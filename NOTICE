@@ -1,0 +1,66 @@
+Localport CLI Agent
+Copyright 2026 Masteren Labs
+
+This product is developed and maintained by Masteren Labs (a sole proprietary
+concern based in India) and is licensed to you under the Apache License,
+Version 2.0 (the "License"). A copy of the License is provided in the LICENSE
+file distributed with this software.
+
+The contents of this NOTICE file are provided for informational purposes only
+and do not modify the License. In the event of any conflict, the terms of the
+License control.
+
+--------------------------------------------------------------------------------
+Community and derivative versions
+--------------------------------------------------------------------------------
+
+You are free to use, modify, and redistribute this software, including
+building and distributing your own community or derivative versions, in
+accordance with the Apache License, Version 2.0.
+
+If you distribute a modified version, the License requires that you cause any
+modified files to carry prominent notices stating that you changed them
+(see Section 4 of the License). Community and derivative versions are not
+official releases of Masteren Labs and are not maintained, endorsed, or
+supported by Masteren Labs.
+
+--------------------------------------------------------------------------------
+Trademarks
+--------------------------------------------------------------------------------
+
+"Localport" and "Masteren Labs", together with the Localport and Masteren Labs
+names, logos, and wordmarks, are trademarks of Masteren Labs. The Apache
+License, Version 2.0 does not grant permission to use these trademarks
+(see Section 6 of the License).
+
+If you distribute a modified or derivative version of this software, you must
+not use the "Localport" or "Masteren Labs" names, logos, or wordmarks, or any
+confusingly similar mark, in a way that states or implies that your version is
+produced, endorsed, sponsored by, or affiliated with Masteren Labs. You must
+remove or replace such branding from any version you distribute. Nominative
+use solely to identify this software as the origin of your derivative work
+(for example, "based on the Localport CLI Agent") is permitted.
+
+--------------------------------------------------------------------------------
+No warranty and limitation of liability
+--------------------------------------------------------------------------------
+
+As stated in Sections 7 and 8 of the License, this software is provided on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+implied, and in no event shall any Contributor be liable for any damages
+arising from the use of or inability to use this software.
+
+You are solely responsible for your use of this software and for ensuring that
+your use, and the use of any version you distribute, complies with all
+applicable laws. Masteren Labs is not responsible or liable for any unlawful,
+harmful, or otherwise improper use of this software by you or by any third
+party, nor for any community or derivative version distributed by anyone other
+than Masteren Labs.
+
+--------------------------------------------------------------------------------
+Hosted service
+--------------------------------------------------------------------------------
+
+This License and NOTICE cover the Localport CLI Agent software only. Use of the
+hosted Localport service operated by Masteren Labs is governed separately by the
+Localport Terms of Service and Privacy Policy published at https://localport.io.

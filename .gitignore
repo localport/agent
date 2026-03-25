@@ -1,0 +1,9 @@
+# Common
+bin/
+*.env
+
+# Certs
+*.crt
+*.key
+*.pem
+*.p12
