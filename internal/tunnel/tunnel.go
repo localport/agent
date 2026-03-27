@@ -94,6 +94,7 @@ type Tunnel struct {
 	opts Options
 
 	state    atomic.Int32
+	closing  atomic.Bool
 	clientID string
 
 	mu       sync.RWMutex
@@ -134,6 +135,7 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		t.mu.Lock()
 		t.disconnected = make(chan struct{})
 		t.mu.Unlock()
+		t.closing.Store(false)
 
 		t.setState(StateConnecting)
 
@@ -334,6 +336,12 @@ func (t *Tunnel) receiveLoop() {
 		default:
 		}
 
+		// start reading from a newly-attached connection that belongs to
+		// the next attempt.
+		if t.closing.Load() {
+			return
+		}
+
 		raw, pc := t.snapshotConnPair()
 		if raw == nil || pc == nil {
 			return
@@ -451,6 +459,7 @@ func (t *Tunnel) dial(_ context.Context, addr string) (net.Conn, error) {
 }
 
 func (t *Tunnel) closeConn() {
+	t.closing.Store(true)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.conn != nil {
