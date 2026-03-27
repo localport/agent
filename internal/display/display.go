@@ -188,8 +188,17 @@ func (d *Display) OnError(label string, err error) {
 }
 
 func (d *Display) OnDataConn(label, connID, local string) {
-	d.log(label, fmt.Sprintf("%s %s  %s",
-		d.c(protoColor(d.protoOf[label]), "⇄"), local, d.c(dim, connID)))
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	short := connID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	fmt.Fprintf(d.out, "%s  %s  %s %s  %s\n",
+		d.ts(), d.lbl(label),
+		d.c(protoColor(d.protoOf[label]), "⇄"), local,
+		d.c(dim, short))
 }
 
 func (d *Display) OnRedirect(label, from, to string) {
