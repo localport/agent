@@ -1,0 +1,17 @@
+version: 1
+specs:
+  - token: ${env.LOCALPORT_TOKEN_EU}
+    region: eu
+    endpoints:
+      - name: api
+        proto: http
+        url: localhost:8080
+  - token: ${env.LOCALPORT_TOKEN_US}
+    region: us
+    endpoints:
+      - name: worker
+        proto: tcp
+        url: localhost:9090
+      - name: metrics
+        proto: http
+        url: localhost:9100
