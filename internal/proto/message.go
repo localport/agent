@@ -74,6 +74,16 @@ type RegisterAckPayload struct {
 	ErrorCode string    `json:"error_code,omitempty"`
 	Retryable *bool     `json:"retryable,omitempty"`
 	LimitType LimitType `json:"limit_type,omitempty"`
+	MTLS      *MTLSInfo `json:"mtls,omitempty"`
+}
+
+// MTLSInfo describes the mutual-TLS posture of a tunnel. When Enabled is
+// true, consumers must present a client certificate signed by the listed CA.
+type MTLSInfo struct {
+	Enabled       bool   `json:"enabled"`
+	CAFingerprint string `json:"ca_fingerprint,omitempty"`
+	CertIssueURL  string `json:"cert_issue_url,omitempty"`
+	CADownloadURL string `json:"ca_download_url,omitempty"`
 }
 
 type NewConnectionPayload struct {
