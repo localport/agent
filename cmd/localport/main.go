@@ -21,6 +21,13 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "connect" {
+		if err := runConnect(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -70,8 +77,7 @@ func run() error {
 	return a.Run(ctx)
 }
 
-// loadConfig picks the right source: --config wins,
-// then explicit --token,
+// loadConfig picks the right source: --config wins, then explicit --token,
 // then LOCALPORT_TOKEN with --local.
 func loadConfig(path, token, region, local, proto, name string) (*config.Config, error) {
 	switch {
