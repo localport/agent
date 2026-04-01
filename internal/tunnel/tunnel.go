@@ -66,6 +66,7 @@ type Info struct {
 	Port      uint16
 	Mode      string
 	Protocol  string
+	MTLS      *proto.MTLSInfo
 }
 
 // EventHandler observes tunnel lifecycle events. A nil handler is allowed.
@@ -251,6 +252,7 @@ func (t *Tunnel) connect(ctx context.Context) error {
 				Port:      ack.Port,
 				Mode:      ack.Mode,
 				Protocol:  ack.Protocol,
+				MTLS:      ack.MTLS,
 			}
 			t.mu.Unlock()
 			return nil

@@ -173,6 +173,15 @@ func (d *Display) OnConnected(label string, info tunnel.Info) {
 			d.c(dim, "mode:"), info.Mode,
 			d.c(dim, "proto:"), info.Protocol)
 	}
+	if info.MTLS != nil && info.MTLS.Enabled {
+		fmt.Fprintf(d.out, "%s  %s    %s\n",
+			d.ts(), d.lbl(label), d.c(green, "🔒 mTLS enabled"))
+		if info.MTLS.CAFingerprint != "" {
+			fmt.Fprintf(d.out, "%s  %s    %s %s\n",
+				d.ts(), d.lbl(label),
+				d.c(dim, "CA:"), d.c(dim, info.MTLS.CAFingerprint))
+		}
+	}
 }
 
 func (d *Display) OnDisconnected(label string, err error) {
