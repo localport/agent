@@ -1,0 +1,13 @@
+connections:
+  - name: postgres
+    remote: db.tunnel.localport.dev:5432
+    local_port: "5432"
+    cert: certs/client.crt
+    key: certs/client.key
+    ca: certs/mesh-ca.crt
+  - name: redis
+    remote: cache.tunnel.localport.dev:6379
+    local_port: "6379"
+    cert: certs/client.crt
+    key: certs/client.key
+    ca: certs/mesh-ca.crt
