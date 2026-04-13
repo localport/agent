@@ -4,15 +4,18 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/localport/agent/internal/security"
 )
 
-// BuildTLSConfig assembles a mutual-TLS client config from PEM-encoded
-// certificate, key, and CA files. The leaf certificate's NotAfter is
-// checked up front so an expired cert fails with a useful message rather
-// than a generic handshake error.
-func BuildTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
+func BuildTLSConfig(certFile, keyFile, caFile, remote, serverNameOverride string) (*tls.Config, error) {
+	if err := security.ValidatePrivateKeyPermissions(keyFile); err != nil {
+		return nil, err
+	}
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, classify("load client cert", err)
@@ -34,7 +37,27 @@ func BuildTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 		Certificates: []tls.Certificate{cert},
 		RootCAs:      pool,
 		MinVersion:   tls.VersionTLS12,
+		ServerName:   resolveServerName(remote, serverNameOverride),
 	}, nil
+}
+
+func resolveServerName(remote, override string) string {
+	if override != "" {
+		return override
+	}
+	host := remote
+	if h, _, err := net.SplitHostPort(remote); err == nil {
+		host = h
+	}
+	// Local development convenience: certs issued for plain "localhost"
+	// should still validate when users dial e.g. "db.localhost".
+	if strings.HasSuffix(host, ".localhost") {
+		return "localhost"
+	}
+	if net.ParseIP(host) != nil {
+		return ""
+	}
+	return host
 }
 
 func checkExpiry(cert tls.Certificate) error {

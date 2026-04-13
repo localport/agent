@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 )
 
@@ -54,7 +55,7 @@ func (p *Proxy) handle(local net.Conn) {
 	remote, err := tls.Dial("tcp", p.Remote, p.TLSConfig)
 	if err != nil {
 		if p.OnError != nil {
-			p.OnError(fmt.Errorf("dial %s: %w", p.Remote, err))
+			p.OnError(friendlyDialError(p.Remote, err))
 		}
 		return
 	}
@@ -76,5 +77,20 @@ func halfCopy(wg *sync.WaitGroup, dst, src net.Conn) {
 	_, _ = io.Copy(dst, src)
 	if cw, ok := dst.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()
+	}
+}
+
+// friendlyDialError translates a few common TLS handshake failures into
+// actionable messages. The original error is preserved as the cause so
+// `errors.Unwrap` still works.
+func friendlyDialError(remote string, err error) error {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "first record does not look like a TLS handshake"):
+		return fmt.Errorf("dial %s: remote is not speaking TLS on this port; verify the endpoint is mTLS-enabled: %w", remote, err)
+	case strings.Contains(msg, "remote error: tls: unrecognized name"):
+		return fmt.Errorf("dial %s: remote rejected SNI; try --server-name: %w", remote, err)
+	default:
+		return fmt.Errorf("dial %s: %w", remote, err)
 	}
 }

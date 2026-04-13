@@ -3,7 +3,9 @@ package display
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -160,11 +162,7 @@ func (d *Display) OnConnected(label string, info tunnel.Info) {
 
 	fmt.Fprintf(d.out, "%s  %s  %s\n", d.ts(), d.lbl(label), d.c(green+bold, "● online"))
 
-	urls := info.URLs
-	if len(urls) == 0 && info.PublicURL != "" {
-		urls = []string{info.PublicURL}
-	}
-	for _, u := range urls {
+	for _, u := range printableURLs(info) {
 		fmt.Fprintf(d.out, "%s  %s    %s\n", d.ts(), d.lbl(label), d.c(white+bold, u))
 	}
 	if info.Mode != "" {
@@ -172,6 +170,20 @@ func (d *Display) OnConnected(label string, info tunnel.Info) {
 			d.ts(), d.lbl(label),
 			d.c(dim, "mode:"), info.Mode,
 			d.c(dim, "proto:"), info.Protocol)
+	}
+	if info.Subdomain != "" || info.Port > 0 {
+		subdomain := info.Subdomain
+		if subdomain == "" {
+			subdomain = "-"
+		}
+		port := "-"
+		if info.Port > 0 {
+			port = strconv.Itoa(int(info.Port))
+		}
+		fmt.Fprintf(d.out, "%s  %s    %s %s  %s %s\n",
+			d.ts(), d.lbl(label),
+			d.c(dim, "subdomain:"), subdomain,
+			d.c(dim, "port:"), port)
 	}
 	if info.MTLS != nil && info.MTLS.Enabled {
 		fmt.Fprintf(d.out, "%s  %s    %s\n",
@@ -277,6 +289,29 @@ func pad(s string, width int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-len(s))
+}
+
+// printableURLs returns the URL list to print after a successful connect.
+// It prefers the explicit URLs the edge sent; falls back to the public URL;
+// and finally synthesizes one from edge addr + port for TCP/TLS tunnels.
+func printableURLs(info tunnel.Info) []string {
+	if len(info.URLs) > 0 {
+		return info.URLs
+	}
+	if info.PublicURL != "" {
+		return []string{info.PublicURL}
+	}
+	if info.Port == 0 || info.EdgeAddr == "" {
+		return nil
+	}
+	host := info.EdgeAddr
+	if h, _, err := net.SplitHostPort(info.EdgeAddr); err == nil {
+		host = h
+	}
+	if host == "" {
+		return nil
+	}
+	return []string{net.JoinHostPort(host, strconv.Itoa(int(info.Port)))}
 }
 
 func policyHint(code string, lt proto.LimitType) string {

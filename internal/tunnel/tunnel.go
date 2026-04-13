@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"net/netip"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -60,6 +61,7 @@ func (s State) String() string {
 // Info is the registration result returned by the edge.
 type Info struct {
 	TunnelID  string
+	EdgeAddr  string
 	PublicURL string
 	URLs      []string
 	Subdomain string
@@ -104,6 +106,9 @@ type Tunnel struct {
 	edgeAddr string
 	info     Info
 
+	terminalMu  sync.Mutex
+	terminalErr error
+
 	shutdown     chan struct{}
 	disconnected chan struct{}
 	wg           sync.WaitGroup
@@ -142,7 +147,7 @@ func (t *Tunnel) Run(ctx context.Context) error {
 
 		if err := t.connect(ctx); err != nil {
 			if t.cancelled(ctx) {
-				return nil
+				return t.consumeTerminalError()
 			}
 			var regErr *RegistrationError
 			if errors.As(err, &regErr) && !regErr.Retryable {
@@ -166,7 +171,7 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		t.runSession(ctx)
 
 		if t.cancelled(ctx) {
-			return nil
+			return t.consumeTerminalError()
 		}
 
 		t.closeConn()
@@ -246,6 +251,7 @@ func (t *Tunnel) connect(ctx context.Context) error {
 			t.edgeAddr = addr
 			t.info = Info{
 				TunnelID:  ack.TunnelID,
+				EdgeAddr:  addr,
 				PublicURL: ack.PublicURL,
 				URLs:      ack.URLs,
 				Subdomain: ack.Subdomain,
@@ -389,6 +395,11 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 	case proto.MsgShutdown:
 		sd, _ := proto.ParseShutdown(body)
 		if sd != nil && sd.Retryable != nil && !*sd.Retryable {
+			t.setTerminalError(&RegistrationError{
+				Message:   "edge requested non-retryable shutdown",
+				Code:      sd.Code,
+				LimitType: sd.LimitType,
+			})
 			t.emitShutdown(sd.Code, sd.LimitType, false)
 			t.Stop()
 			return
@@ -457,7 +468,24 @@ func halfPipe(wg *sync.WaitGroup, dst, src net.Conn) {
 // dial opens a TCP (or TLS over TCP) connection to addr.
 func (t *Tunnel) dial(_ context.Context, addr string) (net.Conn, error) {
 	d := &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}
-	return tls.DialWithDialer(d, "tcp", addr, &tls.Config{MinVersion: tls.VersionTLS12})
+	return tls.DialWithDialer(d, "tcp", addr, t.edgeTLSConfig(addr))
+}
+
+// edgeTLSConfig builds the TLS config used for edge dials. ServerName is
+// derived from addr so SNI works even when DNS resolves to multiple regions
+// behind the same IP; IP literals get an empty ServerName to keep crypto/tls
+// from rejecting the handshake.
+func (t *Tunnel) edgeTLSConfig(addr string) *tls.Config {
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return cfg
+	}
+	cfg.ServerName = host
+	return cfg
 }
 
 func (t *Tunnel) closeConn() {
@@ -481,12 +509,31 @@ func (t *Tunnel) signalDisconnected() {
 }
 
 func (t *Tunnel) setState(s State) {
+	// Once stopped, never transition back to a transient state. This keeps
+	// late-arriving events from re-arming a tunnel that should stay dead.
+	if State(t.state.Load()) == StateStopped && s != StateStopped {
+		return
+	}
 	old := State(t.state.Swap(int32(s)))
 	if old != s {
 		if h := t.opts.Handler; h != nil {
 			h.OnStateChange(t.opts.Label, old, s)
 		}
 	}
+}
+
+func (t *Tunnel) setTerminalError(err error) {
+	t.terminalMu.Lock()
+	defer t.terminalMu.Unlock()
+	if t.terminalErr == nil {
+		t.terminalErr = err
+	}
+}
+
+func (t *Tunnel) consumeTerminalError() error {
+	t.terminalMu.Lock()
+	defer t.terminalMu.Unlock()
+	return t.terminalErr
 }
 
 func (t *Tunnel) snapshotConn() *proto.Conn {
