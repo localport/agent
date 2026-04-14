@@ -8,6 +8,8 @@ import (
 	"github.com/localport/agent/internal/tunnel"
 )
 
+// Agent fans a config out into one tunnel.Tunnel per endpoint and runs them
+// concurrently. Stop tears all of them down.
 type Agent struct {
 	cfg     *config.Config
 	handler tunnel.EventHandler
@@ -25,14 +27,19 @@ func (a *Agent) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	for _, spec := range a.cfg.Specs {
 		for _, ep := range spec.Endpoints {
+			clientName := ep.Name
+			if clientName == "default" {
+				clientName = ""
+			}
 			t := tunnel.New(tunnel.Options{
-				Label:    ep.Name,
-				Token:    spec.Token,
-				Edge:     spec.Edge,
-				Local:    ep.Local,
-				Protocol: ep.Protocol,
-				UseTLS:   spec.UseTLS,
-				Handler:  a.handler,
+				Label:      ep.Name,
+				Token:      spec.Token,
+				Edge:       spec.Edge,
+				Local:      ep.Local,
+				Protocol:   ep.Protocol,
+				UseTLS:     spec.UseTLS,
+				ClientName: clientName,
+				Handler:    a.handler,
 			})
 
 			a.mu.Lock()
