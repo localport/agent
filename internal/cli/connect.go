@@ -22,8 +22,8 @@ func runConnect(args []string) error {
 	var (
 		bundleFile  = fs.String("bundle", "", "PEM bundle file (cert + key + CA)")
 		p12File     = fs.String("p12", "", "PKCS#12 archive (.p12 / .pfx)")
-		p12Pass     = fs.String("p12-pass", "", "PKCS#12 password (discouraged: visible in process list)")
-		p12PassEnv  = fs.String("p12-pass-env", defaultP12PasswordEnv, "env var name carrying the PKCS#12 password")
+		p12Pass     = fs.String("p12-pass", "", "PKCS#12 password (use --p12-pass-env in production)")
+		p12PassEnv  = fs.String("p12-pass-env", defaultP12PasswordEnv, "env var carrying the PKCS#12 password (required for Localport-issued .p12)")
 		p12PassFile = fs.String("p12-pass-file", "", "file containing the PKCS#12 password")
 		localPort   = fs.String("p", "0", "local TCP port to listen on")
 		localAddr   = fs.String("local-addr", "127.0.0.1", "local bind address")
@@ -145,28 +145,41 @@ func runConnectFromConfig(path string) error {
 	return firstErr
 }
 
+// minPasswordLength is the floor Localport enforces on PKCS#12 passwords
+// we issue. Shorter passwords trip a clear error rather than being passed
+// to PKCS#12 decode where they would surface as opaque MAC failures.
+const minPasswordLength = 12
+
 // resolveP12Password reads the password in order: explicit flag, file,
-// env var. An empty string is returned (not an error) so callers can
-// pass it straight through to PKCS#12 decode and let that fail if the
-// archive really did need a password.
+// env var. An empty string is returned (not an error) so callers using a
+// passwordless archive can still proceed; callers that need a password
+// will fail at decode time with a useful error.
 func resolveP12Password(inline, filePath, envName string) (string, error) {
-	if inline != "" {
-		return inline, nil
-	}
-	if filePath != "" {
+	switch {
+	case inline != "":
+		return assertStrongPassword(inline)
+	case filePath != "":
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			return "", fmt.Errorf("read p12 password file: %w", err)
 		}
-		return strings.TrimSpace(string(data)), nil
+		return assertStrongPassword(strings.TrimSpace(string(data)))
 	}
 	if envName == "" {
 		envName = defaultP12PasswordEnv
 	}
-	if v, ok := os.LookupEnv(envName); ok {
-		return v, nil
+	v, ok := os.LookupEnv(envName)
+	if !ok || v == "" {
+		return "", nil
 	}
-	return "", nil
+	return assertStrongPassword(v)
+}
+
+func assertStrongPassword(p string) (string, error) {
+	if len(p) < minPasswordLength {
+		return "", fmt.Errorf("PKCS#12 password must be at least %d characters", minPasswordLength)
+	}
+	return p, nil
 }
 
 func signalCtx() (context.Context, context.CancelFunc) {
