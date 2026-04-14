@@ -13,23 +13,27 @@ import (
 	"github.com/localport/agent/internal/connect"
 )
 
+const defaultP12PasswordEnv = "LOCALPORT_P12_PASSWORD"
+
 func runConnect(args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
 	var (
-		certFile   = fs.String("c", "", "client certificate (PEM)")
-		keyFile    = fs.String("k", "", "client private key (PEM)")
-		caFile     = fs.String("ca", "", "CA certificate that signed the remote cert")
-		localPort  = fs.String("p", "0", "local TCP port to listen on")
-		localAddr  = fs.String("local-addr", "127.0.0.1", "local bind address")
-		serverName = fs.String("server-name", "", "TLS SNI / server name override")
-		configPath = fs.String("config", "", "path to a connect YAML config")
+		bundleFile  = fs.String("bundle", "", "PEM bundle file (cert + key + CA)")
+		p12File     = fs.String("p12", "", "PKCS#12 archive (.p12 / .pfx)")
+		p12Pass     = fs.String("p12-pass", "", "PKCS#12 password (discouraged: visible in process list)")
+		p12PassEnv  = fs.String("p12-pass-env", defaultP12PasswordEnv, "env var name carrying the PKCS#12 password")
+		p12PassFile = fs.String("p12-pass-file", "", "file containing the PKCS#12 password")
+		localPort   = fs.String("p", "0", "local TCP port to listen on")
+		localAddr   = fs.String("local-addr", "127.0.0.1", "local bind address")
+		serverName  = fs.String("server-name", "", "TLS SNI / server name override")
+		configPath  = fs.String("config", "", "path to a connect YAML config")
 	)
 	fs.Usage = func() { usageConnect(fs) }
 
 	// Accept the remote as a leading positional, but tolerate it being
-	// placed after flags as well (`connect -c … host:port`).
+	// supplied after flags as well.
 	remoteFromHead := ""
 	parsed := args
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -57,12 +61,12 @@ func runConnect(args []string) error {
 		return fmt.Errorf("unexpected extra positional arguments")
 	}
 
-	if *certFile == "" || *keyFile == "" || *caFile == "" {
-		fs.Usage()
-		return fmt.Errorf("-c, -k, and -ca are all required (or use --config)")
+	password, err := resolveP12Password(*p12Pass, *p12PassFile, *p12PassEnv)
+	if err != nil {
+		return err
 	}
 
-	tlsCfg, err := connect.BuildTLSConfig(*certFile, *keyFile, *caFile, remote, *serverName)
+	tlsCfg, err := connect.BuildTLSConfig(*bundleFile, *p12File, password, remote, *serverName)
 	if err != nil {
 		return err
 	}
@@ -98,7 +102,12 @@ func runConnectFromConfig(path string) error {
 		errMu    sync.Mutex
 	)
 	for _, c := range cc.Connections {
-		tlsCfg, err := connect.BuildTLSConfig(c.Cert, c.Key, c.CA, c.Remote, "")
+		password, err := resolveP12Password(c.P12Pass, c.P12PassFile, c.P12PassEnv)
+		if err != nil {
+			cancel()
+			return fmt.Errorf("connection %q: %w", c.Name, err)
+		}
+		tlsCfg, err := connect.BuildTLSConfig(c.Bundle, c.P12, password, c.Remote, "")
 		if err != nil {
 			cancel()
 			return fmt.Errorf("connection %q: %w", c.Name, err)
@@ -136,6 +145,30 @@ func runConnectFromConfig(path string) error {
 	return firstErr
 }
 
+// resolveP12Password reads the password in order: explicit flag, file,
+// env var. An empty string is returned (not an error) so callers can
+// pass it straight through to PKCS#12 decode and let that fail if the
+// archive really did need a password.
+func resolveP12Password(inline, filePath, envName string) (string, error) {
+	if inline != "" {
+		return inline, nil
+	}
+	if filePath != "" {
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return "", fmt.Errorf("read p12 password file: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	if envName == "" {
+		envName = defaultP12PasswordEnv
+	}
+	if v, ok := os.LookupEnv(envName); ok {
+		return v, nil
+	}
+	return "", nil
+}
+
 func signalCtx() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sig := make(chan os.Signal, 1)
@@ -150,11 +183,16 @@ func usageConnect(fs *flag.FlagSet) {
 
   Forward a local TCP port through an mTLS tunnel.
 
-  Single target:
+  PEM bundle (cert + key + CA in one file):
     localport connect db.tunnel.localport.dev:5432 \
-      -c client.crt -k client.key -ca mesh-ca.crt -p 5432
+      --bundle client-bundle.pem -p 5432
 
-  Multiple targets from one file:
+  PKCS#12 archive:
+    LOCALPORT_P12_PASSWORD=… \
+      localport connect db.tunnel.localport.dev:5432 \
+      --p12 client.p12 -p 5432
+
+  Multiple targets from one config file:
     localport connect --config connect.yaml
 
 Flags:

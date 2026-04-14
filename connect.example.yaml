@@ -2,12 +2,9 @@ connections:
   - name: postgres
     remote: db.tunnel.localport.dev:5432
     local_port: "5432"
-    cert: certs/client.crt
-    key: certs/client.key
-    ca: certs/mesh-ca.crt
+    bundle: certs/client-bundle.pem
   - name: redis
     remote: cache.tunnel.localport.dev:6379
     local_port: "6379"
-    cert: certs/client.crt
-    key: certs/client.key
-    ca: certs/mesh-ca.crt
+    p12: certs/client.p12
+    p12_pass_env: LOCALPORT_P12_PASSWORD
