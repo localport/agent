@@ -322,9 +322,18 @@ func policyHint(code string, lt proto.LimitType) string {
 		return "client connection limit reached — disconnect another client or upgrade"
 	case proto.LimitTunnelCount:
 		return "tunnel limit reached — remove a tunnel or upgrade your plan"
+	case proto.LimitNoPlan:
+		return "team has no active plan — subscribe or start a free trial from the dashboard"
 	}
-	if strings.EqualFold(code, "TK003") {
+	switch strings.ToUpper(code) {
+	case "TK003":
 		return "token is invalid or expired — rotate it from the dashboard"
+	case "BL005":
+		return "plan limit reached — remove a resource or upgrade your plan"
+	case "BL007":
+		return "bandwidth limit exceeded — wait for billing cycle reset or upgrade"
+	case "BL010":
+		return "feature not available on your current plan — upgrade to unlock it"
 	}
 	return ""
 }

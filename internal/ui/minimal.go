@@ -166,9 +166,38 @@ func (m *Minimal) OnShutdownPolicy(label string, code string, lt proto.LimitType
 		if lt != "" {
 			parts = append(parts, "type="+string(lt))
 		}
+		if hint := policyHint(code, lt); hint != "" {
+			parts = append(parts, hint)
+		}
 		ep.lastErr = strings.Join(parts, " ")
 	}
 	m.renderLocked("")
+}
+
+// policyHint mirrors display.policyHint so the TUI shows the same guidance.
+// Kept private here to avoid importing display just for a single helper.
+func policyHint(code string, lt proto.LimitType) string {
+	switch lt {
+	case proto.LimitBandwidth:
+		return "bandwidth limit — wait for reset or upgrade"
+	case proto.LimitClientConnections:
+		return "client limit — disconnect another client or upgrade"
+	case proto.LimitTunnelCount:
+		return "tunnel limit — remove a tunnel or upgrade"
+	case proto.LimitNoPlan:
+		return "no active plan — subscribe from the dashboard"
+	}
+	switch strings.ToUpper(code) {
+	case "TK003":
+		return "token invalid or expired"
+	case "BL005":
+		return "plan limit reached"
+	case "BL007":
+		return "bandwidth exceeded"
+	case "BL010":
+		return "feature not on your plan"
+	}
+	return ""
 }
 
 func (m *Minimal) ensure(label string) *endpointState {
