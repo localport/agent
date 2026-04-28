@@ -10,7 +10,6 @@ import (
 
 	"github.com/localport/agent/internal/agent"
 	"github.com/localport/agent/internal/config"
-	"github.com/localport/agent/internal/display"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/tunnel"
 	"github.com/localport/agent/internal/ui"
@@ -36,7 +35,7 @@ func runTunnel(version string, args []string) error {
 		local      = fs.String("local", "", "local service host:port")
 		proto      = fs.String("proto", "http", "tunnel protocol: http, tcp, tls")
 		name       = fs.String("name", "", "endpoint name (default: \"default\")")
-		modeUI     = fs.String("ui", "text", "ui mode: text or tui")
+		modeUI     = fs.String("ui", "auto", "ui mode: auto, tui, plain")
 		showVer    = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() { usageTunnel(fs) }
@@ -58,15 +57,7 @@ func runTunnel(version string, args []string) error {
 		fmt.Fprintln(os.Stderr, "warning:", warning)
 	}
 
-	var renderer tunnelUI
-	switch *modeUI {
-	case "text":
-		renderer = display.New()
-	case "tui":
-		renderer = ui.NewMinimal()
-	default:
-		return fmt.Errorf("unsupported --ui %q (use text or tui)", *modeUI)
-	}
+	renderer := pickRenderer(*modeUI)
 	renderer.Banner(version, cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -85,6 +76,13 @@ func runTunnel(version string, args []string) error {
 	err = a.Run(ctx)
 	renderer.Shutdown()
 	return err
+}
+
+func pickRenderer(flagValue string) tunnelUI {
+	if ui.DetectMode(flagValue, os.Stderr) == ui.ModePlain {
+		return ui.NewPlain()
+	}
+	return ui.NewTUI()
 }
 
 func buildTunnelConfig(path, flagToken, region, local, proto, name string) (*config.Config, string, error) {

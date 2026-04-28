@@ -78,6 +78,7 @@ type EventHandler interface {
 	OnDisconnected(label string, err error)
 	OnError(label string, err error)
 	OnDataConn(label string, connID, local string)
+	OnDataClose(label string, connID, local string, bytesIn, bytesOut int64, dur time.Duration, err error)
 	OnRedirect(label string, from, to string)
 	OnShutdownPolicy(label string, code string, limit proto.LimitType, retryable bool)
 }
@@ -421,21 +422,29 @@ func (t *Tunnel) proxyData(connID string) {
 	addr := t.edgeAddr
 	t.mu.RUnlock()
 
+	started := time.Now()
+	closeEvt := func(in, out int64, err error) {
+		if h := t.opts.Handler; h != nil {
+			h.OnDataClose(t.opts.Label, connID, t.opts.Local, in, out, time.Since(started), err)
+		}
+	}
+
 	edge, err := t.dial(context.Background(), addr)
 	if err != nil {
-		t.emitError(fmt.Errorf("data dial: %w", err))
+		closeEvt(0, 0, fmt.Errorf("data dial: %w", err))
 		return
 	}
 	pc := proto.NewConn(edge)
 	if err := pc.SendConnectionReady(&proto.ConnectionReadyPayload{ConnectionID: connID}); err != nil {
 		edge.Close()
+		closeEvt(0, 0, err)
 		return
 	}
 
 	local, err := net.DialTimeout("tcp", t.opts.Local, dialTimeout)
 	if err != nil {
 		edge.Close()
-		t.emitError(fmt.Errorf("local dial %s: %w", t.opts.Local, err))
+		closeEvt(0, 0, fmt.Errorf("local dial %s: %w", t.opts.Local, err))
 		return
 	}
 
@@ -443,26 +452,39 @@ func (t *Tunnel) proxyData(connID string) {
 		h.OnDataConn(t.opts.Label, connID, t.opts.Local)
 	}
 
-	pipe(edge, local)
+	in, out := pipe(edge, local)
+	closeEvt(in, out, nil)
 }
 
 // pipe shuttles bytes between a and b until either side closes.
-func pipe(a, b net.Conn) {
-	var wg sync.WaitGroup
+// It returns (bytesIntoLocal, bytesOutOfLocal)
+func pipe(edge, local net.Conn) (bytesIn, bytesOut int64) {
+	var (
+		wg      sync.WaitGroup
+		inAtom  atomic.Int64
+		outAtom atomic.Int64
+	)
 	wg.Add(2)
-	go halfPipe(&wg, a, b)
-	go halfPipe(&wg, b, a)
+	go func() {
+		defer wg.Done()
+		n, _ := io.Copy(local, edge)
+		inAtom.Store(n)
+		if cw, ok := local.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		n, _ := io.Copy(edge, local)
+		outAtom.Store(n)
+		if cw, ok := edge.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+	}()
 	wg.Wait()
-	a.Close()
-	b.Close()
-}
-
-func halfPipe(wg *sync.WaitGroup, dst, src net.Conn) {
-	defer wg.Done()
-	_, _ = io.Copy(dst, src)
-	if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-		_ = cw.CloseWrite()
-	}
+	edge.Close()
+	local.Close()
+	return inAtom.Load(), outAtom.Load()
 }
 
 // dial opens a TCP (or TLS over TCP) connection to addr.
