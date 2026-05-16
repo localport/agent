@@ -66,19 +66,21 @@ type RegisterPayload struct {
 }
 
 type RegisterAckPayload struct {
-	Success   bool      `json:"success"`
-	TunnelID  string    `json:"tunnel_id"`
-	PublicURL string    `json:"public_url"`
-	URLs      []string  `json:"urls"`
-	Subdomain string    `json:"subdomain"`
-	Port      uint16    `json:"port"`
-	Mode      string    `json:"mode"`
-	Protocol  string    `json:"protocol"`
-	Error     string    `json:"error,omitempty"`
-	ErrorCode string    `json:"error_code,omitempty"`
-	Retryable *bool     `json:"retryable,omitempty"`
-	LimitType LimitType `json:"limit_type,omitempty"`
-	MTLS      *MTLSInfo `json:"mtls,omitempty"`
+	Success    bool      `json:"success"`
+	TunnelID   string    `json:"tunnel_id"`
+	TunnelName string    `json:"tunnel_name"`
+	Region     string    `json:"region"`
+	PublicURL  string    `json:"public_url"`
+	URLs       []string  `json:"urls"`
+	Subdomain  string    `json:"subdomain"`
+	Port       uint16    `json:"port"`
+	Mode       string    `json:"mode"`
+	Protocol   string    `json:"protocol"`
+	Error      string    `json:"error,omitempty"`
+	ErrorCode  string    `json:"error_code,omitempty"`
+	Retryable  *bool     `json:"retryable,omitempty"`
+	LimitType  LimitType `json:"limit_type,omitempty"`
+	MTLS       *MTLSInfo `json:"mtls,omitempty"`
 }
 
 // MTLSInfo describes the mutual-TLS posture of a tunnel. When Enabled is
@@ -92,6 +94,7 @@ type MTLSInfo struct {
 
 type NewConnectionPayload struct {
 	ConnectionID string `json:"connection_id"`
+	RemoteAddr   string `json:"remote_addr"`
 }
 
 type ConnectionReadyPayload struct {

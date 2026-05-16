@@ -60,15 +60,17 @@ func (s State) String() string {
 
 // Info is the registration result returned by the edge.
 type Info struct {
-	TunnelID  string
-	EdgeAddr  string
-	PublicURL string
-	URLs      []string
-	Subdomain string
-	Port      uint16
-	Mode      string
-	Protocol  string
-	MTLS      *proto.MTLSInfo
+	TunnelID   string
+	TunnelName string
+	Region     string
+	EdgeAddr   string
+	PublicURL  string
+	URLs       []string
+	Subdomain  string
+	Port       uint16
+	Mode       string
+	Protocol   string
+	MTLS       *proto.MTLSInfo
 }
 
 // EventHandler observes tunnel lifecycle events. A nil handler is allowed.
@@ -77,10 +79,29 @@ type EventHandler interface {
 	OnConnected(label string, info Info)
 	OnDisconnected(label string, err error)
 	OnError(label string, err error)
-	OnDataConn(label string, connID, local string)
-	OnDataClose(label string, connID, local string, bytesIn, bytesOut int64, dur time.Duration, err error)
-	OnRedirect(label string, from, to string)
-	OnShutdownPolicy(label string, code string, limit proto.LimitType, retryable bool)
+	OnDataConn(label, connID, local, remote string)
+	OnDataClose(label, connID, local, remote string, bytesIn, bytesOut int64, dur time.Duration, err error)
+	OnRedirect(label, from, to string)
+	OnShutdownPolicy(label, code string, limit proto.LimitType, retryable bool)
+}
+
+// ActiveConn is a snapshot of one live edge↔local proxy. The byte counts
+// are loaded from atomics, so a snapshot taken mid-transfer reflects the
+// bytes seen up to that instant.
+type ActiveConn struct {
+	ID        string
+	Local     string
+	Remote    string
+	StartedAt time.Time
+	BytesIn   int64
+	BytesOut  int64
+}
+
+// Stats is a snapshot of tunnel-lifetime counters.
+type Stats struct {
+	BytesIn           int64
+	BytesOut          int64
+	ConnectionsServed int64
 }
 
 type Options struct {
@@ -110,9 +131,28 @@ type Tunnel struct {
 	terminalMu  sync.Mutex
 	terminalErr error
 
+	acMu        sync.RWMutex
+	activeConns map[string]*activeConn
+
+	totalBytesIn  atomic.Int64
+	totalBytesOut atomic.Int64
+	totalConns    atomic.Int64
+
 	shutdown     chan struct{}
 	disconnected chan struct{}
 	wg           sync.WaitGroup
+}
+
+// activeConn is the internal record for one live edge↔local proxy. Byte
+// counters are written from the two io.Copy goroutines and read from the
+// UI snapshot path
+type activeConn struct {
+	id        string
+	local     string
+	remote    string
+	startedAt time.Time
+	bytesIn   atomic.Int64
+	bytesOut  atomic.Int64
 }
 
 func New(opts Options) *Tunnel {
@@ -126,6 +166,7 @@ func New(opts Options) *Tunnel {
 		opts:         opts,
 		edgeAddr:     opts.Edge,
 		clientID:     newClientID(),
+		activeConns:  make(map[string]*activeConn),
 		shutdown:     make(chan struct{}),
 		disconnected: make(chan struct{}),
 	}
@@ -195,6 +236,47 @@ func (t *Tunnel) Stop() {
 
 func (t *Tunnel) CurrentState() State { return State(t.state.Load()) }
 
+func (t *Tunnel) Label() string { return t.opts.Label }
+
+// Stats returns the cumulative byte and connection counters.
+func (t *Tunnel) Stats() Stats {
+	return Stats{
+		BytesIn:           t.totalBytesIn.Load(),
+		BytesOut:          t.totalBytesOut.Load(),
+		ConnectionsServed: t.totalConns.Load(),
+	}
+}
+
+// ActiveConnections returns a snapshot of currently-open proxy connections.
+func (t *Tunnel) ActiveConnections() []ActiveConn {
+	t.acMu.RLock()
+	defer t.acMu.RUnlock()
+	out := make([]ActiveConn, 0, len(t.activeConns))
+	for _, ac := range t.activeConns {
+		out = append(out, ActiveConn{
+			ID:        ac.id,
+			Local:     ac.local,
+			Remote:    ac.remote,
+			StartedAt: ac.startedAt,
+			BytesIn:   ac.bytesIn.Load(),
+			BytesOut:  ac.bytesOut.Load(),
+		})
+	}
+	return out
+}
+
+func (t *Tunnel) addActiveConn(ac *activeConn) {
+	t.acMu.Lock()
+	t.activeConns[ac.id] = ac
+	t.acMu.Unlock()
+}
+
+func (t *Tunnel) removeActiveConn(id string) {
+	t.acMu.Lock()
+	delete(t.activeConns, id)
+	t.acMu.Unlock()
+}
+
 // connect dials the edge and exchanges Register / RegisterAck, following
 // up to maxRedirectHops redirects to another edge.
 func (t *Tunnel) connect(ctx context.Context) error {
@@ -251,15 +333,17 @@ func (t *Tunnel) connect(ctx context.Context) error {
 			t.conn = pc
 			t.edgeAddr = addr
 			t.info = Info{
-				TunnelID:  ack.TunnelID,
-				EdgeAddr:  addr,
-				PublicURL: ack.PublicURL,
-				URLs:      ack.URLs,
-				Subdomain: ack.Subdomain,
-				Port:      ack.Port,
-				Mode:      ack.Mode,
-				Protocol:  ack.Protocol,
-				MTLS:      ack.MTLS,
+				TunnelID:   ack.TunnelID,
+				TunnelName: ack.TunnelName,
+				Region:     ack.Region,
+				EdgeAddr:   addr,
+				PublicURL:  ack.PublicURL,
+				URLs:       ack.URLs,
+				Subdomain:  ack.Subdomain,
+				Port:       ack.Port,
+				Mode:       ack.Mode,
+				Protocol:   ack.Protocol,
+				MTLS:       ack.MTLS,
 			}
 			t.mu.Unlock()
 			return nil
@@ -379,7 +463,7 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 			return
 		}
 		t.wg.Add(1)
-		go t.proxyData(nc.ConnectionID)
+		go t.proxyData(nc.ConnectionID, nc.RemoteAddr)
 
 	case proto.MsgHeartbeat:
 		hb, _ := proto.ParseHeartbeat(body)
@@ -415,17 +499,22 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 	}
 }
 
-func (t *Tunnel) proxyData(connID string) {
+func (t *Tunnel) proxyData(connID, remote string) {
 	defer t.wg.Done()
 
 	t.mu.RLock()
 	addr := t.edgeAddr
 	t.mu.RUnlock()
 
-	started := time.Now()
+	ac := &activeConn{
+		id:        connID,
+		local:     t.opts.Local,
+		remote:    remote,
+		startedAt: time.Now(),
+	}
 	closeEvt := func(in, out int64, err error) {
 		if h := t.opts.Handler; h != nil {
-			h.OnDataClose(t.opts.Label, connID, t.opts.Local, in, out, time.Since(started), err)
+			h.OnDataClose(t.opts.Label, connID, t.opts.Local, remote, in, out, time.Since(ac.startedAt), err)
 		}
 	}
 
@@ -448,35 +537,26 @@ func (t *Tunnel) proxyData(connID string) {
 		return
 	}
 
+	t.addActiveConn(ac)
+	t.totalConns.Add(1)
+	defer t.removeActiveConn(connID)
+
 	if h := t.opts.Handler; h != nil {
-		h.OnDataConn(t.opts.Label, connID, t.opts.Local)
+		h.OnDataConn(t.opts.Label, connID, t.opts.Local, remote)
 	}
 
-	in, out := pipe(edge, local)
-	closeEvt(in, out, nil)
-}
-
-// pipe shuttles bytes between a and b until either side closes.
-// It returns (bytesIntoLocal, bytesOutOfLocal)
-func pipe(edge, local net.Conn) (bytesIn, bytesOut int64) {
-	var (
-		wg      sync.WaitGroup
-		inAtom  atomic.Int64
-		outAtom atomic.Int64
-	)
+	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(local, edge)
-		inAtom.Store(n)
+		copyWithCounters(local, edge, &ac.bytesIn, &t.totalBytesIn)
 		if cw, ok := local.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(edge, local)
-		outAtom.Store(n)
+		copyWithCounters(edge, local, &ac.bytesOut, &t.totalBytesOut)
 		if cw, ok := edge.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
@@ -484,7 +564,32 @@ func pipe(edge, local net.Conn) (bytesIn, bytesOut int64) {
 	wg.Wait()
 	edge.Close()
 	local.Close()
-	return inAtom.Load(), outAtom.Load()
+
+	closeEvt(ac.bytesIn.Load(), ac.bytesOut.Load(), nil)
+}
+
+// copyWithCounters streams src→dst and accumulates each successful write
+// into every counter atomically. Per-conn and tunnel-total counters stay
+// in sync because both see the same bytes the same moment.
+func copyWithCounters(dst io.Writer, src io.Reader, counters ...*atomic.Int64) {
+	buf := make([]byte, 32*1024)
+	for {
+		nr, rerr := src.Read(buf)
+		if nr > 0 {
+			nw, werr := dst.Write(buf[:nr])
+			if nw > 0 {
+				for _, c := range counters {
+					c.Add(int64(nw))
+				}
+			}
+			if werr != nil || nr != nw {
+				return
+			}
+		}
+		if rerr != nil {
+			return
+		}
+	}
 }
 
 // dial opens a TCP (or TLS over TCP) connection to addr.

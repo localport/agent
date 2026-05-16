@@ -93,19 +93,27 @@ func (p *Plain) OnError(label string, err error) {
 	p.line("error", label, err.Error())
 }
 
-func (p *Plain) OnDataConn(label, connID, local string) {
-	p.line("conn.open", label, fmt.Sprintf("id=%s -> %s", shortID(connID), local))
+func (p *Plain) OnDataConn(label, connID, local, remote string) {
+	from := remote
+	if from == "" {
+		from = "-"
+	}
+	p.line("conn.open", label, fmt.Sprintf("id=%s from=%s -> %s", shortID(connID), from, local))
 }
 
-func (p *Plain) OnDataClose(label, connID, local string, bytesIn, bytesOut int64, dur time.Duration, err error) {
+func (p *Plain) OnDataClose(label, connID, local, remote string, bytesIn, bytesOut int64, dur time.Duration, err error) {
 	short := shortID(connID)
+	from := remote
+	if from == "" {
+		from = "-"
+	}
 	if err != nil {
-		p.line("conn.error", label, fmt.Sprintf("id=%s -> %s: %s", short, local, err))
+		p.line("conn.error", label, fmt.Sprintf("id=%s from=%s -> %s: %s", short, from, local, err))
 		return
 	}
 	p.line("conn.close", label, fmt.Sprintf(
-		"id=%s -> %s in=%s out=%s dur=%s",
-		short, local, HumanBytes(bytesIn), HumanBytes(bytesOut), dur.Round(time.Millisecond),
+		"id=%s from=%s -> %s in=%s out=%s dur=%s",
+		short, from, local, HumanBytes(bytesIn), HumanBytes(bytesOut), dur.Round(time.Millisecond),
 	))
 }
 

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,141 +14,200 @@ import (
 type snap struct {
 	cols, rows int
 	title      string
-	clock      string
-	uptime     time.Duration
+	statusText string // top-right capsule #1, e.g. "Connected" / "Connecting…"
+	uptimeText string // top-right capsule #2, e.g. "1m12s"
 	edge       string
 	tunnels    []tState
-	events     []event
-	noColor    bool
+	conns      map[string][]tunnel.ActiveConn
+	stats      map[string]tunnel.Stats
+	palette    Palette
 }
 
-type event struct {
-	at    time.Time
-	kind  eventKind
-	label string
-	text  string
+// buildRightCaps composes the two top-right capsules from the tunnels
+// snapshot. Single-tunnel: state word + per-tunnel uptime. Multi-tunnel:
+// connected/total count + agent uptime.
+func buildRightCaps(tunnels []tState, agentUptime time.Duration) (status, uptime string) {
+	if len(tunnels) == 0 {
+		return "starting…", humanDuration(agentUptime)
+	}
+	if len(tunnels) == 1 {
+		ts := tunnels[0]
+		switch {
+		case ts.connected && ts.state == tunnel.StateActive:
+			return "Connected", humanDuration(time.Since(ts.connectedAt))
+		case ts.state == tunnel.StateConnecting:
+			return "Connecting…", humanDuration(agentUptime)
+		case ts.state == tunnel.StateRegistering:
+			return "Registering…", humanDuration(agentUptime)
+		case ts.state == tunnel.StateReconnecting:
+			return "Reconnecting…", humanDuration(agentUptime)
+		case ts.state == tunnel.StateStopped:
+			return "Stopped", humanDuration(agentUptime)
+		}
+		return "Idle", humanDuration(agentUptime)
+	}
+	connected := 0
+	for _, ts := range tunnels {
+		if ts.connected && ts.state == tunnel.StateActive {
+			connected++
+		}
+	}
+	return fmt.Sprintf("%d/%d connected", connected, len(tunnels)), humanDuration(agentUptime)
 }
 
-type eventKind uint8
-
-const (
-	evInfo eventKind = iota
-	evOK
-	evWarn
-	evErr
-)
-
-// buildFrame returns exactly s.rows lines. Line N is rendered at row N+1.
+// buildFrame returns exactly s.rows formatted lines. Line N renders at row N+1.
 //
-// Single-tunnel layout:
+// Layout:
 //
-//	row 1            ┌ localport ───── 13:44:57 ┐
-//	rows 2..N+1      │ <header content>          │
-//	row N+2          ├─ events ─────────────────┤
-//	rows N+3..rows-1 │ <event rows>              │
-//	row rows         └──────────────────────────┘
-//
-// Multi-tunnel skips the divider and event rows: the box wraps a stat table instead.
+//	row 1            ┌─[ localport ]──────[ Connected ][ 1m12s ]─┐
+//	rows 2..H+1      │ <header — per-tunnel status card>          │
+//	row H+2          ├─[ live connections ]───────────────[ N ]─┤
+//	rows H+3..rows-1 │ <connection rows or centered phrase>       │
+//	row rows         └────────────────────────────────────────────┘
 func buildFrame(s snap) []string {
 	frame := make([]string, s.rows)
-	frame[0] = boxTop(s.title, s.clock, s.cols, s.noColor)
-	frame[s.rows-1] = boxBottom(s.cols)
+	pal := s.palette
 
-	if len(s.tunnels) > 1 {
-		fillMulti(frame, s)
-	} else {
-		fillSingle(frame, s)
+	frame[0] = boxTop(s.title, s.statusText, s.uptimeText, s.cols, pal)
+	frame[s.rows-1] = boxBottom(s.cols, pal)
+
+	header := renderHeader(s)
+	maxHeader := max(s.rows-4, 1)
+	if len(header) > maxHeader {
+		header = header[:maxHeader]
+	}
+	for i, line := range header {
+		frame[1+i] = boxLine(line, s.cols, pal)
+	}
+
+	totalConns := 0
+	for _, list := range s.conns {
+		totalConns += len(list)
+	}
+	divRow := 1 + len(header)
+	frame[divRow] = boxDivider("live connections", fmt.Sprintf("%d", totalConns), s.cols, pal)
+
+	bodyTop := divRow + 1
+	bodyBot := s.rows - 2
+	capacity := max(bodyBot-bodyTop+1, 0)
+
+	body := renderConnections(s, capacity)
+	for i := range capacity {
+		var content string
+		if i < len(body) {
+			content = body[i]
+		}
+		frame[bodyTop+i] = boxLine(content, s.cols, pal)
 	}
 	return frame
 }
 
-func fillSingle(frame []string, s snap) {
-	headerLines := headerSingle(s)
-
-	// Reserve: top(1) + header(N) + divider(1) + events(>=1) + bottom(1).
-	maxHeader := max(s.rows-4, 1)
-	if len(headerLines) > maxHeader {
-		headerLines = headerLines[:maxHeader]
-	}
-	for i, line := range headerLines {
-		frame[1+i] = boxLine(line, s.cols)
-	}
-
-	divRow := 1 + len(headerLines)
-	frame[divRow] = boxDivider("events", s.cols, s.noColor)
-
-	top := divRow + 1
-	bot := s.rows - 2
-	capacity := max(bot-top+1, 0)
-
-	visible := s.events
-	if len(visible) > capacity {
-		visible = visible[len(visible)-capacity:]
-	}
-
-	innerW := max(s.cols-4, 0)
-	for i := range capacity {
-		var content string
-		if i < len(visible) {
-			content = renderEvent(visible[i], innerW, false, s.noColor)
-		}
-		frame[top+i] = boxLine(content, s.cols)
-	}
-}
-
-func fillMulti(frame []string, s snap) {
-	headerLines := headerMulti(s)
-
-	maxHeader := s.rows - 2
-	if len(headerLines) > maxHeader {
-		headerLines = headerLines[:maxHeader]
-	}
-	for i, line := range headerLines {
-		frame[1+i] = boxLine(line, s.cols)
-	}
-	for i := 1 + len(headerLines); i < s.rows-1; i++ {
-		frame[i] = boxLine("", s.cols)
-	}
-}
-
-func headerSingle(s snap) []string {
+// renderHeader picks between the single-tunnel status card and the
+// multi-tunnel table.
+func renderHeader(s snap) []string {
+	pal := s.palette
 	if len(s.tunnels) == 0 {
-		return []string{colorize("waiting for config…", SGRDim, s.noColor)}
+		return []string{pal.Muted("waiting for config…")}
 	}
-	ts := s.tunnels[0]
-	pill := stateGlyph(ts.state, ts.connected)
+	if len(s.tunnels) == 1 {
+		return headerSingle(s, s.tunnels[0])
+	}
+	return headerMulti(s)
+}
 
-	lines := []string{
-		fmt.Sprintf("%s   uptime %s   reqs %d   open %d",
-			colorize(pill.text, pill.color, s.noColor),
-			s.uptime, ts.reqs, ts.openConns),
-	}
-	if ts.url != "" {
-		lines = append(lines, colorize(ts.url, FgCyan+SGRBold, s.noColor))
-	}
-	lines = append(lines, fmt.Sprintf("%s  →  %s", protoTarget(&ts), ts.local))
+func headerSingle(s snap, ts tState) []string {
+	pal := s.palette
 
-	io := fmt.Sprintf("%s in %s    %s out %s",
-		colorize("↓", FgCyan, s.noColor), HumanBytes(ts.bytesIn),
-		colorize("↑", FgMagenta, s.noColor), HumanBytes(ts.bytesOut))
+	const labelW = 14
+	row := func(label, value string) string {
+		return pal.ForegroundDim(padRight(label, labelW)) + pal.Foreground(value)
+	}
+
+	lines := make([]string, 0, 12)
+	lines = append(lines, "") // top padding inside the box
+
+	tname := ts.tunnelName
+	if tname == "" {
+		tname = ts.name
+	}
+	if tname != "" {
+		lines = append(lines, row("Name", tname))
+	}
+	if ts.region != "" {
+		lines = append(lines, row("Region", strings.ToUpper(ts.region)))
+	}
+
+	urls := ts.urls
+	if len(urls) == 0 && ts.url != "" {
+		urls = []string{ts.url}
+	}
+	if len(urls) > 0 {
+		first := true
+		for _, u := range urls {
+			leftCol := pal.ForegroundDim(padRight("", labelW))
+			if first {
+				leftCol = pal.ForegroundDim(padRight("Forwarding", labelW))
+				first = false
+			}
+			lines = append(lines, leftCol+pal.Primary(u))
+		}
+	}
+
+	local := buildLocalURL(ts.proto, ts.local)
+	localLine := pal.ForegroundDim(padRight("Local", labelW)) + pal.Foreground(local)
 	if ts.mtls {
-		io += "    " + colorize("mTLS", FgGreen+SGRBold, s.noColor)
+		localLine += "   " + pal.Primary("mTLS")
 	}
-	lines = append(lines, io)
+	lines = append(lines, localLine)
+
+	st := s.stats[ts.name]
+	bandwidth := pal.ForegroundDim("↓ ") + pal.Foreground(HumanBytes(st.BytesIn)) +
+		pal.ForegroundDim("   ↑ ") + pal.Foreground(HumanBytes(st.BytesOut))
+	lines = append(lines,
+		pal.ForegroundDim(padRight("Bandwidth", labelW))+bandwidth,
+		row("Connections", fmt.Sprintf("%d", st.ConnectionsServed)),
+	)
 
 	if ts.lastErr != "" && ts.state != tunnel.StateActive {
-		lines = append(lines, colorize("✕ "+ts.lastErr, FgRed, s.noColor))
+		inner := max(s.cols-4, 20)
+		for i, line := range wrapPlain("✕ "+ts.lastErr, inner) {
+			if i == 0 {
+				lines = append(lines, pal.Destructive(line))
+			} else {
+				lines = append(lines, pal.DestructiveDim(line))
+			}
+		}
 	}
+	lines = append(lines, "") // bottom padding before the divider
 	return lines
 }
 
-func headerMulti(s snap) []string {
-	edgeLine := colorize(
-		fmt.Sprintf("edge %s   uptime %s", s.edge, s.uptime),
-		SGRDim, s.noColor,
-	)
+// buildLocalURL composes the local-side address as a scheme://host:port
+// string for display. http/https/tcp/tls all map 1:1 to their scheme.
+func buildLocalURL(proto, addr string) string {
+	if addr == "" {
+		return proto
+	}
+	switch proto {
+	case "http", "https", "tcp", "tls":
+		return proto + "://" + addr
+	}
+	return addr
+}
 
-	const stateW = 15
+func padRight(s string, w int) string {
+	if len(s) >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-len(s))
+}
+
+func headerMulti(s snap) []string {
+	pal := s.palette
+	header := pal.ForegroundDim("edge ") + pal.Foreground(s.edge)
+	lines := []string{header, ""}
+
+	const stateW = 14
 	nameW := 4
 	for i := range s.tunnels {
 		if n := len(s.tunnels[i].name); n > nameW {
@@ -156,51 +216,47 @@ func headerMulti(s snap) []string {
 	}
 	nameW++
 
-	urlW := max(s.cols-4-nameW-stateW-6-14-8, 12)
+	urlW := max(s.cols-4-nameW-stateW-4, 12)
 
-	head := fmt.Sprintf("%-*s  %-*s  %-*s  %5s  %s",
-		nameW, "NAME", stateW, "STATE", urlW, "URL/PORT", "REQ", "I/O")
-	lines := []string{edgeLine, colorize(head, SGRDim, s.noColor)}
+	cols := pal.Muted(fmt.Sprintf("%-*s  %-*s  %-*s",
+		nameW, "NAME", stateW, "STATE", urlW, "URL/PORT"))
+	lines = append(lines, cols)
 
 	for i := range s.tunnels {
 		ts := s.tunnels[i]
-		pill := stateGlyph(ts.state, ts.connected)
+		pill := statePill(ts, pal)
 		urlOrPort := ts.url
 		if urlOrPort == "" {
 			urlOrPort = protoTarget(&ts)
 		}
-		ioStr := HumanBytes(ts.bytesIn) + "/" + HumanBytes(ts.bytesOut)
-		lines = append(lines, fmt.Sprintf("%-*s  %s  %-*s  %5d  %s",
-			nameW, ts.name,
-			colorize(padRight(pill.text, stateW), pill.color, s.noColor),
-			urlW, truncate(urlOrPort, urlW),
-			ts.reqs, ioStr))
+		row := fmt.Sprintf("%-*s  %s  %s",
+			nameW, pal.Foreground(ts.name),
+			padVisible(pill, stateW),
+			pal.ForegroundMid(truncate(urlOrPort, urlW)),
+		)
+		lines = append(lines, row)
 	}
 	return lines
 }
 
-type styledState struct {
-	text  string
-	color string
-}
-
-func stateGlyph(s tunnel.State, connected bool) styledState {
-	if connected && s == tunnel.StateActive {
-		return styledState{text: "● connected", color: FgGreen + SGRBold}
+// statePill is the colored status chip.
+func statePill(ts tState, pal Palette) string {
+	if ts.connected && ts.state == tunnel.StateActive {
+		return pal.PrimaryBold("● connected")
 	}
-	switch s {
-	case tunnel.StateConnecting:
-		return styledState{text: "◌ connecting", color: FgYellow}
-	case tunnel.StateRegistering:
-		return styledState{text: "◌ registering", color: FgYellow}
-	case tunnel.StateReconnecting:
-		return styledState{text: "↻ reconnecting", color: FgYellow}
+	switch ts.state {
 	case tunnel.StateActive:
-		return styledState{text: "● active", color: FgGreen}
+		return pal.Primary("● active")
+	case tunnel.StateConnecting:
+		return pal.Warning("◌ connecting")
+	case tunnel.StateRegistering:
+		return pal.Warning("◌ registering")
+	case tunnel.StateReconnecting:
+		return pal.Warning("↻ reconnecting")
 	case tunnel.StateStopped:
-		return styledState{text: "✕ stopped", color: FgRed}
+		return pal.Destructive("✕ stopped")
 	}
-	return styledState{text: "· idle", color: SGRDim}
+	return pal.Muted("· idle")
 }
 
 func protoTarget(ts *tState) string {
@@ -215,104 +271,229 @@ func protoTarget(ts *tState) string {
 	return ts.proto
 }
 
-func renderEvent(e event, maxWidth int, multi, noColor bool) string {
-	ts := e.at.Format("15:04:05")
-	glyph, color := "·", SGRDim
-	switch e.kind {
-	case evOK:
-		glyph, color = "→", FgGreen
-	case evWarn:
-		glyph, color = "↻", FgYellow
-	case evErr:
-		glyph, color = "✕", FgRed
+// renderConnections lays out the bottom panel — at most `capacity` lines.
+func renderConnections(s snap, capacity int) []string {
+	if capacity <= 0 {
+		return nil
 	}
-	prefix := colorize(ts, SGRDim, noColor) + "  " + colorize(glyph, color, noColor) + " "
-	body := e.text
-	if multi && e.label != "" {
-		body = colorize("["+e.label+"]", FgCyan, noColor) + " " + body
+	pal := s.palette
+
+	if len(s.tunnels) == 1 {
+		ts := s.tunnels[0]
+		conns := s.conns[ts.name]
+		if !ts.connected || ts.state != tunnel.StateActive {
+			return centeredPanel(connectingPhrase(ts, pal), capacity, s.cols)
+		}
+		if len(conns) == 0 {
+			return centeredPanel(pal.Muted("no live connections"), capacity, s.cols)
+		}
+		return renderConnTable(conns, capacity, s.cols, pal)
 	}
-	full := prefix + body
-	if visibleLen(full) > maxWidth {
-		full = truncate(stripANSI(full), maxWidth)
+
+	lines := make([]string, 0, capacity)
+	for i, ts := range s.tunnels {
+		if i > 0 && len(lines) < capacity {
+			lines = append(lines, "")
+		}
+		if len(lines) >= capacity {
+			break
+		}
+		groupHeader := pal.PrimaryMid("┄ "+ts.name+" ") +
+			pal.Muted("· ") + statePill(ts, pal)
+		lines = append(lines, groupHeader)
+		if len(lines) >= capacity {
+			break
+		}
+
+		conns := s.conns[ts.name]
+		if !ts.connected || ts.state != tunnel.StateActive {
+			lines = append(lines, "  "+connectingPhrase(ts, pal))
+			continue
+		}
+		if len(conns) == 0 {
+			lines = append(lines, "  "+pal.Muted("no live connections"))
+			continue
+		}
+		groupsLeft := len(s.tunnels) - i - 1
+		reserved := groupsLeft * 2
+		groupCap := max(capacity-len(lines)-reserved, 1)
+		for _, row := range renderConnTable(conns, groupCap, s.cols-2, pal) {
+			if len(lines) >= capacity {
+				break
+			}
+			lines = append(lines, "  "+row)
+		}
 	}
-	return full
+	return lines
+}
+
+func connectingPhrase(ts tState, pal Palette) string {
+	switch ts.state {
+	case tunnel.StateConnecting:
+		return pal.Warning("◌") + " " + pal.ForegroundMid("connecting…")
+	case tunnel.StateRegistering:
+		return pal.Warning("◌") + " " + pal.ForegroundMid("registering…")
+	case tunnel.StateReconnecting:
+		return pal.Warning("↻") + " " + pal.ForegroundMid("reconnecting…")
+	case tunnel.StateStopped:
+		return pal.Destructive("✕ stopped")
+	}
+	return pal.Muted("· idle")
+}
+
+// renderConnTable formats one row per ActiveConn. Sorted by StartedAt
+// descending so the newest connection sits on top.
+//
+//	REMOTE                       DUR     ↓ IN       ↑ OUT
+//	203.0.113.4:54321           3m12s    1.2 MB    430 KB
+func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette) []string {
+	if capacity <= 0 || len(conns) == 0 {
+		return nil
+	}
+	sorted := append([]tunnel.ActiveConn(nil), conns...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].StartedAt.After(sorted[j].StartedAt)
+	})
+
+	innerW := max(cols-4, 20)
+	const durW, byteW, gap = 8, 10, 2
+	remoteW := max(innerW-durW-byteW*2-gap*3, 12)
+	gapStr := strings.Repeat(" ", gap)
+
+	header := padVisible(pal.Muted("REMOTE"), remoteW) + gapStr +
+		padVisible(pal.Muted("DUR"), durW) + gapStr +
+		padLeftVisible(pal.Muted("↓ IN"), byteW) + gapStr +
+		padLeftVisible(pal.Muted("↑ OUT"), byteW)
+
+	rows := make([]string, 0, capacity)
+	rows = append(rows, header)
+
+	now := time.Now()
+	for _, c := range sorted {
+		if len(rows) >= capacity {
+			break
+		}
+		remote := c.Remote
+		if remote == "" {
+			remote = "—"
+		}
+		row := padVisible(pal.Foreground(truncate(remote, remoteW)), remoteW) + gapStr +
+			padVisible(pal.Foreground(humanDuration(now.Sub(c.StartedAt))), durW) + gapStr +
+			padLeftVisible(pal.Primary(HumanBytes(c.BytesIn)), byteW) + gapStr +
+			padLeftVisible(pal.Primary(HumanBytes(c.BytesOut)), byteW)
+		rows = append(rows, row)
+	}
+	if extra := len(sorted) - (capacity - 1); extra > 0 {
+		rows[capacity-1] = pal.Muted(fmt.Sprintf("…and %d more", extra))
+	}
+	return rows
+}
+
+// padLeftVisible right-aligns s in a w-wide cell, ignoring ANSI escape
+// sequences when measuring width.
+func padLeftVisible(s string, w int) string {
+	rl := visibleLen(s)
+	if rl >= w {
+		return s
+	}
+	return strings.Repeat(" ", w-rl) + s
+}
+
+// centeredPanel returns capacity lines with msg vertically and horizontally
+// centered. Used for the "Connecting…" / "no live connections" body.
+func centeredPanel(msg string, capacity, cols int) []string {
+	lines := make([]string, capacity)
+	mid := capacity / 2
+	inner := max(cols-4, 0)
+	pad := max((inner-visibleLen(msg))/2, 0)
+	lines[mid] = strings.Repeat(" ", pad) + msg
+	return lines
 }
 
 // Box drawing.
 
-func boxTop(title, right string, cols int, noColor bool) string {
+// boxTop renders:  ┌─[ localport vX ]──[ Connected ][ 1m12s ]─┐
+func boxTop(title, status, uptime string, cols int, pal Palette) string {
 	if cols < 4 {
-		return strings.Repeat("─", cols)
+		return pal.Border(strings.Repeat("─", cols))
 	}
-	titleStyled := colorize(title, FgCyan+SGRBold, noColor)
-	rightStyled := colorize(right, SGRDim, noColor)
+	titleStyled := pal.PrimaryBold(title)
+	statusStyled := styleStatusWord(status, pal)
+	uptimeStyled := pal.Foreground(uptime)
 
-	left := "┌ " + titleStyled + " "
-	leftRaw := "┌ " + title + " "
-	tail := " " + rightStyled + " ┐"
-	tailRaw := " " + right + " ┐"
+	leftCapRaw := "┌─[ " + title + " ]"
+	rightCapRaw := "[ " + status + " ][ " + uptime + " ]─┐"
 
-	fill := cols - visibleLen(leftRaw) - visibleLen(tailRaw)
+	fill := cols - visibleLen(leftCapRaw) - visibleLen(rightCapRaw)
 	if fill < 1 {
-		// Title or clock too wide; trim title to fit.
 		over := -fill + 1
-		title = truncate(title, len(title)-over)
-		titleStyled = colorize(title, FgCyan+SGRBold, noColor)
-		left = "┌ " + titleStyled + " "
-		leftRaw = "┌ " + title + " "
-		fill = max(cols-visibleLen(leftRaw)-visibleLen(tailRaw), 1)
+		title = truncate(title, max(len(title)-over, 1))
+		titleStyled = pal.PrimaryBold(title)
+		leftCapRaw = "┌─[ " + title + " ]"
+		fill = max(cols-visibleLen(leftCapRaw)-visibleLen(rightCapRaw), 1)
 	}
-	return left + strings.Repeat("─", fill) + tail
+	return pal.Border("┌─[ ") + titleStyled +
+		pal.Border(" ]"+strings.Repeat("─", fill)+"[ ") + statusStyled +
+		pal.Border(" ][ ") + uptimeStyled + pal.Border(" ]─┐")
 }
 
-func boxBottom(cols int) string {
+func styleStatusWord(s string, pal Palette) string {
+	switch {
+	case strings.HasPrefix(s, "Connected") || strings.HasSuffix(s, "connected"):
+		return pal.PrimaryBold(s)
+	case strings.HasPrefix(s, "Stopped"):
+		return pal.Destructive(s)
+	case strings.HasPrefix(s, "Connecting") ||
+		strings.HasPrefix(s, "Reconnecting") ||
+		strings.HasPrefix(s, "Registering") ||
+		strings.HasPrefix(s, "starting"):
+		return pal.Warning(s)
+	}
+	return pal.ForegroundMid(s)
+}
+
+func boxBottom(cols int, pal Palette) string {
 	if cols < 2 {
-		return "└┘"
+		return pal.Border("└┘")
 	}
-	return "└" + strings.Repeat("─", cols-2) + "┘"
+	return pal.Border("└" + strings.Repeat("─", cols-2) + "┘")
 }
 
-func boxDivider(label string, cols int, noColor bool) string {
+// boxDivider renders:  ├─[ live connections ]──────[ N ]─┤
+func boxDivider(label, right string, cols int, pal Palette) string {
 	if cols < 4 {
-		return "├" + strings.Repeat("─", cols-2) + "┤"
+		return pal.Border("├" + strings.Repeat("─", cols-2) + "┤")
 	}
-	left := "├─ " + colorize(label, SGRDim, noColor) + " "
-	leftRaw := "├─ " + label + " "
-	right := "─┤"
-	fill := max(cols-visibleLen(leftRaw)-visibleLen(right), 1)
-	return left + strings.Repeat("─", fill) + right
+	leftCapRaw := "├─[ " + label + " ]"
+	rightCapRaw := "[ " + right + " ]─┤"
+	fill := max(cols-visibleLen(leftCapRaw)-visibleLen(rightCapRaw), 1)
+	return pal.Border("├─[ ") + pal.ForegroundDim(label) +
+		pal.Border(" ]"+strings.Repeat("─", fill)+"[ ") +
+		pal.Foreground(right) + pal.Border(" ]─┤")
 }
 
-// boxLine wraps content in "│ ... │" with symmetric single-space padding.
+// boxLine wraps content in │ ... │ with symmetric single-space padding.
 // Content is truncated to inner width on overflow; ANSI sequences are
 // counted as zero-width via visibleLen.
-func boxLine(content string, cols int) string {
+func boxLine(content string, cols int, pal Palette) string {
 	if cols < 2 {
-		return "││"
+		return pal.Border("││")
 	}
-	inner := max(cols-4, 0) // "│ " + content + " │"
+	inner := max(cols-4, 0)
 	visible := visibleLen(content)
 	if visible > inner {
 		content = truncate(stripANSI(content), inner)
 		visible = visibleLen(content)
 	}
-	return "│ " + content + strings.Repeat(" ", max(inner-visible, 0)) + " │"
+	pad := max(inner-visible, 0)
+	return pal.Border("│") + " " + content + strings.Repeat(" ", pad) + " " + pal.Border("│")
 }
 
-// ANSI-aware helpers shared by Plain (none here) and TUI.
+// ANSI-aware string helpers.
 
-func colorize(s, color string, noColor bool) string {
-	if noColor || color == "" {
-		return s
-	}
-	return color + s + SGRReset
-}
-
-// visibleLen counts visible runes, treating ANSI CSI sequences as zero-width.
-// Width is approximated as 1 per rune; double-width glyphs (CJK, most emoji)
-// are not handled. Avoid them in framed text.
 func visibleLen(s string) int {
-	n, inEsc := 0, false
+	n := 0
+	inEsc := false
 	for _, r := range s {
 		if inEsc {
 			if isCSITerm(r) {
@@ -357,6 +538,60 @@ func isCSITerm(r rune) bool {
 	return false
 }
 
+// wrapPlain word-wraps s to lines no wider than w runes. Tokens longer
+// than w are hard-broken. Returns at least one line.
+func wrapPlain(s string, w int) []string {
+	if w <= 0 {
+		return []string{""}
+	}
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	var (
+		lines []string
+		cur   strings.Builder
+		curW  int
+	)
+	flush := func() {
+		lines = append(lines, cur.String())
+		cur.Reset()
+		curW = 0
+	}
+	for _, word := range words {
+		for visibleLen(word) > w {
+			runes := []rune(word)
+			if curW > 0 {
+				flush()
+			}
+			lines = append(lines, string(runes[:w]))
+			word = string(runes[w:])
+		}
+		add := visibleLen(word)
+		if curW == 0 {
+			cur.WriteString(word)
+			curW = add
+			continue
+		}
+		if curW+1+add > w {
+			flush()
+			cur.WriteString(word)
+			curW = add
+			continue
+		}
+		cur.WriteByte(' ')
+		cur.WriteString(word)
+		curW += 1 + add
+	}
+	if curW > 0 {
+		flush()
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
 func truncate(s string, n int) string {
 	if n <= 0 {
 		return ""
@@ -371,9 +606,30 @@ func truncate(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-func padRight(s string, w int) string {
-	if visibleLen(s) >= w {
+func padVisible(s string, w int) string {
+	rl := visibleLen(s)
+	if rl >= w {
 		return s
 	}
-	return s + strings.Repeat(" ", w-visibleLen(s))
+	return s + strings.Repeat(" ", w-rl)
+}
+
+// humanDuration prints durations the way ops people read them: 3s, 1m12s,
+// 1h04m. Sub-second rounds to seconds for stability between frames.
+func humanDuration(d time.Duration) string {
+	if d < time.Second {
+		return "0s"
+	}
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		m := int(d.Minutes())
+		s := int(d.Seconds()) - m*60
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) - h*60
+	return fmt.Sprintf("%dh%02dm", h, m)
 }

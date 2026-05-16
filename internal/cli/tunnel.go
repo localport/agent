@@ -57,13 +57,13 @@ func runTunnel(version string, args []string) error {
 		fmt.Fprintln(os.Stderr, "warning:", warning)
 	}
 
-	renderer := pickRenderer(*modeUI)
-	renderer.Banner(version, cfg)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	a := agent.New(cfg, renderer)
+	a := agent.New(cfg, nil) // handler attached below so renderer can poll a.Tunnels()
+	renderer := pickRenderer(*modeUI, a)
+	a.SetHandler(renderer)
+	renderer.Banner(version, cfg)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -78,11 +78,13 @@ func runTunnel(version string, args []string) error {
 	return err
 }
 
-func pickRenderer(flagValue string) tunnelUI {
+func pickRenderer(flagValue string, a *agent.Agent) tunnelUI {
 	if ui.DetectMode(flagValue, os.Stderr) == ui.ModePlain {
 		return ui.NewPlain()
 	}
-	return ui.NewTUI()
+	t := ui.NewTUI()
+	t.SetTunnelProvider(a.Tunnels)
+	return t
 }
 
 func buildTunnelConfig(path, flagToken, region, local, proto, name string) (*config.Config, string, error) {

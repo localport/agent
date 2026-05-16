@@ -27,6 +27,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	for _, spec := range a.cfg.Specs {
 		for _, ep := range spec.Endpoints {
+			// "default" is the placeholder name FromFlags assigns when the
+			// user didn't pick one; passing it through to the edge would
+			// have every CLI invocation collide on the same client name.
 			clientName := ep.Name
 			if clientName == "default" {
 				clientName = ""
@@ -63,4 +66,24 @@ func (a *Agent) Stop() {
 	for _, t := range a.tunnels {
 		t.Stop()
 	}
+}
+
+// SetHandler swaps the EventHandler. Useful when the renderer needs the
+// Agent reference (e.g. for ActiveConnections polling) and therefore
+// can't be supplied at construction time.
+func (a *Agent) SetHandler(h tunnel.EventHandler) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.handler = h
+}
+
+// Tunnels returns a snapshot of the currently-running tunnel pointers.
+// The TUI uses this to poll ActiveConnections() without going through
+// the event handler.
+func (a *Agent) Tunnels() []*tunnel.Tunnel {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]*tunnel.Tunnel, len(a.tunnels))
+	copy(out, a.tunnels)
+	return out
 }

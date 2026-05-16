@@ -12,22 +12,24 @@ import (
 	"github.com/localport/agent/internal/tunnel"
 )
 
-// TUI renders a single bordered frame: header card on top, event log
-// below, divider between. Pure ANSI, no external TUI dependency.
+// TUI renders a single bordered frame: status header on top, live
+// connections panel underneath. Pure ANSI, no external deps.
 //
 // Render policy:
-//   - Redraw on state-mutating events and on terminal resize. No tickers,
-//     no scroll regions. Older events fall off once the window fills up.
-//   - Autowrap (DECAWM) is disabled during writes so writing into the
-//     last column never spills onto the next row.
+//   - Frame redraws on state-mutating events (push). No tickers — the
+//     header only changes shape on state transitions, so a poll loop
+//     would just burn CPU.
+//   - DECAWM (autowrap) is disabled during writes so a cell at the last
+//     column never bleeds into the next row.
 //
 // Concurrency:
-//   - mu guards application state.
-//   - A single render goroutine drains a 1-cap signal channel; bursts of
-//     events coalesce into one frame.
+//   - mu guards static tunnel state.
+//   - The connection registry lives inside each tunnel.Tunnel; the TUI
+//     pulls ActiveConnections() / Stats() at render time and never holds
+//     a reference between frames.
 type TUI struct {
 	out     *os.File
-	noColor bool
+	palette Palette
 
 	mu        sync.Mutex
 	version   string
@@ -35,9 +37,10 @@ type TUI struct {
 	edge      string
 	order     []string
 	tunnels   map[string]*tState
-	events    []event
 	cols      int
 	rows      int
+
+	provider func() []*tunnel.Tunnel
 
 	renderMu   sync.Mutex
 	renderCh   chan struct{}
@@ -48,28 +51,30 @@ type TUI struct {
 	started    bool
 }
 
+// tState mirrors the static-ish per-tunnel info populated from
+// EventHandler callbacks. Live byte counters and remote IPs come from
+// the tunnel's own connection registry at render time.
 type tState struct {
-	name      string
-	proto     string
-	local     string
-	state     tunnel.State
-	url       string
-	subdomain string
-	port      uint16
-	mode      string
-	reqs      int64
-	openConns int64
-	bytesIn   int64
-	bytesOut  int64
-	lastErr   string
-	mtls      bool
-	connected bool
+	name        string
+	tunnelName  string
+	region      string
+	proto       string
+	local       string
+	state       tunnel.State
+	url         string
+	urls        []string
+	subdomain   string
+	port        uint16
+	mode        string
+	connectedAt time.Time
+	lastErr     string
+	mtls        bool
+	connected   bool
 }
 
 const (
-	eventBufCap = 256
-	minCols     = 24
-	minRows     = 6
+	minCols = 24
+	minRows = 8
 
 	wrapOff = "\x1b[?7l"
 	wrapOn  = "\x1b[?7h"
@@ -80,16 +85,22 @@ var _ tunnel.EventHandler = (*TUI)(nil)
 func NewTUI() *TUI {
 	return &TUI{
 		out:       os.Stderr,
-		noColor:   NoColor(),
+		palette:   NewPalette(DetectColorMode()),
 		startedAt: time.Now(),
 		tunnels:   make(map[string]*tState),
-		events:    make([]event, 0, eventBufCap),
 		renderCh:  make(chan struct{}, 1),
 		stopCh:    make(chan struct{}),
 	}
 }
 
-// Banner ingests static config then enters the alt-screen.
+// SetTunnelProvider lets the TUI pull ActiveConnections() and Stats()
+// from each running Tunnel at render time. Wire this once after agent.New.
+func (t *TUI) SetTunnelProvider(p func() []*tunnel.Tunnel) {
+	t.mu.Lock()
+	t.provider = p
+	t.mu.Unlock()
+}
+
 func (t *TUI) Banner(version string, cfg *config.Config) {
 	t.mu.Lock()
 	t.version = version
@@ -145,11 +156,6 @@ func (t *TUI) start() {
 	t.requestRender()
 }
 
-// drainStdin discards any bytes the user types or that the terminal emits
-// for mouse-wheel scrolls (CSI sequences) so they never appear in the
-// rendered frame. ICANON is off (see enterRaw) so reads return per byte.
-// The goroutine exits when the process exits; Shutdown restores termios
-// first so subsequent input goes back to the shell.
 func (t *TUI) drainStdin() {
 	buf := make([]byte, 64)
 	for {
@@ -164,7 +170,6 @@ func (t *TUI) drainStdin() {
 	}
 }
 
-// Shutdown restores the terminal. Safe to call multiple times.
 func (t *TUI) Shutdown() {
 	t.stopOnce.Do(func() {
 		close(t.stopCh)
@@ -215,7 +220,7 @@ func (t *TUI) resizeLoop(ch <-chan os.Signal) {
 
 // EventHandler implementation.
 
-func (t *TUI) OnStateChange(label string, _ tunnel.State, to tunnel.State) {
+func (t *TUI) OnStateChange(label string, _, to tunnel.State) {
 	t.mu.Lock()
 	if ts := t.ensure(label); ts != nil {
 		ts.state = to
@@ -224,28 +229,19 @@ func (t *TUI) OnStateChange(label string, _ tunnel.State, to tunnel.State) {
 		}
 	}
 	t.mu.Unlock()
-
-	switch to {
-	case tunnel.StateConnecting:
-		t.appendEvent(evWarn, label, "connecting")
-	case tunnel.StateRegistering:
-		t.appendEvent(evWarn, label, "registering")
-	case tunnel.StateReconnecting:
-		t.appendEvent(evWarn, label, "reconnecting")
-	case tunnel.StateStopped:
-		t.appendEvent(evErr, label, "stopped")
-	}
 	t.requestRender()
 }
 
 func (t *TUI) OnConnected(label string, info tunnel.Info) {
-	endpoint := FirstEndpoint(info.URLs, info.PublicURL, info.EdgeAddr, info.Port)
-
 	t.mu.Lock()
 	if ts := t.ensure(label); ts != nil {
 		ts.state = tunnel.StateActive
 		ts.connected = true
-		ts.url = endpoint
+		ts.connectedAt = time.Now()
+		ts.tunnelName = info.TunnelName
+		ts.region = info.Region
+		ts.url = FirstEndpoint(info.URLs, info.PublicURL, info.EdgeAddr, info.Port)
+		ts.urls = append(ts.urls[:0], info.URLs...)
 		ts.subdomain = info.Subdomain
 		ts.port = info.Port
 		ts.mode = info.Mode
@@ -258,26 +254,15 @@ func (t *TUI) OnConnected(label string, info tunnel.Info) {
 		t.edge = info.EdgeAddr
 	}
 	t.mu.Unlock()
-
-	if endpoint != "" {
-		t.appendEvent(evOK, label, "connected — "+endpoint)
-	} else {
-		t.appendEvent(evOK, label, "connected")
-	}
 	t.requestRender()
 }
 
-func (t *TUI) OnDisconnected(label string, err error) {
+func (t *TUI) OnDisconnected(label string, _ error) {
 	t.mu.Lock()
 	if ts := t.ensure(label); ts != nil {
 		ts.connected = false
 	}
 	t.mu.Unlock()
-	if err != nil {
-		t.appendEvent(evWarn, label, "disconnected — "+err.Error())
-	} else {
-		t.appendEvent(evWarn, label, "disconnected")
-	}
 	t.requestRender()
 }
 
@@ -287,57 +272,23 @@ func (t *TUI) OnError(label string, err error) {
 		ts.lastErr = err.Error()
 	}
 	t.mu.Unlock()
-	t.appendEvent(evErr, label, err.Error())
 	t.requestRender()
 }
 
-func (t *TUI) OnDataConn(label, _, _ string) {
-	t.mu.Lock()
-	if ts := t.ensure(label); ts != nil {
-		ts.openConns++
-		ts.reqs++
-	}
-	t.mu.Unlock()
-	t.requestRender()
-}
+// OnDataConn / OnDataClose only trigger a redraw — the source of truth
+// for the live-connections panel is tunnel.Tunnel.ActiveConnections(),
+// polled at render time.
+func (t *TUI) OnDataConn(_, _, _, _ string)                                        { t.requestRender() }
+func (t *TUI) OnDataClose(_, _, _, _ string, _, _ int64, _ time.Duration, _ error) { t.requestRender() }
 
-func (t *TUI) OnDataClose(label, connID, local string, bytesIn, bytesOut int64, dur time.Duration, err error) {
-	t.mu.Lock()
-	if ts := t.ensure(label); ts != nil {
-		if ts.openConns > 0 {
-			ts.openConns--
-		}
-		ts.bytesIn += bytesIn
-		ts.bytesOut += bytesOut
-	}
-	t.mu.Unlock()
-
-	short := connID
-	if len(short) > 6 {
-		short = short[:6]
-	}
-	if err != nil {
-		t.appendEvent(evErr, label, fmt.Sprintf("%s ✕ %s", short, err.Error()))
-	} else {
-		t.appendEvent(evOK, label, fmt.Sprintf(
-			"%s → %s   ↑%s ↓%s   %s",
-			short, local,
-			HumanBytes(bytesIn), HumanBytes(bytesOut),
-			dur.Round(time.Millisecond),
-		))
-	}
-	t.requestRender()
-}
-
-func (t *TUI) OnRedirect(label, from, to string) {
+func (t *TUI) OnRedirect(_, _, to string) {
 	t.mu.Lock()
 	t.edge = to
 	t.mu.Unlock()
-	t.appendEvent(evInfo, label, "↻ redirect "+from+" → "+to)
 	t.requestRender()
 }
 
-func (t *TUI) OnShutdownPolicy(label string, code string, lt proto.LimitType, _ bool) {
+func (t *TUI) OnShutdownPolicy(label, code string, lt proto.LimitType, _ bool) {
 	parts := []string{"limit reached"}
 	if code != "" {
 		parts = append(parts, "code="+code)
@@ -345,10 +296,15 @@ func (t *TUI) OnShutdownPolicy(label string, code string, lt proto.LimitType, _ 
 	if lt != "" {
 		parts = append(parts, "type="+string(lt))
 	}
-	t.appendEvent(evErr, label, strings.Join(parts, " "))
+	msg := strings.Join(parts, " ")
 	if hint := PolicyHint(lt); hint != "" {
-		t.appendEvent(evInfo, label, hint)
+		msg += " — " + hint
 	}
+	t.mu.Lock()
+	if ts := t.ensure(label); ts != nil {
+		ts.lastErr = msg
+	}
+	t.mu.Unlock()
 	t.requestRender()
 }
 
@@ -367,16 +323,6 @@ func (t *TUI) ensure(label string) *tState {
 	return ts
 }
 
-func (t *TUI) appendEvent(kind eventKind, label, text string) {
-	t.mu.Lock()
-	t.events = append(t.events, event{at: time.Now(), kind: kind, label: label, text: text})
-	if len(t.events) > eventBufCap {
-		copy(t.events, t.events[len(t.events)-eventBufCap:])
-		t.events = t.events[:eventBufCap]
-	}
-	t.mu.Unlock()
-}
-
 func (t *TUI) snapshot() snap {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -392,23 +338,41 @@ func (t *TUI) snapshot() snap {
 		}
 		tunnels = append(tunnels, *ts)
 	}
-	events := append([]event(nil), t.events...)
+
+	conns := make(map[string][]tunnel.ActiveConn, len(tunnels))
+	stats := make(map[string]tunnel.Stats, len(tunnels))
+	if t.provider != nil {
+		for _, tun := range t.provider() {
+			label := tun.Label()
+			conns[label] = tun.ActiveConnections()
+			stats[label] = tun.Stats()
+		}
+	}
 
 	title := "localport"
 	if t.version != "" && t.version != "dev" {
-		title = "localport " + t.version
+		v := t.version
+		if i := strings.IndexAny(v, "-"); i > 0 {
+			v = v[:i]
+		}
+		if !strings.HasPrefix(v, "v") {
+			v = "v" + v
+		}
+		title = "localport " + v
 	}
 
+	status, uptime := buildRightCaps(tunnels, time.Since(t.startedAt))
 	return snap{
-		cols:    cols,
-		rows:    rows,
-		title:   title,
-		clock:   time.Now().Format("15:04:05"),
-		uptime:  time.Since(t.startedAt).Round(time.Second),
-		edge:    t.edge,
-		tunnels: tunnels,
-		events:  events,
-		noColor: t.noColor,
+		cols:       cols,
+		rows:       rows,
+		title:      title,
+		statusText: status,
+		uptimeText: uptime,
+		edge:       t.edge,
+		tunnels:    tunnels,
+		conns:      conns,
+		stats:      stats,
+		palette:    t.palette,
 	}
 }
 
