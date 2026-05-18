@@ -9,7 +9,7 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
-const edgePort = "4443"
+const edgePort = "443"
 
 var regionHosts = map[string]string{
 	"eu": "eu.localport.dev",
@@ -29,7 +29,6 @@ type Spec struct {
 	Token     string
 	Region    string
 	Edge      string
-	UseTLS    bool
 	Endpoints []Endpoint
 }
 
@@ -87,19 +86,17 @@ func Load(path string) (*Config, error) {
 	return build(&fc)
 }
 
-// FromFlags builds a single-endpoint config from CLI arguments. The endpoint
-// name defaults to "default" when blank.
+// FromFlags builds a single-endpoint config from CLI arguments. The
+// endpoint name defaults to "default" when blank.
 func FromFlags(token, region, local, proto, name string) *Config {
 	if name == "" {
 		name = "default"
 	}
-	edge := ResolveEdge(region)
 	return &Config{
 		Specs: []Spec{{
 			Token:  token,
 			Region: region,
-			Edge:   edge,
-			UseTLS: true,
+			Edge:   ResolveEdge(region),
 			Endpoints: []Endpoint{
 				{Name: name, Protocol: NormProto(proto), Local: local},
 			},
@@ -107,15 +104,15 @@ func FromFlags(token, region, local, proto, name string) *Config {
 	}
 }
 
-// ResolveEdge maps a region name to its edge address
-func ResolveEdge(region string) (addr string) {
+// ResolveEdge maps a region name to its agent-facing edge address.
+func ResolveEdge(region string) string {
 	if region == "" {
-		return "edge.localport.dev:" + edgePort
+		return "connect.edge.localport.dev:" + edgePort
 	}
 	if host, ok := regionHosts[region]; ok {
-		return host + ":" + edgePort
+		return "connect." + host + ":" + edgePort
 	}
-	return region + ".localport.dev:" + edgePort
+	return "connect." + region + ".localport.dev:" + edgePort
 }
 
 // NormProto lowercases the protocol and folds https into http.
@@ -164,12 +161,10 @@ func buildSpec(idx int, s spec) (*Spec, error) {
 		return nil, fmt.Errorf("spec %d: at least one endpoint is required", idx)
 	}
 
-	edge := ResolveEdge(s.Region)
 	out := &Spec{
 		Token:  s.Token,
 		Region: s.Region,
-		Edge:   edge,
-		UseTLS: true,
+		Edge:   ResolveEdge(s.Region),
 	}
 	for j, ep := range s.Endpoints {
 		built, err := buildEndpoint(idx, j+1, ep)

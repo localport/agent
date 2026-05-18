@@ -3,20 +3,20 @@ package tunnel
 import (
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net"
-	"net/netip"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/localport/agent/internal/proto"
+	"github.com/localport/agent/internal/transport"
 )
 
 const (
@@ -110,9 +110,13 @@ type Options struct {
 	Edge       string
 	Local      string
 	Protocol   string
-	UseTLS     bool
 	ClientName string
 	Handler    EventHandler
+
+	// Transport tunes the agent's edge transport (raw vs ws probe order,
+	// dial timeout, WS path). The zero value uses Phase 1 secure defaults:
+	// TLS 1.3, full server-cert verification, no insecure fallback.
+	Transport transport.Options
 }
 
 type Tunnel struct {
@@ -131,6 +135,11 @@ type Tunnel struct {
 	terminalMu  sync.Mutex
 	terminalErr error
 
+	// dialer is the transport selected by the most recent Probe. Reused
+	// for data dial-backs within the same session and reset on reconnect
+	// so the next session re-probes.
+	dialer transport.Dialer
+
 	acMu        sync.RWMutex
 	activeConns map[string]*activeConn
 
@@ -145,7 +154,7 @@ type Tunnel struct {
 
 // activeConn is the internal record for one live edge↔local proxy. Byte
 // counters are written from the two io.Copy goroutines and read from the
-// UI snapshot path
+// UI snapshot path; atomics avoid lock contention on the hot path.
 type activeConn struct {
 	id        string
 	local     string
@@ -282,10 +291,16 @@ func (t *Tunnel) removeActiveConn(id string) {
 func (t *Tunnel) connect(ctx context.Context) error {
 	addr := t.edgeAddr
 
+	dialers := transport.DefaultDialers(t.opts.Transport)
+	budget := t.opts.Transport.DialTimeout
+	if budget == 0 {
+		budget = 2 * time.Second
+	}
+
 	for range maxRedirectHops {
-		raw, err := t.dial(ctx, addr)
+		raw, chosen, err := transport.Probe(ctx, addr, budget, dialers, slog.Default())
 		if err != nil {
-			return fmt.Errorf("dial %s: %w", addr, err)
+			return fmt.Errorf("connect %s: %w", addr, err)
 		}
 
 		pc := proto.NewConn(raw)
@@ -332,6 +347,7 @@ func (t *Tunnel) connect(ctx context.Context) error {
 			t.raw = raw
 			t.conn = pc
 			t.edgeAddr = addr
+			t.dialer = chosen
 			t.info = Info{
 				TunnelID:   ack.TunnelID,
 				TunnelName: ack.TunnelName,
@@ -504,6 +520,7 @@ func (t *Tunnel) proxyData(connID, remote string) {
 
 	t.mu.RLock()
 	addr := t.edgeAddr
+	dialer := t.dialer
 	t.mu.RUnlock()
 
 	ac := &activeConn{
@@ -517,10 +534,17 @@ func (t *Tunnel) proxyData(connID, remote string) {
 			h.OnDataClose(t.opts.Label, connID, t.opts.Local, remote, in, out, time.Since(ac.startedAt), err)
 		}
 	}
+	if dialer == nil {
+		closeEvt(0, 0, fmt.Errorf("data dial: no transport selected (control connection not established)"))
+		return
+	}
 
-	edge, err := t.dial(context.Background(), addr)
+	host, port := transport.SplitHostPort(addr)
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), dialTimeout)
+	edge, err := dialer.Dial(dialCtx, host, port)
+	cancelDial()
 	if err != nil {
-		closeEvt(0, 0, fmt.Errorf("data dial: %w", err))
+		closeEvt(0, 0, fmt.Errorf("data dial (%s): %w", dialer.Kind(), err))
 		return
 	}
 	pc := proto.NewConn(edge)
@@ -590,29 +614,6 @@ func copyWithCounters(dst io.Writer, src io.Reader, counters ...*atomic.Int64) {
 			return
 		}
 	}
-}
-
-// dial opens a TCP (or TLS over TCP) connection to addr.
-func (t *Tunnel) dial(_ context.Context, addr string) (net.Conn, error) {
-	d := &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}
-	return tls.DialWithDialer(d, "tcp", addr, t.edgeTLSConfig(addr))
-}
-
-// edgeTLSConfig builds the TLS config used for edge dials. ServerName is
-// derived from addr so SNI works even when DNS resolves to multiple regions
-// behind the same IP; IP literals get an empty ServerName to keep crypto/tls
-// from rejecting the handshake.
-func (t *Tunnel) edgeTLSConfig(addr string) *tls.Config {
-	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	host := addr
-	if h, _, err := net.SplitHostPort(addr); err == nil {
-		host = h
-	}
-	if _, err := netip.ParseAddr(host); err == nil {
-		return cfg
-	}
-	cfg.ServerName = host
-	return cfg
 }
 
 func (t *Tunnel) closeConn() {

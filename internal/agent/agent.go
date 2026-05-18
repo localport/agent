@@ -40,7 +40,6 @@ func (a *Agent) Run(ctx context.Context) error {
 				Edge:       spec.Edge,
 				Local:      ep.Local,
 				Protocol:   ep.Protocol,
-				UseTLS:     spec.UseTLS,
 				ClientName: clientName,
 				Handler:    a.handler,
 			})

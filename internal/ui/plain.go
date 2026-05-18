@@ -33,11 +33,7 @@ func (p *Plain) Banner(version string, cfg *config.Config) {
 		if region == "" {
 			region = "auto"
 		}
-		tls := "tls"
-		if !s.UseTLS {
-			tls = "tls=off"
-		}
-		p.line("startup", "", fmt.Sprintf("region=%s edge=%s %s", region, s.Edge, tls))
+		p.line("startup", "", fmt.Sprintf("region=%s edge=%s", region, s.Edge))
 		for _, ep := range s.Endpoints {
 			p.line("startup", ep.Name, fmt.Sprintf("proto=%s local=%s", ep.Protocol, ep.Local))
 		}

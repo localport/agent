@@ -30,7 +30,7 @@ spec:
 	if s.Token != "tok_test123" {
 		t.Errorf("token = %q, want tok_test123", s.Token)
 	}
-	if s.Edge != "eu.localport.dev:4443" {
+	if s.Edge != "connect.eu.localport.dev:443" {
 		t.Errorf("edge = %q", s.Edge)
 	}
 	if s.Region != "eu" {
@@ -71,10 +71,10 @@ specs:
 	if len(cfg.Specs) != 2 {
 		t.Fatalf("specs = %d, want 2", len(cfg.Specs))
 	}
-	if cfg.Specs[0].Edge != "eu.localport.dev:4443" {
+	if cfg.Specs[0].Edge != "connect.eu.localport.dev:443" {
 		t.Errorf("specs[0].Edge = %q", cfg.Specs[0].Edge)
 	}
-	if cfg.Specs[1].Edge != "us.localport.dev:4443" {
+	if cfg.Specs[1].Edge != "connect.us.localport.dev:443" {
 		t.Errorf("specs[1].Edge = %q", cfg.Specs[1].Edge)
 	}
 	if cfg.TotalEndpoints() != 2 {
@@ -157,17 +157,16 @@ func TestResolveEdge(t *testing.T) {
 		region string
 		addr   string
 	}{
-		{"", "edge.localport.dev:4443"},
-		{"eu", "eu.localport.dev:4443"},
-		{"us", "us.localport.dev:4443"},
-		{"ap", "ap.localport.dev:4443"},
-		{"unknown", "unknown.localport.dev:4443"},
+		{"localhost", "localhost:443"},
+		{"", "connect.edge.localport.dev:443"},
+		{"eu", "connect.eu.localport.dev:443"},
+		{"us", "connect.us.localport.dev:443"},
+		{"ap", "connect.ap.localport.dev:443"},
+		{"unknown", "connect.unknown.localport.dev:443"},
 	}
 	for _, tc := range cases {
-		addr := ResolveEdge(tc.region)
-		if addr != tc.addr {
-			t.Errorf("ResolveEdge(%q) = %q, want %q",
-				tc.region, addr, tc.addr)
+		if got := ResolveEdge(tc.region); got != tc.addr {
+			t.Errorf("ResolveEdge(%q) = %q, want %q", tc.region, got, tc.addr)
 		}
 	}
 }
@@ -192,7 +191,7 @@ func TestNormProto(t *testing.T) {
 func TestFromFlags(t *testing.T) {
 	cfg := FromFlags("tok_flag", "eu", "localhost:8080", "tcp", "myapp")
 	s := cfg.Specs[0]
-	if s.Token != "tok_flag" || s.Edge != "eu.localport.dev:4443" {
+	if s.Token != "tok_flag" || s.Edge != "connect.eu.localport.dev:443" {
 		t.Errorf("spec = %+v", s)
 	}
 	if s.Endpoints[0].Name != "myapp" || s.Endpoints[0].Protocol != "tcp" {
@@ -206,7 +205,7 @@ func TestFromFlagsDefaults(t *testing.T) {
 	if s.Endpoints[0].Name != "default" {
 		t.Errorf("name = %q, want default", s.Endpoints[0].Name)
 	}
-	if s.Edge != "edge.localport.dev:4443" {
+	if s.Edge != "connect.edge.localport.dev:443" {
 		t.Errorf("edge = %q", s.Edge)
 	}
 }
@@ -218,7 +217,7 @@ spec:
   token: tok
   endpoints: [{name: web, proto: http, url: localhost:3000}]
 `)
-	if cfg.Specs[0].Edge != "edge.localport.dev:4443" {
+	if cfg.Specs[0].Edge != "connect.edge.localport.dev:443" {
 		t.Errorf("edge = %q, want default fallback", cfg.Specs[0].Edge)
 	}
 }

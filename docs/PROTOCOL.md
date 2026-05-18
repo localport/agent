@@ -1,7 +1,7 @@
 # Localport Wire Protocol
 
 Binary control protocol between the agent and an edge server. Carried over
-TCP, with TLS 1.2+ on every region except `localhost` (dev).
+TCP, with TLS 1.2+ on every region.
 
 ## Frame format
 
