@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ type snap struct {
 	tunnels    []tState
 	conns      map[string][]tunnel.ActiveConn
 	stats      map[string]tunnel.Stats
+	spinner    string
 	palette    Palette
 }
 
@@ -282,7 +284,7 @@ func renderConnections(s snap, capacity int) []string {
 		ts := s.tunnels[0]
 		conns := s.conns[ts.name]
 		if !ts.connected || ts.state != tunnel.StateActive {
-			return centeredPanel(connectingPhrase(ts, pal), capacity, s.cols)
+			return centeredPanel(connectingPhrase(ts, s.spinner, pal), capacity, s.cols)
 		}
 		if len(conns) == 0 {
 			return centeredPanel(pal.Muted("no live connections"), capacity, s.cols)
@@ -307,7 +309,7 @@ func renderConnections(s snap, capacity int) []string {
 
 		conns := s.conns[ts.name]
 		if !ts.connected || ts.state != tunnel.StateActive {
-			lines = append(lines, "  "+connectingPhrase(ts, pal))
+			lines = append(lines, "  "+connectingPhrase(ts, s.spinner, pal))
 			continue
 		}
 		if len(conns) == 0 {
@@ -327,14 +329,14 @@ func renderConnections(s snap, capacity int) []string {
 	return lines
 }
 
-func connectingPhrase(ts tState, pal Palette) string {
+func connectingPhrase(ts tState, spin string, pal Palette) string {
 	switch ts.state {
 	case tunnel.StateConnecting:
-		return pal.Warning("◌") + " " + pal.ForegroundMid("connecting…")
+		return pal.Warning(spin) + " " + pal.ForegroundMid("connecting…")
 	case tunnel.StateRegistering:
-		return pal.Warning("◌") + " " + pal.ForegroundMid("registering…")
+		return pal.Warning(spin) + " " + pal.ForegroundMid("registering…")
 	case tunnel.StateReconnecting:
-		return pal.Warning("↻") + " " + pal.ForegroundMid("reconnecting…")
+		return pal.Warning(spin) + " " + pal.ForegroundMid("reconnecting…")
 	case tunnel.StateStopped:
 		return pal.Destructive("✕ stopped")
 	}
@@ -344,8 +346,11 @@ func connectingPhrase(ts tState, pal Palette) string {
 // renderConnTable formats one row per ActiveConn. Sorted by StartedAt
 // descending so the newest connection sits on top.
 //
-//	REMOTE                       DUR     ↓ IN       ↑ OUT
-//	203.0.113.4:54321           3m12s    1.2 MB    430 KB
+//	IP                           DUR     ↓ IN       ↑ OUT
+//	203.0.113.4                 3m12s    1.2 MB    430 KB
+//
+// The remote address is host-only — the source port carries no signal
+// for an operator watching the panel, so the port is stripped for clarity.
 func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette) []string {
 	if capacity <= 0 || len(conns) == 0 {
 		return nil
@@ -360,7 +365,7 @@ func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette)
 	remoteW := max(innerW-durW-byteW*2-gap*3, 12)
 	gapStr := strings.Repeat(" ", gap)
 
-	header := padVisible(pal.Muted("REMOTE"), remoteW) + gapStr +
+	header := padVisible(pal.Muted("IP"), remoteW) + gapStr +
 		padVisible(pal.Muted("DUR"), durW) + gapStr +
 		padLeftVisible(pal.Muted("↓ IN"), byteW) + gapStr +
 		padLeftVisible(pal.Muted("↑ OUT"), byteW)
@@ -376,6 +381,8 @@ func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette)
 		remote := c.Remote
 		if remote == "" {
 			remote = "—"
+		} else if host, _, err := net.SplitHostPort(remote); err == nil && host != "" {
+			remote = host
 		}
 		row := padVisible(pal.Foreground(truncate(remote, remoteW)), remoteW) + gapStr +
 			padVisible(pal.Foreground(humanDuration(now.Sub(c.StartedAt))), durW) + gapStr +

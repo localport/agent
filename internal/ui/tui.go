@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/localport/agent/internal/config"
@@ -40,7 +41,8 @@ type TUI struct {
 	cols      int
 	rows      int
 
-	provider func() []*tunnel.Tunnel
+	provider     func() []*tunnel.Tunnel
+	spinnerFrame atomic.Uint32
 
 	renderMu   sync.Mutex
 	renderCh   chan struct{}
@@ -78,7 +80,12 @@ const (
 
 	wrapOff = "\x1b[?7l"
 	wrapOn  = "\x1b[?7h"
+
+	spinnerInterval = 120 * time.Millisecond
 )
+
+// Braille spinner frames. 10 frames @ 120ms ≈ 1.2s rotation.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 var _ tunnel.EventHandler = (*TUI)(nil)
 
@@ -152,8 +159,40 @@ func (t *TUI) start() {
 	t.resizeStop = stop
 	go t.renderLoop()
 	go t.resizeLoop(resizeCh)
+	go t.animationLoop()
 
 	t.requestRender()
+}
+
+// animationLoop drives the spinner with one ticker. It only requests a
+// render when there is something on screen that changes between frames
+func (t *TUI) animationLoop() {
+	tk := time.NewTicker(spinnerInterval)
+	defer tk.Stop()
+	for {
+		select {
+		case <-t.stopCh:
+			return
+		case <-tk.C:
+			if t.shouldAnimate() {
+				t.spinnerFrame.Add(1)
+				t.requestRender()
+			}
+		}
+	}
+}
+
+func (t *TUI) shouldAnimate() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, ts := range t.tunnels {
+		switch ts.state {
+		case tunnel.StateConnecting, tunnel.StateRegistering,
+			tunnel.StateReconnecting, tunnel.StateActive:
+			return true
+		}
+	}
+	return false
 }
 
 func (t *TUI) drainStdin() {
@@ -372,6 +411,7 @@ func (t *TUI) snapshot() snap {
 		tunnels:    tunnels,
 		conns:      conns,
 		stats:      stats,
+		spinner:    spinnerFrames[t.spinnerFrame.Load()%uint32(len(spinnerFrames))],
 		palette:    t.palette,
 	}
 }
