@@ -14,17 +14,40 @@ import (
 	"github.com/localport/agent/internal/tunnel"
 )
 
+const usageReportInterval = 60 * time.Second
+
 // Plain is a line-oriented event handler suitable for non-tty stdouts
 // (CI logs, journald, file redirection). No ANSI escapes, no in-place
 // updates. Each event becomes one line.
 type Plain struct {
 	out io.Writer
-	mu  sync.Mutex
+
+	mu    sync.Mutex
+	stats map[string]*plainStats
+
+	// Usage ticker lifecycle. The goroutine is started lazily on the
+	// first data event so single-shot invocations don't spawn it.
+	tickerOnce sync.Once
+	stopOnce   sync.Once
+	stop       chan struct{}
+}
+
+type plainStats struct {
+	bytesIn, bytesOut int64
+	active            int
+	totalConns        int64
+	dirtySinceTick    bool
 }
 
 var _ tunnel.EventHandler = (*Plain)(nil)
 
-func NewPlain() *Plain { return &Plain{out: os.Stderr} }
+func NewPlain() *Plain {
+	return &Plain{
+		out:   os.Stderr,
+		stats: make(map[string]*plainStats),
+		stop:  make(chan struct{}),
+	}
+}
 
 func (p *Plain) Banner(version string, cfg *config.Config) {
 	p.line("startup", "", "localport "+version)
@@ -40,7 +63,10 @@ func (p *Plain) Banner(version string, cfg *config.Config) {
 	}
 }
 
-func (p *Plain) Shutdown() { p.line("shutdown", "", "stopping") }
+func (p *Plain) Shutdown() {
+	p.stopOnce.Do(func() { close(p.stop) })
+	p.line("shutdown", "", "stopping")
+}
 
 func (p *Plain) OnStateChange(label string, _ tunnel.State, to tunnel.State) {
 	switch to {
@@ -95,6 +121,15 @@ func (p *Plain) OnDataConn(label, connID, local, remote string) {
 		from = "-"
 	}
 	p.line("conn.open", label, fmt.Sprintf("id=%s from=%s -> %s", shortID(connID), from, local))
+
+	p.mu.Lock()
+	s := p.statsFor(label)
+	s.active++
+	s.totalConns++
+	s.dirtySinceTick = true
+	p.mu.Unlock()
+
+	p.ensureUsageTicker()
 }
 
 func (p *Plain) OnDataClose(label, connID, local, remote string, bytesIn, bytesOut int64, dur time.Duration, err error) {
@@ -105,12 +140,82 @@ func (p *Plain) OnDataClose(label, connID, local, remote string, bytesIn, bytesO
 	}
 	if err != nil {
 		p.line("conn.error", label, fmt.Sprintf("id=%s from=%s -> %s: %s", short, from, local, err))
-		return
+	} else {
+		p.line("conn.close", label, fmt.Sprintf(
+			"id=%s from=%s -> %s in=%s out=%s dur=%s",
+			short, from, local, HumanBytes(bytesIn), HumanBytes(bytesOut), dur.Round(time.Millisecond),
+		))
 	}
-	p.line("conn.close", label, fmt.Sprintf(
-		"id=%s from=%s -> %s in=%s out=%s dur=%s",
-		short, from, local, HumanBytes(bytesIn), HumanBytes(bytesOut), dur.Round(time.Millisecond),
-	))
+
+	p.mu.Lock()
+	s := p.statsFor(label)
+	if s.active > 0 {
+		s.active--
+	}
+	s.bytesIn += bytesIn
+	s.bytesOut += bytesOut
+	s.dirtySinceTick = true
+	p.mu.Unlock()
+}
+
+// statsFor returns the per-label stats record, creating it if missing.
+// Caller holds p.mu.
+func (p *Plain) statsFor(label string) *plainStats {
+	if s, ok := p.stats[label]; ok {
+		return s
+	}
+	s := &plainStats{}
+	p.stats[label] = s
+	return s
+}
+
+// ensureUsageTicker spawns the per-minute usage reporter the first time
+// any tunnel sees activity. The goroutine exits on Shutdown.
+func (p *Plain) ensureUsageTicker() {
+	p.tickerOnce.Do(func() { go p.usageLoop() })
+}
+
+func (p *Plain) usageLoop() {
+	t := time.NewTicker(usageReportInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-p.stop:
+			return
+		case <-t.C:
+			p.emitUsage()
+		}
+	}
+}
+
+// emitUsage writes one line per tunnel that has either an active
+// connection or new traffic since the last tick. Idle tunnels stay silent.
+func (p *Plain) emitUsage() {
+	type row struct {
+		label string
+		stats plainStats
+	}
+	var rows []row
+
+	p.mu.Lock()
+	for label, s := range p.stats {
+		if s.active == 0 && !s.dirtySinceTick {
+			continue
+		}
+		rows = append(rows, row{label: label, stats: *s})
+		s.dirtySinceTick = false
+	}
+	p.mu.Unlock()
+
+	for _, r := range rows {
+		p.line("usage", r.label, fmt.Sprintf(
+			"in=%s out=%s active=%d total-conns=%d",
+			HumanBytes(r.stats.bytesIn),
+			HumanBytes(r.stats.bytesOut),
+			r.stats.active,
+			r.stats.totalConns,
+		))
+	}
 }
 
 func (p *Plain) OnRedirect(label, from, to string) {

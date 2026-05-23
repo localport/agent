@@ -38,7 +38,7 @@ func runTunnel(version string, args []string) error {
 		local      = fs.String("local", "", "local service: tcp://host:port, http://host:port, or host:port")
 		proto      = fs.String("proto", "http", "tunnel protocol: http, tcp, tls (overridden when --local has a scheme)")
 		name       = fs.String("name", "", "endpoint name (default: \"default\")")
-		modeUI     = fs.String("ui", "auto", "ui mode: auto, tui, plain")
+		noUI       = fs.Bool("noui", false, "disable the live TUI and emit plain logs (auto-enabled when stdout is not a TTY)")
 		showVer    = fs.Bool("version", false, "print version and exit")
 	)
 	fs.StringVar(token, "t", "", "alias for --token")
@@ -74,7 +74,7 @@ func runTunnel(version string, args []string) error {
 	defer cancel()
 
 	a := agent.New(cfg, nil) // handler attached below so renderer can poll a.Tunnels()
-	renderer := pickRenderer(*modeUI, a)
+	renderer := pickRenderer(*noUI, a)
 	a.SetHandler(renderer)
 	renderer.Banner(version, cfg)
 	sig := make(chan os.Signal, 1)
@@ -91,8 +91,8 @@ func runTunnel(version string, args []string) error {
 	return err
 }
 
-func pickRenderer(flagValue string, a *agent.Agent) tunnelUI {
-	if ui.DetectMode(flagValue, os.Stderr) == ui.ModePlain {
+func pickRenderer(noUI bool, a *agent.Agent) tunnelUI {
+	if ui.DetectMode(noUI, os.Stderr) == ui.ModePlain {
 		return ui.NewPlain()
 	}
 	t := ui.NewTUI()

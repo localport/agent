@@ -20,20 +20,13 @@ func (m Mode) String() string {
 	return "plain"
 }
 
-// DetectMode picks a renderer from the --ui flag and the environment.
-//
-// flag may be "auto" (or empty), "tui", or "plain". For "auto" we choose
-// the TUI when stdout/stderr is a real terminal and TERM is not "dumb".
-// NO_COLOR is not a forcing function here; the TUI honors it by skipping
+// DetectMode picks a renderer from the --noui flag and the environment.
+// Plain mode wins when --noui is set, when stdout/stderr is not a TTY
+// (pipes, CI, journald), or when TERM=dumb. Otherwise TUI.
+// NO_COLOR does not force plain mode — the TUI honors it by skipping
 // ANSI color codes but keeps the layout.
-func DetectMode(flag string, out *os.File) Mode {
-	switch strings.ToLower(strings.TrimSpace(flag)) {
-	case "tui":
-		return ModeTUI
-	case "plain":
-		return ModePlain
-	}
-	if !IsTTY(out) {
+func DetectMode(noUI bool, out *os.File) Mode {
+	if noUI || !IsTTY(out) {
 		return ModePlain
 	}
 	if strings.EqualFold(os.Getenv("TERM"), "dumb") {
