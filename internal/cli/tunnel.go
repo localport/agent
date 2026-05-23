@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/localport/agent/internal/agent"
@@ -25,6 +26,8 @@ type tunnelUI interface {
 }
 
 func runTunnel(version string, args []string) error {
+	posProto, posLocal, rest := extractPositional(args)
+
 	fs := flag.NewFlagSet("tunnel", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
@@ -32,16 +35,26 @@ func runTunnel(version string, args []string) error {
 		configPath = fs.String("config", "", "path to YAML config")
 		token      = fs.String("token", "", "tunnel token (single-endpoint mode)")
 		region     = fs.String("region", "", "edge region: eu, us, ap")
-		local      = fs.String("local", "", "local service host:port")
-		proto      = fs.String("proto", "http", "tunnel protocol: http, tcp, tls")
+		local      = fs.String("local", "", "local service: tcp://host:port, http://host:port, or host:port")
+		proto      = fs.String("proto", "http", "tunnel protocol: http, tcp, tls (overridden when --local has a scheme)")
 		name       = fs.String("name", "", "endpoint name (default: \"default\")")
 		modeUI     = fs.String("ui", "auto", "ui mode: auto, tui, plain")
 		showVer    = fs.Bool("version", false, "print version and exit")
 	)
+	fs.StringVar(token, "t", "", "alias for --token")
+	fs.StringVar(local, "l", "", "alias for --local")
 	fs.Usage = func() { usageTunnel(fs) }
 
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		return err
+	}
+
+	if posProto != "" {
+		if *local != "" {
+			return fmt.Errorf("--local cannot be combined with positional protocol/address")
+		}
+		*proto = posProto
+		*local = posLocal
 	}
 	if *showVer {
 		fmt.Printf("localport %s\n", version)
@@ -104,15 +117,19 @@ func buildTunnelConfig(path, flagToken, region, local, proto, name string) (*con
 
 func usageTunnel(fs *flag.FlagSet) {
 	fmt.Fprint(os.Stderr, `Usage: localport tunnel [flags]
+       localport <proto> <port|host:port> [flags]
 
-  From a config file:
+  Config file:
     localport tunnel --config localport.yaml
 
-  From CLI flags:
-    localport tunnel --token <token> --local <host:port> [--region <region>]
+  Single endpoint, scheme in --local sets the protocol:
+    localport --token <token> --local tcp://localhost:18789
+    localport -t <token> -l http://localhost:3000
 
-  Legacy flat form (no subcommand) is accepted:
-    localport --token <token> --local <host:port>
+  Positional shorthand (proto + port or host:port):
+    localport tcp 18789 -t <token>
+    localport http localhost:3000 -t <token>
+    localport tls 8443 -t <token>
 
 Environment:
   LOCALPORT_TOKEN   tunnel token (alternative to --token)
@@ -121,4 +138,23 @@ Environment:
 Flags:
 `)
 	fs.PrintDefaults()
+}
+
+// extractPositional consumes a leading "<proto> <port|host:port>" pair
+// when present so callers can write `localport tcp 18789 -t tok`. The
+// recognised protocols are http, https, tcp, tls; anything else leaves
+// args untouched so the regular flag parser sees them.
+func extractPositional(args []string) (proto, local string, rest []string) {
+	if len(args) < 2 || strings.HasPrefix(args[0], "-") {
+		return "", "", args
+	}
+	switch strings.ToLower(args[0]) {
+	case "http", "https", "tcp", "tls":
+	default:
+		return "", "", args
+	}
+	if strings.HasPrefix(args[1], "-") {
+		return "", "", args
+	}
+	return args[0], args[1], args[2:]
 }

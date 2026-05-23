@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"go.yaml.in/yaml/v4"
@@ -12,9 +13,10 @@ import (
 const edgePort = "443"
 
 var regionHosts = map[string]string{
-	"eu": "eu.localport.dev",
-	"us": "us.localport.dev",
-	"ap": "ap.localport.dev",
+	"eu":        "eu.localport.dev",
+	"us":        "us.localport.dev",
+	"ap":        "ap.localport.dev",
+	"localhost": "localhost",
 }
 
 var envRef = regexp.MustCompile(`\$\{env\.([^}]+)\}`)
@@ -87,29 +89,67 @@ func Load(path string) (*Config, error) {
 }
 
 // FromFlags builds a single-endpoint config from CLI arguments. The
-// endpoint name defaults to "default" when blank.
+// endpoint name defaults to "default" when blank. `local` may carry a
+// scheme prefix (tcp://, tls://, http://, https://) — when present, the
+// scheme overrides `proto`. A bare numeric local is treated as a localhost port.
 func FromFlags(token, region, local, proto, name string) *Config {
 	if name == "" {
 		name = "default"
 	}
+	resolvedProto, resolvedLocal := ParseLocal(local, proto)
 	return &Config{
 		Specs: []Spec{{
 			Token:  token,
 			Region: region,
 			Edge:   ResolveEdge(region),
 			Endpoints: []Endpoint{
-				{Name: name, Protocol: NormProto(proto), Local: local},
+				{Name: name, Protocol: resolvedProto, Local: resolvedLocal},
 			},
 		}},
 	}
 }
 
+// ParseLocal splits a `local` value into (protocol, addr). A scheme in
+// the URL wins over fallbackProto. A bare port ("18789") is rewritten
+// to "localhost:18789". Empty input passes through.
+func ParseLocal(local, fallbackProto string) (protocol, addr string) {
+	local = strings.TrimSpace(local)
+	if local == "" {
+		return NormProto(fallbackProto), ""
+	}
+	if i := strings.Index(local, "://"); i > 0 {
+		scheme := strings.ToLower(local[:i])
+		switch scheme {
+		case "http", "https", "tcp", "tls":
+			return NormProto(scheme), normalizeLocalAddr(local[i+3:])
+		}
+	}
+	return NormProto(fallbackProto), normalizeLocalAddr(local)
+}
+
+func normalizeLocalAddr(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return addr
+	}
+	if _, err := strconv.Atoi(addr); err == nil {
+		return "localhost:" + addr
+	}
+	return addr
+}
+
 // ResolveEdge maps a region name to its agent-facing edge address.
+// Production regions use the "connect." subdomain so the dial host
+// doubles as the TLS SNI the edge expects. The localhost region keeps
+// the bare hostname for dev. TLS is mandatory on every region.
 func ResolveEdge(region string) string {
 	if region == "" {
 		return "connect.edge.localport.dev:" + edgePort
 	}
 	if host, ok := regionHosts[region]; ok {
+		if region == "localhost" {
+			return host + ":" + edgePort
+		}
 		return "connect." + host + ":" + edgePort
 	}
 	return "connect." + region + ".localport.dev:" + edgePort
@@ -183,13 +223,13 @@ func buildEndpoint(specIdx, epIdx int, ep endpoint) (*Endpoint, error) {
 	if ep.URL == "" {
 		return nil, fmt.Errorf("spec %d endpoint %q: url is required", specIdx, ep.Name)
 	}
-	proto := NormProto(ep.Proto)
+	proto, local := ParseLocal(ep.URL, ep.Proto)
 	switch proto {
 	case "http", "tcp", "tls":
 	default:
 		return nil, fmt.Errorf("spec %d endpoint %q: protocol %q is not one of http, tcp, tls", specIdx, ep.Name, ep.Proto)
 	}
-	return &Endpoint{Name: ep.Name, Protocol: proto, Local: ep.URL}, nil
+	return &Endpoint{Name: ep.Name, Protocol: proto, Local: local}, nil
 }
 
 func expand(raw string) (string, []string) {
