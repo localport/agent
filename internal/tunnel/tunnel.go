@@ -11,6 +11,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -82,7 +83,7 @@ type EventHandler interface {
 	OnDataConn(label, connID, local, remote string)
 	OnDataClose(label, connID, local, remote string, bytesIn, bytesOut int64, dur time.Duration, err error)
 	OnRedirect(label, from, to string)
-	OnShutdownPolicy(label, code string, limit proto.LimitType, retryable bool)
+	OnShutdownPolicy(label, reason, code string, limit proto.LimitType, retryable bool)
 }
 
 // ActiveConn is a snapshot of one live edge↔local proxy. The byte counts
@@ -203,7 +204,7 @@ func (t *Tunnel) Run(ctx context.Context) error {
 			var regErr *RegistrationError
 			if errors.As(err, &regErr) && !regErr.Retryable {
 				t.setState(StateStopped)
-				t.emitShutdown(regErr.Code, regErr.LimitType, false)
+				t.emitShutdown(regErr.Message, regErr.Code, regErr.LimitType, false)
 				return regErr
 			}
 			t.emitError(err)
@@ -370,6 +371,9 @@ func (t *Tunnel) connect(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("parse redirect: %w", err)
 			}
+			if !allowedRedirectHost(rd.EdgeAddr) {
+				return fmt.Errorf("refusing redirect to untrusted host %q", sanitizeAddr(rd.EdgeAddr))
+			}
 			if h := t.opts.Handler; h != nil {
 				h.OnRedirect(t.opts.Label, addr, rd.EdgeAddr)
 			}
@@ -479,7 +483,8 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 			return
 		}
 		t.wg.Add(1)
-		go t.proxyData(nc.ConnectionID, nc.RemoteAddr)
+
+		go t.proxyData(nc.ConnectionID, sanitizeAddr(nc.RemoteAddr))
 
 	case proto.MsgHeartbeat:
 		hb, _ := proto.ParseHeartbeat(body)
@@ -496,12 +501,16 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 	case proto.MsgShutdown:
 		sd, _ := proto.ParseShutdown(body)
 		if sd != nil && sd.Retryable != nil && !*sd.Retryable {
+			reason := sd.Reason
+			if reason == "" {
+				reason = "edge closed the tunnel"
+			}
 			t.setTerminalError(&RegistrationError{
-				Message:   "edge requested non-retryable shutdown",
+				Message:   reason,
 				Code:      sd.Code,
 				LimitType: sd.LimitType,
 			})
-			t.emitShutdown(sd.Code, sd.LimitType, false)
+			t.emitShutdown(reason, sd.Code, sd.LimitType, false)
 			t.Stop()
 			return
 		}
@@ -513,6 +522,23 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 			t.emitError(fmt.Errorf("[%s] %s", ep.Code, ep.Message))
 		}
 	}
+}
+
+const edgeBaseDomain = "localport.dev"
+
+func allowedRedirectHost(addr string) bool {
+	host, _ := transport.SplitHostPort(addr)
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	return host == edgeBaseDomain || strings.HasSuffix(host, "."+edgeBaseDomain)
+}
+
+func sanitizeAddr(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == 0x7f || r < 0x20 || (r >= 0x80 && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func (t *Tunnel) proxyData(connID, remote string) {
@@ -691,9 +717,9 @@ func (t *Tunnel) emitError(err error) {
 		h.OnError(t.opts.Label, err)
 	}
 }
-func (t *Tunnel) emitShutdown(code string, limit proto.LimitType, retryable bool) {
+func (t *Tunnel) emitShutdown(reason, code string, limit proto.LimitType, retryable bool) {
 	if h := t.opts.Handler; h != nil {
-		h.OnShutdownPolicy(t.opts.Label, code, limit, retryable)
+		h.OnShutdownPolicy(t.opts.Label, reason, code, limit, retryable)
 	}
 }
 
@@ -749,11 +775,9 @@ type RegistrationError struct {
 	Retryable bool
 }
 
+// Error renders the public, sanitized message supplied by the edge.
 func (e *RegistrationError) Error() string {
 	s := e.Message
-	if e.Code != "" {
-		s += " [code=" + e.Code + "]"
-	}
 	if e.LimitType != "" && e.LimitType != proto.LimitUnspecified {
 		s += " [limit=" + string(e.LimitType) + "]"
 	}

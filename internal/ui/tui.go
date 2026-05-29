@@ -70,6 +70,7 @@ type tState struct {
 	mode        string
 	connectedAt time.Time
 	lastErr     string
+	lastCode    string
 	mtls        bool
 	connected   bool
 }
@@ -285,6 +286,7 @@ func (t *TUI) OnConnected(label string, info tunnel.Info) {
 		ts.port = info.Port
 		ts.mode = info.Mode
 		ts.lastErr = ""
+		ts.lastCode = ""
 		if info.MTLS != nil {
 			ts.mtls = info.MTLS.Enabled
 		}
@@ -309,6 +311,9 @@ func (t *TUI) OnError(label string, err error) {
 	t.mu.Lock()
 	if ts := t.ensure(label); ts != nil {
 		ts.lastErr = err.Error()
+		if code := errorCode(err); code != "" {
+			ts.lastCode = code
+		}
 	}
 	t.mu.Unlock()
 	t.requestRender()
@@ -327,21 +332,18 @@ func (t *TUI) OnRedirect(_, _, to string) {
 	t.requestRender()
 }
 
-func (t *TUI) OnShutdownPolicy(label, code string, lt proto.LimitType, _ bool) {
-	parts := []string{"limit reached"}
-	if code != "" {
-		parts = append(parts, "code="+code)
+func (t *TUI) OnShutdownPolicy(label, reason, code string, lt proto.LimitType, _ bool) {
+	msg := reason
+	if msg == "" {
+		msg = PolicyHint(lt)
 	}
-	if lt != "" {
-		parts = append(parts, "type="+string(lt))
-	}
-	msg := strings.Join(parts, " ")
-	if hint := PolicyHint(lt); hint != "" {
-		msg += " — " + hint
+	if msg == "" {
+		msg = "tunnel closed by the server"
 	}
 	t.mu.Lock()
 	if ts := t.ensure(label); ts != nil {
 		ts.lastErr = msg
+		ts.lastCode = code
 	}
 	t.mu.Unlock()
 	t.requestRender()
@@ -401,12 +403,23 @@ func (t *TUI) snapshot() snap {
 	}
 
 	status, uptime := buildRightCaps(tunnels, time.Since(t.startedAt))
+
+	// Bottom-right capsule shows the most recent error code while a tunnel is not active
+	errCode := ""
+	for _, ts := range tunnels {
+		if ts.lastCode != "" && ts.state != tunnel.StateActive {
+			errCode = ts.lastCode
+			break
+		}
+	}
+
 	return snap{
 		cols:       cols,
 		rows:       rows,
 		title:      title,
 		statusText: status,
 		uptimeText: uptime,
+		errCode:    errCode,
 		edge:       t.edge,
 		tunnels:    tunnels,
 		conns:      conns,

@@ -49,10 +49,8 @@ const (
 	LimitBandwidth         LimitType = "bandwidth"
 	LimitClientConnections LimitType = "client_connections"
 	LimitTunnelCount       LimitType = "tunnel_count"
-	// LimitNoPlan is emitted by the edge when the team has no active paid
-	// or trialing subscription. Non-retryable; the agent exits rather than
-	// hammering the edge while the team is plan-less.
-	LimitNoPlan LimitType = "no_plan"
+	LimitNoPlan            LimitType = "no_plan"
+	LimitBlocked           LimitType = "blocked"
 )
 
 type RegisterPayload struct {

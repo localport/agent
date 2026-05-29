@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -105,14 +104,14 @@ func (p *Plain) OnConnected(label string, info tunnel.Info) {
 
 func (p *Plain) OnDisconnected(label string, err error) {
 	if err != nil {
-		p.line("disconnected", label, err.Error())
+		p.line("disconnected", label, withCode(err.Error(), errorCode(err)))
 		return
 	}
 	p.line("disconnected", label, "")
 }
 
 func (p *Plain) OnError(label string, err error) {
-	p.line("error", label, err.Error())
+	p.line("error", label, withCode(err.Error(), errorCode(err)))
 }
 
 func (p *Plain) OnDataConn(label, connID, local, remote string) {
@@ -222,18 +221,32 @@ func (p *Plain) OnRedirect(label, from, to string) {
 	p.line("redirect", label, from+" -> "+to)
 }
 
-func (p *Plain) OnShutdownPolicy(label string, code string, lt proto.LimitType, _ bool) {
-	parts := []string{"limit-reached"}
-	if code != "" {
-		parts = append(parts, "code="+code)
+func (p *Plain) OnShutdownPolicy(label string, reason, code string, lt proto.LimitType, _ bool) {
+	// The edge-supplied reason is the authoritative, public-safe message; the
+	// opaque code is appended in [brackets] so it lands in the noui log for
+	// support lookups.
+	msg := reason
+	if msg == "" {
+		msg = PolicyHint(lt)
 	}
-	if lt != "" {
-		parts = append(parts, "type="+string(lt))
+	if msg == "" {
+		msg = "tunnel closed by the server"
 	}
-	p.line("policy", label, strings.Join(parts, " "))
-	if hint := PolicyHint(lt); hint != "" {
-		p.line("policy", label, hint)
+	p.line("policy", label, withCode(msg, code))
+}
+
+// withCode appends an opaque edge error code as a sanitized [CODE] suffix. The
+// code originates from the edge, so it is stripped of terminal control bytes
+// before being written to the log.
+func withCode(msg, code string) string {
+	code = sanitizeForDisplay(code)
+	if code == "" {
+		return msg
 	}
+	if msg == "" {
+		return "[" + code + "]"
+	}
+	return msg + " [" + code + "]"
 }
 
 func (p *Plain) line(event, label, msg string) {

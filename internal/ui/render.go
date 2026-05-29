@@ -17,6 +17,7 @@ type snap struct {
 	title      string
 	statusText string // top-right capsule #1, e.g. "Connected" / "Connecting…"
 	uptimeText string // top-right capsule #2, e.g. "1m12s"
+	errCode    string // bottom-right capsule, opaque edge error code e.g. "AT001"
 	edge       string
 	tunnels    []tState
 	conns      map[string][]tunnel.ActiveConn
@@ -71,7 +72,7 @@ func buildFrame(s snap) []string {
 	pal := s.palette
 
 	frame[0] = boxTop(s.title, s.statusText, s.uptimeText, s.cols, pal)
-	frame[s.rows-1] = boxBottom(s.cols, pal)
+	frame[s.rows-1] = boxBottom(s.cols, s.errCode, pal)
 
 	header := renderHeader(s)
 	maxHeader := max(s.rows-4, 1)
@@ -459,11 +460,34 @@ func styleStatusWord(s string, pal Palette) string {
 	return pal.ForegroundMid(s)
 }
 
-func boxBottom(cols int, pal Palette) string {
+func boxBottom(cols int, code string, pal Palette) string {
 	if cols < 2 {
 		return pal.Border("└┘")
 	}
-	return pal.Border("└" + strings.Repeat("─", cols-2) + "┘")
+	code = sanitizeForDisplay(code)
+	if code == "" {
+		return pal.Border("└" + strings.Repeat("─", cols-2) + "┘")
+	}
+	rightCapRaw := "[ " + code + " ]─┘"
+	fill := cols - 1 - visibleLen(rightCapRaw) // 1 = "└"
+	if fill < 1 {
+		return pal.Border("└" + strings.Repeat("─", cols-2) + "┘")
+	}
+	return pal.Border("└"+strings.Repeat("─", fill)+"[ ") +
+		pal.ForegroundDim(code) + pal.Border(" ]─┘")
+}
+
+// sanitizeForDisplay strips terminal control characters (C0 incl. ESC, DEL, and C1)
+func sanitizeForDisplay(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == 0x7f || r < 0x20 || (r >= 0x80 && r <= 0x9f) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // boxDivider renders:  ├─[ live connections ]──────[ N ]─┤
