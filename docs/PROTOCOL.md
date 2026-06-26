@@ -1,7 +1,17 @@
 # Localport Wire Protocol
 
-Binary control protocol between the agent and an edge server. Carried over
-TCP, with TLS 1.2+ on every region.
+Binary control protocol between the agent and an edge server. The same framed
+messages ride over one of two TLS 1.2+ carriers, both terminating on the edge
+HTTPS port (`:443`) and selected by ALPN after a single TLS handshake:
+
+- **`localport-raw/1`** — framed bytes flow directly inside the TLS stream.
+  Lowest overhead.
+- **`localport-ws/1`** — framed bytes ride inside binary WebSocket frames
+  (HTTP/1.1 upgrade at `/v1/control`). Traverses DPI and HTTPS-inspecting proxies.
+
+The agent connects with SNI `connect.<edge-domain>`; the edge routes that SNI to
+its agent handler and all other SNIs to tunnel traffic. The wire format below is
+identical on either carrier.
 
 ## Frame format
 
@@ -51,6 +61,8 @@ TCP, with TLS 1.2+ on every region.
 {
   "success": true,
   "tunnel_id": "tun_xxx",
+  "tunnel_name": "my-api",
+  "region": "eu",
   "public_url": "https://foo.tunnel.localport.dev",
   "urls": [
     "https://foo.tunnel.localport.dev",
@@ -66,19 +78,25 @@ TCP, with TLS 1.2+ on every region.
   "limit_type": "",
   "mtls": {
     "enabled": true,
-    "ca_fingerprint": "sha256:a1b2c3...",
-    "cert_issue_url": "https://api.localport.dev/v1/connect/cert",
-    "ca_download_url": "https://api.localport.dev/v1/connect/ca"
+    "ca_fingerprint": "sha256:a1b2c3..."
   }
 }
 ```
 
 The `mtls` field is optional. When present with `enabled: true`, inbound
-connections to the tunnel's mesh port must present a client certificate
-issued by the listed CA. The agent prints the CA fingerprint at connect
-time so consumers can verify it out of band.
+connections to the tunnel must present a client certificate signed by the tunnel's CA.
+The agent prints the `ca_fingerprint` at connect time so consumers can verify the CA out of band.
 
-### NewConnection (3), ConnectionReady (4)
+### NewConnection (3)
+
+```json
+{ "connection_id": "conn_xxx", "remote_addr": "203.0.113.7:54321" }
+```
+
+`remote_addr` is the L4 peer (host:port) of the inbound connection as seen by the
+edge. Agents surface it as the originating address in their live-connections view.
+
+### ConnectionReady (4)
 
 ```json
 { "connection_id": "conn_xxx" }
@@ -116,6 +134,7 @@ time so consumers can verify it out of band.
 | `client_connections` | Too many concurrent clients across the team      | no        |
 | `tunnel_count`       | Team hit its max tunnel count                    | no        |
 | `no_plan`            | Team has no active paid or trialing subscription | no        |
+| `blocked`            | Access blocked for this tunnel or team           | no        |
 
 ### Error (9)
 
