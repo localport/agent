@@ -12,21 +12,21 @@
   <a href="https://localport.io/docs"><img src="https://img.shields.io/badge/docs-localport.io-2eb67d" alt="Documentation" /></a>
 </p>
 
-Localport gives anything on your machine a secure public link in one command. HTTP, TCP, TLS, and mutual-TLS tunnels that work behind NAT, CGNAT, and corporate firewalls. No port forwarding, no router config, no exposed IP.
+Localport exposes local services to the internet over secure tunnels. It supports HTTP, TCP, TLS, and mutual TLS, and operates through NAT, CGNAT, and corporate firewalls without port forwarding, router configuration, or a public IP.
 
-This repository holds the Localport agent, the program that runs on your machine and carries your traffic to the Localport network. The tool that sits between your machine and the internet should be one you can inspect, so the agent is open source under Apache 2.0. Read every line, build it yourself, and audit the wire protocol before you trust it with a single packet. The service it connects to, including the edge network, control plane, and dashboard, is a managed product run by the Localport team.
+This repository contains the Localport agent: the client process that runs on the host machine and maintains tunnel connections to the Localport network. The agent is the only component that runs in your environment, and it is released as open source under the Apache License 2.0. The remainder of the platform, including the edge network, control plane, and dashboard, is operated by Localport as a managed service.
 
-Sign up and manage your tunnels at [localport.io](https://localport.io).
+Accounts and tunnels are managed at [localport.io](https://localport.io).
 
 ## Features
 
-- **Every protocol.** HTTP, TCP, and TLS tunnels, with browser-trusted HTTPS provisioned for you.
-- **Reserved addresses.** Static subdomains and ports stay yours between runs, so shared links and webhook URLs never break on a restart.
-- **Mesh tunnels.** One token for a whole fleet. Every device gets its own address and stays reachable by name, even behind CGNAT or a cellular modem.
-- **Shared tunnels.** Fan a single webhook out to your whole team at once. One client, picked from the dashboard, sends the reply back.
-- **Locked tunnels.** Mutual TLS with ECDSA P-256, so only the devices and people you trust can reach a service. Revoke any of them in a click.
-- **Access control.** IP allow lists and password protection on top of any tunnel.
-- **Private by design.** Localport never reads, logs, or trains on your traffic, and every tunnel runs in the region you choose.
+- **Protocols.** HTTP, TCP, and TLS tunnels with automatic, browser-trusted HTTPS.
+- **Reserved addresses.** Static subdomains and ports persist across sessions, keeping public links and webhook URLs stable.
+- **Mesh tunnels.** A single token serves an entire fleet. Each device receives its own address and remains reachable by name behind CGNAT or cellular networks.
+- **Shared tunnels.** One inbound request is delivered to every connected client, with a designated client returning the response.
+- **Locked tunnels.** Mutual TLS with ECDSA P-256 certificates restricts access to authorized devices, with per-device revocation.
+- **Access control.** IP allow lists and password protection on any tunnel.
+- **Data privacy.** Traffic is never inspected, logged, or used for training, and each tunnel is pinned to a chosen region.
 - **Cross-platform.** Prebuilt binaries for macOS, Linux, and Windows.
 
 ## Installation
@@ -36,25 +36,23 @@ Sign up and manage your tunnels at [localport.io](https://localport.io).
 brew install localport/tap/localport
 
 # macOS and Linux (install script)
-curl -fsSL https://get.localport.io/install.sh | sh
+curl -fsSL https://localport.io/install.sh | sh
 ```
 
 ```powershell
 # Windows (PowerShell)
-irm https://get.localport.io/install.ps1 | iex
+irm https://localport.io/install.ps1 | iex
 ```
 
-Prefer to do it by hand? Grab a binary from the [releases page](https://github.com/localport/agent/releases). Full instructions for every platform are in the [installation guide](https://localport.io/docs/installation).
+For manual installation, download a binary from the [releases page](https://github.com/localport/agent/releases). Platform-specific instructions are in the [installation guide](https://localport.io/docs/installation).
 
 ## Usage
 
-Create a tunnel in the [dashboard](https://dashboard.localport.io) to issue a token, then run the agent against a local service to bring the tunnel online.
+Create a tunnel in the [dashboard](https://dashboard.localport.io) to obtain a token, then run the agent against the local service. Complete command, flag, configuration, and protocol documentation is maintained on the documentation site:
 
-Every command, flag, config file, and tunnel type is documented in full:
-
-- [Quick start](https://localport.io/docs/quick-start), a working tunnel in about a minute
-- [CLI reference](https://localport.io/docs/cli), the complete list of commands and flags
-- Tunnel guides, by protocol ([HTTP](https://localport.io/docs/http-tunnels), [TCP](https://localport.io/docs/tcp-tunnels), TLS) and routing mode ([mesh](https://localport.io/docs/mesh-tunnels), [shared](https://localport.io/docs/shared-tunnels), [locked / mTLS](https://localport.io/docs/locked-tunnels))
+- [Quick start](https://localport.io/docs/quick-start) — first-tunnel walkthrough
+- [CLI reference](https://localport.io/docs/cli) — commands, flags, and environment variables
+- Tunnel guides — by protocol ([HTTP](https://localport.io/docs/http-tunnels), [TCP](https://localport.io/docs/tcp-tunnels), TLS) and routing mode ([mesh](https://localport.io/docs/mesh-tunnels), [shared](https://localport.io/docs/shared-tunnels), [locked / mTLS](https://localport.io/docs/locked-tunnels))
 
 ## Build from source
 
@@ -76,8 +74,8 @@ make build
 
 ## Contributing
 
-Issues and pull requests are welcome. For anything beyond a small fix, open an issue first so we can agree on the approach before you write code. Run `make test`, `make vet`, and `make lint` before you submit.
+Issues and pull requests are welcome. For non-trivial changes, open an issue to discuss the approach before submitting. Run `make test`, `make vet`, and `make lint` before opening a pull request.
 
 ## Security
 
-If you find a security vulnerability, please report it privately rather than opening a public issue. Use the contact form at [localport.io/contact](https://localport.io/contact) and we will respond quickly.
+Report security vulnerabilities privately through [localport.io/contact](https://localport.io/contact). Do not open public issues for security reports.

@@ -9,7 +9,7 @@ LDFLAGS = -s -w \
 
 GO_BUILD = go build -trimpath -ldflags "$(LDFLAGS)"
 
-.PHONY: build build-all clean test lint fmt vet
+.PHONY: build build-all release clean test lint fmt vet
 
 build:
 	$(GO_BUILD) -o bin/localport ./cmd/localport
@@ -20,6 +20,9 @@ build-all:
 	GOOS=darwin  GOARCH=amd64 $(GO_BUILD) -o bin/localport-darwin-amd64      ./cmd/localport
 	GOOS=darwin  GOARCH=arm64 $(GO_BUILD) -o bin/localport-darwin-arm64      ./cmd/localport
 	GOOS=windows GOARCH=amd64 $(GO_BUILD) -o bin/localport-windows-amd64.exe ./cmd/localport
+
+release: build-all
+	cd bin && { command -v sha256sum >/dev/null 2>&1 && sha256sum localport-* > checksums.txt || shasum -a 256 localport-* > checksums.txt; }
 
 clean:
 	rm -rf bin/
