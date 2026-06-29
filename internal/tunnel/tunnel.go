@@ -163,6 +163,9 @@ type activeConn struct {
 	startedAt time.Time
 	bytesIn   atomic.Int64
 	bytesOut  atomic.Int64
+
+	edge      net.Conn
+	localConn net.Conn
 }
 
 func New(opts Options) *Tunnel {
@@ -287,6 +290,19 @@ func (t *Tunnel) removeActiveConn(id string) {
 	t.acMu.Unlock()
 }
 
+func (t *Tunnel) closeActiveConns() {
+	t.acMu.RLock()
+	defer t.acMu.RUnlock()
+	for _, ac := range t.activeConns {
+		if ac.edge != nil {
+			_ = ac.edge.Close()
+		}
+		if ac.localConn != nil {
+			_ = ac.localConn.Close()
+		}
+	}
+}
+
 // connect dials the edge and exchanges Register / RegisterAck, following
 // up to maxRedirectHops redirects to another edge.
 func (t *Tunnel) connect(ctx context.Context) error {
@@ -405,6 +421,9 @@ func (t *Tunnel) runSession(ctx context.Context) {
 	case <-t.shutdown:
 	case <-t.disconnected:
 	}
+
+	// Tear down in-flight proxy sockets so their copy loops return now
+	t.closeActiveConns()
 
 	done := make(chan struct{})
 	go func() { t.wg.Wait(); close(done) }()
@@ -587,6 +606,8 @@ func (t *Tunnel) proxyData(connID, remote string) {
 		return
 	}
 
+	ac.edge = edge
+	ac.localConn = local
 	t.addActiveConn(ac)
 	t.totalConns.Add(1)
 	defer t.removeActiveConn(connID)
