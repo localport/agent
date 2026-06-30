@@ -157,7 +157,6 @@ func TestResolveEdge(t *testing.T) {
 		region string
 		addr   string
 	}{
-		{"localhost", "localhost:443"},
 		{"", "connect.edge.localport.dev:443"},
 		{"eu", "connect.eu.localport.dev:443"},
 		{"us", "connect.us.localport.dev:443"},

@@ -48,7 +48,6 @@ func TestResolveServerName(t *testing.T) {
 		{"db.tunnel.localport.dev:5432", "db.tunnel.localport.dev"},
 		{"127.0.0.1:5432", ""},
 		{"[::1]:5432", ""},
-		{"db.localhost:5432", "localhost"},
 		{"host", "host"},
 	}
 	for _, tc := range cases {

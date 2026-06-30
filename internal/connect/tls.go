@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/localport/agent/internal/security"
@@ -159,9 +158,6 @@ func resolveServerName(remote, override string) string {
 	host := remote
 	if h, _, err := net.SplitHostPort(remote); err == nil {
 		host = h
-	}
-	if strings.HasSuffix(host, ".localhost") {
-		return "localhost"
 	}
 	if net.ParseIP(host) != nil {
 		return ""

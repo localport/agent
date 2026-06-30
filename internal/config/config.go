@@ -13,10 +13,9 @@ import (
 const edgePort = "443"
 
 var regionHosts = map[string]string{
-	"eu":        "eu.localport.dev",
-	"us":        "us.localport.dev",
-	"ap":        "ap.localport.dev",
-	"localhost": "localhost",
+	"eu": "eu.localport.dev",
+	"us": "us.localport.dev",
+	"ap": "ap.localport.dev",
 }
 
 var envRef = regexp.MustCompile(`\$\{env\.([^}]+)\}`)
@@ -139,17 +138,13 @@ func normalizeLocalAddr(addr string) string {
 }
 
 // ResolveEdge maps a region name to its agent-facing edge address.
-// Production regions use the "connect." subdomain so the dial host
-// doubles as the TLS SNI the edge expects. The localhost region keeps
-// the bare hostname for dev. TLS is mandatory on every region.
+// Regions use the "connect." subdomain so the dial host doubles as the
+// TLS SNI the edge expects. TLS is mandatory on every region.
 func ResolveEdge(region string) string {
 	if region == "" {
 		return "connect.edge.localport.dev:" + edgePort
 	}
 	if host, ok := regionHosts[region]; ok {
-		if region == "localhost" {
-			return host + ":" + edgePort
-		}
 		return "connect." + host + ":" + edgePort
 	}
 	return "connect." + region + ".localport.dev:" + edgePort
