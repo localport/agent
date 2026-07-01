@@ -50,9 +50,19 @@ Commands:
   version   Print version and exit
 
 Examples:
+  # Expose a service running on localhost (protocol and port):
+  localport http 3000 --token <token> --region eu
+  localport tcp 11434 --token <token> --region eu
+
+  # Expose a service on another host (LAN address or hostname):
+  localport --token <token> --local 192.168.1.13:3000 --region eu
+  localport --token <token> --local tcp://192.168.1.13:11434 --region eu
+
+  # Run several tunnels at once from a config file:
   localport tunnel --config localport.yaml
-  localport tunnel --token <token> --local 127.0.0.1:3000 --region eu
-  localport connect db.tunnel.localport.dev:5432 \
-    -c client.crt -k client.key -ca mesh-ca.crt -p 5432
+
+  # Connect to a locked tunnel (mTLS) with your client certificate:
+  localport connect https://sub.eu.localport.dev --pem client.pem -p 3001
+  localport connect tcp://sub.eu.localport.dev:11434 --pem db.pem -p 11434
 `)
 }

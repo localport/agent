@@ -20,16 +20,19 @@ func runConnect(args []string) error {
 	fs.SetOutput(os.Stderr)
 
 	var (
-		bundleFile  = fs.String("bundle", "", "PEM bundle file (cert + key + CA)")
+		pemFile     = fs.String("pem", "", "PEM file (client cert + key + tunnel CA)")
 		p12File     = fs.String("p12", "", "PKCS#12 archive (.p12 / .pfx)")
 		p12Pass     = fs.String("p12-pass", "", "PKCS#12 password (use --p12-pass-env in production)")
 		p12PassEnv  = fs.String("p12-pass-env", defaultP12PasswordEnv, "env var carrying the PKCS#12 password (required for Localport-issued .p12)")
 		p12PassFile = fs.String("p12-pass-file", "", "file containing the PKCS#12 password")
-		localPort   = fs.String("p", "0", "local TCP port to listen on")
 		localAddr   = fs.String("local-addr", "127.0.0.1", "local bind address")
 		serverName  = fs.String("server-name", "", "TLS SNI / server name override")
 		configPath  = fs.String("config", "", "path to a connect YAML config")
 	)
+	// -p and --port both set the local listen port.
+	var localPort string
+	fs.StringVar(&localPort, "p", "0", "local TCP port to listen on")
+	fs.StringVar(&localPort, "port", "0", "local TCP port to listen on [alias of -p]")
 	fs.Usage = func() { usageConnect(fs) }
 
 	// Accept the remote as a leading positional, but tolerate it being
@@ -61,17 +64,22 @@ func runConnect(args []string) error {
 		return fmt.Errorf("unexpected extra positional arguments")
 	}
 
+	remote, err := connect.ParseRemote(remote)
+	if err != nil {
+		return err
+	}
+
 	password, err := resolveP12Password(*p12Pass, *p12PassFile, *p12PassEnv)
 	if err != nil {
 		return err
 	}
 
-	tlsCfg, err := connect.BuildTLSConfig(*bundleFile, *p12File, password, remote, *serverName)
+	tlsCfg, err := connect.BuildTLSConfig(*pemFile, *p12File, password, remote, *serverName)
 	if err != nil {
 		return err
 	}
 
-	listen := fmt.Sprintf("%s:%s", *localAddr, *localPort)
+	listen := fmt.Sprintf("%s:%s", *localAddr, localPort)
 	proxy := &connect.Proxy{
 		Remote:    remote,
 		LocalAddr: listen,
@@ -107,7 +115,12 @@ func runConnectFromConfig(path string) error {
 			cancel()
 			return fmt.Errorf("connection %q: %w", c.Name, err)
 		}
-		tlsCfg, err := connect.BuildTLSConfig(c.Bundle, c.P12, password, c.Remote, "")
+		remote, err := connect.ParseRemote(c.Remote)
+		if err != nil {
+			cancel()
+			return fmt.Errorf("connection %q: %w", c.Name, err)
+		}
+		tlsCfg, err := connect.BuildTLSConfig(c.Bundle, c.P12, password, remote, "")
 		if err != nil {
 			cancel()
 			return fmt.Errorf("connection %q: %w", c.Name, err)
@@ -118,7 +131,6 @@ func runConnectFromConfig(path string) error {
 			name = c.Remote
 		}
 		listen := "127.0.0.1:" + c.LocalPort
-		remote := c.Remote
 		proxy := &connect.Proxy{
 			Remote:    remote,
 			LocalAddr: listen,
@@ -191,22 +203,30 @@ func signalCtx() (context.Context, context.CancelFunc) {
 }
 
 func usageConnect(fs *flag.FlagSet) {
-	fmt.Fprint(os.Stderr, `Usage: localport connect <remote-host:port> [flags]
+	fmt.Fprint(os.Stderr, `Usage: localport connect <URL> --pem <file> -p <local-port> [flags]
+       localport connect <URL> --p12 <file> -p <local-port> [flags]
        localport connect --config connect.yaml
 
-  Forward a local TCP port through an mTLS tunnel.
+  Reach a live mTLS tunnel as a consumer: presents your client certificate to
+  the edge and forwards a local port to it. Paste the tunnel URL straight from
+  the dashboard.
 
-  PEM bundle (cert + key + CA in one file):
-    localport connect db.tunnel.localport.dev:5432 \
-      --bundle client-bundle.pem -p 5432
+  <URL> accepts the dashboard forms (scheme picks the port):
+    https://sub.eu.localport.dev          -> :443 (mTLS terminates at the edge)
+    tcp://sub.eu.localport.dev:5432       -> :5432
+    tls://sub.eu.localport.dev:5432       -> :5432
+    sub.eu.localport.dev:5432             -> bare host:port also works
 
-  PKCS#12 archive:
+  Credentials — supply exactly one:
+    --pem               PEM file with client cert + key + tunnel CA
+    --p12               PKCS#12 archive (password via --p12-pass-env / -file)
+
+  Examples:
+    localport connect https://de8yp41s.eu.localport.dev --pem client.pem -p 3001
+    localport connect tcp://de8yp41s.eu.localport.dev:5432 --pem db.pem --port 5432
     LOCALPORT_P12_PASSWORD=… \
-      localport connect db.tunnel.localport.dev:5432 \
-      --p12 client.p12 -p 5432
-
-  Multiple targets from one config file:
-    localport connect --config connect.yaml
+      localport connect https://de8yp41s.eu.localport.dev --p12 client.p12 -p 3001
+    localport connect --config connect.yaml   # many targets at once
 
 Flags:
 `)
