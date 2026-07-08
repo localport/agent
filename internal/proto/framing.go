@@ -20,17 +20,25 @@ import (
 //
 // length is big-endian and counts the type byte plus payload.
 
+// defaultWriteTimeout bounds every framed control write. A peer that stops
+// draining (dead link, zero receive window after a network change) would
+// otherwise block the write (and, under wmu, every other send) for the
+// kernel's multi-minute retransmission timeout. Control frames are tiny, so
+// any write that can't finish in this window means the session is over.
+const defaultWriteTimeout = 10 * time.Second
+
 // Conn wraps a net.Conn with framed JSON messages. Sends and receives are
 // independently serialized so the wrapper is safe for one writer and one
 // reader running concurrently.
 type Conn struct {
-	raw    net.Conn
-	wmu    sync.Mutex
-	rmu    sync.Mutex
-	hdrBuf [5]byte
+	raw          net.Conn
+	wmu          sync.Mutex
+	rmu          sync.Mutex
+	hdrBuf       [5]byte
+	writeTimeout time.Duration
 }
 
-func NewConn(c net.Conn) *Conn { return &Conn{raw: c} }
+func NewConn(c net.Conn) *Conn { return &Conn{raw: c, writeTimeout: defaultWriteTimeout} }
 
 func (c *Conn) Underlying() net.Conn              { return c.raw }
 func (c *Conn) Close() error                      { return c.raw.Close() }
@@ -54,6 +62,14 @@ func (c *Conn) Send(t MessageType, payload any) error {
 
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+
+	// Bound the write so a stuck socket can't wedge this and every queued
+	// sender behind wmu. Cleared after: the data path reuses raw for io.Copy
+	// once ConnectionReady is sent, which must run without a write deadline.
+	if c.writeTimeout > 0 {
+		_ = c.raw.SetWriteDeadline(time.Now().Add(c.writeTimeout))
+		defer c.raw.SetWriteDeadline(time.Time{})
+	}
 
 	binary.BigEndian.PutUint32(c.hdrBuf[:4], total)
 	c.hdrBuf[4] = byte(t)
@@ -97,7 +113,7 @@ func (c *Conn) Recv() (MessageType, []byte, error) {
 	return t, body, nil
 }
 
-// Typed send helpers — these are the only ones the agent emits today.
+// Typed send helpers, these are the only ones the agent emits today.
 
 func (c *Conn) SendRegister(p *RegisterPayload) error { return c.Send(MsgRegister, p) }
 func (c *Conn) SendConnectionReady(p *ConnectionReadyPayload) error {
