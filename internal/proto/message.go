@@ -61,6 +61,10 @@ type RegisterPayload struct {
 	Timestamp  int64  `json:"timestamp"`
 	Nonce      string `json:"nonce"`
 	Subdomain  string `json:"subdomain,omitempty"`
+
+	// ResumeSessionID echoes the session_id from this tunnel's previous
+	// RegisterAck so the edge can replace the stale session on reconnect.
+	ResumeSessionID string `json:"resume_session_id,omitempty"`
 }
 
 type RegisterAckPayload struct {
@@ -68,6 +72,7 @@ type RegisterAckPayload struct {
 	TunnelID   string    `json:"tunnel_id"`
 	TunnelName string    `json:"tunnel_name"`
 	Region     string    `json:"region"`
+	RegionName string    `json:"region_name,omitempty"` // display name; empty from older edges
 	PublicURL  string    `json:"public_url"`
 	URLs       []string  `json:"urls"`
 	Subdomain  string    `json:"subdomain"`
@@ -79,6 +84,10 @@ type RegisterAckPayload struct {
 	Retryable  *bool     `json:"retryable,omitempty"`
 	LimitType  LimitType `json:"limit_type,omitempty"`
 	MTLS       *MTLSInfo `json:"mtls,omitempty"`
+
+	// SessionID identifies this session; send it back as resume_session_id
+	// on the next Register to reclaim the slot immediately.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // MTLSInfo describes the mutual-TLS posture of a tunnel. When Enabled is true,
