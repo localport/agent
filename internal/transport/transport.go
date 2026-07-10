@@ -69,4 +69,9 @@ func SplitHostPort(addr string) (host, port string) {
 type Options struct {
 	DialTimeout time.Duration
 	WSPath      string
+
+	// ServerName sets the TLS SNI and verification name independently of
+	// the dial host: dials to a per-edge hostname present the zone's
+	// connect host instead. Empty derives the name from the dial host.
+	ServerName string
 }

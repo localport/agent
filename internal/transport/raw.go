@@ -15,6 +15,7 @@ import (
 // no insecure escape hatch.
 type RawDialer struct {
 	DialTimeout time.Duration
+	ServerName  string // SNI override; empty = derive from dial host
 }
 
 func (d *RawDialer) Kind() Kind { return KindRaw }
@@ -35,7 +36,7 @@ func (d *RawDialer) Dial(ctx context.Context, host, port string) (net.Conn, erro
 		return nil, fmt.Errorf("tcp dial: %w", err)
 	}
 
-	conn := tls.Client(tcp, agentTLSConfig(host, ALPNRaw))
+	conn := tls.Client(tcp, agentTLSConfig(d.ServerName, host, ALPNRaw))
 	if err := conn.HandshakeContext(ctx); err != nil {
 		tcp.Close()
 		return nil, fmt.Errorf("tls handshake: %w", err)
@@ -48,15 +49,20 @@ func (d *RawDialer) Dial(ctx context.Context, host, port string) (net.Conn, erro
 }
 
 // agentTLSConfig keeps the TLS posture identical across transports. SNI
-// is derived from host unless host is a literal IP, in which case it
-// stays empty (crypto/tls refuses IP-literal SNI).
-func agentTLSConfig(host, alpn string) *tls.Config {
+// is serverName when set (the caller derives the zone connect host for
+// redirect targets), else derived from host. Literal IPs leave SNI empty
+// (crypto/tls refuses IP-literal SNI).
+func agentTLSConfig(serverName, host, alpn string) *tls.Config {
 	cfg := &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{alpn},
 	}
-	if _, err := netip.ParseAddr(host); err != nil {
-		cfg.ServerName = host
+	name := serverName
+	if name == "" {
+		name = host
+	}
+	if _, err := netip.ParseAddr(name); err != nil {
+		cfg.ServerName = name
 	}
 	return cfg
 }

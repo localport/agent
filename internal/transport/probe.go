@@ -70,7 +70,7 @@ func DefaultDialers(opts Options) []Dialer {
 		timeout = 2 * time.Second
 	}
 	return []Dialer{
-		&RawDialer{DialTimeout: timeout},
-		&WSDialer{DialTimeout: timeout, Path: opts.WSPath},
+		&RawDialer{DialTimeout: timeout, ServerName: opts.ServerName},
+		&WSDialer{DialTimeout: timeout, Path: opts.WSPath, ServerName: opts.ServerName},
 	}
 }

@@ -16,6 +16,7 @@ import (
 type WSDialer struct {
 	DialTimeout time.Duration
 	Path        string
+	ServerName  string // SNI override; empty = derive from dial host
 }
 
 func (d *WSDialer) Kind() Kind { return KindWS }
@@ -30,7 +31,7 @@ func (d *WSDialer) Dial(ctx context.Context, host, port string) (net.Conn, error
 
 	httpClient := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig:   agentTLSConfig(host, ALPNWS),
+			TLSClientConfig:   agentTLSConfig(d.ServerName, host, ALPNWS),
 			ForceAttemptHTTP2: false, // WS rides HTTP/1.1
 			DialContext: (&net.Dialer{
 				Timeout:   timeout,
