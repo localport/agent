@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/netmon"
 	"github.com/localport/agent/internal/tunnel"
 )
 
@@ -16,6 +18,7 @@ type Agent struct {
 
 	mu      sync.Mutex
 	tunnels []*tunnel.Tunnel
+	runErrs []error
 }
 
 func New(cfg *config.Config, handler tunnel.EventHandler) *Agent {
@@ -25,6 +28,26 @@ func New(cfg *config.Config, handler tunnel.EventHandler) *Agent {
 // Run starts every endpoint and blocks until they have all returned.
 func (a *Agent) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
+
+	// One network monitor for the whole agent: on a host network change it
+	// nudges every tunnel to fast-probe its edge link, so a change that killed
+	// the connection is detected in seconds instead of the ~75s idle timeout.
+	// Zero idle cost (event-driven on Linux/BSD/macOS; light poll elsewhere).
+	mon := netmon.New(nil)
+	go mon.Run(ctx)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-mon.Events():
+				for _, t := range a.Tunnels() {
+					t.OnNetworkChange()
+				}
+			}
+		}
+	}()
+
 	for _, spec := range a.cfg.Specs {
 		for _, ep := range spec.Endpoints {
 			// "default" is the placeholder name FromFlags assigns when the
@@ -51,12 +74,18 @@ func (a *Agent) Run(ctx context.Context) error {
 			wg.Add(1)
 			go func(t *tunnel.Tunnel) {
 				defer wg.Done()
-				_ = t.Run(ctx)
+				if err := t.Run(ctx); err != nil {
+					a.mu.Lock()
+					a.runErrs = append(a.runErrs, err)
+					a.mu.Unlock()
+				}
 			}(t)
 		}
 	}
 	wg.Wait()
-	return nil
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return errors.Join(a.runErrs...)
 }
 
 func (a *Agent) Stop() {
