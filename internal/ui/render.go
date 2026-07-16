@@ -10,6 +10,21 @@ import (
 	"github.com/localport/agent/internal/tunnel"
 )
 
+// regionNames maps region slugs to display names; unknown slugs render as
+// the uppercased slug.
+var regionNames = map[string]string{
+	"eu": "EU",
+	"us": "US",
+	"ap": "Asia Pacific",
+}
+
+func regionName(slug string) string {
+	if name, ok := regionNames[strings.ToLower(slug)]; ok {
+		return name
+	}
+	return strings.ToUpper(slug)
+}
+
 // snap is an immutable, lock-free view of TUI state used while rendering.
 // Built once per frame under TUI.mu, then handed to buildFrame.
 type snap struct {
@@ -137,7 +152,11 @@ func headerSingle(s snap, ts tState) []string {
 		lines = append(lines, row("Name", tname))
 	}
 	if ts.region != "" {
-		lines = append(lines, row("Region", strings.ToUpper(ts.region)))
+		name := ts.regionName
+		if name == "" {
+			name = regionName(ts.region)
+		}
+		lines = append(lines, row("Region", name))
 	}
 
 	urls := ts.urls

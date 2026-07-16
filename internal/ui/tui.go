@@ -60,6 +60,7 @@ type tState struct {
 	name        string
 	tunnelName  string
 	region      string
+	regionName  string
 	proto       string
 	local       string
 	state       tunnel.State
@@ -165,35 +166,55 @@ func (t *TUI) start() {
 	t.requestRender()
 }
 
-// animationLoop drives the spinner with one ticker. It only requests a
-// render when there is something on screen that changes between frames
+// animationLoop drives periodic redraws with one timer, at the cadence the
+// screen actually needs: spinner speed while any tunnel is transitioning,
+// once per second while connected (uptime and byte counters tick), and idle
+// no-op checks otherwise. Steady state is one redraw per second, not eight.
 func (t *TUI) animationLoop() {
-	tk := time.NewTicker(spinnerInterval)
-	defer tk.Stop()
+	timer := time.NewTimer(spinnerInterval)
+	defer timer.Stop()
 	for {
 		select {
 		case <-t.stopCh:
 			return
-		case <-tk.C:
-			if t.shouldAnimate() {
-				t.spinnerFrame.Add(1)
-				t.requestRender()
-			}
+		case <-timer.C:
 		}
+		next := time.Second
+		switch t.animPace() {
+		case paceSpinner:
+			t.spinnerFrame.Add(1)
+			t.requestRender()
+			next = spinnerInterval
+		case paceSlow:
+			t.requestRender()
+		case paceIdle:
+			// nothing on screen changes; keep checking lazily
+		}
+		timer.Reset(next)
 	}
 }
 
-func (t *TUI) shouldAnimate() bool {
+type animPace int
+
+const (
+	paceIdle    animPace = iota // no live tunnels: nothing animates
+	paceSlow                    // connected: uptime/counters tick once per second
+	paceSpinner                 // transitioning: spinner frames
+)
+
+func (t *TUI) animPace() animPace {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	pace := paceIdle
 	for _, ts := range t.tunnels {
 		switch ts.state {
-		case tunnel.StateConnecting, tunnel.StateRegistering,
-			tunnel.StateReconnecting, tunnel.StateActive:
-			return true
+		case tunnel.StateConnecting, tunnel.StateRegistering, tunnel.StateReconnecting:
+			return paceSpinner
+		case tunnel.StateActive:
+			pace = paceSlow
 		}
 	}
-	return false
+	return pace
 }
 
 func (t *TUI) drainStdin() {
@@ -280,6 +301,7 @@ func (t *TUI) OnConnected(label string, info tunnel.Info) {
 		ts.connectedAt = time.Now()
 		ts.tunnelName = info.TunnelName
 		ts.region = info.Region
+		ts.regionName = info.RegionName
 		ts.url = FirstEndpoint(info.URLs, info.PublicURL, info.EdgeAddr, info.Port)
 		ts.urls = append(ts.urls[:0], info.URLs...)
 		ts.subdomain = info.Subdomain
