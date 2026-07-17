@@ -7,33 +7,26 @@ import (
 	"strings"
 )
 
-// cliTokenWarning is emitted when a token is read off the command line —
-// it lands in `ps` output and shell history, so prefer the env variable.
-const cliTokenWarning = "using token from CLI flag; prefer env or config to keep it out of process listings"
-
 // ResolveToken returns a token from the flag value or env variable, in that
 // order. It is an error for both to be empty.
-func ResolveToken(flagValue, envName string) (token, warning string, err error) {
-	token, warning, err = ResolveOptionalToken(flagValue, envName)
-	if err != nil {
-		return "", "", err
-	}
+func ResolveToken(flagValue, envName string) (string, error) {
+	token := ResolveOptionalToken(flagValue, envName)
 	if token == "" {
-		return "", "", fmt.Errorf("token required (set --token or %s)", envName)
+		return "", fmt.Errorf("token required (set --token or %s)", envName)
 	}
-	return token, warning, nil
+	return token, nil
 }
 
 // ResolveOptionalToken is like ResolveToken but returns an empty token
 // instead of an error when neither source is set.
-func ResolveOptionalToken(flagValue, envName string) (token, warning string, err error) {
+func ResolveOptionalToken(flagValue, envName string) string {
 	if v := strings.TrimSpace(flagValue); v != "" {
-		return v, cliTokenWarning, nil
+		return v
 	}
 	if envName == "" {
-		return "", "", nil
+		return ""
 	}
-	return strings.TrimSpace(os.Getenv(envName)), "", nil
+	return strings.TrimSpace(os.Getenv(envName))
 }
 
 // RedactString returns text with every occurrence of each secret swapped

@@ -51,9 +51,18 @@ identical on either carrier.
   "client_name": "hostname",
   "timestamp": 1711357200,
   "nonce": "hex32",
-  "subdomain": "optional"
+  "subdomain": "optional",
+  "resume_session_id": "optional"
 }
 ```
+
+`resume_session_id` echoes the `session_id` from this tunnel's previous
+`RegisterAck`. When it matches a live session on the edge, that stale session
+is replaced in place, so a reconnect after a network drop is instant on
+every tunnel kind. It is held in memory only (empty on first connect and after an
+agent restart) and ignored by older edges. On single tunnels a valid
+registration without a resume match still replaces the sole existing client
+(newest-wins); shared/mesh tunnels never replace without a resume match.
 
 ### RegisterAck (2)
 
@@ -63,6 +72,7 @@ identical on either carrier.
   "tunnel_id": "tun_xxx",
   "tunnel_name": "my-api",
   "region": "eu",
+  "region_name": "Europe",
   "public_url": "https://foo.tunnel.localport.dev",
   "urls": [
     "https://foo.tunnel.localport.dev",
@@ -79,9 +89,20 @@ identical on either carrier.
   "mtls": {
     "enabled": true,
     "ca_fingerprint": "sha256:a1b2c3..."
-  }
+  },
+  "session_id": "hex32"
 }
 ```
+
+`region_name` is the server-supplied display name for the region; when empty
+(older edges) the agent falls back to a built-in mapping, then the uppercased
+slug. New regions therefore render correctly without an agent update.
+
+`session_id` is an edge-minted secret for this session; present it as
+`resume_session_id` on the next `Register` for this tunnel to reclaim the
+slot immediately on reconnect. A session replaced this way receives a
+non-retryable `Shutdown` with code `TU012`, so two agents sharing one token
+cannot kick each other in a loop (the replaced one stops).
 
 The `mtls` field is optional. When present with `enabled: true`, inbound
 connections to the tunnel must present a client certificate signed by the tunnel's CA.
@@ -107,6 +128,13 @@ edge. Agents surface it as the originating address in their live-connections vie
 ```json
 { "timestamp": 1711357200 }
 ```
+
+Both sides send a heartbeat every 30 s on the control connection and ack the
+peer's. The edge treats a control connection with NO inbound frame for ~75 s
+(two missed heartbeats plus margin) as dead and deregisters the client, so a
+silently dropped link (wifi loss, sleep, NAT rebind) is reaped within ~75 s
+even though the socket never errors. A live agent's own 30 s heartbeat (or
+its ack of the edge's) always resets that window.
 
 ### SetActive (7)
 
@@ -146,11 +174,15 @@ edge. Agents surface it as the originating address in their live-connections vie
 
 ```json
 {
-  "edge_addr": "eu.localport.dev:4443",
+  "edge_addr": "e1.eu.localport.dev",
   "edge_id": "edge-eu-1",
   "reason": "rebalance"
 }
 ```
+
+`edge_addr` is a per-edge hostname (served by the platform's own NS); port
+defaults to 443 when omitted. The agent dials the new address verbatim and
+derives the SNI from the TARGET's zone (see Redirect under Reconnect Policy).
 
 ## Lifecycle
 
@@ -208,6 +240,7 @@ Public message families an agent may surface:
 | Client limit              | client connection limit reached                | no        |
 | Tunnel limit              | tunnel limit reached                           | no        |
 | Tunnel terminated/deleted | tunnel terminated by an administrator          | no        |
+| Session replaced          | replaced by a newer session for this tunnel    | no        |
 | Protocol / clock          | protocol error — update the agent ...          | no        |
 
 Certificate / mTLS failures on a data connection surface at the TLS handshake
@@ -221,9 +254,52 @@ client certificate or the connection is refused.
    a failed `RegisterAck`.
 3. Unknown / opaque codes never change behavior; the agent relies on
    `retryable` and `limit_type` only.
-4. Backoff is exponential (1.5×), capped at 30 s, with ±25 % jitter.
+4. Backoff is exponential (1.5×), capped at 30 s, with ±25 % jitter. The
+   per-transport dial budget also escalates with consecutive failures
+   (2 s doubling to 16 s) so high-latency links (2G, satellite) can
+   complete the TLS handshake; an explicit dial-timeout setting is used
+   verbatim.
+5. Dead-link detection is symmetric: the agent treats a control connection
+   with no inbound frame for ~75 s (the edge heartbeats every 30 s) as dead
+   and reconnects, even when the socket never returns an error.
+   A detected host network change (interface or address churn) additionally
+   fires an immediate probe heartbeat; if nothing arrives within ~5 s of the
+   probe the session reconnects, so a connection orphaned by a network
+   switch recovers in seconds. TCP connections cannot survive an address
+   change, so in-flight proxied connections on the old network close and
+   visitors retry over the re-established tunnel.
+   Wake from sleep is detected the same way via a wall-clock jump check
+   (~10 s cadence): after sleep the socket is presumed stale even when the
+   address set is unchanged, so the wake fires the same probe and a
+   suspended laptop's tunnel is serving again within seconds of lid-open.
+6. When a previously assigned edge address keeps failing for ~90 s, the
+   agent falls back to the originally configured connect host, which
+   resolves to healthy edges only. A routine edge restart finishes well
+   inside that window and restores the session (and any assigned port) on
+   the same edge; a permanently lost edge costs at most that window before
+   the tunnel returns on a replacement edge.
 
 ### Redirect
 
-The edge may answer a `Register` with a `Redirect` pointing at another edge.
-The agent follows up to 5 hops before giving up.
+The edge may answer a `Register` with a `Redirect` pointing at another edge -
+a per-edge hostname like `e1.eu.localport.dev` (tunnels are pinned to one edge
+inside a shared region zone). The agent follows up to 5 hops before giving up,
+and only to hosts under the platform base domain.
+
+SNI is derived per dial from the address being dialed: the original connect
+host is used verbatim; a redirect target (`e1.eu.localport.dev`) gets the
+target zone's connect host, i.e. the target's first label replaced with the
+configured connect label (`connect.eu.localport.dev`). Post-redirect
+reconnects and data dial-backs present the same derived SNI. An explicit
+`--server-name` override always wins. Reasons:
+
+1. The edge demuxes agent traffic by SNI: only `connect.<region-zone>` (and
+   `connect.<its-own-hostname>`) reach the agent handler; any other SNI is
+   treated as tunnel traffic. A cross-region redirect therefore needs the
+   target zone's connect host, not the original one (which the target edge
+   would treat as unknown tunnel traffic and close).
+2. The edge serves the region-zone wildcard cert (`*.<region-zone>`), which
+   covers `connect.<region-zone>` but NOT `connect.<per-edge-hostname>` (two
+   labels deep), so the derived SNI must sit one label under the target
+   zone. The dial address itself stays the per-edge hostname, which resolves
+   directly to the pinned edge (no extra DNS indirection).

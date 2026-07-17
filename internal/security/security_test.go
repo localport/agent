@@ -11,35 +11,29 @@ import (
 
 func TestResolveTokenFlagBeatsEnv(t *testing.T) {
 	t.Setenv("LOCALPORT_TOKEN", "tok_env")
-	tok, warn, err := ResolveToken("tok_flag", "LOCALPORT_TOKEN")
+	tok, err := ResolveToken("tok_flag", "LOCALPORT_TOKEN")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if tok != "tok_flag" {
 		t.Fatalf("tok = %q, want tok_flag", tok)
 	}
-	if warn == "" {
-		t.Fatalf("expected warning when flag is used")
-	}
 }
 
 func TestResolveTokenFallsBackToEnv(t *testing.T) {
 	t.Setenv("LOCALPORT_TOKEN", "tok_env")
-	tok, warn, err := ResolveToken("", "LOCALPORT_TOKEN")
+	tok, err := ResolveToken("", "LOCALPORT_TOKEN")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if tok != "tok_env" {
 		t.Fatalf("tok = %q, want tok_env", tok)
 	}
-	if warn != "" {
-		t.Fatalf("warn = %q, want empty", warn)
-	}
 }
 
 func TestResolveTokenMissing(t *testing.T) {
 	t.Setenv("LOCALPORT_TOKEN", "")
-	if _, _, err := ResolveToken("", "LOCALPORT_TOKEN"); err == nil {
+	if _, err := ResolveToken("", "LOCALPORT_TOKEN"); err == nil {
 		t.Fatal("expected error for missing token")
 	}
 }

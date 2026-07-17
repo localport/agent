@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -61,13 +62,10 @@ func runTunnel(version string, args []string) error {
 		return nil
 	}
 
-	cfg, warning, err := buildTunnelConfig(*configPath, *token, *region, *local, *proto, *name)
+	cfg, err := buildTunnelConfig(*configPath, *token, *region, *local, *proto, *name)
 	if err != nil {
 		fs.Usage()
 		return err
-	}
-	if warning != "" {
-		fmt.Fprintln(os.Stderr, "warning:", warning)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -88,6 +86,13 @@ func runTunnel(version string, args []string) error {
 
 	err = a.Run(ctx)
 	renderer.Shutdown()
+	// One final line for a terminal error, with the opaque debug code
+	// appended so support can decode it (the message itself stays the
+	// public, sanitized one).
+	var regErr *tunnel.RegistrationError
+	if errors.As(err, &regErr) && regErr.Code != "" {
+		return fmt.Errorf("%s [%s]", regErr.Error(), regErr.Code)
+	}
 	return err
 }
 
@@ -100,19 +105,18 @@ func pickRenderer(noUI bool, a *agent.Agent) tunnelUI {
 	return t
 }
 
-func buildTunnelConfig(path, flagToken, region, local, proto, name string) (*config.Config, string, error) {
+func buildTunnelConfig(path, flagToken, region, local, proto, name string) (*config.Config, error) {
 	if path != "" {
-		cfg, err := config.Load(path)
-		return cfg, "", err
+		return config.Load(path)
 	}
-	token, warning, err := security.ResolveToken(flagToken, "LOCALPORT_TOKEN")
+	token, err := security.ResolveToken(flagToken, "LOCALPORT_TOKEN")
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if local == "" {
-		return nil, "", fmt.Errorf("--local is required for token-based tunnel mode")
+		return nil, fmt.Errorf("--local is required for token-based tunnel mode")
 	}
-	return config.FromFlags(token, region, local, proto, name), warning, nil
+	return config.FromFlags(token, region, local, proto, name), nil
 }
 
 func usageTunnel(fs *flag.FlagSet) {
