@@ -128,10 +128,12 @@ func (c *Conn) SendHeartbeatAck(ts int64) error {
 func (c *Conn) SendShutdown(reason string) error {
 	return c.Send(MsgShutdown, &ShutdownPayload{Reason: reason})
 }
+func (c *Conn) SendMuxBind(p *MuxBindPayload) error { return c.Send(MsgMuxBind, p) }
 
 // Payload parsers. Each one validates the JSON and returns a typed payload.
 
 func ParseRegisterAck(b []byte) (*RegisterAckPayload, error) { return parse[RegisterAckPayload](b) }
+func ParseMuxBindAck(b []byte) (*MuxBindAckPayload, error)   { return parse[MuxBindAckPayload](b) }
 func ParseNewConnection(b []byte) (*NewConnectionPayload, error) {
 	return parse[NewConnectionPayload](b)
 }

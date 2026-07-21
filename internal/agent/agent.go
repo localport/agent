@@ -65,6 +65,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				Protocol:   ep.Protocol,
 				ClientName: clientName,
 				Handler:    a.handler,
+				DisableMux: a.cfg.NoMux,
 			})
 
 			a.mu.Lock()

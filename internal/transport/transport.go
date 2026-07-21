@@ -1,15 +1,18 @@
 // Package transport encapsulates how the agent reaches its edge server.
 //
-// Phase 1 supports two transports, both terminating on the edge HTTPS port
-// and demultiplexed there by SNI + ALPN:
+// Two carriers, both terminating on the edge HTTPS port and demultiplexed
+// there by SNI + ALPN:
 //
-//   - "raw" — TLS-only. Wire protocol bytes ride directly inside the TLS
-//     stream. Lowest overhead; works through dumb firewalls.
-//   - "ws"  — TLS + WebSocket. Wire protocol bytes ride inside binary
-//     WS frames. Survives DPI / HTTPS-inspecting MITM proxies.
+//   - "raw" runs the wire protocol bytes directly inside a TLS stream. It has
+//     the lowest overhead and works through dumb firewalls.
+//   - "ws" carries the same bytes inside binary WebSocket frames, which gets
+//     them through DPI and HTTPS-inspecting MITM proxies.
 //
-// A future phase will add a multiplexing carrier and a per-network-
-// fingerprint cache so the auto-detect decision survives reconnects.
+// The data plane multiplexes over one HTTP/2 connection to avoid a dial-back
+// per inbound visitor connection. It is NOT a third transport: it reuses
+// whichever of the two above the control connection already established (so it
+// survives the same firewalls), and is distinguished by its first frame
+// (MuxBind), not by an ALPN of its own. See internal/tunnel/mux_session.go.
 package transport
 
 import (
@@ -64,8 +67,9 @@ func SplitHostPort(addr string) (host, port string) {
 	return strings.TrimSuffix(addr, ":"), DefaultPort
 }
 
-// Options collects user-facing knobs for the default dialer set.
-// Intentionally minimal — no insecure-skip-verify, no root-CA override.
+// Options collects user-facing knobs for the default dialer set. We keep it
+// deliberately small. There is no insecure-skip-verify and no root-CA override,
+// so nobody can weaken the TLS posture through config.
 type Options struct {
 	DialTimeout time.Duration
 	WSPath      string

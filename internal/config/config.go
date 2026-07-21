@@ -24,6 +24,12 @@ var envRef = regexp.MustCompile(`\$\{env\.([^}]+)\}`)
 
 type Config struct {
 	Specs []Spec
+
+	// NoMux forces every inbound connection onto its own dial-back instead of
+	// multiplexing them over one connection. Multiplexing is the better default
+	// on nearly every network; this exists for the ones where it is not, such as
+	// a lossy link where one dropped packet stalls unrelated streams.
+	NoMux bool
 }
 
 type Spec struct {
@@ -88,9 +94,7 @@ func Load(path string) (*Config, error) {
 }
 
 // FromFlags builds a single-endpoint config from CLI arguments. The
-// endpoint name defaults to "default" when blank. `local` may carry a
-// scheme prefix (tcp://, tls://, http://, https://) — when present, the
-// scheme overrides `proto`. A bare numeric local is treated as a localhost port.
+// endpoint name defaults to "default" when blank.
 func FromFlags(token, region, local, proto, name string) *Config {
 	if name == "" {
 		name = "default"

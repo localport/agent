@@ -4,10 +4,25 @@ Binary control protocol between the agent and an edge server. The same framed
 messages ride over one of two TLS 1.2+ carriers, both terminating on the edge
 HTTPS port (`:443`) and selected by ALPN after a single TLS handshake:
 
-- **`localport-raw/1`** — framed bytes flow directly inside the TLS stream.
+- **`localport-raw/1`** carries the framed bytes directly inside the TLS stream.
   Lowest overhead.
-- **`localport-ws/1`** — framed bytes ride inside binary WebSocket frames
+- **`localport-ws/1`** wraps the framed bytes in binary WebSocket frames
   (HTTP/1.1 upgrade at `/v1/control`). Traverses DPI and HTTPS-inspecting proxies.
+
+The **multiplexed data plane** is not a third ALPN. The agent opens a second
+connection over whichever carrier above the control connection already
+established, sends a `MuxBind` frame as its first message, and from there the
+connection speaks HTTP/2: the edge opens one stream per inbound visitor
+connection instead of asking the agent to dial back. Because it reuses the
+working carrier, it survives the same firewalls the tunnel does. It is an
+optimisation: an edge that does not accept the bind, or `--no-mux`, leave the
+tunnel working over dial-back.
+
+The agent runs one tunnel per config endpoint, and each tunnel opens its own
+control connection and its own mux, bound to that tunnel's session. A mesh set up
+as several same-token endpoints therefore gets one connection pair per device, so
+the devices stay independent, rather than sharing a single connection across
+every tunnel.
 
 The agent connects with SNI `connect.<edge-domain>`; the edge routes that SNI to
 its agent handler and all other SNIs to tunnel traffic. The wire format below is
@@ -38,6 +53,8 @@ identical on either carrier.
 | Shutdown        | 8   | both      | Graceful disconnect              |
 | Error           | 9   | E → C     | Server-side error                |
 | Redirect        | 10  | E → C     | Reconnect to a different edge    |
+| MuxBind         | 11  | C → E     | Attach a multiplexed data conn   |
+| MuxBindAck      | 12  | E → C     | Mux bind result                  |
 
 ## Payloads
 
@@ -184,6 +201,64 @@ its ack of the edge's) always resets that window.
 defaults to 443 when omitted. The agent dials the new address verbatim and
 derives the SNI from the TARGET's zone (see Redirect under Reconnect Policy).
 
+### MuxBind (11) / MuxBindAck (12)
+
+```json
+{
+  "token": "<tunnel token>",
+  "session_id": "<session_id from RegisterAck>",
+  "client_id": "<same client id as Register>",
+  "timestamp": 1735689600,
+  "nonce": "<32 hex chars>"
+}
+```
+
+Sent as the first frame on a second connection to the edge, over the SAME
+carrier the control connection used (raw or WebSocket). No dedicated ALPN: the
+frame type is what tells the edge this connection is a mux rather than a control
+or data connection. It attaches that connection to a session already registered
+on the control connection; the edge then opens one HTTP/2 stream per inbound
+visitor connection instead of asking the agent to dial back.
+
+The bind is authenticated in its own right, because it is dialed separately from
+the control connection:
+
+- `timestamp` and `nonce` are checked against the same replay window and the
+  same store a Register uses, so neither frame can be replayed as the other.
+- `token` proves which tunnel.
+- `session_id` names which live client the streams belong to, compared in
+  constant time.
+
+All three are required. The token identifies a tenant but not which of its
+clients; the session id on its own is a bearer credential.
+
+A bind never takes over a session, never mints a new one and never registers a
+tunnel. It attaches to a live session or is refused. Refusals are counted
+against the same limiter as failed registrations and carry only a generic
+reason, so the frame cannot be used to probe tokens or session ids.
+
+```json
+{ "success": false, "error": "...", "code": "..." }
+```
+
+A refusal is not fatal. The agent keeps serving over dial-back, which is also
+what happens when the edge does not accept the bind, or when the connection
+later dies. Because the mux reuses the control connection's carrier rather than
+a carrier of its own, it reaches the edge on exactly the networks the tunnel
+already reaches it on. `--no-mux` skips the attempt entirely.
+
+Streams carry opaque bytes, exactly as a dialed-back connection did, so the same
+mechanism serves every tunnel type: http, tcp, tls, and both the primary and the
+secondaries of a shared tunnel. The visitor's address travels in the
+`Localport-Visitor-Addr` header on each stream, replacing the field NewConnection
+carried.
+
+An agent that does not bind a mux connection is fully supported and receives
+NewConnection for every inbound connection as before. The edge decides per
+connection: a stream when the agent has a live mux, a dial-back otherwise. So an
+older agent, `--no-mux`, a refused bind and a mux that dies mid-session all keep
+working, and a mux that dies is simply not used for the next connection.
+
 ## Lifecycle
 
 ```
@@ -221,7 +296,7 @@ The authoritative, human-readable explanation is the sanitized `error` /
 `reason` / `message` string the edge supplies, together with the structured
 `retryable` and `limit_type` fields. Messages never reveal server internals.
 Infrastructure problems are always reported generically as
-`"service temporarily unavailable"` — the agent learns only that the service is
+`"service temporarily unavailable"`. The agent learns only that the service is
 unavailable, never why.
 
 Public message families an agent may surface:
@@ -235,13 +310,13 @@ Public message families an agent may surface:
 | Access denied             | access denied                                  | no        |
 | Rate limited              | too many connection attempts, retry shortly    | yes       |
 | Bandwidth limit           | bandwidth limit reached for this billing cycle | no        |
-| Plan limit                | plan limit reached — upgrade to continue       | no        |
+| Plan limit                | plan limit reached, upgrade to continue        | no        |
 | Resource limit            | resource limit reached                         | no        |
 | Client limit              | client connection limit reached                | no        |
 | Tunnel limit              | tunnel limit reached                           | no        |
 | Tunnel terminated/deleted | tunnel terminated by an administrator          | no        |
 | Session replaced          | replaced by a newer session for this tunnel    | no        |
-| Protocol / clock          | protocol error — update the agent ...          | no        |
+| Protocol / clock          | protocol error, update the agent ...           | no        |
 
 Certificate / mTLS failures on a data connection surface at the TLS handshake
 layer, not as control-plane frames: a consumer either presents an acceptable

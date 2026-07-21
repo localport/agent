@@ -135,6 +135,14 @@ type Options struct {
 	// dial timeout, WS path). The zero value uses Phase 1 secure defaults:
 	// TLS 1.3, full server-cert verification, no insecure fallback.
 	Transport transport.Options
+
+	// DisableMux keeps every inbound connection on the dial-back path instead of
+	// multiplexing them onto one connection. Multiplexing is the better default
+	// on nearly every network, but it puts all streams on a single TCP
+	// connection, so a lossy or aggressively shaped link can be better served by
+	// separate connections. The escape hatch exists because that call belongs to
+	// whoever is looking at the network, not to us.
+	DisableMux bool
 }
 
 type Tunnel struct {
@@ -273,7 +281,13 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		t.setState(StateActive)
 		t.emitConnected()
 
+		// The multiplexed data connection is established alongside the session,
+		// not before it: the tunnel is already serving over dial-back by now, so
+		// a slow or refused bind costs nothing.
+		stopMux := t.startMux(ctx)
+
 		t.runSession(ctx)
+		stopMux()
 
 		if t.cancelled(ctx) {
 			return t.consumeTerminalError()
@@ -624,8 +638,9 @@ func (t *Tunnel) readDeadline(lastInbound time.Time) time.Time {
 // interruptReader wakes a Recv parked on a long deadline so the receive loop
 // re-evaluates now (a probe was armed, or the session is tearing down). If a
 // frame happens to be mid-flight the framing desyncs, the next length check
-// fails, and the session reconnects — bounded and self-healing, and the
-// interrupt only fires when the link just changed or is being torn down.
+// fails, and the session reconnects. That is bounded and self-healing, and the
+// interrupt only fires when the link just changed or is being torn down, so the
+// cost is a rare reconnect rather than a corrupt stream.
 func (t *Tunnel) interruptReader() {
 	t.mu.RLock()
 	raw := t.raw

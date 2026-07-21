@@ -19,6 +19,8 @@ const (
 	MsgShutdown        MessageType = 8
 	MsgError           MessageType = 9
 	MsgRedirect        MessageType = 10
+	MsgMuxBind         MessageType = 11
+	MsgMuxBindAck      MessageType = 12
 )
 
 var msgNames = map[MessageType]string{
@@ -32,6 +34,8 @@ var msgNames = map[MessageType]string{
 	MsgShutdown:        "Shutdown",
 	MsgError:           "Error",
 	MsgRedirect:        "Redirect",
+	MsgMuxBind:         "MuxBind",
+	MsgMuxBindAck:      "MuxBindAck",
 }
 
 func (m MessageType) String() string {
@@ -135,4 +139,26 @@ type RedirectPayload struct {
 	EdgeAddr string `json:"edge_addr"`
 	EdgeID   string `json:"edge_id"`
 	Reason   string `json:"reason"`
+}
+
+// MuxBindPayload binds a multiplexed data connection to a session that is
+// already registered on the control connection.
+//
+// It carries the same replay protection as a registration because it is dialed
+// and authenticated independently: the token proves which tunnel, the session id
+// names which live client the streams belong to, and neither alone is accepted.
+type MuxBindPayload struct {
+	Token     string `json:"token"`
+	SessionID string `json:"session_id"`
+	ClientID  string `json:"client_id"`
+	Timestamp int64  `json:"timestamp"`
+	Nonce     string `json:"nonce"`
+}
+
+// MuxBindAckPayload reports whether the edge accepted the data connection. A
+// refusal is not fatal; the tunnel continues on dial-back.
+type MuxBindAckPayload struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+	Code    string `json:"code,omitempty"`
 }

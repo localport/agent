@@ -40,6 +40,7 @@ func runTunnel(version string, args []string) error {
 		proto      = fs.String("proto", "http", "tunnel protocol: http, tcp, tls (overridden when --local has a scheme)")
 		name       = fs.String("name", "", "endpoint name (default: \"default\")")
 		noUI       = fs.Bool("noui", false, "disable the live TUI and emit plain logs (auto-enabled when stdout is not a TTY)")
+		noMux      = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them")
 		showVer    = fs.Bool("version", false, "print version and exit")
 	)
 	fs.StringVar(token, "t", "", "alias for --token")
@@ -66,6 +67,9 @@ func runTunnel(version string, args []string) error {
 	if err != nil {
 		fs.Usage()
 		return err
+	}
+	if *noMux {
+		cfg.NoMux = true
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
