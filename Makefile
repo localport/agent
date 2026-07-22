@@ -9,7 +9,7 @@ LDFLAGS = -s -w \
 
 GO_BUILD = go build -trimpath -ldflags "$(LDFLAGS)"
 
-.PHONY: build build-all release clean test lint fmt vet
+.PHONY: build build-all release clean test lint fmt vet notices notices-check
 
 build:
 	$(GO_BUILD) -o bin/localport ./cmd/localport
@@ -21,8 +21,24 @@ build-all:
 	GOOS=darwin  GOARCH=arm64 $(GO_BUILD) -o bin/localport-darwin-arm64      ./cmd/localport
 	GOOS=windows GOARCH=amd64 $(GO_BUILD) -o bin/localport-windows-amd64.exe ./cmd/localport
 
-release: build-all
+release: notices-check build-all
+	# BSD/ISC dependencies require their notices in binary distributions, and the
+	# Apache-2.0 NOTICE must travel with the software, so ship all three next to
+	# the binaries.
+	cp LICENSE NOTICE THIRD_PARTY_NOTICES bin/
 	cd bin && { command -v sha256sum >/dev/null 2>&1 && sha256sum localport-* > checksums.txt || shasum -a 256 localport-* > checksums.txt; }
+
+# Regenerate THIRD_PARTY_NOTICES from the module graph. Run after changing deps.
+notices:
+	./scripts/gen-third-party-notices.sh
+
+# Fail if the committed notices are stale, so a dependency change cannot ship
+# without its attribution. Wired into release and suitable for CI.
+notices-check:
+	@./scripts/gen-third-party-notices.sh
+	@git diff --quiet -- THIRD_PARTY_NOTICES || { \
+		echo "THIRD_PARTY_NOTICES is out of date; run 'make notices' and commit."; \
+		exit 1; }
 
 clean:
 	rm -rf bin/

@@ -50,9 +50,9 @@ For manual installation, download a binary from the [releases page](https://gith
 
 Create a tunnel in the [dashboard](https://dashboard.localport.io) to obtain a token, then run the agent against the local service. Complete command, flag, configuration, and protocol documentation is maintained on the documentation site:
 
-- [Quick start](https://localport.io/docs/quick-start) — first-tunnel walkthrough
-- [CLI reference](https://localport.io/docs/cli) — commands, flags, and environment variables
-- Tunnel guides — by protocol ([HTTP](https://localport.io/docs/http-tunnels), [TCP](https://localport.io/docs/tcp-tunnels), TLS) and routing mode ([mesh](https://localport.io/docs/mesh-tunnels), [shared](https://localport.io/docs/shared-tunnels), [locked / mTLS](https://localport.io/docs/locked-tunnels))
+- [Quick start](https://localport.io/docs/quick-start): first-tunnel walkthrough
+- [CLI reference](https://localport.io/docs/cli): commands, flags, and environment variables
+- Tunnel guides, by protocol ([HTTP](https://localport.io/docs/http-tunnels), [TCP](https://localport.io/docs/tcp-tunnels), TLS) and routing mode ([mesh](https://localport.io/docs/mesh-tunnels), [shared](https://localport.io/docs/shared-tunnels), [locked / mTLS](https://localport.io/docs/locked-tunnels))
 
 ## Build from source
 
@@ -79,3 +79,12 @@ Issues and pull requests are welcome. For non-trivial changes, open an issue to 
 ## Security
 
 Report security vulnerabilities privately through [localport.io/contact](https://localport.io/contact). Do not open public issues for security reports.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+The agent bundles open-source dependencies under permissive licenses (BSD, ISC,
+Apache-2.0); their notices are reproduced in
+[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES), regenerated from the module graph by
+`make notices`.

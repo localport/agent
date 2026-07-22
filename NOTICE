@@ -58,6 +58,15 @@ party, nor for any community or derivative version distributed by anyone other
 than Masteren Labs.
 
 --------------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------------
+
+This software is built with open-source components, each under its own
+permissive license (BSD, ISC, Apache-2.0). Their copyright notices and license
+texts are reproduced in the THIRD_PARTY_NOTICES file distributed alongside this
+NOTICE. Binary distributions must include that file.
+
+--------------------------------------------------------------------------------
 Hosted service
 --------------------------------------------------------------------------------
 
