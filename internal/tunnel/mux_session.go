@@ -267,9 +267,10 @@ func (t *Tunnel) serveMux(conn net.Conn) {
 		dialLocal: func() (net.Conn, error) {
 			return net.DialTimeout("tcp", t.opts.Local, dialTimeout)
 		},
-		tracker:  t,
-		totalIn:  &t.totalBytesIn,
-		totalOut: &t.totalBytesOut,
+		tracker:      t,
+		totalIn:      &t.totalBytesIn,
+		totalOut:     &t.totalBytesOut,
+		newInspector: t.newRequestInspector,
 	}
 
 	// ServeConn blocks for the life of the connection.

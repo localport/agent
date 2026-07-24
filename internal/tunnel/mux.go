@@ -31,6 +31,9 @@ type muxServer struct {
 	// long-lived stream is not invisible until it ends.
 	totalIn  *atomic.Int64
 	totalOut *atomic.Int64
+
+	// newInspector returns an inspector for the stream, nil when uninspected.
+	newInspector func() *httpInspector
 }
 
 // muxTracker mirrors what proxyData does for a dialed-back connection, so the
@@ -74,17 +77,27 @@ func (s *muxServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	inCounters := s.counters(ac, true)
 	outCounters := s.counters(ac, false)
 
+	// http tunnels: the scanner reads a copy off the read side; forwarding is
+	// untouched.
+	reqSrc, respSrc := io.Reader(r.Body), io.Reader(local)
+	if s.newInspector != nil {
+		if insp := s.newInspector(); insp != nil {
+			reqSrc = insp.wrapRequest(r.Body)
+			respSrc = insp.wrapResponse(local)
+		}
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		copyWithCounters(local, r.Body, inCounters...)
+		copyWithCounters(local, reqSrc, inCounters...)
 		// Propagate the visitor's half-close so a local service waiting on EOF
 		// (anything request/response shaped) sees it and replies.
 		halfCloseOrClose(local)
 	}()
 
-	copyWithCounters(&flushWriter{w: w, f: flusher}, local, outCounters...)
+	copyWithCounters(&flushWriter{w: w, f: flusher}, respSrc, outCounters...)
 	wg.Wait()
 
 	if s.tracker != nil {

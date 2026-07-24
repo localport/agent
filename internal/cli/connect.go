@@ -217,7 +217,7 @@ func usageConnect(fs *flag.FlagSet) {
     tls://sub.eu.localport.dev:5432       -> :5432
     sub.eu.localport.dev:5432             -> bare host:port also works
 
-  Credentials — supply exactly one:
+  Credentials (supply exactly one):
     --pem               PEM file with client cert + key + tunnel CA
     --p12               PKCS#12 archive (password via --p12-pass-env / -file)
 

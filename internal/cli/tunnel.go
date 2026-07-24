@@ -33,15 +33,17 @@ func runTunnel(version string, args []string) error {
 	fs.SetOutput(os.Stderr)
 
 	var (
-		configPath = fs.String("config", "", "path to YAML config")
-		token      = fs.String("token", "", "tunnel token (single-endpoint mode)")
-		region     = fs.String("region", "", "edge region: eu, us, ap")
-		local      = fs.String("local", "", "local service: tcp://host:port, http://host:port, or host:port")
-		proto      = fs.String("proto", "http", "tunnel protocol: http, tcp, tls (overridden when --local has a scheme)")
-		name       = fs.String("name", "", "endpoint name (default: \"default\")")
-		noUI       = fs.Bool("noui", false, "disable the live TUI and emit plain logs (auto-enabled when stdout is not a TTY)")
-		noMux      = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them")
-		showVer    = fs.Bool("version", false, "print version and exit")
+		configPath  = fs.String("config", "", "path to YAML config")
+		token       = fs.String("token", "", "tunnel token (single-endpoint mode)")
+		region      = fs.String("region", "", "edge region: eu, us, ap")
+		local       = fs.String("local", "", "local service: tcp://host:port, http://host:port, or host:port")
+		proto       = fs.String("proto", "http", "tunnel protocol: http, tcp, tls (overridden when --local has a scheme)")
+		name        = fs.String("name", "", "endpoint name (default: \"default\")")
+		noUI        = fs.Bool("noui", false, "disable the live TUI and emit plain logs (auto-enabled when stdout is not a TTY)")
+		noMux       = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them")
+		noInspect   = fs.Bool("no-inspect", false, "do not inspect HTTP requests, even under the TUI")
+		logRequests = fs.Bool("log-requests", false, "log one line per HTTP request in headless mode (http tunnels)")
+		showVer     = fs.Bool("version", false, "print version and exit")
 	)
 	fs.StringVar(token, "t", "", "alias for --token")
 	fs.StringVar(local, "l", "", "alias for --local")
@@ -71,12 +73,23 @@ func runTunnel(version string, args []string) error {
 	if *noMux {
 		cfg.NoMux = true
 	}
+	// No TUI means no consumer for the request view, so headless skips parsing by
+	// default. --log-requests opts back in; --no-inspect forces off and wins.
+	mode := ui.DetectMode(*noUI, os.Stderr)
+	switch {
+	case *noInspect:
+		cfg.NoInspect = true
+	case *logRequests:
+		cfg.NoInspect = false
+	default:
+		cfg.NoInspect = mode == ui.ModePlain
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	a := agent.New(cfg, nil) // handler attached below so renderer can poll a.Tunnels()
-	renderer := pickRenderer(*noUI, a)
+	renderer := pickRenderer(mode, a)
 	a.SetHandler(renderer)
 	renderer.Banner(version, cfg)
 	sig := make(chan os.Signal, 1)
@@ -100,8 +113,8 @@ func runTunnel(version string, args []string) error {
 	return err
 }
 
-func pickRenderer(noUI bool, a *agent.Agent) tunnelUI {
-	if ui.DetectMode(noUI, os.Stderr) == ui.ModePlain {
+func pickRenderer(mode ui.Mode, a *agent.Agent) tunnelUI {
+	if mode == ui.ModePlain {
 		return ui.NewPlain()
 	}
 	t := ui.NewTUI()

@@ -30,6 +30,9 @@ type Config struct {
 	// on nearly every network; this exists for the ones where it is not, such as
 	// a lossy link where one dropped packet stalls unrelated streams.
 	NoMux bool
+
+	// NoInspect turns off HTTP request inspection on http tunnels.
+	NoInspect bool
 }
 
 type Spec struct {

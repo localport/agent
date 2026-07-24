@@ -58,14 +58,15 @@ func (a *Agent) Run(ctx context.Context) error {
 				clientName = ""
 			}
 			t := tunnel.New(tunnel.Options{
-				Label:      ep.Name,
-				Token:      spec.Token,
-				Edge:       spec.Edge,
-				Local:      ep.Local,
-				Protocol:   ep.Protocol,
-				ClientName: clientName,
-				Handler:    a.handler,
-				DisableMux: a.cfg.NoMux,
+				Label:          ep.Name,
+				Token:          spec.Token,
+				Edge:           spec.Edge,
+				Local:          ep.Local,
+				Protocol:       ep.Protocol,
+				ClientName:     clientName,
+				Handler:        a.handler,
+				DisableMux:     a.cfg.NoMux,
+				DisableInspect: a.cfg.NoInspect,
 			})
 
 			a.mu.Lock()

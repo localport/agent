@@ -99,8 +99,19 @@ type EventHandler interface {
 	OnError(label string, err error)
 	OnDataConn(label, connID, local, remote string)
 	OnDataClose(label, connID, local, remote string, bytesIn, bytesOut int64, dur time.Duration, err error)
+	OnHTTPRequest(label string, r RequestInfo)
 	OnRedirect(label, from, to string)
 	OnShutdownPolicy(label, reason, code string, limit proto.LimitType, retryable bool)
+}
+
+// RequestInfo is one finished HTTP request for the live view. Metadata only: no
+// header or body content is captured.
+type RequestInfo struct {
+	Method    string
+	Path      string
+	Status    int
+	Duration  time.Duration
+	StartedAt time.Time
 }
 
 // ActiveConn is a snapshot of one live edge↔local proxy. The byte counts
@@ -120,6 +131,7 @@ type Stats struct {
 	BytesIn           int64
 	BytesOut          int64
 	ConnectionsServed int64
+	RequestsServed    int64
 }
 
 type Options struct {
@@ -143,6 +155,10 @@ type Options struct {
 	// separate connections. The escape hatch exists because that call belongs to
 	// whoever is looking at the network, not to us.
 	DisableMux bool
+
+	// DisableInspect turns the HTTP request view off on http tunnels, for anyone
+	// who wants nothing but the byte pipe.
+	DisableInspect bool
 }
 
 type Tunnel struct {
@@ -172,6 +188,12 @@ type Tunnel struct {
 
 	acMu        sync.RWMutex
 	activeConns map[string]*activeConn
+
+	// recentReqs rings the newest requests for render; totalReqs is the lifetime
+	// count the ring cannot give once it wraps.
+	reqMu      sync.Mutex
+	recentReqs []RequestInfo
+	totalReqs  atomic.Int64
 
 	// fastProbeAt (unix-nano) is when OnNetworkChange last armed a link
 	// probe. Zero when no probe is in flight.
@@ -322,6 +344,7 @@ func (t *Tunnel) Stats() Stats {
 		BytesIn:           t.totalBytesIn.Load(),
 		BytesOut:          t.totalBytesOut.Load(),
 		ConnectionsServed: t.totalConns.Load(),
+		RequestsServed:    t.totalReqs.Load(),
 	}
 }
 
@@ -716,6 +739,52 @@ func sanitizeAddr(s string) string {
 	}, s)
 }
 
+const maxRecentRequests = 100
+
+// isHTTPProto reports the tunnels the agent can read as HTTP; the rest are
+// opaque and not inspected.
+func isHTTPProto(proto string) bool {
+	return proto == "http" || proto == "https"
+}
+
+// newRequestInspector returns nil unless this is an http tunnel with inspection
+// enabled.
+func (t *Tunnel) newRequestInspector() *httpInspector {
+	if t.opts.DisableInspect || !isHTTPProto(t.opts.Protocol) {
+		return nil
+	}
+	label := t.opts.Label
+	handler := t.opts.Handler
+	return newHTTPInspector(func(r RequestInfo) {
+		t.recordRequest(r)
+		if handler != nil {
+			handler.OnHTTPRequest(label, r)
+		}
+	})
+}
+
+func (t *Tunnel) recordRequest(r RequestInfo) {
+	t.totalReqs.Add(1)
+	t.reqMu.Lock()
+	if len(t.recentReqs) == maxRecentRequests {
+		copy(t.recentReqs, t.recentReqs[1:])
+		t.recentReqs[len(t.recentReqs)-1] = r
+	} else {
+		t.recentReqs = append(t.recentReqs, r)
+	}
+	t.reqMu.Unlock()
+}
+
+// RecentRequests copies the ring, newest last.
+func (t *Tunnel) RecentRequests() []RequestInfo {
+	t.reqMu.Lock()
+	defer t.reqMu.Unlock()
+	if len(t.recentReqs) == 0 {
+		return nil
+	}
+	return append([]RequestInfo(nil), t.recentReqs...)
+}
+
 func (t *Tunnel) proxyData(connID, remote string) {
 	defer t.wg.Done()
 
@@ -772,16 +841,24 @@ func (t *Tunnel) proxyData(connID, remote string) {
 		h.OnDataConn(t.opts.Label, connID, t.opts.Local, remote)
 	}
 
+	// http tunnels: the scanner reads a copy off the read side; forwarding is
+	// untouched.
+	reqSrc, respSrc := io.Reader(edge), io.Reader(local)
+	if insp := t.newRequestInspector(); insp != nil {
+		reqSrc = insp.wrapRequest(edge)
+		respSrc = insp.wrapResponse(local)
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		copyWithCounters(local, edge, &ac.bytesIn, &t.totalBytesIn)
+		copyWithCounters(local, reqSrc, &ac.bytesIn, &t.totalBytesIn)
 		halfCloseOrClose(local)
 	}()
 	go func() {
 		defer wg.Done()
-		copyWithCounters(edge, local, &ac.bytesOut, &t.totalBytesOut)
+		copyWithCounters(edge, respSrc, &ac.bytesOut, &t.totalBytesOut)
 		halfCloseOrClose(edge)
 	}()
 	wg.Wait()

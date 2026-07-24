@@ -17,9 +17,9 @@ import (
 // connections panel underneath. Pure ANSI, no external deps.
 //
 // Render policy:
-//   - Frame redraws on state-mutating events (push). No tickers — the
-//     header only changes shape on state transitions, so a poll loop
-//     would just burn CPU.
+//   - Frame redraws on state-mutating events (push). There is no ticker
+//     because the header only changes shape on state transitions, so a
+//     poll loop would just burn CPU.
 //   - DECAWM (autowrap) is disabled during writes so a cell at the last
 //     column never bleeds into the next row.
 //
@@ -341,11 +341,11 @@ func (t *TUI) OnError(label string, err error) {
 	t.requestRender()
 }
 
-// OnDataConn / OnDataClose only trigger a redraw — the source of truth
-// for the live-connections panel is tunnel.Tunnel.ActiveConnections(),
-// polled at render time.
+// These only ask for a redraw; the bottom panel reads live data from the tunnel
+// at render time, so the callbacks carry no state.
 func (t *TUI) OnDataConn(_, _, _, _ string)                                        { t.requestRender() }
 func (t *TUI) OnDataClose(_, _, _, _ string, _, _ int64, _ time.Duration, _ error) { t.requestRender() }
+func (t *TUI) OnHTTPRequest(_ string, _ tunnel.RequestInfo)                        { t.requestRender() }
 
 func (t *TUI) OnRedirect(_, _, to string) {
 	t.mu.Lock()
@@ -404,11 +404,13 @@ func (t *TUI) snapshot() snap {
 
 	conns := make(map[string][]tunnel.ActiveConn, len(tunnels))
 	stats := make(map[string]tunnel.Stats, len(tunnels))
+	reqs := make(map[string][]tunnel.RequestInfo, len(tunnels))
 	if t.provider != nil {
 		for _, tun := range t.provider() {
 			label := tun.Label()
 			conns[label] = tun.ActiveConnections()
 			stats[label] = tun.Stats()
+			reqs[label] = tun.RecentRequests()
 		}
 	}
 
@@ -445,6 +447,7 @@ func (t *TUI) snapshot() snap {
 		edge:       t.edge,
 		tunnels:    tunnels,
 		conns:      conns,
+		reqs:       reqs,
 		stats:      stats,
 		spinner:    spinnerFrames[t.spinnerFrame.Load()%uint32(len(spinnerFrames))],
 		palette:    t.palette,

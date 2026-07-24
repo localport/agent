@@ -36,6 +36,7 @@ type snap struct {
 	edge       string
 	tunnels    []tState
 	conns      map[string][]tunnel.ActiveConn
+	reqs       map[string][]tunnel.RequestInfo
 	stats      map[string]tunnel.Stats
 	spinner    string
 	palette    Palette
@@ -78,7 +79,7 @@ func buildRightCaps(tunnels []tState, agentUptime time.Duration) (status, uptime
 // Layout:
 //
 //	row 1            ┌─[ localport ]──────[ Connected ][ 1m12s ]─┐
-//	rows 2..H+1      │ <header — per-tunnel status card>          │
+//	rows 2..H+1      │ <header: per-tunnel status card>          │
 //	row H+2          ├─[ live connections ]───────────────[ N ]─┤
 //	rows H+3..rows-1 │ <connection rows or centered phrase>       │
 //	row rows         └────────────────────────────────────────────┘
@@ -98,12 +99,9 @@ func buildFrame(s snap) []string {
 		frame[1+i] = boxLine(line, s.cols, pal)
 	}
 
-	totalConns := 0
-	for _, list := range s.conns {
-		totalConns += len(list)
-	}
+	divLabel, divCount := panelDivider(s)
 	divRow := 1 + len(header)
-	frame[divRow] = boxDivider("live connections", fmt.Sprintf("%d", totalConns), s.cols, pal)
+	frame[divRow] = boxDivider(divLabel, divCount, s.cols, pal)
 
 	bodyTop := divRow + 1
 	bodyBot := s.rows - 2
@@ -293,7 +291,9 @@ func protoTarget(ts *tState) string {
 	return ts.proto
 }
 
-// renderConnections lays out the bottom panel — at most `capacity` lines.
+// renderConnections lays out the bottom panel, using at most `capacity` lines.
+// An http tunnel shows one row per HTTP request; every other protocol shows one
+// row per live connection, as before.
 func renderConnections(s snap, capacity int) []string {
 	if capacity <= 0 {
 		return nil
@@ -302,14 +302,13 @@ func renderConnections(s snap, capacity int) []string {
 
 	if len(s.tunnels) == 1 {
 		ts := s.tunnels[0]
-		conns := s.conns[ts.name]
 		if !ts.connected || ts.state != tunnel.StateActive {
 			return centeredPanel(connectingPhrase(ts, s.spinner, pal), capacity, s.cols)
 		}
-		if len(conns) == 0 {
-			return centeredPanel(pal.Muted("no live connections"), capacity, s.cols)
+		if bottomCount(ts, s) == 0 {
+			return centeredPanel(bottomEmptyMsg(ts, pal), capacity, s.cols)
 		}
-		return renderConnTable(conns, capacity, s.cols, pal)
+		return bottomRows(ts, s, capacity, s.cols, pal)
 	}
 
 	lines := make([]string, 0, capacity)
@@ -327,19 +326,18 @@ func renderConnections(s snap, capacity int) []string {
 			break
 		}
 
-		conns := s.conns[ts.name]
 		if !ts.connected || ts.state != tunnel.StateActive {
 			lines = append(lines, "  "+connectingPhrase(ts, s.spinner, pal))
 			continue
 		}
-		if len(conns) == 0 {
-			lines = append(lines, "  "+pal.Muted("no live connections"))
+		if bottomCount(ts, s) == 0 {
+			lines = append(lines, "  "+bottomEmptyMsg(ts, pal))
 			continue
 		}
 		groupsLeft := len(s.tunnels) - i - 1
 		reserved := groupsLeft * 2
 		groupCap := max(capacity-len(lines)-reserved, 1)
-		for _, row := range renderConnTable(conns, groupCap, s.cols-2, pal) {
+		for _, row := range bottomRows(ts, s, groupCap, s.cols-2, pal) {
 			if len(lines) >= capacity {
 				break
 			}
@@ -347,6 +345,42 @@ func renderConnections(s snap, capacity int) []string {
 		}
 	}
 	return lines
+}
+
+// panelDivider labels the bottom panel: requests for a single http tunnel, live
+// connections otherwise.
+func panelDivider(s snap) (label, count string) {
+	if len(s.tunnels) == 1 && httpProto(s.tunnels[0].proto) {
+		return "requests", fmt.Sprintf("%d", s.stats[s.tunnels[0].name].RequestsServed)
+	}
+	total := 0
+	for _, list := range s.conns {
+		total += len(list)
+	}
+	return "live connections", fmt.Sprintf("%d", total)
+}
+
+func httpProto(proto string) bool { return proto == "http" || proto == "https" }
+
+func bottomCount(ts tState, s snap) int {
+	if httpProto(ts.proto) {
+		return len(s.reqs[ts.name])
+	}
+	return len(s.conns[ts.name])
+}
+
+func bottomEmptyMsg(ts tState, pal Palette) string {
+	if httpProto(ts.proto) {
+		return pal.Muted("no requests yet")
+	}
+	return pal.Muted("no live connections")
+}
+
+func bottomRows(ts tState, s snap, capacity, cols int, pal Palette) []string {
+	if httpProto(ts.proto) {
+		return renderRequestTable(s.reqs[ts.name], capacity, cols, pal)
+	}
+	return renderConnTable(s.conns[ts.name], capacity, cols, pal)
 }
 
 func connectingPhrase(ts tState, spin string, pal Palette) string {
@@ -369,8 +403,8 @@ func connectingPhrase(ts tState, spin string, pal Palette) string {
 //	IP                           DUR     ↓ IN       ↑ OUT
 //	203.0.113.4                 3m12s    1.2 MB    430 KB
 //
-// The remote address is host-only — the source port carries no signal
-// for an operator watching the panel, so the port is stripped for clarity.
+// The remote address is shown host-only. An operator watching the panel gets
+// nothing useful from the source port, so it is stripped for clarity.
 func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette) []string {
 	if capacity <= 0 || len(conns) == 0 {
 		return nil
@@ -400,7 +434,7 @@ func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette)
 		}
 		remote := c.Remote
 		if remote == "" {
-			remote = "—"
+			remote = "-"
 		} else if host, _, err := net.SplitHostPort(remote); err == nil && host != "" {
 			remote = host
 		}
@@ -414,6 +448,90 @@ func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette)
 		rows[capacity-1] = pal.Muted(fmt.Sprintf("…and %d more", extra))
 	}
 	return rows
+}
+
+// renderRequestTable formats one row per HTTP request, newest at the bottom so
+// it reads like a log. Shown on http tunnels in place of the connection table.
+//
+//	TIME      METHOD  PATH                    STATUS   DUR
+//	15:04:05  POST    /webhook/slack          200      142ms
+//	15:04:06  GET     /health                 200        3ms
+func renderRequestTable(reqs []tunnel.RequestInfo, capacity, cols int, pal Palette) []string {
+	if capacity <= 0 || len(reqs) == 0 {
+		return nil
+	}
+
+	innerW := max(cols-4, 20)
+	const timeW, methodW, statusW, durW, gap = 8, 7, 6, 8, 2
+	pathW := max(innerW-timeW-methodW-statusW-durW-gap*4, 10)
+	gapStr := strings.Repeat(" ", gap)
+
+	header := padVisible(pal.Muted("TIME"), timeW) + gapStr +
+		padVisible(pal.Muted("METHOD"), methodW) + gapStr +
+		padVisible(pal.Muted("PATH"), pathW) + gapStr +
+		padVisible(pal.Muted("STATUS"), statusW) + gapStr +
+		padLeftVisible(pal.Muted("DUR"), durW)
+
+	rows := make([]string, 0, capacity)
+	rows = append(rows, header)
+
+	// The ring is oldest-first; show the most recent that fit, newest last.
+	bodyCap := capacity - 1
+	start := 0
+	if len(reqs) > bodyCap {
+		start = len(reqs) - bodyCap
+	}
+	for _, r := range reqs[start:] {
+		row := padVisible(pal.Muted(r.StartedAt.Format("15:04:05")), timeW) + gapStr +
+			padVisible(pal.Foreground(padMethod(r.Method, methodW)), methodW) + gapStr +
+			padVisible(pal.Foreground(truncate(r.Path, pathW)), pathW) + gapStr +
+			padVisible(statusStyle(r.Status, pal)(fmt.Sprintf("%d", r.Status)), statusW) + gapStr +
+			padLeftVisible(pal.Foreground(humanLatency(r.Duration)), durW)
+		rows = append(rows, row)
+	}
+	// Mark hidden older requests on the first body row. Skip when only the header
+	// fits (capacity 1), else rows[1] is out of range.
+	if start > 0 && len(rows) > 1 {
+		rows[1] = pal.Muted(fmt.Sprintf("…%d earlier", start))
+	}
+	return rows
+}
+
+// padMethod defends the column against a malformed or oversized method.
+func padMethod(m string, w int) string {
+	if m == "" {
+		return "-"
+	}
+	return truncate(m, w)
+}
+
+// statusStyle colours a status code by class: 2xx primary, 3xx/4xx warning,
+// 5xx (and anything unexpected) destructive.
+func statusStyle(code int, pal Palette) StyleFn {
+	switch {
+	case code >= 200 && code < 300:
+		return pal.Primary
+	case code >= 300 && code < 500:
+		return pal.Warning
+	default:
+		return pal.Destructive
+	}
+}
+
+// humanLatency shows sub-second timing (µs/ms) that humanDuration collapses to 0s.
+func humanLatency(d time.Duration) string {
+	switch {
+	case d < time.Microsecond:
+		return "0µs"
+	case d < time.Millisecond:
+		return fmt.Sprintf("%dµs", d.Microseconds())
+	case d < time.Second:
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	case d < 10*time.Second:
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	default:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
 }
 
 // padLeftVisible right-aligns s in a w-wide cell, ignoring ANSI escape

@@ -76,8 +76,8 @@ func stripPathAndQuery(s string) string {
 }
 
 // splitHostPortLoose splits host:port but tolerates a bare host (no colon),
-// returning an empty port in that case. Hostnames only — IPv6 literals are
-// not a valid tunnel remote.
+// returning an empty port in that case. It only handles hostnames; an IPv6
+// literal is not a valid tunnel remote and is rejected earlier.
 func splitHostPortLoose(s string) (host, port string, err error) {
 	if !strings.Contains(s, ":") {
 		return s, "", nil

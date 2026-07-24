@@ -19,15 +19,15 @@ func errorCode(err error) string {
 func PolicyHint(lt proto.LimitType) string {
 	switch lt {
 	case proto.LimitBandwidth:
-		return "bandwidth limit reached — wait for the billing cycle to reset or upgrade your plan"
+		return "bandwidth limit reached. Wait for the billing cycle to reset, or upgrade your plan"
 	case proto.LimitClientConnections:
-		return "client connection limit reached — disconnect another client or upgrade"
+		return "client connection limit reached. Disconnect another client, or upgrade"
 	case proto.LimitTunnelCount:
-		return "tunnel limit reached — remove a tunnel or upgrade your plan"
+		return "tunnel limit reached. Remove a tunnel, or upgrade your plan"
 	case proto.LimitNoPlan:
-		return "team has no active plan — subscribe or start a free trial from the dashboard"
+		return "team has no active plan. Subscribe or start a free trial from the dashboard"
 	case proto.LimitBlocked:
-		return "team account is blocked — contact support"
+		return "team account is blocked. Contact support"
 	}
 	return ""
 }

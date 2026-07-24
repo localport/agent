@@ -128,7 +128,8 @@ type Palette struct {
 	Dim            StyleFn
 }
 
-// NewPalette binds every swatch to the given mode. Cheap — call once.
+// NewPalette binds every swatch to the given mode. It is cheap enough to build
+// once at startup and reuse.
 func NewPalette(m ColorMode) Palette {
 	bind := func(s swatch) StyleFn {
 		if m == ColorOff {

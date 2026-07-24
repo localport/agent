@@ -29,22 +29,38 @@ type Plain struct {
 	tickerOnce sync.Once
 	stopOnce   sync.Once
 	stop       chan struct{}
+
+	// Request-log drain, started lazily on the first request.
+	reqLogOnce sync.Once
+	reqLog     chan reqLogLine
 }
 
 type plainStats struct {
 	bytesIn, bytesOut int64
 	active            int
 	totalConns        int64
+	requests          int64 // http requests served (only when inspection is on)
+	warns             int64 // 4xx responses
+	errors            int64 // 5xx responses
+	droppedLogs       int64 // http.req lines dropped under log backpressure
 	dirtySinceTick    bool
+}
+
+// reqLogLine is queued off the forwarding path so a slow log sink cannot stall a
+// tunnel.
+type reqLogLine struct {
+	label  string
+	detail string
 }
 
 var _ tunnel.EventHandler = (*Plain)(nil)
 
 func NewPlain() *Plain {
 	return &Plain{
-		out:   os.Stderr,
-		stats: make(map[string]*plainStats),
-		stop:  make(chan struct{}),
+		out:    os.Stderr,
+		stats:  make(map[string]*plainStats),
+		stop:   make(chan struct{}),
+		reqLog: make(chan reqLogLine, 1024),
 	}
 }
 
@@ -112,6 +128,57 @@ func (p *Plain) OnDisconnected(label string, err error) {
 
 func (p *Plain) OnError(label string, err error) {
 	p.line("error", label, withCode(err.Error(), errorCode(err)))
+}
+
+// OnHTTPRequest runs on the forwarding goroutine, so it must not block. Counts
+// update under a brief lock (accurate); the log line is queued and dropped, never
+// blocked, when the sink lags.
+func (p *Plain) OnHTTPRequest(label string, r tunnel.RequestInfo) {
+	path := r.Path
+	if path == "" {
+		path = "-"
+	}
+	detail := fmt.Sprintf("%s %s %d %s", r.Method, path, r.Status, r.Duration.Round(time.Millisecond))
+
+	p.ensureReqLogDrain()
+	dropped := false
+	select {
+	case p.reqLog <- reqLogLine{label: label, detail: detail}:
+	default:
+		dropped = true
+	}
+
+	p.mu.Lock()
+	s := p.statsFor(label)
+	s.requests++
+	switch {
+	case r.Status >= 500:
+		s.errors++
+	case r.Status >= 400:
+		s.warns++
+	}
+	if dropped {
+		s.droppedLogs++
+	}
+	s.dirtySinceTick = true
+	p.mu.Unlock()
+
+	p.ensureUsageTicker()
+}
+
+func (p *Plain) ensureReqLogDrain() {
+	p.reqLogOnce.Do(func() {
+		go func() {
+			for {
+				select {
+				case <-p.stop:
+					return
+				case ll := <-p.reqLog:
+					p.line("http.req", ll.label, ll.detail)
+				}
+			}
+		}()
+	})
 }
 
 func (p *Plain) OnDataConn(label, connID, local, remote string) {
@@ -207,13 +274,23 @@ func (p *Plain) emitUsage() {
 	p.mu.Unlock()
 
 	for _, r := range rows {
-		p.line("usage", r.label, fmt.Sprintf(
+		msg := fmt.Sprintf(
 			"in=%s out=%s active=%d total-conns=%d",
 			HumanBytes(r.stats.bytesIn),
 			HumanBytes(r.stats.bytesOut),
 			r.stats.active,
 			r.stats.totalConns,
-		))
+		)
+		// Only http tunnels under inspection have request counts; keep tcp/tls
+		// lines clean.
+		if r.stats.requests > 0 {
+			msg += fmt.Sprintf(" requests=%d warns=%d errors=%d",
+				r.stats.requests, r.stats.warns, r.stats.errors)
+			if r.stats.droppedLogs > 0 {
+				msg += fmt.Sprintf(" dropped-logs=%d", r.stats.droppedLogs)
+			}
+		}
+		p.line("usage", r.label, msg)
 	}
 }
 
