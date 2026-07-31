@@ -334,8 +334,6 @@ func (t *Tunnel) Stop() {
 	t.interruptReader()
 }
 
-func (t *Tunnel) CurrentState() State { return State(t.state.Load()) }
-
 func (t *Tunnel) Label() string { return t.opts.Label }
 
 // Stats returns the cumulative byte and connection counters.
@@ -464,9 +462,9 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			return fmt.Errorf("send register: %w", err)
 		}
 
-		raw.SetReadDeadline(time.Now().Add(registrationTimeout))
+		_ = raw.SetReadDeadline(time.Now().Add(registrationTimeout))
 		msgType, body, err := pc.Recv()
-		raw.SetReadDeadline(time.Time{})
+		_ = raw.SetReadDeadline(time.Time{})
 		if err != nil {
 			raw.Close()
 			return fmt.Errorf("register response: %w", err)
@@ -614,7 +612,7 @@ func (t *Tunnel) receiveLoop() {
 			return
 		}
 
-		raw.SetReadDeadline(t.readDeadline(lastInbound))
+		_ = raw.SetReadDeadline(t.readDeadline(lastInbound))
 		msgType, body, err := pc.Recv()
 		if err != nil {
 			var ne net.Error
@@ -693,6 +691,9 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 			_ = c.SendHeartbeatAck(hb.Timestamp)
 		}
 
+	// SetActive tells a shared-tunnel client it is now primary. The EDGE decides
+	// routing, so an agent has nothing to do with it; it is matched here so the
+	// frame is a recognised no-op rather than falling through as unknown.
 	case proto.MsgHeartbeatAck, proto.MsgSetActive:
 		// nothing to do; edge liveness / dispatch hints
 

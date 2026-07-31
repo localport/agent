@@ -29,9 +29,7 @@ const (
 	FgWhite   = "\x1b[37m"
 )
 
-func MoveTo(row, col int) string          { return fmt.Sprintf("\x1b[%d;%dH", row, col) }
-func SetScrollRegion(top, bot int) string { return fmt.Sprintf("\x1b[%d;%dr", top, bot) }
-func ResetScrollRegion() string           { return "\x1b[r" }
+func MoveTo(row, col int) string { return fmt.Sprintf("\x1b[%d;%dH", row, col) }
 
 // IsTTY reports whether f refers to a character device.
 func IsTTY(f *os.File) bool {

@@ -119,10 +119,6 @@ type HeartbeatAckPayload struct {
 	Timestamp int64 `json:"timestamp"`
 }
 
-type SetActivePayload struct {
-	Active bool `json:"active"`
-}
-
 type ShutdownPayload struct {
 	Reason    string    `json:"reason,omitempty"`
 	Code      string    `json:"code,omitempty"`
