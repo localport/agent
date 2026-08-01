@@ -33,6 +33,11 @@ type Config struct {
 
 	// NoInspect turns off HTTP request inspection on http tunnels.
 	NoInspect bool
+
+	// AgentVersion is this build's version string, set from ldflags in main and
+	// sent on registration. Not part of the YAML schema: it describes the
+	// binary, not the user's configuration.
+	AgentVersion string
 }
 
 type Spec struct {

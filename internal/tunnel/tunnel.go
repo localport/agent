@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -141,7 +142,12 @@ type Options struct {
 	Local      string
 	Protocol   string
 	ClientName string
-	Handler    EventHandler
+
+	// AgentVersion is reported on registration for the connection's audit
+	// record. Self-asserted and forensic only.
+	AgentVersion string
+
+	Handler EventHandler
 
 	// Transport tunes the agent's edge transport (raw vs ws probe order,
 	// dial timeout, WS path). The zero value uses Phase 1 secure defaults:
@@ -449,12 +455,17 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 		resumeID := t.sessionID
 		t.mu.RUnlock()
 		reg := &proto.RegisterPayload{
-			Token:           t.opts.Token,
-			Protocol:        t.opts.Protocol,
-			ClientID:        t.clientID,
-			ClientName:      t.opts.ClientName,
-			Timestamp:       time.Now().Unix(),
-			Nonce:           nonce,
+			Token:      t.opts.Token,
+			Protocol:   t.opts.Protocol,
+			ClientID:   t.clientID,
+			ClientName: t.opts.ClientName,
+			Timestamp:  time.Now().Unix(),
+			Nonce:      nonce,
+			// GOOS/GOARCH rather than anything probed at runtime: it is a compile-time
+			// constant, it needs no plumbing, and "darwin/arm64" is what support
+			// actually asks for.
+			AgentVersion:    t.opts.AgentVersion,
+			AgentOS:         runtime.GOOS + "/" + runtime.GOARCH,
 			ResumeSessionID: resumeID,
 		}
 		if err := pc.SendRegister(reg); err != nil {

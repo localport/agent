@@ -66,6 +66,16 @@ type RegisterPayload struct {
 	Nonce      string `json:"nonce"`
 	Subdomain  string `json:"subdomain,omitempty"`
 
+	// AgentVersion and AgentOS describe the BINARY, for the connection's audit
+	// record: "which build was this, on what platform". Both are SELF-ASSERTED
+	// and forensic only: nothing on the server gates on either, and an edge that
+	// does not read them simply sees them absent.
+	AgentVersion string `json:"agent_version,omitempty"`
+	AgentOS      string `json:"agent_os,omitempty"`
+
+	// A registering client asserts nothing that access depends on: a grant
+	// names devices directly (`*`, `gw-*`, `gw-01`).
+
 	// ResumeSessionID echoes the session_id from this tunnel's previous
 	// RegisterAck so the edge can replace the stale session on reconnect.
 	ResumeSessionID string `json:"resume_session_id,omitempty"`

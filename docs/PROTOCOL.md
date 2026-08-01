@@ -69,9 +69,21 @@ identical on either carrier.
   "timestamp": 1711357200,
   "nonce": "hex32",
   "subdomain": "optional",
+  "agent_version": "1.4.2",
+  "agent_os": "darwin/arm64",
   "resume_session_id": "optional"
 }
 ```
+
+**A registering client asserts nothing that access depends on.** `client_name`
+(the `--name` flag) is the device's name and its address. Whether it may be
+reached is decided server-side.
+
+`agent_version` and `agent_os` describe the BINARY, not the client. They land in
+the connection's server-side record so support can answer "which build was
+this" without asking, and they are FORENSIC ONLY: both are self-asserted, so
+nothing on the server gates on either. `agent_version` is the build's version
+string; `agent_os` is `GOOS/GOARCH`. Both are optional.
 
 `resume_session_id` echoes the `session_id` from this tunnel's previous
 `RegisterAck`. When it matches a live session on the edge, that stale session
