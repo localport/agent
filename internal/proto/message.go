@@ -105,11 +105,14 @@ type RegisterAckPayload struct {
 }
 
 // MTLSInfo describes the mutual-TLS posture of a tunnel. When Enabled is true,
-// consumers must present a client certificate signed by the tunnel's CA.
-// The fingerprint lets a consumer verify that CA out of band
+// consumers must present a client certificate the tunnel trusts.
+//
+// There is no CA fingerprint here. A tunnel trusts several certificate
+// authorities at once, ours and any the customer registered, so one fingerprint
+// would not name the one that matters. The field that used to be here was never
+// populated by the edge either, so the agent printed an empty value.
 type MTLSInfo struct {
-	Enabled       bool   `json:"enabled"`
-	CAFingerprint string `json:"ca_fingerprint,omitempty"`
+	Enabled bool `json:"enabled"`
 }
 
 type NewConnectionPayload struct {

@@ -116,8 +116,7 @@ registration without a resume match still replaces the sole existing client
   "retryable": null,
   "limit_type": "",
   "mtls": {
-    "enabled": true,
-    "ca_fingerprint": "sha256:a1b2c3..."
+    "enabled": true
   },
   "session_id": "hex32"
 }
@@ -134,8 +133,9 @@ non-retryable `Shutdown` with code `TU012`, so two agents sharing one token
 cannot kick each other in a loop (the replaced one stops).
 
 The `mtls` field is optional. When present with `enabled: true`, inbound
-connections to the tunnel must present a client certificate signed by the tunnel's CA.
-The agent prints the `ca_fingerprint` at connect time so consumers can verify the CA out of band.
+connections must present a client certificate from one of the authorities the
+tunnel trusts. It reports nothing else: which authorities those are, and what any
+certificate may reach, are decided server-side.
 
 ### NewConnection (3)
 
