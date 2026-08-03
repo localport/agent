@@ -51,18 +51,3 @@ func SanitizeError(err error, secrets ...string) error {
 	}
 	return errors.New(RedactString(err.Error(), secrets...))
 }
-
-// ValidatePrivateKeyPermissions refuses a key file that is readable by
-// group or other. The check is best-effort on Windows where mode bits
-// are mostly cosmetic.
-func ValidatePrivateKeyPermissions(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return fmt.Errorf("stat key %s: %w", path, err)
-	}
-	mode := info.Mode().Perm()
-	if mode&0o077 != 0 {
-		return fmt.Errorf("key file %s has too-open permissions %#o (want 0600 or stricter)", path, mode)
-	}
-	return nil
-}

@@ -52,10 +52,9 @@ func BuildTLSConfig(bundlePath, p12Path, p12Password, remote, serverNameOverride
 // comes first; everything else not matching the leaf serial is added to
 // the trust store.
 func loadFromPEMBundle(path string) (tls.Certificate, *x509.CertPool, error) {
-	if err := security.ValidatePrivateKeyPermissions(path); err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	data, err := os.ReadFile(path)
+	// Carries a private key, so it is read owner-only: validated on the open
+	// descriptor, symlinks refused.
+	data, err := security.ReadPrivateFile(path)
 	if err != nil {
 		return tls.Certificate{}, nil, classify("read pem bundle", err)
 	}
@@ -100,7 +99,10 @@ func loadFromPEMBundle(path string) (tls.Certificate, *x509.CertPool, error) {
 // CA chain it carries. PKCS#12 always ships its own chain, so an empty
 // chain is treated as a config error.
 func loadFromPKCS12(path, password string) (tls.Certificate, *x509.CertPool, error) {
-	raw, err := os.ReadFile(path)
+	// Owner-only, like the PEM bundle. A password on an archive is not a reason to
+	// let every local account read a private key: exported passwords are routinely
+	// weak or shared.
+	raw, err := security.ReadPrivateFile(path)
 	if err != nil {
 		return tls.Certificate{}, nil, classify("read pkcs12", err)
 	}
