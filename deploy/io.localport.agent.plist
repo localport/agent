@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Localport agent as a launchd daemon.
+
+    sudo install -d -m 0700 /Library/Application\ Support/localport
+    sudo cp io.localport.agent.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/io.localport.agent.plist
+    sudo chmod 0644 /Library/LaunchDaemons/io.localport.agent.plist
+    sudo launchctl load -w /Library/LaunchDaemons/io.localport.agent.plist
+
+  launchd has no LoadCredential= equivalent, so the token goes in a root-owned
+  0600 file that only this daemon reads. Do not put it in ProgramArguments,
+  where `ps` shows it to every local account.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.localport.agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/localport</string>
+    <string>http</string>
+    <string>8080</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>LOCALPORT_TOKEN_FILE</key>
+    <string>/Library/Application Support/localport/token</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/localport.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/localport.log</string>
+</dict>
+</plist>

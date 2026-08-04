@@ -42,3 +42,42 @@ func TestOpenPrivateFileRefusesASymlink(t *testing.T) {
 		t.Fatal("expected a symlinked key to be refused")
 	}
 }
+
+// LoadCredential= and docker secrets both deliver a token as a file rather than
+// an environment variable, which keeps it out of /proc/<pid>/environ.
+func TestResolveOptionalTokenReadsTheFileForm(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("tok_from_file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LP_TEST_TOKEN_FILE", path)
+
+	got, err := ResolveOptionalToken("", "LP_TEST_TOKEN")
+	if err != nil {
+		t.Fatalf("ResolveOptionalToken: %v", err)
+	}
+	if got != "tok_from_file" {
+		t.Fatalf("token = %q, want tok_from_file (trailing newline must be trimmed)", got)
+	}
+
+	// An explicitly set value wins, matching the services' *_FILE precedence.
+	t.Setenv("LP_TEST_TOKEN", "tok_from_env")
+	if got, err = ResolveOptionalToken("", "LP_TEST_TOKEN"); err != nil || got != "tok_from_env" {
+		t.Fatalf("ResolveOptionalToken = %q, %v; want tok_from_env", got, err)
+	}
+	// And the flag wins over both.
+	if got, err = ResolveOptionalToken("tok_from_flag", "LP_TEST_TOKEN"); err != nil || got != "tok_from_flag" {
+		t.Fatalf("ResolveOptionalToken = %q, %v; want tok_from_flag", got, err)
+	}
+}
+
+func TestResolveOptionalTokenRefusesAWorldReadableTokenFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("tok_exposed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LP_TEST_TOKEN_FILE", path)
+	if _, err := ResolveOptionalToken("", "LP_TEST_TOKEN"); err == nil {
+		t.Fatal("expected a 0644 token file to be refused")
+	}
+}

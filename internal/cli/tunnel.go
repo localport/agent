@@ -155,7 +155,9 @@ func usageTunnel(fs *flag.FlagSet) {
     localport tls 8443 -t <token>
 
 Environment:
-  LOCALPORT_TOKEN   tunnel token (alternative to --token)
+  LOCALPORT_TOKEN        tunnel token (alternative to --token)
+  LOCALPORT_TOKEN_FILE   file to read the token from, for systemd LoadCredential=
+                         and docker secrets
   NO_COLOR          disable colored output
 
 Flags:
