@@ -110,7 +110,9 @@ type RegisterAckPayload struct {
 // There is no CA fingerprint here. A tunnel trusts several certificate
 // authorities at once, ours and any the customer registered, so one fingerprint
 // would not name the one that matters. The field that used to be here was never
-// populated by the edge either, so the agent printed an empty value.
+// populated by the edge either, so the agent printed an empty value. Consumers
+// verify the SERVER against system roots; the CA they care about is the one in
+// their own bundle.
 type MTLSInfo struct {
 	Enabled bool `json:"enabled"`
 }

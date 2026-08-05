@@ -135,7 +135,8 @@ cannot kick each other in a loop (the replaced one stops).
 The `mtls` field is optional. When present with `enabled: true`, inbound
 connections must present a client certificate from one of the authorities the
 tunnel trusts. It reports nothing else: which authorities those are, and what any
-certificate may reach, are decided server-side.
+certificate may reach, are decided server-side. Consumers verify the server
+against system roots.
 
 ### NewConnection (3)
 
@@ -390,3 +391,19 @@ reconnects and data dial-backs present the same derived SNI. An explicit
    labels deep), so the derived SNI must sit one label under the target
    zone. The dial address itself stays the per-edge hostname, which resolves
    directly to the pinned edge (no extra DNS indirection).
+
+## mTLS consumer connections (`localport connect`)
+
+A consumer presents a client certificate; the tunnel decides whether that
+certificate's identity may reach the device the connection is routed to.
+
+**Server verification uses the system trust store, not the bundle's CA.** The
+edge presents its region zone wildcard certificate, publicly trusted and issued
+by Let's Encrypt, as its mTLS server identity. It is not signed by the tunnel CA,
+and never could be for a customer-registered CA, since the platform holds no key
+for one. The CA in a bundle or `.p12` is used for the other direction only: it is
+part of the chain the consumer PRESENTS so the edge can verify it.
+
+A bundle must still contain at least one CA certificate. That is checked when the
+bundle is loaded, so a chainless bundle fails locally with a clear message
+instead of as an opaque handshake alert from the far side.

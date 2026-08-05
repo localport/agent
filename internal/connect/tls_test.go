@@ -1,6 +1,7 @@
 package connect
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -31,8 +32,19 @@ func TestBuildTLSConfigBundle(t *testing.T) {
 	if len(cfg.Certificates) != 1 {
 		t.Fatalf("Certificates = %d", len(cfg.Certificates))
 	}
-	if cfg.RootCAs == nil {
-		t.Fatal("RootCAs nil")
+	// RootCAs stays NIL: the SERVER is verified against the system trust store.
+	//
+	// The edge presents the region zone wildcard, publicly trusted and issued by
+	// Let's Encrypt, as its mTLS server identity. It is not signed by the tunnel
+	// CA and never could be for a customer-registered CA, since we hold no key to
+	// sign one with. Pinning the bundle's CA here would reject every connection
+	// with "certificate signed by unknown authority". The bundle's chain is used
+	// in the other direction only: it is what we PRESENT.
+	if cfg.RootCAs != nil {
+		t.Fatal("RootCAs must stay nil: the server is verified against system roots, not against the credential's own CA")
+	}
+	if cfg.MinVersion != 0x0303 { // tls.VersionTLS12
+		t.Fatalf("MinVersion = %#x, want TLS 1.2", cfg.MinVersion)
 	}
 }
 
@@ -45,11 +57,20 @@ func TestBuildTLSConfigRejectsAmbiguousMode(t *testing.T) {
 	}
 }
 
+// An IP remote keeps the literal as its ServerName.
+//
+// Returning "" made crypto/tls refuse to handshake at all, with "either
+// ServerName or InsecureSkipVerify must be specified", so
+// `--remote 203.0.113.5:443` failed with a message naming neither the address
+// nor the certificate. The literal is also the CORRECT value: crypto/tls omits
+// SNI for an IP (RFC 6066 forbids it there) and VerifyHostname then matches the
+// IP SANs, which is the check that should run.
 func TestResolveServerName(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"db.tunnel.localport.dev:5432", "db.tunnel.localport.dev"},
-		{"127.0.0.1:5432", ""},
-		{"[::1]:5432", ""},
+		{"127.0.0.1:5432", "127.0.0.1"},
+		{"[::1]:5432", "::1"},
+		{"203.0.113.5:443", "203.0.113.5"},
 		{"host", "host"},
 	}
 	for _, tc := range cases {
@@ -98,6 +119,75 @@ func TestPKCS12IsReadThroughThePrivateFilePath(t *testing.T) {
 	}
 	if _, err := BuildTLSConfig("", archive, "hunter2", "host:1", ""); err == nil {
 		t.Fatal("a world-readable .p12 must be refused, exactly like a loose PEM bundle")
+	}
+}
+
+// No remote turns server verification off, loopback included. This is the
+// connection that presents a client certificate, and agent/ is public.
+func TestBaseTLSConfigAlwaysVerifiesTheServer(t *testing.T) {
+	remotes := []string{
+		"db.tunnel.localport.dev:5432",
+		"127.0.0.1:8080",
+		"[::1]:8080",
+		"localhost:8080",
+		"anything.localhost:8080",
+	}
+	for _, remote := range remotes {
+		cfg := BaseTLSConfig(remote, "")
+		if cfg.InsecureSkipVerify {
+			t.Errorf("BaseTLSConfig(%q) skips server verification", remote)
+		}
+		if cfg.RootCAs != nil {
+			t.Errorf("BaseTLSConfig(%q) pins RootCAs instead of using system roots", remote)
+		}
+	}
+}
+
+// A CA sharing the leaf's serial must not make the bundle look CA-less.
+//
+// The chain was counted by "every certificate whose serial differs from the
+// leaf's", but a serial is unique only within the CA that assigned it
+// (RFC 5280 4.1.2.2). Two independent PKIs both numbering from 1 is ordinary,
+// so a legitimate CA was skipped and the bundle refused for carrying none.
+func TestPEMBundleWithCASharingTheLeafSerialIsAccepted(t *testing.T) {
+	const shared = 4242
+	dir := t.TempDir()
+	bundle := writePEMBundleWithSerials(t, dir, "client.pem", shared, shared)
+
+	cert, err := loadFromPEMBundle(bundle)
+	if err != nil {
+		t.Fatalf("a bundle whose CA shares the leaf's serial must load: %v", err)
+	}
+	// Parsed once and kept, so crypto/tls does not re-parse the leaf on every
+	// handshake.
+	if cert.Leaf == nil {
+		t.Fatal("Leaf must be set on the loaded certificate")
+	}
+	if cert.Leaf.SerialNumber.Int64() != shared {
+		t.Fatalf("Leaf serial = %s, want %d", cert.Leaf.SerialNumber, shared)
+	}
+}
+
+func TestPEMBundleWithoutACARefuses(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "client.pem")
+
+	caKey, caDER := testCA(t, 1)
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse ca: %v", err)
+	}
+	leafDER, leafKeyDER := testLeaf(t, caCert, caKey, 2)
+
+	var buf bytes.Buffer
+	_ = pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
+	_ = pem.Encode(&buf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: leafKeyDER})
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if _, err := loadFromPEMBundle(path); err == nil {
+		t.Fatal("a bundle with no chain to present must be refused here, not at the far side's handshake")
 	}
 }
 
@@ -156,13 +246,20 @@ func testLeaf(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, seria
 // [leaf, key, ca] into a single PEM file with 0600 perms.
 func writePEMBundle(t *testing.T, dir, name string) string {
 	t.Helper()
+	return writePEMBundleWithSerials(t, dir, name, 1, 2)
+}
 
-	caKey, caDER := testCA(t, 1)
+// writePEMBundleWithSerials is writePEMBundle with the serials chosen, so a CA
+// and a leaf can deliberately share one.
+func writePEMBundleWithSerials(t *testing.T, dir, name string, caSerial, leafSerial int64) string {
+	t.Helper()
+
+	caKey, caDER := testCA(t, caSerial)
 	caCert, err := x509.ParseCertificate(caDER)
 	if err != nil {
 		t.Fatalf("parse ca: %v", err)
 	}
-	leafDER, leafKeyDER := testLeaf(t, caCert, caKey, 2)
+	leafDER, leafKeyDER := testLeaf(t, caCert, caKey, leafSerial)
 
 	path := filepath.Join(dir, name)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
