@@ -407,3 +407,22 @@ part of the chain the consumer PRESENTS so the edge can verify it.
 A bundle must still contain at least one CA certificate. That is checked when the
 bundle is loaded, so a chainless bundle fails locally with a clear message
 instead of as an opaque handshake alert from the far side.
+
+Access can be narrowed while a connection is open. When it is, the edge closes
+that consumer's live connections rather than letting an existing session outlive
+the change: a revocation that only takes effect on the next connection is not a
+revocation. The agent sees an ordinary disconnect and reconnects; the new attempt
+is refused if the grant no longer covers it.
+
+### A refused certificate is REPORTED
+
+Under TLS 1.3 the client sends its certificate after the server's Finished, so a
+server that refuses it cannot say so during the handshake: `tls.Dial` returns a
+healthy connection and the rejection arrives on the FIRST READ as
+`remote error: tls: bad certificate`. `localport connect` therefore reports the
+error from the REMOTE side of the copy and stays quiet about the local side,
+where a client tool closing its own connection is ordinary.
+
+The message names what the holder can check: that the identity has been granted
+access to the device, and that the certificate is still valid and unrevoked. The
+agent is not told why the far side refused, and does not guess.
