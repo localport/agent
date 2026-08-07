@@ -5,6 +5,8 @@ package security
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -12,7 +14,11 @@ import (
 
 // Windows mode bits are synthesised by the Go runtime from the read-only
 // attribute, so they report nothing about who may read a file. Access is
-// carried by the DACL, which is what is checked here.
+// carried by the DACL, which is set when the file is created rather than
+// afterwards. Creating first and tightening second leaves a window in which the
+// key still carries whatever it inherited from its parent. That matters most
+// under %PROGRAMDATA%, which standard users can write to and whose
+// subdirectories inherit that right.
 //
 // The owner, LocalSystem and Administrators are the permitted trustees.
 // Administrators stay because they may take ownership of any object regardless,
@@ -36,6 +42,61 @@ func openNoFollow(path string) (*os.File, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	return os.NewFile(uintptr(h), path), nil
+}
+
+func createPrivate(path string) (*os.File, error) {
+	sa, err := privateSecurityAttributes()
+	if err != nil {
+		return nil, err
+	}
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	h, err := windows.CreateFile(p,
+		windows.GENERIC_WRITE,
+		0,
+		sa,
+		windows.CREATE_NEW,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(h), path), nil
+}
+
+func mkdirPrivate(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", path, err)
+	}
+	if info, err := os.Stat(abs); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("%s exists and is not a directory", abs)
+		}
+		return setPrivateDACL(abs)
+	}
+	if parent := filepath.Dir(abs); parent != abs {
+		if _, err := os.Stat(parent); os.IsNotExist(err) {
+			if err := mkdirPrivate(parent); err != nil {
+				return err
+			}
+		}
+	}
+
+	sa, err := privateSecurityAttributes()
+	if err != nil {
+		return err
+	}
+	p, err := windows.UTF16PtrFromString(abs)
+	if err != nil {
+		return err
+	}
+	if err := windows.CreateDirectory(p, sa); err != nil {
+		return fmt.Errorf("create %s: %w", abs, err)
+	}
+	return nil
 }
 
 func verifyPrivate(f *os.File, path string) error {
@@ -141,6 +202,50 @@ func assertOwnerIsTrusted(owner *windows.SID, path string) error {
 	return nil
 }
 
+func setPrivateDACL(path string) error {
+	sd, err := privateSecurityDescriptor()
+	if err != nil {
+		return err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return fmt.Errorf("read DACL for %s: %w", path, err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil); err != nil {
+		return fmt.Errorf("secure %s: %w", path, err)
+	}
+	return nil
+}
+
+func privateSecurityAttributes() (*windows.SecurityAttributes, error) {
+	sd, err := privateSecurityDescriptor()
+	if err != nil {
+		return nil, err
+	}
+	return &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: sd,
+	}, nil
+}
+
+// privateSecurityDescriptor builds a protected DACL granting full access to the
+// current user, LocalSystem and Administrators, and to nobody else. `P` marks
+// it protected, so nothing is inherited from the parent directory.
+func privateSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
+	user, err := currentUserSID()
+	if err != nil {
+		return nil, err
+	}
+	sddl := fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)", user)
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return nil, fmt.Errorf("build security descriptor: %w", err)
+	}
+	return sd, nil
+}
+
 func currentUserSID() (*windows.SID, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -178,4 +283,31 @@ func sidIn(sid *windows.SID, set []*windows.SID) bool {
 		}
 	}
 	return false
+}
+
+// isRedirect reports whether a directory entry points somewhere other than where
+// it appears to.
+//
+// It tests FILE_ATTRIBUTE_REPARSE_POINT rather than os.ModeSymlink, and the
+// difference is the whole point. Go sets ModeSymlink only for
+// IO_REPARSE_TAG_SYMLINK; a DIRECTORY JUNCTION (IO_REPARSE_TAG_MOUNT_POINT)
+// falls through to ModeIrregular (os/types_windows.go, Mode). Go 1.22 and
+// earlier DID report a junction as a symlink, so a check written against
+// ModeSymlink silently stopped catching them on a toolchain upgrade.
+//
+// A junction is also the cheaper primitive: creating a symlink needs
+// SeCreateSymbolicLinkPrivilege (administrator, or Developer Mode), while
+// creating a junction needs only write access to the directory. That is exactly
+// the %PROGRAMDATA% case this file's header warns about, a machine-wide
+// credential root a standard user can write to.
+//
+// The attribute is the authoritative answer and the mode bit is a derivation of
+// it, so this is correct whatever a future Go release decides to report.
+func isRedirect(info os.FileInfo) bool {
+	if d, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {
+		return d.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0
+	}
+	// No attribute data means we cannot tell. Refuse rather than assume, the same
+	// rule verifyPrivate applies to an ACE type it does not recognise.
+	return true
 }
