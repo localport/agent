@@ -201,6 +201,23 @@ func TestSaveRoundTripsTheKeyBacking(t *testing.T) {
 	}
 }
 
+// The setup token is a bearer secret. Sending it over http is the one mistake
+// that cannot be undone afterwards, so there is no host it is allowed for.
+func TestNewClientRefusesPlaintext(t *testing.T) {
+	for _, raw := range []string{
+		"http://api.example.com",
+		"http://localhost:8080",
+		"http://127.0.0.1:8080",
+	} {
+		if _, err := NewClient(raw); err == nil {
+			t.Errorf("NewClient(%q) must refuse plain http", raw)
+		}
+	}
+	if _, err := NewClient("https://api.example.com"); err != nil {
+		t.Fatalf("https must be accepted: %v", err)
+	}
+}
+
 func selfSigned(t *testing.T, uri string) *x509.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

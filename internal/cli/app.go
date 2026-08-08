@@ -28,6 +28,8 @@ func (a *App) Run(args []string) error {
 		return runTunnel(a.version, args[1:])
 	case "connect":
 		return runConnect(args[1:])
+	case "enroll":
+		return runEnroll(args[1:])
 	case "version", "--version", "-version":
 		fmt.Printf("localport %s (%s) built %s\n", a.version, a.commit, a.date)
 		return nil
@@ -47,6 +49,7 @@ func printMainUsage(w io.Writer) {
 Commands:
   tunnel    Open tunnels to the Localport edge (default)
   connect   Forward a local port through an mTLS tunnel
+  enroll    Redeem a setup token so this MACHINE can reach locked tunnels
   version   Print version and exit
 
 Examples:
@@ -64,5 +67,8 @@ Examples:
   # Connect to a locked tunnel (mTLS) with your client certificate:
   localport connect https://sub.eu.localport.dev --pem client.pem -p 3001
   localport connect tcp://sub.eu.localport.dev:11434 --pem db.pem -p 11434
+
+  # Or enroll the machine once and let the agent obtain the credential:
+  localport enroll <TOKEN>
 `)
 }

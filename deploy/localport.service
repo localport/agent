@@ -6,6 +6,12 @@
 ;   sudo chmod 0600 /etc/localport/token
 ;   sudo cp localport.service /etc/systemd/system/
 ;   sudo systemctl enable --now localport
+;
+; For a locked (mTLS) tunnel, enroll as the service user so it can read the
+; credential it will present:
+;
+;   sudo -u localport LOCALPORT_HOME=/var/lib/localport \
+;       localport enroll lps_...
 
 [Unit]
 Description=Localport tunnel
@@ -14,8 +20,15 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+; User= is also what makes systemd set $HOME. Without it the service runs with
+; none, and the agent has no home directory to keep its credential in.
 User=localport
 Group=localport
+
+; systemd creates /var/lib/localport as 0700 owned by User=, and recreates it
+; if it is removed.
+StateDirectory=localport
+Environment=LOCALPORT_HOME=/var/lib/localport
 
 ; The token is a bearer secret and never belongs in ExecStart, where
 ; `systemctl show`, `ps` and the unit file itself expose it to every local

@@ -426,3 +426,29 @@ where a client tool closing its own connection is ordinary.
 The message names what the holder can check: that the identity has been granted
 access to the device, and that the certificate is still valid and unrevoked. The
 agent is not told why the far side refused, and does not guess.
+
+### Stored identity
+
+A credential file is not the intended path. `localport enroll <TOKEN>` spends a
+single-use setup token against the control plane, keeps a private key that never
+leaves the machine, and stores the result under `~/.localport/identity/`
+(directories `0700`, files `0600`):
+
+```
+<team>/<identity>/
+  cert.pem    leaf first, then the issuing chain, which is what the agent presents
+  key.pem     P-256 private key, generated locally, never transmitted
+  meta.json   identity, team, kind, spiffe_id, source, api_url, serial,
+              not_after and renew_after
+```
+
+**The path and every identity field are read from the CERTIFICATE, never from
+the response body**, so the record and the material beside it cannot disagree.
+
+The path carries no control-plane component. Which plane issued a credential is
+recorded as `api_url`, which is where renewal reads it.
+
+Components are used verbatim, with case preserved: nothing is escaped, sanitized
+or folded. A component that is empty, `.`, `..`, or that contains `/`, `\` or
+`:` is refused rather than repaired, since a repaired component names a
+different credential than the certificate does.

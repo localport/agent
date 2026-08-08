@@ -3,6 +3,8 @@ package identity
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -49,6 +51,21 @@ func (k fileKey) marshal() ([]byte, error) {
 		return nil, fmt.Errorf("encode key: %w", err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), nil
+}
+
+// generateKey creates a key of the given backing. P-256 throughout: it is what
+// the control plane issues against.
+func generateKey(b Backing) (Key, error) {
+	switch b {
+	case BackingFile, "":
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("generate key: %w", err)
+		}
+		return fileKey{key}, nil
+	default:
+		return nil, fmt.Errorf("unsupported key backing %q", b)
+	}
 }
 
 // loadKey opens the key a credential's metadata points at.

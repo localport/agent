@@ -26,6 +26,8 @@
 
   <key>EnvironmentVariables</key>
   <dict>
+    <key>LOCALPORT_HOME</key>
+    <string>/Library/Application Support/localport</string>
     <key>LOCALPORT_TOKEN_FILE</key>
     <string>/Library/Application Support/localport/token</string>
   </dict>
