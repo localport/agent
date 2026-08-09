@@ -1,11 +1,13 @@
 package identity
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"math/big"
 	"net/url"
@@ -15,6 +17,68 @@ import (
 	"testing"
 	"time"
 )
+
+// The renewal digest is the ONE value the agent and the control plane must
+// compute identically, and a mismatch is silent: renewal never succeeds
+// and the credential expires weeks later. This vector is asserted on both sides.
+const goldenDigest = "bb21b93bb7ddd5f72c67c1a2b127f99322456fd06b00242a65791b6b9cbe80ff"
+
+func TestRenewalDigestMatchesTheServerVector(t *testing.T) {
+	got := hex.EncodeToString(renewalDigest([]byte("csr-der-bytes"), 29000000, "beef"))
+	if got != goldenDigest {
+		t.Fatalf("renewal digest drifted from the server:\n got %s\nwant %s", got, goldenDigest)
+	}
+}
+
+func TestRenewalDigestBindsToTheCertificateAndTheMinute(t *testing.T) {
+	base := renewalDigest([]byte("csr"), 100, "aa")
+	for _, tc := range []struct {
+		name   string
+		digest []byte
+	}{
+		{"different csr", renewalDigest([]byte("other"), 100, "aa")},
+		{"different minute", renewalDigest([]byte("csr"), 101, "aa")},
+		{"different serial", renewalDigest([]byte("csr"), 100, "bb")},
+	} {
+		if string(tc.digest) == string(base) {
+			t.Errorf("%s produced the same digest: a captured renewal would replay", tc.name)
+		}
+	}
+}
+
+// Renewal proves possession by signing with the credential's existing key.
+// Routing that through crypto.Signer instead of ecdsa.SignASN1 must not change
+// the bytes on the wire: a mismatch here is silent, and renewal would
+// never succeed until the certificate expired.
+func TestSignerProducesTheSameSignatureFormatAsSignASN1(t *testing.T) {
+	key := testKey(t)
+	digest := renewalDigest([]byte("csr-der-bytes"), 29000000, "beef")
+
+	viaSigner, err := fileKey{key}.Sign(rand.Reader, digest, crypto.SHA256)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if !ecdsa.VerifyASN1(&key.PublicKey, digest, viaSigner) {
+		t.Fatal("signature from crypto.Signer is not the ASN.1 DER the server verifies")
+	}
+
+	direct, err := ecdsa.SignASN1(rand.Reader, key, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ecdsa.VerifyASN1(&key.PublicKey, digest, direct) {
+		t.Fatal("control signature failed to verify")
+	}
+}
+
+func testKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
 
 func TestRefFromCertReadsTheCertificate(t *testing.T) {
 	for _, tc := range []struct {

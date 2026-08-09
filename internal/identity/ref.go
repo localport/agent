@@ -15,6 +15,19 @@ const (
 	KindDevice Kind = "device"
 )
 
+// Label is the word shown to a person. The SPIFFE path and the selector keep
+// the wire values.
+func (k Kind) Label() string {
+	switch k {
+	case KindClient:
+		return "Machine"
+	case KindDevice:
+		return "Device"
+	default:
+		return string(k)
+	}
+}
+
 // Ref locates one stored credential: `<team>/<identity>`.
 //
 // The team is load-bearing: one machine legitimately holds credentials for

@@ -122,7 +122,7 @@ func TestFriendlyStreamErrorNamesTheNextStep(t *testing.T) {
 	err := friendlyStreamError("gw-01.eu.localport.dev:443",
 		errors.New("remote error: tls: bad certificate"))
 	msg := err.Error()
-	for _, want := range []string{"refused the certificate", "access to the device", "revoked"} {
+	for _, want := range []string{"refused the certificate", "access to the device", "revoked", "localport identity list"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("message does not mention %q:\n%s", want, msg)
 		}

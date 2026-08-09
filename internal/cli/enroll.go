@@ -85,24 +85,6 @@ func runEnroll(args []string) error {
 	return nil
 }
 
-// printCredential reports what a credential is and where it landed.
-func printCredential(store *identity.Store, ref identity.Ref, meta identity.Meta) {
-	fmt.Fprintf(os.Stderr, "  identity   %s\n", meta.SpiffeID)
-	fmt.Fprintf(os.Stderr, "  team       %s\n", ref.Team)
-	fmt.Fprintf(os.Stderr, "  stored in  %s\n", store.Dir(ref))
-	fmt.Fprintf(os.Stderr, "  expires    %s\n", meta.NotAfter.Format(time.RFC3339))
-}
-
-func resolveAPIURL(flagValue string) string {
-	if v := strings.TrimSpace(flagValue); v != "" {
-		return v
-	}
-	if v := strings.TrimSpace(os.Getenv(identity.APIURLEnv)); v != "" {
-		return v
-	}
-	return identity.DefaultAPIURL
-}
-
 func usageEnroll() {
 	fmt.Fprint(os.Stderr, `Usage: localport enroll <TOKEN> [--api <url>]
 

@@ -17,9 +17,6 @@ import (
 
 const defaultP12PasswordEnv = "LOCALPORT_P12_PASSWORD"
 
-// identityEnv selects a credential when a machine holds several.
-const identityEnv = "LOCALPORT_IDENTITY"
-
 func runConnect(args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -75,13 +72,16 @@ func runConnect(args []string) error {
 		return err
 	}
 
+	ctx, cancel := signalCtx()
+	defer cancel()
+
 	var (
 		tlsCfg *tls.Config
 		source string
 	)
 	if *pemFile == "" && *p12File == "" {
 		// No credential file named: present the identity this machine holds.
-		tlsCfg, source, err = identityTLSConfig(firstNonEmpty(*identityArg, os.Getenv(identityEnv)), remote, *serverName)
+		tlsCfg, source, err = identityTLSConfig(ctx, firstNonEmpty(*identityArg, os.Getenv(identityEnv)), remote, *serverName)
 	} else {
 		// The password is only resolved for --p12. Reading it on the --pem path
 		// would fail a PEM connect on a box where LOCALPORT_P12_PASSWORD happens
@@ -110,15 +110,14 @@ func runConnect(args []string) error {
 	fmt.Fprintln(os.Stderr, "  localport connect")
 	fmt.Fprintf(os.Stderr, "  listening on %s -> %s (mTLS, %s)\n", listen, remote, source)
 
-	ctx, cancel := signalCtx()
-	defer cancel()
 	return proxy.Run(ctx)
 }
 
-// identityTLSConfig presents the stored credential. The certificate comes
-// through a CALLBACK rather than being copied into the config, so a renewal is
-// picked up on the next handshake without restarting.
-func identityTLSConfig(selector, remote, serverName string) (*tls.Config, string, error) {
+// identityTLSConfig presents the stored credential and keeps it fresh. The
+// certificate comes through a CALLBACK rather than being copied into the config,
+// so a renewal by this process or by `localport identity renew` is picked up on
+// the next handshake.
+func identityTLSConfig(ctx context.Context, selector, remote, serverName string) (*tls.Config, string, error) {
 	store, err := identity.DefaultStore()
 	if err != nil {
 		return nil, "", err
@@ -137,6 +136,8 @@ func identityTLSConfig(selector, remote, serverName string) (*tls.Config, string
 
 	cfg := connect.BaseTLSConfig(remote, serverName)
 	cfg.GetClientCertificate = cred.GetClientCertificate
+
+	startIdentityRenewal(ctx, store, cred.Ref())
 	return cfg, "identity " + cred.Meta().Identity, nil
 }
 
@@ -172,7 +173,7 @@ func runConnectFromConfig(path string) error {
 
 		var tlsCfg *tls.Config
 		if c.UsesIdentity() {
-			tlsCfg, _, err = identityTLSConfig(c.Identity, remote, "")
+			tlsCfg, _, err = identityTLSConfig(ctx, c.Identity, remote, "")
 		} else {
 			var password string
 			if c.P12 != "" {

@@ -30,6 +30,8 @@ func (a *App) Run(args []string) error {
 		return runConnect(args[1:])
 	case "enroll":
 		return runEnroll(args[1:])
+	case "identity":
+		return runIdentity(args[1:])
 	case "version", "--version", "-version":
 		fmt.Printf("localport %s (%s) built %s\n", a.version, a.commit, a.date)
 		return nil
@@ -50,6 +52,7 @@ Commands:
   tunnel    Open tunnels to the Localport edge (default)
   connect   Forward a local port through an mTLS tunnel
   enroll    Redeem a setup token so this MACHINE can reach locked tunnels
+  identity  List and renew the credentials on this machine
   version   Print version and exit
 
 Examples:

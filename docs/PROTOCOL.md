@@ -452,3 +452,33 @@ Components are used verbatim, with case preserved: nothing is escaped, sanitized
 or folded. A component that is empty, `.`, `..`, or that contains `/`, `\` or
 `:` is refused rather than repaired, since a repaired component names a
 different credential than the certificate does.
+
+**Renewal carries no bearer secret.** Requiring the setup token to renew
+would mean keeping that token forever, which is the thing this removes. Instead
+the agent proves it still holds the current certificate's private key:
+
+```
+POST /v1/mtls/certs/renew
+{ cert_pem, csr_pem, signature }
+
+signature = base64( ECDSA-P256( oldKey, SHA256( csrDER
+                                              || uint64be(unixSeconds / 60)
+                                              || hex(oldCertSerial) ) ) )
+```
+
+The minute bucket bounds replay without a nonce store (the server accepts the
+minute either side of its own, so clock drift has no preferred direction). The
+serial binds the signature to the one certificate it was made for, so an
+intercepted renewal cannot be replayed against another certificate of the same
+identity.
+
+This digest is a wire format shared with the control plane, and a mismatch is
+silent: renewal would simply never succeed. Both sides pin it with the same
+test vector; do not change one without the other.
+
+Renewal is due at `renew_after`, which the SERVER sets two thirds through the
+lifetime, so the last third is retry budget. Cadence is therefore policy the
+platform can change without shipping a new agent. The loop runs inside
+`localport connect`; a machine that is not permanently connected should run
+`localport identity renew` from a daily timer instead. The previous certificate
+stays valid until its own expiry, so rollover overlaps.

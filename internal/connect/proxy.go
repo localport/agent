@@ -124,10 +124,12 @@ func friendlyStreamError(remote string, err error) error {
 		return fmt.Errorf(
 			"%s refused the certificate presented for this connection.\n"+
 				"  Check in the dashboard that this identity has been given access to the device you are reaching,\n"+
-				"  and that its certificate is still valid and has not been revoked: %w", remote, err)
+				"  and that its certificate is still valid and has not been revoked.\n"+
+				"  `localport identity list` shows what this machine holds: %w", remote, err)
 	case strings.Contains(msg, "tls: certificate expired"),
 		strings.Contains(msg, "tls: expired certificate"):
-		return fmt.Errorf("%s rejected the certificate as expired: %w", remote, err)
+		return fmt.Errorf(
+			"%s rejected the certificate as expired. Run `localport identity renew`: %w", remote, err)
 	default:
 		return fmt.Errorf("connection to %s ended: %w", remote, err)
 	}
