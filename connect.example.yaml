@@ -1,10 +1,24 @@
 connections:
+  # With no `bundle` and no `p12`, the credential this machine already holds is
+  # presented (see `localport enroll`). This is the intended path: nothing to
+  # copy, and it renews itself.
+  - name: gateway
+    remote: gw-01.eu.localport.dev:443
+    local_port: "3001"
+
+  # `identity` picks one when the machine holds several. A config file is never
+  # interactive, so an ambiguous entry is an error rather than a prompt: name the
+  # credential here.
+  #   gw-01                     a bare identity
+  #   <team>/gw-01              narrowed to one team
   - name: postgres
-    remote: db.tunnel.localport.dev:5432
+    remote: db.eu.localport.dev:5432
     local_port: "5432"
-    bundle: certs/client-bundle.pem
+    identity: 01kpq7x2/deploy-prod
+
+  # A credential we did not issue (your own CA) still comes from a file.
   - name: redis
-    remote: cache.tunnel.localport.dev:6379
+    remote: cache.eu.localport.dev:6379
     local_port: "6379"
     p12: certs/client.p12
     p12_pass_env: LOCALPORT_P12_PASSWORD

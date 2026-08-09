@@ -80,6 +80,18 @@ func loadFromPEMBundle(path string) (tls.Certificate, error) {
 	}
 	cert, err := tls.X509KeyPair(data, data)
 	if err != nil {
+		// --pem pointed at the store's `cert.pem` has no key, and crypto/tls
+		// answers that with a sentence about PEM block types. Name the mistake
+		// rather than relay it.
+		if bytes.Contains(data, []byte("BEGIN CERTIFICATE")) && !bytes.Contains(data, []byte("PRIVATE KEY")) {
+			// A multi-line, multi-sentence message on purpose, so ST1005's
+			// single-clause rule does not apply.
+			return tls.Certificate{}, fmt.Errorf( //nolint:staticcheck // ST1005
+				"%s holds certificates but no private key.\n"+
+					"  --pem wants ONE file containing the leaf, its chain and the key.\n"+
+					"  If this came from the identity store, drop --pem entirely: "+
+					"`localport connect` presents a stored credential on its own.", path)
+		}
 		return tls.Certificate{}, classify("parse pem bundle", err)
 	}
 	leaf, err := x509.ParseCertificate(cert.Certificate[0])

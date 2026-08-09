@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"os"
@@ -11,9 +12,13 @@ import (
 	"syscall"
 
 	"github.com/localport/agent/internal/connect"
+	"github.com/localport/agent/internal/identity"
 )
 
 const defaultP12PasswordEnv = "LOCALPORT_P12_PASSWORD"
+
+// identityEnv selects a credential when a machine holds several.
+const identityEnv = "LOCALPORT_IDENTITY"
 
 func runConnect(args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
@@ -28,6 +33,7 @@ func runConnect(args []string) error {
 		localAddr   = fs.String("local-addr", "127.0.0.1", "local bind address")
 		serverName  = fs.String("server-name", "", "TLS SNI / server name override")
 		configPath  = fs.String("config", "", "path to a connect YAML config")
+		identityArg = fs.String("identity", "", "credential to present: `<identity>` or <team>/<identity>")
 	)
 	// -p and --port both set the local listen port.
 	var localPort string
@@ -69,12 +75,26 @@ func runConnect(args []string) error {
 		return err
 	}
 
-	password, err := resolveP12Password(*p12Pass, *p12PassFile, *p12PassEnv)
-	if err != nil {
-		return err
+	var (
+		tlsCfg *tls.Config
+		source string
+	)
+	if *pemFile == "" && *p12File == "" {
+		// No credential file named: present the identity this machine holds.
+		tlsCfg, source, err = identityTLSConfig(firstNonEmpty(*identityArg, os.Getenv(identityEnv)), remote, *serverName)
+	} else {
+		// The password is only resolved for --p12. Reading it on the --pem path
+		// would fail a PEM connect on a box where LOCALPORT_P12_PASSWORD happens
+		// to be set, over a flag the caller never passed.
+		var password string
+		if *p12File != "" {
+			password, err = resolveP12Password(*p12Pass, *p12PassFile, *p12PassEnv)
+		}
+		if err == nil {
+			tlsCfg, err = connect.BuildTLSConfig(*pemFile, *p12File, password, remote, *serverName)
+			source = "file"
+		}
 	}
-
-	tlsCfg, err := connect.BuildTLSConfig(*pemFile, *p12File, password, remote, *serverName)
 	if err != nil {
 		return err
 	}
@@ -88,11 +108,45 @@ func runConnect(args []string) error {
 		OnError:   func(err error) { fmt.Fprintln(os.Stderr, "  [error]", err) },
 	}
 	fmt.Fprintln(os.Stderr, "  localport connect")
-	fmt.Fprintf(os.Stderr, "  listening on %s -> %s (mTLS)\n", listen, remote)
+	fmt.Fprintf(os.Stderr, "  listening on %s -> %s (mTLS, %s)\n", listen, remote, source)
 
 	ctx, cancel := signalCtx()
 	defer cancel()
 	return proxy.Run(ctx)
+}
+
+// identityTLSConfig presents the stored credential. The certificate comes
+// through a CALLBACK rather than being copied into the config, so a renewal is
+// picked up on the next handshake without restarting.
+func identityTLSConfig(selector, remote, serverName string) (*tls.Config, string, error) {
+	store, err := identity.DefaultStore()
+	if err != nil {
+		return nil, "", err
+	}
+	sel, err := identity.ParseSelector(selector)
+	if err != nil {
+		return nil, "", err
+	}
+	cred, err := identity.Open(store, sel)
+	if err != nil {
+		return nil, "", fmt.Errorf("%w\n  (or pass a credential file with --pem / --p12)", err)
+	}
+	// A refused reload means the file now holds a different principal. The process
+	// keeps presenting what it opened with, so the refusal must be visible.
+	cred.OnSwap(func(line string) { fmt.Fprintf(os.Stderr, "  [identity] %s\n", line) })
+
+	cfg := connect.BaseTLSConfig(remote, serverName)
+	cfg.GetClientCertificate = cred.GetClientCertificate
+	return cfg, "identity " + cred.Meta().Identity, nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func runConnectFromConfig(path string) error {
@@ -110,17 +164,24 @@ func runConnectFromConfig(path string) error {
 		errMu    sync.Mutex
 	)
 	for _, c := range cc.Connections {
-		password, err := resolveP12Password(c.P12Pass, c.P12PassFile, c.P12PassEnv)
-		if err != nil {
-			cancel()
-			return fmt.Errorf("connection %q: %w", c.Name, err)
-		}
 		remote, err := connect.ParseRemote(c.Remote)
 		if err != nil {
 			cancel()
 			return fmt.Errorf("connection %q: %w", c.Name, err)
 		}
-		tlsCfg, err := connect.BuildTLSConfig(c.Bundle, c.P12, password, remote, "")
+
+		var tlsCfg *tls.Config
+		if c.UsesIdentity() {
+			tlsCfg, _, err = identityTLSConfig(c.Identity, remote, "")
+		} else {
+			var password string
+			if c.P12 != "" {
+				password, err = resolveP12Password(c.P12Pass, c.P12PassFile, c.P12PassEnv)
+			}
+			if err == nil {
+				tlsCfg, err = connect.BuildTLSConfig(c.Bundle, c.P12, password, remote, "")
+			}
+		}
 		if err != nil {
 			cancel()
 			return fmt.Errorf("connection %q: %w", c.Name, err)
@@ -217,11 +278,17 @@ func usageConnect(fs *flag.FlagSet) {
     tls://sub.eu.localport.dev:5432       -> :5432
     sub.eu.localport.dev:5432             -> bare host:port also works
 
-  Credentials (supply exactly one):
+  Credentials. With no flag, the identity this machine holds is used, so there
+  is no file to copy around. Supply a file only for a credential we did not
+  issue:
+    (none)              the stored identity (localport enroll <TOKEN>)
     --pem               PEM file with client cert + key + tunnel CA
     --p12               PKCS#12 archive (password via --p12-pass-env / -file)
 
   Examples:
+    localport enroll lps_...           # once per machine
+    localport connect https://de8yp41s.eu.localport.dev -p 3001
+
     localport connect https://de8yp41s.eu.localport.dev --pem client.pem -p 3001
     localport connect tcp://de8yp41s.eu.localport.dev:5432 --pem db.pem --port 5432
     LOCALPORT_P12_PASSWORD=… \

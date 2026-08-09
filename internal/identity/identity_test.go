@@ -110,6 +110,47 @@ func TestResolveRefusesToGuessBetweenIdentities(t *testing.T) {
 	}
 }
 
+// A renewal carries the identity forward, so a changed principal means the file
+// was replaced by something else. Presenting it would authenticate this process
+// as another party and attribute its traffic to them.
+func TestReloadRefusesASwappedPrincipal(t *testing.T) {
+	store := &Store{Root: t.TempDir()}
+	ref, err := store.Save(credentialFor(t, "spiffe://team_x.mtls.localport.dev/client/deploy-prod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err := Open(store, Selector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := cred.Certificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Overwrite in place with a different principal.
+	other := credentialFor(t, "spiffe://team_x.mtls.localport.dev/client/other-box")
+	otherKeyPEM, err := other.Key.(persistentKey).marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := store.Dir(ref)
+	for name, data := range map[string][]byte{certFile: other.CertPEM, keyFile: otherKeyPEM} {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cred.lastStat = time.Time{} // force the next Certificate() to re-stat
+
+	after, err := cred.Certificate()
+	if err != nil {
+		t.Fatalf("a refused reload must keep serving the credential we opened with: %v", err)
+	}
+	if after.Leaf.SerialNumber.Cmp(before.Leaf.SerialNumber) != 0 {
+		t.Fatal("reload adopted a different principal from disk")
+	}
+}
+
 // Components are used VERBATIM, and a component that could escape the store is
 // REFUSED rather than repaired.
 //

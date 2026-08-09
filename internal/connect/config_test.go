@@ -52,6 +52,41 @@ connections:
 	}
 }
 
+func TestLoadConnectConfigAcceptsIdentityMode(t *testing.T) {
+	// No bundle and no p12 is the stored-identity path, not a broken config.
+	yamlPath := writeYAML(t, t.TempDir(), `
+connections:
+  - name: gw
+    remote: gw-01.eu.localport.dev:22
+    local_port: "2222"
+`)
+	cc, err := LoadConnectConfig(yamlPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cc.Connections[0].UsesIdentity() {
+		t.Fatal("a connection with no credential file should use the stored identity")
+	}
+}
+
+func TestLoadConnectConfigRejectsIdentityWithACredentialFile(t *testing.T) {
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "client.pem")
+	_ = os.WriteFile(bundle, []byte("x"), 0o600)
+
+	yamlPath := writeYAML(t, dir, `
+connections:
+  - name: gw
+    remote: gw-01.eu.localport.dev:22
+    local_port: "2222"
+    identity: 01kpq7x2/deploy-prod
+    bundle: `+bundle+`
+`)
+	if _, err := LoadConnectConfig(yamlPath); err == nil {
+		t.Fatal("expected 'identity' to be refused alongside a credential file")
+	}
+}
+
 func TestLoadConnectConfigRejectsMissing(t *testing.T) {
 	yamlPath := writeYAML(t, t.TempDir(), `
 connections:

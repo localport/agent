@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,6 +141,29 @@ func TestBaseTLSConfigAlwaysVerifiesTheServer(t *testing.T) {
 		if cfg.RootCAs != nil {
 			t.Errorf("BaseTLSConfig(%q) pins RootCAs instead of using system roots", remote)
 		}
+	}
+}
+
+// Pointing --pem at the `cert.pem` inside the identity store is the common
+// mistake. crypto/tls answers with a sentence about PEM block types that says
+// nothing about what to do, so the error names the mistake instead.
+func TestPEMBundleWithoutAKeyNamesTheMistake(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cert.pem")
+
+	_, caDER := testCA(t, 1)
+	var buf bytes.Buffer
+	_ = pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, err := loadFromPEMBundle(path)
+	if err == nil {
+		t.Fatal("a bundle with no private key must be refused")
+	}
+	if !strings.Contains(err.Error(), "--pem") {
+		t.Fatalf("the error must name the mistake and the way out, got: %v", err)
 	}
 }
 
