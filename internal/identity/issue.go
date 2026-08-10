@@ -19,6 +19,7 @@ type issueResponse struct {
 	CertPEM    string `json:"cert_pem"`
 	CAChainPEM string `json:"ca_chain_pem"`
 	RenewAfter string `json:"renew_after"`
+	TeamName   string `json:"team_name"`
 }
 
 // renewResponse is POST /v1/mtls/certs/renew.
@@ -26,6 +27,7 @@ type renewResponse struct {
 	CertPEM    string `json:"cert_pem"`
 	CAChainPEM string `json:"ca_chain_pem"`
 	RenewAfter string `json:"renew_after"`
+	TeamName   string `json:"team_name"`
 }
 
 // issuedMaterial is one issuance response in the shape assemble consumes. A
@@ -35,6 +37,8 @@ type issuedMaterial struct {
 	ChainPEM   string
 	Source     Source
 	RenewAfter string
+	// TeamName is cosmetic and may be empty; see Meta.TeamName.
+	TeamName string
 }
 
 // RedeemSetupToken spends a setup token once and returns the credential.
@@ -67,6 +71,7 @@ func (c *Client) RedeemSetupToken(ctx context.Context, token string) (*Material,
 		ChainPEM:   resp.CAChainPEM,
 		Source:     SourceToken,
 		RenewAfter: resp.RenewAfter,
+		TeamName:   resp.TeamName,
 	})
 }
 
@@ -108,12 +113,19 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 	}
 
 	// Source carried from the credential being replaced: a renewal does not change
-	// how the identity was established.
+	// how the identity was established. The team name is carried forward when the
+	// response omits it, because the server resolves it best-effort and a renewal
+	// may refresh the name but must never blank it.
+	teamName := resp.TeamName
+	if teamName == "" {
+		teamName = cur.Meta.TeamName
+	}
 	return c.assemble(kp.key, issuedMaterial{
 		CertPEM:    resp.CertPEM,
 		ChainPEM:   resp.CAChainPEM,
 		Source:     cur.Meta.Source,
 		RenewAfter: resp.RenewAfter,
+		TeamName:   teamName,
 	})
 }
 
@@ -150,6 +162,7 @@ func (c *Client) assemble(key Key, in issuedMaterial) (*Material, error) {
 	meta := Meta{
 		Identity:   ref.Identity,
 		Team:       ref.Team,
+		TeamName:   in.TeamName,
 		Kind:       ref.Kind,
 		SpiffeID:   SpiffeURI(leaf),
 		Source:     in.Source,

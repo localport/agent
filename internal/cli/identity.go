@@ -77,7 +77,7 @@ func runIdentityList(args []string) error {
 		shown++
 
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			ref.Identity, ref.Kind.Label(), ref.Team,
+			ref.Identity, ref.Kind.Label(), m.Meta.DisplayTeam(),
 			m.Meta.Source, humanUntil(now, m.Meta.NotAfter), humanUntil(now, m.Meta.RenewAfter))
 	}
 	if err := w.Flush(); err != nil {
@@ -140,7 +140,11 @@ func runIdentityRenew(args []string) error {
 // printCredential reports what a credential is and where it landed.
 func printCredential(store *identity.Store, ref identity.Ref, meta identity.Meta) {
 	fmt.Fprintf(os.Stderr, "  identity   %s\n", meta.SpiffeID)
-	fmt.Fprintf(os.Stderr, "  team       %s\n", ref.Team)
+	team := ref.Team
+	if meta.TeamName != "" {
+		team = fmt.Sprintf("%s (%s)", meta.TeamName, ref.Team)
+	}
+	fmt.Fprintf(os.Stderr, "  team       %s\n", team)
 	fmt.Fprintf(os.Stderr, "  stored in  %s\n", store.Dir(ref))
 	fmt.Fprintf(os.Stderr, "  expires    %s\n", meta.NotAfter.Format(time.RFC3339))
 }

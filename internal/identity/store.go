@@ -42,8 +42,12 @@ const (
 // APIURL is stored rather than re-derived, so a renewal is never told which
 // control plane issued the credential.
 type Meta struct {
-	Identity   string    `json:"identity"`
-	Team       string    `json:"team"`
+	Identity string `json:"identity"`
+	Team     string `json:"team"`
+	// TeamName labels the team in `localport identity list`. Cosmetic, so a
+	// record without it still loads and renewal refreshes it; the team id from
+	// the certificate is the key. No personal name is stored anywhere here.
+	TeamName   string    `json:"team_name,omitempty"`
 	Kind       Kind      `json:"kind"`
 	SpiffeID   string    `json:"spiffe_id"`
 	Key        KeyRef    `json:"key"`

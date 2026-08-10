@@ -70,6 +70,15 @@ func (r Ref) valid() bool {
 	return true
 }
 
+// DisplayTeam renders the team as `name (id)`, or the id alone when no name is
+// known. The id is what --identity accepts.
+func (m Meta) DisplayTeam() string {
+	if m.TeamName != "" {
+		return fmt.Sprintf("%s (%s)", m.TeamName, m.Team)
+	}
+	return m.Team
+}
+
 // Selector narrows the store to one Ref. Empty fields match anything.
 type Selector struct {
 	Team     string
