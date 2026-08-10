@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -123,6 +124,12 @@ func runIdentityRenew(args []string) error {
 	defer cancel()
 
 	material, err := (&identity.Renewer{Store: store, Ref: ref}).RenewOnce(ctx)
+	if errors.Is(err, identity.ErrRenewalInProgress) {
+		// Not a failure: another process is already renewing, and a second
+		// certificate would only be orphaned.
+		fmt.Fprintf(os.Stderr, "  %s is already being renewed by another process\n", ref)
+		return nil
+	}
 	if err != nil {
 		return err
 	}

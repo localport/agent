@@ -2,7 +2,10 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -31,14 +34,52 @@ type Renewer struct {
 	OnEvent func(string)
 }
 
+// lock takes the credential's renewal lock without blocking. It lives beside
+// the material, so it is scoped to one credential, and the OS releases it if
+// the holder dies.
+func (r *Renewer) lock() (release func(), held bool, err error) {
+	dir := r.Store.Dir(r.Ref)
+	f, err := os.OpenFile(filepath.Join(dir, lockFile), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, false, fmt.Errorf("open renewal lock: %w", err)
+	}
+	held, err = tryLockFile(f)
+	if err != nil || !held {
+		f.Close()
+		return nil, false, err
+	}
+	return func() {
+		_ = unlockFile(f)
+		f.Close()
+	}, true, nil
+}
+
 func (r *Renewer) log(format string, args ...any) {
 	if r.OnEvent != nil {
 		r.OnEvent(fmt.Sprintf(format, args...))
 	}
 }
 
+// ErrRenewalInProgress means another process holds this credential's renewal
+// lock. The caller waits rather than renewing alongside it.
+var ErrRenewalInProgress = errors.New("another process is renewing this credential")
+
 // RenewOnce renews unconditionally and stores the result.
+//
+// One renewal at a time per credential, across processes: a `localport connect`
+// and a cron `localport identity renew` are both legitimate writers, and
+// renewing minutes apart orphans a certificate against the live cap. The
+// in-process guard cannot see another process.
 func (r *Renewer) RenewOnce(ctx context.Context) (*Material, error) {
+	release, held, err := r.lock()
+	if err != nil {
+		return nil, err
+	}
+	if !held {
+		return nil, ErrRenewalInProgress
+	}
+	defer release()
+
 	cur, err := r.Store.Load(r.Ref)
 	if err != nil {
 		return nil, err
@@ -95,6 +136,14 @@ func (r *Renewer) Run(ctx context.Context) {
 		if err != nil {
 			if ctx.Err() != nil {
 				return
+			}
+			// Another writer is producing the certificate this cycle wanted.
+			// Queueing behind it is the burst the lock exists to prevent.
+			if errors.Is(err, ErrRenewalInProgress) {
+				if !sleepCtx(ctx, minInterval) {
+					return
+				}
+				continue
 			}
 			// Still valid: renew_after is two thirds through the life, not the
 			// expiry. A failure is a retry, not a reason to stop presenting it.

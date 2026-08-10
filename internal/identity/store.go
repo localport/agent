@@ -26,6 +26,7 @@ const (
 	certFile = "cert.pem"
 	keyFile  = "key.pem"
 	metaFile = "meta.json"
+	lockFile = ".renew.lock"
 )
 
 // Source is how a credential was obtained. Written to meta.json, so the values

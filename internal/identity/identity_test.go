@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net/url"
 	"os"
@@ -243,6 +245,33 @@ func TestRefRefusesComponentsThatEscapeTheStore(t *testing.T) {
 			t.Errorf("%s: must be refused, not filed under a repaired name", name)
 		}
 	}
+}
+
+func TestRenewalLockAdmitsOneWriter(t *testing.T) {
+	store := &Store{Root: t.TempDir()}
+	ref, err := store.Save(credentialFor(t, "spiffe://team_x.mtls.localport.dev/client/deploy-prod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Renewer{Store: store, Ref: ref}
+
+	release, held, err := r.lock()
+	if err != nil || !held {
+		t.Fatalf("first lock: held=%v err=%v", held, err)
+	}
+	if _, held, err := r.lock(); err != nil || held {
+		t.Fatalf("second lock: held=%v err=%v, want held=false", held, err)
+	}
+	if _, err := r.RenewOnce(context.Background()); !errors.Is(err, ErrRenewalInProgress) {
+		t.Fatalf("RenewOnce while locked = %v, want ErrRenewalInProgress", err)
+	}
+
+	release()
+	release2, held, err := r.lock()
+	if err != nil || !held {
+		t.Fatalf("lock after release: held=%v err=%v", held, err)
+	}
+	release2()
 }
 
 // systemd sets $HOME only for a unit that names a User=, so a service without
