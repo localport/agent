@@ -31,9 +31,21 @@ func openNoFollow(path string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
+	// FILE_SHARE_DELETE is REQUIRED, not incidental.
+	//
+	// Windows refuses to rename or delete a file that another handle has open
+	// without it, and `WritePrivateFileAtomic` installs a renewed credential by
+	// renaming over exactly this path. With FILE_SHARE_READ alone, a reader that
+	// happened to hold the certificate open, the renewal loop re-reading it, a
+	// second `localport connect`, made the rename fail with "Access is denied"
+	// and the renewal silently retried until the certificate expired.
+	//
+	// It is not a weakening: sharing DELETE lets someone who ALREADY has the
+	// access rights replace the file, and the DACL is what decides who that is.
+	// This is the same semantics Unix gives for free.
 	h, err := windows.CreateFile(p,
 		windows.GENERIC_READ,
-		windows.FILE_SHARE_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
 		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,

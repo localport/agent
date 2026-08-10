@@ -11,7 +11,7 @@ import (
 
 // reloadCheckInterval bounds how often a handshake stats the credential.
 // Modification time rather than a watcher: the writer may be this process or a
-// separate command, so the file is the only thing both see.
+// separate `localport identity renew`, so the file is the only thing both see.
 const reloadCheckInterval = time.Second
 
 // Credential is a live view of a stored identity. It hands tls.Config a
