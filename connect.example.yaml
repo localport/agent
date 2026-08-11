@@ -11,10 +11,11 @@ connections:
   # credential here.
   #   gw-01                     a bare identity
   #   <team>/gw-01              narrowed to one team
+  #   <team>/client/gw-01       fully qualified
   - name: postgres
     remote: db.eu.localport.dev:5432
     local_port: "5432"
-    identity: 01kpq7x2/deploy-prod
+    identity: 01kpq7x2/client/deploy-prod
 
   # A credential we did not issue (your own CA) still comes from a file.
   - name: redis

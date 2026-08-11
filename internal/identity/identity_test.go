@@ -156,6 +156,48 @@ func TestSaveWritesKeyMaterialUnreadableByOthers(t *testing.T) {
 	}
 }
 
+// `localport login` and `localport enroll` must resolve to different
+// directories: one replacing the other would swap the principal a running
+// connect presents.
+func TestSignInAndSetupTokenDoNotOverwriteEachOther(t *testing.T) {
+	store := &Store{Root: t.TempDir()}
+
+	machine := credentialFor(t, "spiffe://team_x.mtls.localport.dev/client/deploy-prod")
+	machine.Meta.Source = SourceToken
+	person := credentialFor(t, "spiffe://team_x.mtls.localport.dev/user/0mkppnsc7lsdcv")
+	person.Meta.Source = SourceSSO
+
+	machineRef, err := store.Save(machine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	personRef, err := store.Save(person)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if machineRef == personRef {
+		t.Fatal("a machine setup token and a sign-in resolved to the same credential")
+	}
+
+	refs, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("store holds %d credentials, want 2: %+v", len(refs), refs)
+	}
+	// Both must still be intact and still be themselves.
+	for ref, want := range map[Ref]Source{machineRef: SourceToken, personRef: SourceSSO} {
+		m, err := store.Load(ref)
+		if err != nil {
+			t.Fatalf("Load(%s): %v", ref, err)
+		}
+		if m.Meta.Source != want {
+			t.Fatalf("%s has source %q, want %q", ref, m.Meta.Source, want)
+		}
+	}
+}
+
 func TestResolveRefusesToGuessBetweenIdentities(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 	for _, uri := range []string{
@@ -234,7 +276,7 @@ func TestRefRefusesComponentsThatEscapeTheStore(t *testing.T) {
 	if !base.valid() {
 		t.Fatal("an ordinary ref must be valid")
 	}
-	if got := base.dir(); got != "01kppnsc7lsdcv/deploy-prod" {
+	if got := base.dir(); got != "01kppnsc7lsdcv/client-deploy-prod" {
 		t.Fatalf("dir() = %q; components are used verbatim", got)
 	}
 

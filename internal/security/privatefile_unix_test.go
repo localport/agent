@@ -95,7 +95,7 @@ func TestEnsurePrivateDirRefusesASymlinkedParent(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if err := EnsurePrivateDir(root, filepath.Join(link, "team", "deploy-prod")); err == nil {
+	if err := EnsurePrivateDir(root, filepath.Join(link, "team", "client-deploy")); err == nil {
 		t.Fatal("expected a path through a symlinked parent to be refused")
 	}
 }

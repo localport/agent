@@ -435,15 +435,19 @@ leaves the machine, and stores the result under `~/.localport/identity/`
 (directories `0700`, files `0600`):
 
 ```
-<team>/<identity>/
+<team>/<kind>-<identity>/
   cert.pem    leaf first, then the issuing chain, which is what the agent presents
   key.pem     P-256 private key, generated locally, never transmitted
-  meta.json   identity, team, kind, spiffe_id, source, api_url, serial,
-              not_after and renew_after
+  meta.json   identity, team, team_name, kind, spiffe_id, source, api_url,
+              serial, not_after and renew_after
 ```
 
 **The path and every identity field are read from the CERTIFICATE, never from
 the response body**, so the record and the material beside it cannot disagree.
+Both path components are load-bearing: one machine may hold credentials for
+several teams, and `user` and `client` are separate SPIFFE namespaces that may
+hold the same name, so keying on the team alone would let `localport login` and
+`localport enroll` overwrite each other.
 
 The path carries no control-plane component. Which plane issued a credential is
 recorded as `api_url`, which is where renewal reads it.
@@ -504,7 +508,7 @@ localport login
        <- 428 { "error": "authorization_pending" }   ... keep polling
        <- 200 { cert_pem, ca_chain_pem, identity, team_id, not_after }
 
-  ~/.localport/identity/<team>/<id>/{cert.pem,key.pem,meta.json}
+  ~/.localport/identity/<team>/user-<id>/{cert.pem,key.pem,meta.json}
 ```
 
 `hostname` and `agent_os` describe the MACHINE, not the person. They are what
@@ -544,3 +548,17 @@ Four properties worth knowing:
   holds against an agent of any vintage. The agent never asks either: the
   credential records `source: sso`, and `Renew` refuses before building a
   request.
+
+`localport connect` with no `--pem` and no `--p12` presents this credential.
+When a machine holds several, a SELECTOR picks one:
+
+```
+gw-01                     a bare identity
+<team>/gw-01              narrowed to one team
+<team>/client/gw-01       fully qualified
+```
+
+Two segments are TEAM/identity, never kind/identity. The three-segment form
+exists for one reachable case: a team may hold a `client` and a `user`
+credential under the same name, because the server validates a client identity
+as lowercase alphanumerics and a username is exactly that.

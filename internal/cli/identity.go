@@ -219,10 +219,11 @@ func usageIdentity() {
   ~/.localport/identity/<team>/, one directory per identity, 0700 with keys
   0600. Set LOCALPORT_HOME to keep them elsewhere.
 
-  A SELECTOR names one credential, in either of these forms:
+  A SELECTOR names one credential, in any of these forms:
 
-    gw-01             a bare identity
-    <team>/gw-01      narrowed to one team
+    gw-01                     a bare identity
+    <team>/gw-01              narrowed to one team
+    <team>/client/gw-01       fully qualified
 
   The shortest form that matches exactly one is enough; when several match, the
   error lists the full form of each so it can be pasted back. `+identityEnv+` sets

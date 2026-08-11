@@ -30,7 +30,7 @@ func runConnect(args []string) error {
 		localAddr   = fs.String("local-addr", "127.0.0.1", "local bind address")
 		serverName  = fs.String("server-name", "", "TLS SNI / server name override")
 		configPath  = fs.String("config", "", "path to a connect YAML config")
-		identityArg = fs.String("identity", "", "credential to present: `<identity>` or <team>/<identity>")
+		identityArg = fs.String("identity", "", "credential to present: `<identity>`, <team>/<identity> or <team>/<kind>/<identity>")
 	)
 	// -p and --port both set the local listen port.
 	var localPort string

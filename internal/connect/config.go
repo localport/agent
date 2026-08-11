@@ -26,8 +26,9 @@ type Connection struct {
 	P12Pass     string `yaml:"p12_pass,omitempty"`
 	P12PassFile string `yaml:"p12_pass_file,omitempty"`
 	P12PassEnv  string `yaml:"p12_pass_env,omitempty"`
-	// Identity selects which stored credential to present: `<identity>` or
-	// `<team>/<identity>`. Only needed when the machine holds more than one.
+	// Identity selects which stored credential to present: `<identity>`,
+	// `<team>/<identity>` or `<team>/<kind>/<identity>`. Only needed when the
+	// machine holds more than one.
 	Identity string `yaml:"identity,omitempty"`
 }
 
