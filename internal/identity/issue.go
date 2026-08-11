@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -75,12 +76,21 @@ func (c *Client) RedeemSetupToken(ctx context.Context, token string) (*Material,
 	})
 }
 
+// ErrNotRenewable is a sentinel so callers can tell "never renews" from "renewal
+// failed, retry": the loop backs off on the second and must stop on the first.
+var ErrNotRenewable = errors.New("a sign-in credential does not renew; run `localport login` again")
+
 // Renew exchanges the credential we hold for a fresh one.
 //
 // No bearer token: possession of the current private key is the proof, so the
 // setup token need not be kept. The certificate being replaced stays valid, so
 // rollover overlaps.
 func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
+	// Guarded here because every renewal path converges on this call.
+	if !cur.Meta.Source.Renewable() {
+		return nil, ErrNotRenewable
+	}
+
 	leaf, err := leafOf(cur.CertPEM)
 	if err != nil {
 		return nil, err
@@ -160,16 +170,20 @@ func (c *Client) assemble(key Key, in issuedMaterial) (*Material, error) {
 	}
 
 	meta := Meta{
-		Identity:   ref.Identity,
-		Team:       ref.Team,
-		TeamName:   in.TeamName,
-		Kind:       ref.Kind,
-		SpiffeID:   SpiffeURI(leaf),
-		Source:     in.Source,
-		APIURL:     c.BaseURL,
-		Serial:     leaf.SerialNumber.Text(16),
-		NotAfter:   leaf.NotAfter.UTC(),
-		RenewAfter: parseTimeOr(in.RenewAfter, defaultRenewAfter(leaf.NotBefore, leaf.NotAfter)),
+		Identity: ref.Identity,
+		Team:     ref.Team,
+		TeamName: in.TeamName,
+		Kind:     ref.Kind,
+		SpiffeID: SpiffeURI(leaf),
+		Source:   in.Source,
+		APIURL:   c.BaseURL,
+		Serial:   leaf.SerialNumber.Text(16),
+		NotAfter: leaf.NotAfter.UTC(),
+	}
+	// Only for a source that renews. A sign-in has no deadline at all, and
+	// synthesizing one would invent a schedule the control plane never issued.
+	if in.Source.Renewable() {
+		meta.RenewAfter = parseTimeOr(in.RenewAfter, defaultRenewAfter(leaf.NotBefore, leaf.NotAfter))
 	}
 	return &Material{CertPEM: bundle, Key: key, Meta: meta}, nil
 }

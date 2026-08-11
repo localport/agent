@@ -137,8 +137,16 @@ func identityTLSConfig(ctx context.Context, selector, remote, serverName string)
 	cfg := connect.BaseTLSConfig(remote, serverName)
 	cfg.GetClientCertificate = cred.GetClientCertificate
 
+	meta := cred.Meta()
+	if !meta.Source.Renewable() {
+		// No renewal loop, so say when it ends: otherwise it stops being accepted
+		// mid-session and the far side answers with an opaque TLS refusal.
+		noteSignInExpiry(cred.Ref(), meta)
+		return cfg, "sign-in " + meta.Identity, nil
+	}
+
 	startIdentityRenewal(ctx, store, cred.Ref())
-	return cfg, "identity " + cred.Meta().Identity, nil
+	return cfg, "identity " + meta.Identity, nil
 }
 
 func firstNonEmpty(vals ...string) string {

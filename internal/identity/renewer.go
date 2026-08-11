@@ -137,6 +137,12 @@ func (r *Renewer) Run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
+			// Not retryable, and the wait above never blocks, so retrying would
+			// poll a refusing server flat out.
+			if errors.Is(err, ErrNotRenewable) {
+				r.log("identity: %v", err)
+				return
+			}
 			// Another writer is producing the certificate this cycle wanted.
 			// Queueing behind it is the burst the lock exists to prevent.
 			if errors.Is(err, ErrRenewalInProgress) {

@@ -35,7 +35,22 @@ type Source string
 
 const (
 	SourceToken Source = "token" // setup token, renews itself
+	SourceSSO   Source = "sso"   // `localport login`, short-lived, for a person
 )
+
+// Renewable reports whether a credential from this source may be reissued.
+//
+// A positive allowlist, so an unrecognised source is not renewable. A person's
+// sign-in never is: re-authenticating is the renewal, and the server refuses
+// the request.
+func (s Source) Renewable() bool {
+	switch s {
+	case SourceToken:
+		return true
+	default:
+		return false
+	}
+}
 
 // Meta is the record beside the key material.
 //

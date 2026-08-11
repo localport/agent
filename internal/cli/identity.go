@@ -76,9 +76,13 @@ func runIdentityList(args []string) error {
 		}
 		shown++
 
+		renews := "never"
+		if m.Meta.Source.Renewable() {
+			renews = humanUntil(now, m.Meta.RenewAfter)
+		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			ref.Identity, ref.Kind.Label(), m.Meta.DisplayTeam(),
-			m.Meta.Source, humanUntil(now, m.Meta.NotAfter), humanUntil(now, m.Meta.RenewAfter))
+			m.Meta.Source, humanUntil(now, m.Meta.NotAfter), renews)
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -87,7 +91,7 @@ func runIdentityList(args []string) error {
 	if shown == 0 {
 		if len(refs) == 0 {
 			fmt.Fprintf(os.Stderr, "\n  no credential on this machine\n")
-			fmt.Fprintf(os.Stderr, "  run: localport enroll <TOKEN>\n")
+			fmt.Fprintf(os.Stderr, "  run: localport login, or localport enroll <TOKEN>\n")
 		} else {
 			fmt.Fprintf(os.Stderr, "\n  no credential matches; this machine holds:\n")
 			for _, ref := range refs {
@@ -175,6 +179,21 @@ func resolveAPIURL(flagValue string) string {
 // process. A config with five targets on one credential must not start five
 // loops, which would renew it five times against its live-certificate cap.
 var renewalLoops sync.Map
+
+// signInNotices records which credentials have already had their sign-in expiry
+// reported, so a config naming five targets says it once.
+var signInNotices sync.Map
+
+// noteSignInExpiry says when the sign-in ends and how to get it back.
+func noteSignInExpiry(ref identity.Ref, meta identity.Meta) {
+	if _, seen := signInNotices.LoadOrStore(ref, true); seen {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "  signed in as %s\n", meta.SpiffeID)
+	fmt.Fprintf(os.Stderr, "  sign-in expires %s (%s)\n",
+		meta.NotAfter.Format(time.RFC3339), humanUntil(time.Now(), meta.NotAfter))
+	fmt.Fprintf(os.Stderr, "  it does not renew; run `localport login` again to sign back in\n")
+}
 
 // startIdentityRenewal runs the renewal loop alongside a long-lived command, so
 // a months-long `localport connect` needs no separate timer.

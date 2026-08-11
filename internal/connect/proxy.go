@@ -129,7 +129,8 @@ func friendlyStreamError(remote string, err error) error {
 	case strings.Contains(msg, "tls: certificate expired"),
 		strings.Contains(msg, "tls: expired certificate"):
 		return fmt.Errorf(
-			"%s rejected the certificate as expired. Run `localport identity renew`: %w", remote, err)
+			"%s rejected the certificate as expired. Run `localport login` again for a sign-in,\n"+
+				"  or `localport identity renew` for a machine credential: %w", remote, err)
 	default:
 		return fmt.Errorf("connection to %s ended: %w", remote, err)
 	}

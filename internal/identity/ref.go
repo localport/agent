@@ -11,6 +11,7 @@ import (
 type Kind string
 
 const (
+	KindUser   Kind = "user"
 	KindClient Kind = "client"
 	KindDevice Kind = "device"
 )
@@ -19,6 +20,8 @@ const (
 // the wire values.
 func (k Kind) Label() string {
 	switch k {
+	case KindUser:
+		return "Member"
 	case KindClient:
 		return "Machine"
 	case KindDevice:

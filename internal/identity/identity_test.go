@@ -12,6 +12,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -90,6 +92,10 @@ func TestRefFromCertReadsTheCertificate(t *testing.T) {
 		{
 			"spiffe://team_abc123.mtls.localport.dev/client/deploy-prod",
 			Ref{Team: "team_abc123", Kind: KindClient, Identity: "deploy-prod"},
+		},
+		{
+			"spiffe://team_abc123.mtls.localport.dev/user/0mkppnsc7lsdcv",
+			Ref{Team: "team_abc123", Kind: KindUser, Identity: "0mkppnsc7lsdcv"},
 		},
 		{
 			// A device carries its tunnel between kind and identity.
@@ -244,6 +250,28 @@ func TestRefRefusesComponentsThatEscapeTheStore(t *testing.T) {
 		if ref.valid() {
 			t.Errorf("%s: must be refused, not filed under a repaired name", name)
 		}
+	}
+}
+
+// A sign-in never renews, and the refusal happens BEFORE any request: waiting
+// on the server to say no would spend a round trip to learn something the
+// record already states.
+func TestRenewNeverCallsTheServerForASignInCredential(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+
+	cur := credentialFor(t, "spiffe://team_x.mtls.localport.dev/user/0mkppnsc7lsdcv")
+	cur.Meta.Source = SourceSSO
+
+	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	if _, err := c.Renew(context.Background(), &cur); !errors.Is(err, ErrNotRenewable) {
+		t.Fatalf("Renew of a sign-in = %v, want ErrNotRenewable", err)
+	}
+	if called {
+		t.Fatal("Renew reached the control plane for a credential that cannot renew")
 	}
 }
 

@@ -482,3 +482,65 @@ platform can change without shipping a new agent. The loop runs inside
 `localport connect`; a machine that is not permanently connected should run
 `localport identity renew` from a daily timer instead. The previous certificate
 stays valid until its own expiry, so rollover overlaps.
+
+### Human sign-in (`localport login`)
+
+For a PERSON, not a machine. RFC 8628 device authorization: nothing has to be
+transmitted to this machine beforehand (no token, no team, no identity), which
+is what makes it work over SSH into a jump box, where a browser redirect back to
+localhost does not.
+
+```
+localport login
+  |- P-256 keypair generated LOCALLY
+  `- POST /v1/mtls/device/start  { csr_pem, hostname, agent_os }
+       <- { device_code, user_code, verification_uri,
+            verification_uri_complete, interval, expires_in }
+
+     prints:  Open https://dashboard.localport.io/device?code=HBQX-4T2M
+              or go to https://dashboard.localport.io/device and enter  HBQX-4T2M
+
+  POST /v1/mtls/device/token  { device_code, csr_pem }
+       <- 428 { "error": "authorization_pending" }   ... keep polling
+       <- 200 { cert_pem, ca_chain_pem, identity, team_id, not_after }
+
+  ~/.localport/identity/<team>/<id>/{cert.pem,key.pem,meta.json}
+```
+
+`hostname` and `agent_os` describe the MACHINE, not the person. They are what
+the approval screen shows beside the requesting address, so somebody signing in
+from a laptop and a jump box can tell which one is asking. Both are
+self-asserted and optional, like `agent_version` and `agent_os` on Register:
+nothing on the server gates on either.
+
+Four properties worth knowing:
+
+- **Both URIs are printed, and the prefilled one leads.** `verification_uri_complete`
+  (RFC 8628 §3.3.1) carries the code so the common path is one click; the bare
+  address and the code are printed beside it because that is what works when this
+  is running over SSH and the browser is on a phone. It does not weaken the
+  phishing defence: what catches that is the approval screen showing the
+  requesting IP and what the certificate will reach, and prefilling skips a
+  typing step, not that screen. Nothing auto-submits, and the code stays visible
+  so it can be read aloud and CHECKED against what is on screen.
+
+- **The CSR goes up at START**, and the server pins its hash. The human approves
+  ONE key, and only that key can collect. Sending it at redemption instead would
+  mean they approved key A while key B received the certificate.
+- **Two answers are distinguishable, and both mean "keep going".** `SE021`
+  (RFC 8628 `authorization_pending`) and `SE022` (`slow_down`, add 5 seconds to
+  the interval and continue). Every other refusal, whether unknown, denied,
+  already consumed or expired, is the same opaque message, so a guessed device
+  code cannot be used to map the state of somebody else's sign-in.
+
+  The agent branches on the CODE, never on message text. Codes are stable;
+  wording is not.
+- **A sign-in certificate does not renew.** It lives hours; re-running
+  `localport login` is how a fresh one is obtained. The identity is the person's
+  immutable username, so removing them from the team ends it.
+
+  Enforced on both sides. The control plane refuses
+  `/v1/mtls/certs/renew` for a sign-in certificate, which is the boundary and
+  holds against an agent of any vintage. The agent never asks either: the
+  credential records `source: sso`, and `Renew` refuses before building a
+  request.

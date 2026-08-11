@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -86,6 +87,16 @@ func (e *APIError) Error() string {
 		return fmt.Sprintf("%s: %s (%s)", e.Path, e.Message, e.Code)
 	}
 	return fmt.Sprintf("%s: %s", e.Path, e.Message)
+}
+
+// errorCode returns the control plane's code for err, or "" when err did not
+// come from the control plane. Wrapping-safe.
+func errorCode(err error) string {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Code
+	}
+	return ""
 }
 
 func (c *Client) post(ctx context.Context, path, bearer string, body, out any) error {
