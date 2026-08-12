@@ -45,8 +45,11 @@ type issuedMaterial struct {
 // RedeemSetupToken spends a setup token once and returns the credential.
 //
 // The token is used for this call only and never written to disk; from here the
-// certificate renews itself.
-func (c *Client) RedeemSetupToken(ctx context.Context, token string) (*Material, error) {
+// certificate renews itself. budget bounds how long an UNREACHABLE control plane
+// is waited out, and a refusal is never retried. onWait reports each wait.
+func (c *Client) RedeemSetupToken(
+	ctx context.Context, token string, budget time.Duration, onWait RetryNotice,
+) (*Material, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("setup token required")
 	}
@@ -56,9 +59,12 @@ func (c *Client) RedeemSetupToken(ctx context.Context, token string) (*Material,
 	}
 
 	var resp issueResponse
-	if err := c.post(ctx, "/v1/mtls/certs", token, map[string]string{
-		"csr_pem": string(kp.csrPEM),
-	}, &resp); err != nil {
+	if err := retry(ctx, budget, onWait, func() error {
+		resp = issueResponse{}
+		return c.post(ctx, "/v1/mtls/certs", token, map[string]string{
+			"csr_pem": string(kp.csrPEM),
+		}, &resp)
+	}); err != nil {
 		return nil, err
 	}
 	if resp.CertPEM == "" {
@@ -104,18 +110,23 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 	// bounds replay with no nonce store; the serial binds the signature to the one
 	// certificate it was made for.
 	serial := leaf.SerialNumber.Text(16)
-	digest := renewalDigest(kp.csrDER, time.Now().Unix()/60, serial)
-	sig, err := cur.Key.Sign(rand.Reader, digest, crypto.SHA256)
-	if err != nil {
-		return nil, fmt.Errorf("sign renewal: %w", err)
-	}
 
+	// Re-signed per attempt: a retry crossing a minute boundary must not replay a
+	// stale signature.
 	var resp renewResponse
-	if err := c.post(ctx, "/v1/mtls/certs/renew", "", map[string]string{
-		"cert_pem":  string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})),
-		"csr_pem":   string(kp.csrPEM),
-		"signature": base64.StdEncoding.EncodeToString(sig),
-	}, &resp); err != nil {
+	if err := retry(ctx, DefaultRetryBudget, nil, func() error {
+		digest := renewalDigest(kp.csrDER, time.Now().Unix()/60, serial)
+		sig, signErr := cur.Key.Sign(rand.Reader, digest, crypto.SHA256)
+		if signErr != nil {
+			return fmt.Errorf("sign renewal: %w", signErr)
+		}
+		resp = renewResponse{}
+		return c.post(ctx, "/v1/mtls/certs/renew", "", map[string]string{
+			"cert_pem":  string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})),
+			"csr_pem":   string(kp.csrPEM),
+			"signature": base64.StdEncoding.EncodeToString(sig),
+		}, &resp)
+	}); err != nil {
 		return nil, err
 	}
 	if resp.CertPEM == "" {

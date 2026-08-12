@@ -26,6 +26,8 @@ func runSetup(args []string) error {
 	fs.SetOutput(os.Stderr)
 	token := fs.String("token", "", "setup token (or "+setupTokenEnv+")")
 	apiURL := fs.String("api", "", "control plane base URL (default "+identity.DefaultAPIURL+")")
+	wait := fs.Duration("wait", identity.DefaultRetryBudget,
+		"how long to keep retrying while the control plane is unreachable (0 = one attempt)")
 	fs.Usage = usageSetup
 
 	// The token is accepted as a leading positional, because that is what the
@@ -67,7 +69,11 @@ func runSetup(args []string) error {
 	ctx, cancel := signalCtx()
 	defer cancel()
 
-	material, err := client.RedeemSetupToken(ctx, secret)
+	notice := func(attempt int, in time.Duration, err error) {
+		fmt.Fprintf(os.Stderr, "  control plane unreachable (attempt %d), retrying in %s\n",
+			attempt, in.Round(time.Second))
+	}
+	material, err := client.RedeemSetupToken(ctx, secret, *wait, notice)
 	if err != nil {
 		// The token is single-use and the error may quote the request. Never let
 		// it reach a terminal or a CI log.
@@ -86,7 +92,7 @@ func runSetup(args []string) error {
 }
 
 func usageSetup() {
-	fmt.Fprint(os.Stderr, `Usage: localport setup <TOKEN> [--api <url>]
+	fmt.Fprint(os.Stderr, `Usage: localport setup <TOKEN> [--wait <duration>] [--api <url>]
 
   Redeem a setup token and keep the credential this machine will present to
   reach locked (mTLS) tunnels.
@@ -110,5 +116,10 @@ func usageSetup() {
   Credentials live under ~/.localport/identity/<team>/, one directory per
   identity (0700, keys 0600). Set LOCALPORT_HOME to keep them elsewhere; a
   service with no home directory falls back to a machine-wide state directory.
+
+  --wait covers a box that boots before its network is ready: the command keeps
+  retrying an UNREACHABLE control plane for that long, with backoff. A refused
+  token is not retried at any setting, it fails immediately. Use --wait 0 in CI
+  to make exactly one attempt.
 `)
 }

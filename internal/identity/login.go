@@ -87,11 +87,14 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 	// The CSR goes up at START and the server pins its hash, so the human approves
 	// one key and only that key can collect.
 	var start deviceStartResponse
-	if err := c.post(ctx, "/v1/mtls/device/start", "", map[string]string{
-		"csr_pem":  string(kp.csrPEM),
-		"hostname": hostname(),
-		"agent_os": runtime.GOOS + "/" + runtime.GOARCH,
-	}, &start); err != nil {
+	if err := retry(ctx, DefaultRetryBudget, nil, func() error {
+		start = deviceStartResponse{}
+		return c.post(ctx, "/v1/mtls/device/start", "", map[string]string{
+			"csr_pem":  string(kp.csrPEM),
+			"hostname": hostname(),
+			"agent_os": runtime.GOOS + "/" + runtime.GOARCH,
+		}, &start)
+	}); err != nil {
 		return nil, err
 	}
 	if start.DeviceCode == "" || start.UserCode == "" {
@@ -120,6 +123,10 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Remembered so an expiry caused by an unreachable control plane is
+	// reported as that, not as an unapproved sign-in.
+	var lastUnreachable error
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -128,6 +135,9 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 		}
 
 		if time.Now().After(deadline) {
+			if lastUnreachable != nil {
+				return nil, fmt.Errorf("could not reach the control plane while waiting for approval: %w", lastUnreachable)
+			}
 			return nil, fmt.Errorf("sign-in expired before it was approved; run `localport login` again")
 		}
 
@@ -152,12 +162,18 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 
 		// Branched on the code the SERVER sent, not the status: a proxy answering
 		// 428 for its own reasons must not make the agent poll forever.
-		switch errorCode(err) {
-		case codeSlowDown:
+		switch code := errorCode(err); {
+		case code == codeSlowDown:
+			lastUnreachable = nil
 			interval += slowDownStep
 			ticker.Reset(interval)
-		case codeAuthorizationPending:
+		case code == codeAuthorizationPending:
+			lastUnreachable = nil
 			// Keep waiting.
+		case isRetryable(err):
+			// Unreachable, not refused. The code stays valid for its window, so
+			// keep polling rather than ending a sign-in already approved.
+			lastUnreachable = err
 		default:
 			// A real refusal: unknown, denied, consumed or expired. Terminal.
 			return nil, err

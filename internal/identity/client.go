@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,8 +31,9 @@ const APIURLEnv = "LOCALPORT_API_URL"
 // and its chain are a few kilobytes, and the body is parsed in memory.
 const maxResponseBytes = 1 << 20
 
-// requestTimeout covers one issuance round trip. Long enough for a slow link,
-// short enough that a hung control plane cannot wedge the caller.
+// requestTimeout covers one issuance or renewal round trip. Long enough for a
+// slow link, short enough that a hung control plane cannot wedge the renewal
+// loop.
 const requestTimeout = 60 * time.Second
 
 // Client talks to the control plane's public mTLS credential endpoints.
@@ -77,6 +80,9 @@ type APIError struct {
 	Code string
 	// Message is the human-readable text.
 	Message string
+	// retryAfter is the server's Retry-After, 0 when absent. Read through
+	// RetryAfter() so that convention has one reader.
+	retryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -97,6 +103,109 @@ func errorCode(err error) string {
 		return apiErr.Code
 	}
 	return ""
+}
+
+// RetryAfter is how long the server asked us to wait, and whether it asked.
+func (e *APIError) RetryAfter() (time.Duration, bool) {
+	return e.retryAfter, e.retryAfter > 0
+}
+
+// isRetryable reports whether waiting could change the answer. Transport
+// failures, 5xx and 429 are retried; every other 4xx is a refusal.
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= 500
+	}
+	// No status at all: dial, DNS, TLS, timeout, reset, EOF mid-body.
+	// Cancellation is not retried; the caller asked us to stop.
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+const (
+	// retryBaseDelay and retryMaxDelay bound the exponential backoff.
+	retryBaseDelay = 2 * time.Second
+	retryMaxDelay  = 30 * time.Second
+
+	// DefaultRetryBudget bounds how long a credential call waits out an
+	// unreachable control plane. `--wait` extends it.
+	DefaultRetryBudget = 60 * time.Second
+)
+
+// RetryNotice reports one wait before the next attempt. Optional.
+type RetryNotice func(attempt int, wait time.Duration, err error)
+
+// retry runs fn until it succeeds, hits a terminal error, or spends the budget.
+// Waits carry full jitter so agents recovering from one outage do not retry in
+// lockstep. A zero budget makes exactly one attempt.
+func retry(ctx context.Context, budget time.Duration, onWait RetryNotice, fn func() error) error {
+	deadline := time.Now().Add(budget)
+	delay := retryBaseDelay
+
+	for attempt := 1; ; attempt++ {
+		err := fn()
+		if err == nil || !isRetryable(err) {
+			return err
+		}
+
+		wait := jitter(delay)
+		// Retry-After wins, clamped below to the remaining budget so a bad
+		// value cannot park the agent.
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			if asked, ok := apiErr.RetryAfter(); ok {
+				wait = asked
+			}
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || wait > remaining {
+			return err
+		}
+
+		if onWait != nil {
+			onWait(attempt, wait, err)
+		}
+		if !sleepCtx(ctx, wait) {
+			return ctx.Err()
+		}
+
+		if delay *= 2; delay > retryMaxDelay {
+			delay = retryMaxDelay
+		}
+	}
+}
+
+// jitter returns a uniformly random duration in [0, d]. math/rand: this spreads
+// retries and is not a secret.
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	return time.Duration(mrand.Int64N(int64(d)))
+}
+
+// parseRetryAfter reads RFC 9110 §10.2.3: delay-seconds or an HTTP date.
+// Anything else yields zero and the caller keeps its own backoff.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 func (c *Client) post(ctx context.Context, path, bearer string, body, out any) error {
@@ -124,7 +233,11 @@ func (c *Client) post(ctx context.Context, path, bearer string, body, out any) e
 		return fmt.Errorf("read %s response: %w", path, err)
 	}
 	if resp.StatusCode >= 300 {
-		apiErr := &APIError{Path: path, Status: resp.StatusCode}
+		apiErr := &APIError{
+			Path:       path,
+			Status:     resp.StatusCode,
+			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
 		var env errorEnvelope
 		if json.Unmarshal(raw, &env) == nil {
 			apiErr.Code = env.Code

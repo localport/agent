@@ -562,3 +562,35 @@ Two segments are TEAM/identity, never kind/identity. The three-segment form
 exists for one reachable case: a team may hold a `client` and a `user`
 credential under the same name, because the server validates a client identity
 as lowercase alphanumerics and a username is exactly that.
+
+The signature is recomputed on every ATTEMPT rather than once, because the digest
+is bound to a minute bucket: a retry that crosses a minute boundary must re-sign,
+or it replays a signature the server no longer accepts.
+
+### When the control plane cannot be reached
+
+A credential call that fails because nothing answered is retried; one that fails
+because it was REFUSED is not. The distinction is the whole policy:
+
+| condition | behavior |
+|---|---|
+| transport failure (dial, DNS, TLS, timeout, reset, EOF) | retry |
+| `5xx` | retry |
+| `429` | retry, honoring `Retry-After` |
+| any other `4xx` | terminal, immediately |
+
+A refused credential stays refused however long the agent waits, and repeating
+the request only spends request quota, so a refusal is never retried.
+
+Waits carry full jitter, so many agents recovering from one outage do not retry
+in lockstep. Backoff runs 2s to 30s inside a budget of 60s by default.
+`localport setup --wait <duration>` extends the budget for a box that boots
+before its network is ready, and `--wait 0` makes exactly one attempt for CI.
+**`--wait` applies only to retryable conditions.** A bad token fails at once
+whatever it is set to.
+
+The sign-in poll is more patient. A transport failure while waiting for approval
+does not end the sign-in: the code stays valid for its whole window and the poll
+keeps its `expires_in` deadline. If it does expire after a run of transport
+failures, the error says the control plane was unreachable rather than that the
+sign-in was never approved.
