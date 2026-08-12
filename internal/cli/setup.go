@@ -11,22 +11,22 @@ import (
 	"github.com/localport/agent/internal/security"
 )
 
-// enrollTokenEnv keeps the setup token off the command line. An argument is
+// setupTokenEnv keeps the setup token off the command line. An argument is
 // visible in shell history and in `ps` to every local account, which for a
 // single-use credential on a provisioning run is exactly the wrong place.
-const enrollTokenEnv = "LOCALPORT_ENROLL_TOKEN"
+const setupTokenEnv = "LOCALPORT_SETUP_TOKEN"
 
-// `localport enroll <TOKEN>` redeems a setup token and keeps the credential.
+// `localport setup <TOKEN>` redeems a setup token and keeps the credential.
 //
 // This is the once-per-machine command. Everything after it is automatic: the
 // certificate renews itself, so there is no long-lived secret left on the box
 // and nothing to rotate by hand.
-func runEnroll(args []string) error {
-	fs := flag.NewFlagSet("enroll", flag.ContinueOnError)
+func runSetup(args []string) error {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	token := fs.String("token", "", "setup token (or "+enrollTokenEnv+")")
+	token := fs.String("token", "", "setup token (or "+setupTokenEnv+")")
 	apiURL := fs.String("api", "", "control plane base URL (default "+identity.DefaultAPIURL+")")
-	fs.Usage = usageEnroll
+	fs.Usage = usageSetup
 
 	// The token is accepted as a leading positional, because that is what the
 	// dashboard shows.
@@ -44,15 +44,15 @@ func runEnroll(args []string) error {
 
 	secret := positional
 	if secret == "" {
-		resolved, err := security.ResolveOptionalToken(*token, enrollTokenEnv)
+		resolved, err := security.ResolveOptionalToken(*token, setupTokenEnv)
 		if err != nil {
 			return err
 		}
 		secret = resolved
 	}
 	if secret == "" {
-		usageEnroll()
-		return fmt.Errorf("setup token required (argument, --token, or %s)", enrollTokenEnv)
+		usageSetup()
+		return fmt.Errorf("setup token required (argument, --token, or %s)", setupTokenEnv)
 	}
 
 	client, err := identity.NewClient(resolveAPIURL(*apiURL))
@@ -78,15 +78,15 @@ func runEnroll(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "\n  enrolled\n")
+	fmt.Fprintf(os.Stderr, "\n  set up\n")
 	printCredential(store, ref, material.Meta)
 	fmt.Fprintf(os.Stderr, "  renews     %s\n", material.Meta.RenewAfter.Format(time.RFC3339))
 	fmt.Fprintf(os.Stderr, "\n  next: localport connect https://<device>.<region>.localport.dev -p 3001\n")
 	return nil
 }
 
-func usageEnroll() {
-	fmt.Fprint(os.Stderr, `Usage: localport enroll <TOKEN> [--api <url>]
+func usageSetup() {
+	fmt.Fprint(os.Stderr, `Usage: localport setup <TOKEN> [--api <url>]
 
   Redeem a setup token and keep the credential this machine will present to
   reach locked (mTLS) tunnels.
@@ -96,15 +96,15 @@ func usageEnroll() {
   renews itself from then on, so there is no long-lived secret to rotate and no
   certificate file to copy around.
 
-    localport enroll lps_...
+    localport setup lps_...
     localport connect https://gw-01.eu.localport.dev -p 3001
 
   The token is single-use. Prefer the environment over an argument, which is
   visible in shell history and to "ps":
 
-    LOCALPORT_ENROLL_TOKEN=lps_... localport enroll
+    LOCALPORT_SETUP_TOKEN=lps_... localport setup
 
-  LOCALPORT_ENROLL_TOKEN_FILE names a file to read it from instead, which is
+  LOCALPORT_SETUP_TOKEN_FILE names a file to read it from instead, which is
   what systemd LoadCredential= and docker secrets provide.
 
   Credentials live under ~/.localport/identity/<team>/, one directory per

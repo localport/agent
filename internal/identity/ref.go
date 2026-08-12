@@ -34,7 +34,7 @@ func (k Kind) Valid() bool {
 // Both components are load-bearing. Team, because one machine legitimately holds
 // credentials for several. Kind, because `user` and `client` may hold the same
 // identity string, so keying on team alone lets `localport login` and
-// `localport enroll` overwrite each other.
+// `localport setup` overwrite each other.
 //
 // No control-plane component: which plane issued a credential is recorded in
 // Meta.APIURL, which is what renewal reads.

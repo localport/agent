@@ -1,6 +1,6 @@
 connections:
   # With no `bundle` and no `p12`, the credential this machine already holds is
-  # presented (see `localport enroll`). This is the intended path: nothing to
+  # presented (see `localport setup`). This is the intended path: nothing to
   # copy, and it renews itself.
   - name: gateway
     remote: gw-01.eu.localport.dev:443

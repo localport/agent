@@ -156,7 +156,7 @@ func TestSaveWritesKeyMaterialUnreadableByOthers(t *testing.T) {
 	}
 }
 
-// `localport login` and `localport enroll` must resolve to different
+// `localport login` and `localport setup` must resolve to different
 // directories: one replacing the other would swap the principal a running
 // connect presents.
 func TestSignInAndSetupTokenDoNotOverwriteEachOther(t *testing.T) {

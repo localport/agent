@@ -10,7 +10,7 @@ import (
 
 // `localport login` signs a PERSON in and returns a short-lived certificate.
 //
-// The machine counterpart is `localport enroll`, which spends one token and then
+// The machine counterpart is `localport setup`, which spends one token and then
 // renews itself. There is no renewal loop here. Re-running the command is how a
 // person gets a fresh certificate.
 //
@@ -83,6 +83,6 @@ Flags:
   --api <url>   control plane base URL (advanced)
 
 The certificate expires in hours. Run this again when it does.
-For a machine that should renew itself, use `+"`localport enroll`"+` instead.
+For a machine that should renew itself, use `+"`localport setup`"+` instead.
 `)
 }

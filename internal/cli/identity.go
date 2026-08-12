@@ -27,6 +27,8 @@ func runIdentity(args []string) error {
 		return runIdentityList(args[1:])
 	case "renew":
 		return runIdentityRenew(args[1:])
+	case "remove":
+		return runIdentityRemove(args[1:])
 	case "help", "--help", "-h":
 		usageIdentity()
 		return nil
@@ -91,7 +93,7 @@ func runIdentityList(args []string) error {
 	if shown == 0 {
 		if len(refs) == 0 {
 			fmt.Fprintf(os.Stderr, "\n  no credential on this machine\n")
-			fmt.Fprintf(os.Stderr, "  run: localport login, or localport enroll <TOKEN>\n")
+			fmt.Fprintf(os.Stderr, "  run: localport login, or localport setup <TOKEN>\n")
 		} else {
 			fmt.Fprintf(os.Stderr, "\n  no credential matches; this machine holds:\n")
 			for _, ref := range refs {
@@ -138,6 +140,45 @@ func runIdentityRenew(args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "  renewed %s, valid until %s\n", ref, material.Meta.NotAfter.Format(time.RFC3339))
+	return nil
+}
+
+// runIdentityRemove deletes a credential from this machine.
+func runIdentityRemove(args []string) error {
+	fs := flag.NewFlagSet("identity remove", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = usageIdentity
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		usageIdentity()
+		return fmt.Errorf("identity remove: name exactly one credential")
+	}
+
+	store, err := identity.DefaultStore()
+	if err != nil {
+		return err
+	}
+	// Requires an explicit selector. No "remove the only one" convenience:
+	// deleting a credential must not happen because of where a command was run.
+	sel, err := identity.ParseSelector(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	ref, err := store.Resolve(sel)
+	if err != nil {
+		return err
+	}
+
+	dir := store.Dir(ref)
+	if err := store.Remove(ref); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "  removed %s\n", ref)
+	fmt.Fprintf(os.Stderr, "  deleted %s\n", dir)
+	// Removing the file does not revoke. Say so, or the operator assumes it did.
+	fmt.Fprintf(os.Stderr, "\n  the certificate is still valid until it is revoked in the dashboard\n")
 	return nil
 }
 
@@ -210,12 +251,13 @@ func startIdentityRenewal(ctx context.Context, store *identity.Store, ref identi
 }
 
 func usageIdentity() {
-	fmt.Fprint(os.Stderr, `Usage: localport identity list  [--identity <selector>]
-       localport identity renew [--identity <selector>]
+	fmt.Fprint(os.Stderr, `Usage: localport identity list   [--identity <selector>]
+       localport identity renew  [--identity <selector>]
+       localport identity remove <selector>
 
   Inspect and manage the credentials this machine holds.
 
-  Credentials arrive from "localport enroll <TOKEN>". They live under
+  Credentials arrive from "localport setup <TOKEN>". They live under
   ~/.localport/identity/<team>/, one directory per identity, 0700 with keys
   0600. Set LOCALPORT_HOME to keep them elsewhere.
 
@@ -234,5 +276,7 @@ func usageIdentity() {
   renew   force a renewal now. Renewal normally happens on its own inside
           "localport connect"; run this from a daily timer for a machine that is
           not always connected.
+  remove  delete a credential from THIS MACHINE. It does not revoke anything:
+          the certificate stays valid until it is revoked in the dashboard.
 `)
 }

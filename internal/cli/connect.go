@@ -290,12 +290,12 @@ func usageConnect(fs *flag.FlagSet) {
   Credentials. With no flag, the identity this machine holds is used, so there
   is no file to copy around. Supply a file only for a credential we did not
   issue:
-    (none)              the stored identity (localport enroll <TOKEN>)
+    (none)              the stored identity (localport setup <TOKEN>)
     --pem               PEM file with client cert + key + tunnel CA
     --p12               PKCS#12 archive (password via --p12-pass-env / -file)
 
   Examples:
-    localport enroll lps_...           # once per machine
+    localport setup lps_...           # once per machine
     localport connect https://de8yp41s.eu.localport.dev -p 3001
 
     localport connect https://de8yp41s.eu.localport.dev --pem client.pem -p 3001

@@ -153,6 +153,20 @@ func (s *Store) List() ([]Ref, error) {
 	return refs, nil
 }
 
+// Remove deletes a credential's directory. LOCAL ONLY: the certificate stays
+// valid until it is revoked. Callers must say so, or an operator reads the
+// deletion as a withdrawal of access.
+func (s *Store) Remove(ref Ref) error {
+	dir := s.dir(ref)
+	if _, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("no credential at %s: %w", dir, err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove credential %s: %w", ref, err)
+	}
+	return nil
+}
+
 // Resolve picks the one credential a selector names. Ambiguity is an error
 // rather than a guess: the wrong identity surfaces as a refused handshake, far
 // from the choice that caused it.

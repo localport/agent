@@ -429,7 +429,7 @@ agent is not told why the far side refused, and does not guess.
 
 ### Stored identity
 
-A credential file is not the intended path. `localport enroll <TOKEN>` spends a
+A credential file is not the intended path. `localport setup <TOKEN>` spends a
 single-use setup token against the control plane, keeps a private key that never
 leaves the machine, and stores the result under `~/.localport/identity/`
 (directories `0700`, files `0600`):
@@ -447,7 +447,7 @@ the response body**, so the record and the material beside it cannot disagree.
 Both path components are load-bearing: one machine may hold credentials for
 several teams, and `user` and `client` are separate SPIFFE namespaces that may
 hold the same name, so keying on the team alone would let `localport login` and
-`localport enroll` overwrite each other.
+`localport setup` overwrite each other.
 
 The path carries no control-plane component. Which plane issued a credential is
 recorded as `api_url`, which is where renewal reads it.
