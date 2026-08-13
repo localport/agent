@@ -13,6 +13,7 @@ import (
 
 	"github.com/localport/agent/internal/connect"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/security"
 )
 
 const defaultP12PasswordEnv = "LOCALPORT_P12_PASSWORD"
@@ -31,6 +32,8 @@ func runConnect(args []string) error {
 		serverName  = fs.String("server-name", "", "TLS SNI / server name override")
 		configPath  = fs.String("config", "", "path to a connect YAML config")
 		identityArg = fs.String("identity", "", "credential to present: `<identity>`, <team>/<identity> or <team>/<kind>/<identity>")
+		audience    = fs.String("audience", "", "OIDC audience for a CI workload identity (or "+identity.AudienceEnv+")")
+		apiURL      = fs.String("api", "", "control plane base URL (CI identity only; default "+identity.DefaultAPIURL+")")
 	)
 	// -p and --port both set the local listen port.
 	var localPort string
@@ -72,11 +75,17 @@ func runConnect(args []string) error {
 		return err
 	}
 
+	// Refused rather than ranked. Both name a credential, and silently preferring
+	// one presents a principal the caller did not ask for.
+	if *audience != "" && (*pemFile != "" || *p12File != "") {
+		return fmt.Errorf("--audience uses the CI platform's own identity, so it cannot be combined with --pem or --p12")
+	}
+
 	// Decided BEFORE the signal handler is installed, because deciding it may
 	// PROMPT: a blocking read on stdin does not unblock on context cancellation,
 	// so Ctrl-C at the prompt would leave the process hung.
 	var chosen *identity.Ref
-	if *pemFile == "" && *p12File == "" {
+	if *pemFile == "" && *p12File == "" && *audience == "" && os.Getenv(identity.AudienceEnv) == "" {
 		store, storeErr := identity.DefaultStore()
 		if storeErr != nil {
 			return storeErr
@@ -95,10 +104,15 @@ func runConnect(args []string) error {
 		tlsCfg *tls.Config
 		source string
 	)
-	if *pemFile == "" && *p12File == "" {
+	switch {
+	case *audience != "" || (*pemFile == "" && *p12File == "" && os.Getenv(identity.AudienceEnv) != ""):
+		// CI: the platform mints the credential, we exchange it for a short-lived
+		// certificate held IN MEMORY. Nothing on disk, nothing to rotate.
+		tlsCfg, source, err = workloadTLSConfig(ctx, *audience, *apiURL, remote, *serverName)
+	case *pemFile == "" && *p12File == "":
 		// No credential file named: present the identity this machine holds.
 		tlsCfg, source, err = identityTLSConfig(ctx, *chosen, remote, *serverName)
-	} else {
+	default:
 		// The password is only resolved for --p12. Reading it on the --pem path
 		// would fail a PEM connect on a box where LOCALPORT_P12_PASSWORD happens
 		// to be set, over a flag the caller never passed.
@@ -161,6 +175,38 @@ func identityTLSConfig(ctx context.Context, ref identity.Ref, remote, serverName
 
 	startIdentityRenewal(ctx, store, cred.Ref())
 	return cfg, "identity " + meta.Identity, nil
+}
+
+// workloadTLSConfig exchanges the CI platform's token for a certificate and
+// keeps it in memory. No file is written and no renewal loop starts: the
+// certificate is scoped to the life of this process.
+func workloadTLSConfig(ctx context.Context, audience, apiURL, remote, serverName string) (*tls.Config, string, error) {
+	if audience == "" {
+		audience = strings.TrimSpace(os.Getenv(identity.AudienceEnv))
+	}
+
+	token, err := identity.FetchWorkloadToken(ctx, audience)
+	if err != nil {
+		return nil, "", err
+	}
+	client, err := identity.NewClient(resolveAPIURL(apiURL))
+	if err != nil {
+		return nil, "", err
+	}
+	material, err := client.ExchangeWorkloadToken(ctx, token)
+	if err != nil {
+		// The platform token is a bearer credential for its few minutes; keep it
+		// out of any log the CI system captures.
+		return nil, "", security.SanitizeError(err, token)
+	}
+
+	cert, err := material.TLSCertificate()
+	if err != nil {
+		return nil, "", fmt.Errorf("load workload certificate: %w", err)
+	}
+	cfg := connect.BaseTLSConfig(remote, serverName)
+	cfg.Certificates = []tls.Certificate{*cert}
+	return cfg, "ci identity " + material.Meta.Identity, nil
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -314,6 +360,7 @@ func usageConnect(fs *flag.FlagSet) {
   is no file to copy around. Supply a file only for a credential we did not
   issue:
     (none)              the stored identity (localport setup <TOKEN>)
+    --audience          CI: the pipeline's own OIDC identity, no secret at all
     --pem               PEM file with client cert + key + tunnel CA
     --p12               PKCS#12 archive (password via --p12-pass-env / -file)
 
@@ -326,6 +373,16 @@ func usageConnect(fs *flag.FlagSet) {
     LOCALPORT_P12_PASSWORD=… \
       localport connect https://de8yp41s.eu.localport.dev --p12 client.p12 -p 3001
     localport connect --config connect.yaml   # many targets at once
+
+  From CI, with nothing stored anywhere. On GitHub Actions add
+  "permissions: { id-token: write }" to the job; the certificate is obtained
+  from the runner's own identity and kept in memory:
+
+    localport connect tcp://gw-01.eu.localport.dev:22 \
+      --audience lpa_... -p 2222
+
+  Other platforms: put the token in LOCALPORT_OIDC_TOKEN and the audience in
+  LOCALPORT_OIDC_AUDIENCE.
 
 Flags:
 `)

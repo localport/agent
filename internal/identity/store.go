@@ -35,6 +35,7 @@ type Source string
 
 const (
 	SourceToken Source = "token" // setup token, renews itself
+	SourceOIDC  Source = "oidc"  // CI workload identity, held in memory
 	SourceSSO   Source = "sso"   // `localport login`, short-lived, for a person
 )
 
@@ -45,7 +46,7 @@ const (
 // the request.
 func (s Source) Renewable() bool {
 	switch s {
-	case SourceToken:
+	case SourceToken, SourceOIDC:
 		return true
 	default:
 		return false

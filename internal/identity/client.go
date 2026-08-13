@@ -209,6 +209,18 @@ func parseRetryAfter(v string) time.Duration {
 }
 
 func (c *Client) post(ctx context.Context, path, bearer string, body, out any) error {
+	header := ""
+	if bearer != "" {
+		header = "Authorization"
+		bearer = "Bearer " + bearer
+	}
+	return c.postWithHeader(ctx, path, header, bearer, body, out)
+}
+
+// postWithHeader is the shared request path. Only the credential header differs:
+// `Authorization: Bearer <secret>` for a setup token, `X-Workload-Token` for a
+// platform-minted one.
+func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue string, body, out any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("encode request: %w", err)
@@ -218,8 +230,8 @@ func (c *Client) post(ctx context.Context, path, bearer string, body, out any) e
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
+	if credHeader != "" && credValue != "" {
+		req.Header.Set(credHeader, credValue)
 	}
 
 	resp, err := c.HTTP.Do(req)
