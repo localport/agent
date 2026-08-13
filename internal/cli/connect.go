@@ -72,6 +72,22 @@ func runConnect(args []string) error {
 		return err
 	}
 
+	// Decided BEFORE the signal handler is installed, because deciding it may
+	// PROMPT: a blocking read on stdin does not unblock on context cancellation,
+	// so Ctrl-C at the prompt would leave the process hung.
+	var chosen *identity.Ref
+	if *pemFile == "" && *p12File == "" {
+		store, storeErr := identity.DefaultStore()
+		if storeErr != nil {
+			return storeErr
+		}
+		ref, resolveErr := resolveCredential(store, firstNonEmpty(*identityArg, os.Getenv(identityEnv)), true)
+		if resolveErr != nil {
+			return fmt.Errorf("%w\n  (or pass a credential file with --pem / --p12)", resolveErr)
+		}
+		chosen = &ref
+	}
+
 	ctx, cancel := signalCtx()
 	defer cancel()
 
@@ -81,7 +97,7 @@ func runConnect(args []string) error {
 	)
 	if *pemFile == "" && *p12File == "" {
 		// No credential file named: present the identity this machine holds.
-		tlsCfg, source, err = identityTLSConfig(ctx, firstNonEmpty(*identityArg, os.Getenv(identityEnv)), remote, *serverName)
+		tlsCfg, source, err = identityTLSConfig(ctx, *chosen, remote, *serverName)
 	} else {
 		// The password is only resolved for --p12. Reading it on the --pem path
 		// would fail a PEM connect on a box where LOCALPORT_P12_PASSWORD happens
@@ -117,16 +133,14 @@ func runConnect(args []string) error {
 // certificate comes through a CALLBACK rather than being copied into the config,
 // so a renewal by this process or by `localport identity renew` is picked up on
 // the next handshake.
-func identityTLSConfig(ctx context.Context, selector, remote, serverName string) (*tls.Config, string, error) {
+func identityTLSConfig(ctx context.Context, ref identity.Ref, remote, serverName string) (*tls.Config, string, error) {
 	store, err := identity.DefaultStore()
 	if err != nil {
 		return nil, "", err
 	}
-	sel, err := identity.ParseSelector(selector)
-	if err != nil {
-		return nil, "", err
-	}
-	cred, err := identity.Open(store, sel)
+	// Opened by exact Ref: resolveCredential is the one place precedence and
+	// ambiguity are decided.
+	cred, err := identity.OpenRef(store, ref)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w\n  (or pass a credential file with --pem / --p12)", err)
 	}
@@ -163,6 +177,10 @@ func runConnectFromConfig(path string) error {
 	if err != nil {
 		return err
 	}
+	store, err := identity.DefaultStore()
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := signalCtx()
 	defer cancel()
@@ -181,7 +199,12 @@ func runConnectFromConfig(path string) error {
 
 		var tlsCfg *tls.Config
 		if c.UsesIdentity() {
-			tlsCfg, _, err = identityTLSConfig(ctx, c.Identity, remote, "")
+			// NEVER interactive: this loop builds several connections, so prompting
+			// would ask once per entry.
+			var ref identity.Ref
+			if ref, err = resolveCredential(store, c.Identity, false); err == nil {
+				tlsCfg, _, err = identityTLSConfig(ctx, ref, remote, "")
+			}
 		} else {
 			var password string
 			if c.P12 != "" {

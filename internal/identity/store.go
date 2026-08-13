@@ -186,7 +186,7 @@ func (s *Store) Resolve(sel Selector) (Ref, error) {
 		return found[0], nil
 	case 0:
 		if len(all) == 0 {
-			return Ref{}, fmt.Errorf("no credential on this machine")
+			return Ref{}, fmt.Errorf("no credential on this machine (run: localport login, or localport setup <TOKEN>)")
 		}
 		return Ref{}, fmt.Errorf("no credential matches; this machine holds:\n%s", indentRefs(all))
 	default:

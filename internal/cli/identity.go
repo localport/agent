@@ -117,11 +117,9 @@ func runIdentityRenew(args []string) error {
 	if err != nil {
 		return err
 	}
-	sel, err := identity.ParseSelector(firstNonEmpty(*selector, os.Getenv(identityEnv)))
-	if err != nil {
-		return err
-	}
-	ref, err := store.Resolve(sel)
+	// Never interactive: a renewal runs from a timer as often as from a
+	// terminal, and a prompt there hangs the timer.
+	ref, err := resolveCredential(store, firstNonEmpty(*selector, os.Getenv(identityEnv)), false)
 	if err != nil {
 		return err
 	}
@@ -162,11 +160,7 @@ func runIdentityRemove(args []string) error {
 	}
 	// Requires an explicit selector. No "remove the only one" convenience:
 	// deleting a credential must not happen because of where a command was run.
-	sel, err := identity.ParseSelector(fs.Arg(0))
-	if err != nil {
-		return err
-	}
-	ref, err := store.Resolve(sel)
+	ref, err := resolveCredential(store, fs.Arg(0), false)
 	if err != nil {
 		return err
 	}
