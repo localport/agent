@@ -625,3 +625,10 @@ one.
 ephemeral; a certificate that outlives the job is one nobody cleans up, and a job
 that outruns its certificate should fail loudly rather than quietly extend a
 credential the pipeline never intended to hold.
+
+A sign-in carries **no `renew_after`**: the device flow sends none and the agent
+synthesizes none, so the two-thirds fallback applies only to credentials that
+renew. The field is omitted from `meta.json` rather than written as a zero time.
+Go's zero instant serializes as `0001-01-01T00:00:00Z`, which looks like a value,
+reads as a corrupt record, and is in the past, so anything scheduling off it
+would fire immediately and keep firing.

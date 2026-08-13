@@ -79,8 +79,8 @@ func runIdentityList(args []string) error {
 		shown++
 
 		renews := "never"
-		if m.Meta.Source.Renewable() {
-			renews = humanUntil(now, m.Meta.RenewAfter)
+		if due, ok := m.Meta.NextRenewal(); ok {
+			renews = humanUntil(now, due)
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			ref.Identity, ref.Kind.Label(), m.Meta.DisplayTeam(),

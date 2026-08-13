@@ -86,7 +86,9 @@ func runSetup(args []string) error {
 
 	fmt.Fprintf(os.Stderr, "\n  set up\n")
 	printCredential(store, ref, material.Meta)
-	fmt.Fprintf(os.Stderr, "  renews     %s\n", material.Meta.RenewAfter.Format(time.RFC3339))
+	if due, renews := material.Meta.NextRenewal(); renews {
+		fmt.Fprintf(os.Stderr, "  renews     %s\n", due.Format(time.RFC3339))
+	}
 	fmt.Fprintf(os.Stderr, "\n  next: localport connect https://<device>.<region>.localport.dev -p 3001\n")
 	return nil
 }

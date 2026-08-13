@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -342,6 +343,46 @@ func TestRenewalLockAdmitsOneWriter(t *testing.T) {
 		t.Fatalf("lock after release: held=%v err=%v", held, err)
 	}
 	release2()
+}
+
+// A stored record must never carry a timestamp that means "no value".
+//
+// Go's zero time is a real instant, so a sentinel serialises as
+// "0001-01-01T00:00:00Z": a date that looks like data, reads as a corrupt
+// record, and is in the past, so anything scheduling off it fires immediately
+// and keeps firing.
+func TestStoredMetadataNeverCarriesAZeroTimestamp(t *testing.T) {
+	store := &Store{Root: t.TempDir()}
+	cred := credentialFor(t, "spiffe://team_x.mtls.localport.dev/user/0mkppnsc7lsdcv")
+	cred.Meta.Source = SourceSSO
+
+	ref, err := store.Save(cred)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(store.Dir(ref), metaFile))
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	if bytes.Contains(raw, []byte("0001-01-01")) {
+		t.Fatalf("meta.json carries a zero timestamp:\n%s", raw)
+	}
+	// Absent, not present-and-empty: a sign-in has no renewal at all.
+	if bytes.Contains(raw, []byte("renew_after")) {
+		t.Fatalf("a credential that does not renew must omit renew_after:\n%s", raw)
+	}
+
+	loaded, err := store.Load(ref)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, renews := loaded.Meta.NextRenewal(); renews {
+		t.Fatal("a sign-in must report that it does not renew")
+	}
+	if loaded.Meta.NotAfter.IsZero() {
+		t.Fatal("expiry must be derived from the certificate, not left to the caller")
+	}
 }
 
 // systemd sets $HOME only for a unit that names a User=, so a service without

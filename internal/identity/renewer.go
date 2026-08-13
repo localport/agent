@@ -115,7 +115,14 @@ func (r *Renewer) Run(ctx context.Context) {
 			continue
 		}
 
-		if wait := time.Until(cur.Meta.RenewAfter); wait > 0 {
+		// Callers only start this loop for a renewable source, so an absent
+		// deadline is a record disagreeing with itself. Stop rather than renew on
+		// a missing field.
+		due, ok := cur.Meta.NextRenewal()
+		if !ok {
+			return
+		}
+		if wait := time.Until(due); wait > 0 {
 			if !sleepCtx(ctx, min(wait, maxSleep)) {
 				return
 			}

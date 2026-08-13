@@ -63,16 +63,34 @@ type Meta struct {
 	// TeamName labels the team in `localport identity list`. Cosmetic, so a
 	// record without it still loads and renewal refreshes it; the team id from
 	// the certificate is the key. No personal name is stored anywhere here.
-	TeamName   string    `json:"team_name,omitempty"`
-	Kind       Kind      `json:"kind"`
-	SpiffeID   string    `json:"spiffe_id"`
-	Key        KeyRef    `json:"key"`
-	Source     Source    `json:"source"`
-	APIURL     string    `json:"api_url"`
-	Serial     string    `json:"serial"`
-	NotAfter   time.Time `json:"not_after"`
-	RenewAfter time.Time `json:"renew_after"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	TeamName string    `json:"team_name,omitempty"`
+	Kind     Kind      `json:"kind"`
+	SpiffeID string    `json:"spiffe_id"`
+	Key      KeyRef    `json:"key"`
+	Source   Source    `json:"source"`
+	APIURL   string    `json:"api_url"`
+	Serial   string    `json:"serial"`
+	NotAfter time.Time `json:"not_after"`
+
+	// RenewAfter is absent when the credential does not renew, never a zero time,
+	// which would serialise as `"0001-01-01T00:00:00Z"` and read as data. Callers
+	// go through NextRenewal.
+	RenewAfter *time.Time `json:"renew_after,omitempty"`
+
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// NextRenewal reports when this credential should be renewed, and whether it
+// renews at all. Comma-ok rather than a zero time, which is in the past and
+// would make a renewal loop fire immediately and keep firing.
+//
+// Both conditions are required: a source that does not renew has no deadline
+// whatever the file says.
+func (m Meta) NextRenewal() (time.Time, bool) {
+	if !m.Source.Renewable() || m.RenewAfter == nil {
+		return time.Time{}, false
+	}
+	return *m.RenewAfter, true
 }
 
 // Material is one stored credential: the certificate chain we present, the key

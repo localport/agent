@@ -78,7 +78,7 @@ func TestLoginSurvivesATransportFailureMidPoll(t *testing.T) {
 		t.Fatalf("team_name = %q, want it carried from the response", mat.Meta.TeamName)
 	}
 	// A sign-in does not renew, and nothing may synthesize a deadline for it.
-	if mat.Meta.Source.Renewable() {
+	if _, renews := mat.Meta.NextRenewal(); renews {
 		t.Fatal("a sign-in must not acquire a renewal deadline")
 	}
 }

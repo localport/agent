@@ -191,17 +191,23 @@ func (c *Client) assemble(key Key, in issuedMaterial) (*Material, error) {
 		Serial:   leaf.SerialNumber.Text(16),
 		NotAfter: leaf.NotAfter.UTC(),
 	}
-	// Only for a source that renews. A sign-in has no deadline at all, and
-	// synthesizing one would invent a schedule the control plane never issued.
+	// Stored only for a source that renews, so the field's presence and meaning
+	// never disagree. The server's value wins; the fallback covers a renewable
+	// source whose response omitted one.
 	if in.Source.Renewable() {
-		meta.RenewAfter = parseTimeOr(in.RenewAfter, defaultRenewAfter(leaf.NotBefore, leaf.NotAfter))
+		t := parseTimeOr(in.RenewAfter, time.Time{})
+		if t.IsZero() {
+			t = defaultRenewAfter(leaf.NotBefore, leaf.NotAfter)
+		}
+		t = t.UTC()
+		meta.RenewAfter = &t
 	}
 	return &Material{CertPEM: bundle, Key: key, Meta: meta}, nil
 }
 
-// defaultRenewAfter is the fallback when the control plane names no time: two
-// thirds through the lifetime, leaving the last third as retry budget, so a
-// missing field cannot mean "never renew".
+// defaultRenewAfter is the fallback when the control plane names no time for a
+// renewable credential: two thirds through the lifetime, leaving the last third
+// as retry budget, so a missing field cannot mean "never renew".
 func defaultRenewAfter(notBefore, notAfter time.Time) time.Time {
 	life := notAfter.Sub(notBefore)
 	if life <= 0 {
