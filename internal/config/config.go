@@ -149,12 +149,20 @@ func normalizeLocalAddr(addr string) string {
 	return addr
 }
 
+// defaultRegion is only where the agent lands when no region is given. A
+// tunnel's region lives on the tunnel, and an edge that does not hold it answers
+// Register with a redirect.
+const defaultRegion = "eu"
+
 // ResolveEdge maps a region name to its agent-facing edge address.
 // Regions use the "connect." subdomain so the dial host doubles as the
 // TLS SNI the edge expects. TLS is mandatory on every region.
+//
+// An unknown region is passed through rather than refused, so a region added
+// after this binary shipped still resolves.
 func ResolveEdge(region string) string {
 	if region == "" {
-		return "connect.edge.localport.dev:" + edgePort
+		region = defaultRegion
 	}
 	if host, ok := regionHosts[region]; ok {
 		return "connect." + host + ":" + edgePort

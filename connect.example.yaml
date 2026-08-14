@@ -1,14 +1,16 @@
+version: 1
+
 connections:
   # With no `bundle` and no `p12`, the credential this machine already holds is
-  # presented (see `localport setup`). This is the intended path: nothing to
-  # copy, and it renews itself.
+  # presented (see `localport setup` and `localport login`). This is the intended
+  # path, with nothing to copy around and no file that renewal has to chase.
   - name: gateway
     remote: gw-01.eu.localport.dev:443
     local_port: "3001"
 
   # `identity` picks one when the machine holds several. A config file is never
-  # interactive, so an ambiguous entry is an error rather than a prompt: name the
-  # credential here.
+  # interactive, so an ambiguous entry is an error rather than a prompt. Name the
+  # credential here, and run `localport identity list` to see the options.
   #   gw-01                     a bare identity
   #   <team>/gw-01              narrowed to one team
   #   <team>/client/gw-01       fully qualified

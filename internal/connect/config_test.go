@@ -14,6 +14,7 @@ func TestLoadConnectConfigBundleMode(t *testing.T) {
 	}
 
 	yamlPath := writeYAML(t, dir, `
+version: 1
 connections:
   - name: postgres
     remote: db.tunnel.localport.dev:5432
@@ -40,6 +41,7 @@ func TestLoadConnectConfigRejectsAmbiguousMode(t *testing.T) {
 	_ = os.WriteFile(p12, []byte("x"), 0o600)
 
 	yamlPath := writeYAML(t, dir, `
+version: 1
 connections:
   - name: pg
     remote: db:5432
@@ -55,6 +57,7 @@ connections:
 func TestLoadConnectConfigAcceptsIdentityMode(t *testing.T) {
 	// No bundle and no p12 is the stored-identity path, not a broken config.
 	yamlPath := writeYAML(t, t.TempDir(), `
+version: 1
 connections:
   - name: gw
     remote: gw-01.eu.localport.dev:22
@@ -75,11 +78,12 @@ func TestLoadConnectConfigRejectsIdentityWithACredentialFile(t *testing.T) {
 	_ = os.WriteFile(bundle, []byte("x"), 0o600)
 
 	yamlPath := writeYAML(t, dir, `
+version: 1
 connections:
   - name: gw
     remote: gw-01.eu.localport.dev:22
     local_port: "2222"
-    identity: 01kpq7x2/deploy-prod
+    identity: 01kpq7x2/client/deploy-prod
     bundle: `+bundle+`
 `)
 	if _, err := LoadConnectConfig(yamlPath); err == nil {
@@ -89,6 +93,7 @@ connections:
 
 func TestLoadConnectConfigRejectsMissing(t *testing.T) {
 	yamlPath := writeYAML(t, t.TempDir(), `
+version: 1
 connections:
   - name: pg
     remote: ""
@@ -97,6 +102,54 @@ connections:
 `)
 	if _, err := LoadConnectConfig(yamlPath); err == nil {
 		t.Fatal("expected missing-remote rejection")
+	}
+}
+
+// A file written for another schema must fail on the version line, not on a
+// field this build happens to ignore.
+func TestLoadConnectConfigRejectsUnknownVersion(t *testing.T) {
+	for _, body := range []string{
+		"connections:\n  - name: gw\n    remote: gw:22\n    local_port: \"2222\"\n",
+		"version: 2\nconnections:\n  - name: gw\n    remote: gw:22\n    local_port: \"2222\"\n",
+	} {
+		if _, err := LoadConnectConfig(writeYAML(t, t.TempDir(), body)); err == nil {
+			t.Fatalf("expected a version rejection for:\n%s", body)
+		}
+	}
+}
+
+// Two connections on one port bind the same address, so the second listener
+// fails after the first is already serving.
+func TestLoadConnectConfigRejectsDuplicateLocalPort(t *testing.T) {
+	yamlPath := writeYAML(t, t.TempDir(), `
+version: 1
+connections:
+  - name: gw
+    remote: gw-01.eu.localport.dev:22
+    local_port: "2222"
+  - name: gw2
+    remote: gw-02.eu.localport.dev:22
+    local_port: "2222"
+`)
+	if _, err := LoadConnectConfig(yamlPath); err == nil {
+		t.Fatal("expected a duplicate local_port rejection")
+	}
+}
+
+// Port 0 asks the OS for a free one, so repeats never collide.
+func TestLoadConnectConfigAllowsRepeatedEphemeralPort(t *testing.T) {
+	yamlPath := writeYAML(t, t.TempDir(), `
+version: 1
+connections:
+  - name: gw
+    remote: gw-01.eu.localport.dev:22
+    local_port: "0"
+  - name: gw2
+    remote: gw-02.eu.localport.dev:22
+    local_port: "0"
+`)
+	if _, err := LoadConnectConfig(yamlPath); err != nil {
+		t.Fatalf("Load: %v", err)
 	}
 }
 
