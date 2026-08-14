@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -463,6 +464,34 @@ func TestNewClientRefusesPlaintext(t *testing.T) {
 	}
 }
 
+// Parsing is not validation. A record that survives json.Unmarshal but names an
+// enum this build does not know describes a credential that cannot work, and it
+// fails later, at a handshake, far from the file that caused it.
+func TestUnusableMetadataIsRefusedOnRead(t *testing.T) {
+	for name, meta := range map[string]Meta{
+		"unknown kind":        {Identity: "a", Team: "t", Kind: "sideways", Source: SourceToken, NotAfter: time.Now()},
+		"unknown source":      {Identity: "a", Team: "t", Kind: KindClient, Source: "magic", NotAfter: time.Now()},
+		"no expiry":           {Identity: "a", Team: "t", Kind: KindClient, Source: SourceToken},
+		"no identity":         {Team: "t", Kind: KindClient, Source: SourceToken, NotAfter: time.Now()},
+		"sso with a deadline": {Identity: "a", Team: "t", Kind: KindUser, Source: SourceSSO, NotAfter: time.Now(), RenewAfter: ptr(time.Now())},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, metaFile)
+			raw, err := json.Marshal(meta)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readMeta(path); err == nil {
+				t.Fatalf("readMeta accepted an unusable record (%s)", name)
+			}
+		})
+	}
+}
+
 func selfSigned(t *testing.T, uri string) *x509.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -519,6 +548,10 @@ func credentialFor(t *testing.T, uri string) Material {
 	return Material{
 		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 		Key:     fileKey{key},
-		Meta:    Meta{APIURL: "https://api.localport.io", Source: SourceToken},
+		// Source has to be set: Save validates the record it writes, so a helper
+		// that omitted it would be testing against a credential the store refuses.
+		Meta: Meta{APIURL: "https://api.localport.io", Source: SourceToken},
 	}
 }
+
+func ptr[T any](v T) *T { return &v }

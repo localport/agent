@@ -41,9 +41,9 @@ const (
 
 // Renewable reports whether a credential from this source may be reissued.
 //
-// A positive allowlist, so an unrecognised source is not renewable. A person's
-// sign-in never is: re-authenticating is the renewal, and the server refuses
-// the request.
+// An allowlist rather than a denylist, so a source this build has not seen is
+// treated as non-renewable. A person's sign-in never renews: re-authenticating
+// is the renewal, and the server refuses the request.
 func (s Source) Renewable() bool {
 	switch s {
 	case SourceToken, SourceOIDC:
@@ -53,15 +53,26 @@ func (s Source) Renewable() bool {
 	}
 }
 
+// Valid reports whether s is a source this build knows how to act on.
+func (s Source) Valid() bool {
+	switch s {
+	case SourceToken, SourceOIDC, SourceSSO:
+		return true
+	default:
+		return false
+	}
+}
+
 // Meta is the record beside the key material.
 //
 // APIURL is stored rather than re-derived, so a renewal is never told which
-// control plane issued the credential.
+// control plane issued the credential. Source separates a human sign-in from a
+// machine setup token, and every renewal decision reads it.
 type Meta struct {
 	Identity string `json:"identity"`
 	Team     string `json:"team"`
-	// TeamName labels the team in `localport identity list`. Cosmetic, so a
-	// record without it still loads and renewal refreshes it; the team id from
+	// TeamName labels the team in `localport identity list`. Cosmetic, so
+	// validate() does not require it and renewal refreshes it; the team id from
 	// the certificate is the key. No personal name is stored anywhere here.
 	TeamName string    `json:"team_name,omitempty"`
 	Kind     Kind      `json:"kind"`
@@ -72,9 +83,9 @@ type Meta struct {
 	Serial   string    `json:"serial"`
 	NotAfter time.Time `json:"not_after"`
 
-	// RenewAfter is absent when the credential does not renew, never a zero time,
-	// which would serialise as `"0001-01-01T00:00:00Z"` and read as data. Callers
-	// go through NextRenewal.
+	// RenewAfter is absent when the credential does not renew, rather than a zero
+	// time, which serialises as `"0001-01-01T00:00:00Z"` and reads back as a
+	// value. Callers go through NextRenewal.
 	RenewAfter *time.Time `json:"renew_after,omitempty"`
 
 	UpdatedAt time.Time `json:"updated_at"`
@@ -148,28 +159,46 @@ func (s *Store) dir(ref Ref) string { return filepath.Join(s.Root, filepath.From
 // written and where.
 func (s *Store) Dir(ref Ref) string { return s.dir(ref) }
 
+// Skipped is a credential directory List could not read. Carried out rather
+// than dropped: to a caller shown only the survivors, an unreadable record and
+// a missing one look the same. `identity list` prints these.
+type Skipped struct {
+	Path   string
+	Reason error
+}
+
 // List returns every stored credential, sorted. The Ref is read from meta.json
 // rather than decoded back out of the path, so the directory names stay purely
 // a legibility aid.
 func (s *Store) List() ([]Ref, error) {
+	refs, _, err := s.ListWithSkipped()
+	return refs, err
+}
+
+// ListWithSkipped is List plus what it could not read.
+func (s *Store) ListWithSkipped() ([]Ref, []Skipped, error) {
 	matches, err := filepath.Glob(filepath.Join(s.Root, "*", "*", metaFile))
 	if err != nil {
-		return nil, fmt.Errorf("read identity store: %w", err)
+		return nil, nil, fmt.Errorf("read identity store: %w", err)
 	}
 	refs := make([]Ref, 0, len(matches))
+	var skipped []Skipped
 	for _, path := range matches {
 		meta, err := readMeta(path)
 		if err != nil {
-			return nil, err
+			skipped = append(skipped, Skipped{Path: filepath.Dir(path), Reason: err})
+			continue
 		}
 		ref, err := refFromMeta(meta)
 		if err != nil {
-			return nil, err
+			skipped = append(skipped, Skipped{Path: filepath.Dir(path), Reason: err})
+			continue
 		}
 		refs = append(refs, ref)
 	}
 	sort.Slice(refs, func(i, j int) bool { return refs[i].dir() < refs[j].dir() })
-	return refs, nil
+	sort.Slice(skipped, func(i, j int) bool { return skipped[i].Path < skipped[j].Path })
+	return refs, skipped, nil
 }
 
 // Remove deletes a credential's directory. LOCAL ONLY: the certificate stays
@@ -263,6 +292,12 @@ func (s *Store) Save(m Material) (Ref, error) {
 	m.Meta.Key = m.Key.Ref()
 	m.Meta.UpdatedAt = time.Now().UTC()
 
+	// Validated on the way out as well as in: readMeta refuses a record it cannot
+	// act on, so writing one would store a credential that never loads again.
+	if err := m.Meta.validate(); err != nil {
+		return Ref{}, fmt.Errorf("refusing to store an unusable credential record: %w", err)
+	}
+
 	dir := s.dir(ref)
 
 	if err := security.EnsurePrivateDir(s.Root, dir); err != nil {
@@ -332,7 +367,36 @@ func readMeta(path string) (Meta, error) {
 	if err := json.Unmarshal(raw, &meta); err != nil {
 		return Meta{}, fmt.Errorf("parse identity metadata: %w", err)
 	}
+	if err := meta.validate(); err != nil {
+		return Meta{}, fmt.Errorf("%s: %w", path, err)
+	}
 	return meta, nil
+}
+
+// validate refuses a record this build cannot act on.
+//
+// encoding/json leaves what it does not recognise at its zero value, so a
+// truncated meta.json parses cleanly and describes a credential that does not
+// exist. The enums are the sharp part: an unrecognised Source is treated as
+// non-renewable and an unrecognised Kind resolves through the wrong SPIFFE
+// namespace, and both surface later, at a handshake.
+func (m Meta) validate() error {
+	switch {
+	case m.Identity == "":
+		return fmt.Errorf("identity metadata names no identity")
+	case m.Team == "":
+		return fmt.Errorf("identity metadata names no team")
+	case !m.Kind.Valid():
+		return fmt.Errorf("identity metadata has unknown kind %q", m.Kind)
+	case !m.Source.Valid():
+		return fmt.Errorf("identity metadata has unknown source %q", m.Source)
+	case m.NotAfter.IsZero():
+		return fmt.Errorf("identity metadata has no expiry")
+	case m.RenewAfter != nil && !m.Source.Renewable():
+		// The halves disagree, so acting on either would be a guess.
+		return fmt.Errorf("identity metadata for a %s credential carries a renewal deadline", m.Source)
+	}
+	return nil
 }
 
 func refFromMeta(m Meta) (Ref, error) {

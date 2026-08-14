@@ -6,8 +6,24 @@ import (
 	"time"
 )
 
-// Absent must SERIALISE as absent, not as an empty string that later reads as a
-// team genuinely called "".
+// team_name is cosmetic. Requiring it in validate() would make a record written
+// before the field existed, or one whose server-side lookup failed, refuse to
+// load, turning a missing display string into a missing credential.
+func TestMetaWithoutTeamNameStillValidates(t *testing.T) {
+	m := Meta{
+		Identity: "gw-01",
+		Team:     "01kpq7x2",
+		Kind:     KindClient,
+		Source:   SourceToken,
+		NotAfter: time.Now().Add(time.Hour),
+	}
+	if err := m.validate(); err != nil {
+		t.Fatalf("a credential with no team name must still load: %v", err)
+	}
+}
+
+// Absent has to serialise as absent, not as an empty string that later reads as
+// a team genuinely called "".
 func TestTeamNameIsOmittedWhenEmpty(t *testing.T) {
 	raw, err := json.Marshal(Meta{
 		Identity: "gw-01", Team: "01kpq7x2", Kind: KindClient,
@@ -43,5 +59,8 @@ func TestTeamNameRoundTrips(t *testing.T) {
 	}
 	if got := out.DisplayTeam(); got != "Acme Robotics (01kpq7x2)" {
 		t.Fatalf("DisplayTeam = %q", got)
+	}
+	if err := out.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
 	}
 }

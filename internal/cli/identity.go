@@ -58,7 +58,7 @@ func runIdentityList(args []string) error {
 	if err != nil {
 		return err
 	}
-	refs, err := store.List()
+	refs, skipped, err := store.ListWithSkipped()
 	if err != nil {
 		return err
 	}
@@ -100,6 +100,11 @@ func runIdentityList(args []string) error {
 				fmt.Fprintf(os.Stderr, "    %s\n", ref)
 			}
 		}
+	}
+	// An unreadable directory and a missing one look the same to a reader shown
+	// only the survivors. Exit stays 0: this is information, not a failed request.
+	for _, s := range skipped {
+		fmt.Fprintf(os.Stderr, "  skipped %s: %v\n", s.Path, s.Reason)
 	}
 	return nil
 }
