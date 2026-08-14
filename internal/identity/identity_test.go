@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -20,13 +21,15 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
 
-// The renewal digest is the ONE value the agent and the control plane must
-// compute identically, and a mismatch is silent: renewal never succeeds
-// and the credential expires weeks later. This vector is asserted on both sides.
+// The renewal digest is the one value the agent and the control plane must
+// compute identically. A mismatch is silent, renewal simply never succeeds and
+// the credential expires weeks later, so this vector is pinned here and checked
+// against the same one on the far side.
 const goldenDigest = "bb21b93bb7ddd5f72c67c1a2b127f99322456fd06b00242a65791b6b9cbe80ff"
 
 func TestRenewalDigestMatchesTheServerVector(t *testing.T) {
@@ -50,40 +53,6 @@ func TestRenewalDigestBindsToTheCertificateAndTheMinute(t *testing.T) {
 			t.Errorf("%s produced the same digest: a captured renewal would replay", tc.name)
 		}
 	}
-}
-
-// Renewal proves possession by signing with the credential's existing key.
-// Routing that through crypto.Signer instead of ecdsa.SignASN1 must not change
-// the bytes on the wire: a mismatch here is silent, and renewal would
-// never succeed until the certificate expired.
-func TestSignerProducesTheSameSignatureFormatAsSignASN1(t *testing.T) {
-	key := testKey(t)
-	digest := renewalDigest([]byte("csr-der-bytes"), 29000000, "beef")
-
-	viaSigner, err := fileKey{key}.Sign(rand.Reader, digest, crypto.SHA256)
-	if err != nil {
-		t.Fatalf("Sign: %v", err)
-	}
-	if !ecdsa.VerifyASN1(&key.PublicKey, digest, viaSigner) {
-		t.Fatal("signature from crypto.Signer is not the ASN.1 DER the server verifies")
-	}
-
-	direct, err := ecdsa.SignASN1(rand.Reader, key, digest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ecdsa.VerifyASN1(&key.PublicKey, digest, direct) {
-		t.Fatal("control signature failed to verify")
-	}
-}
-
-func testKey(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return key
 }
 
 func TestRefFromCertReadsTheCertificate(t *testing.T) {
@@ -244,8 +213,9 @@ func TestReloadRefusesASwappedPrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Overwrite in place with a different principal.
-	other := credentialFor(t, "spiffe://team_x.mtls.localport.dev/client/other-box")
+	// Overwrite in place with a different principal, as the old team-keyed
+	// layout did whenever the other command ran.
+	other := credentialFor(t, "spiffe://team_x.mtls.localport.dev/user/0mkppnsc7lsdcv")
 	otherKeyPEM, err := other.Key.(persistentKey).marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -267,8 +237,8 @@ func TestReloadRefusesASwappedPrincipal(t *testing.T) {
 	}
 }
 
-// Components are used VERBATIM, and a component that could escape the store is
-// REFUSED rather than repaired.
+// Components are used verbatim, and a component that could escape the store is
+// refused rather than repaired.
 //
 // The Ref is built from a certificate, so `..` in an identity is the case that
 // matters: repairing it would file the credential under a name that is not the
@@ -297,28 +267,258 @@ func TestRefRefusesComponentsThatEscapeTheStore(t *testing.T) {
 	}
 }
 
-// A sign-in never renews, and the refusal happens BEFORE any request: waiting
-// on the server to say no would spend a round trip to learn something the
-// record already states.
-func TestRenewNeverCallsTheServerForASignInCredential(t *testing.T) {
-	called := false
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		called = true
-	}))
-	defer srv.Close()
-
-	cur := credentialFor(t, "spiffe://team_x.mtls.localport.dev/user/0mkppnsc7lsdcv")
-	cur.Meta.Source = SourceSSO
-
-	c := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
-	if _, err := c.Renew(context.Background(), &cur); !errors.Is(err, ErrNotRenewable) {
-		t.Fatalf("Renew of a sign-in = %v, want ErrNotRenewable", err)
+// The setup token is a bearer secret. Sending it over http is the one mistake
+// that cannot be undone afterwards, so there is no host it is allowed for.
+func TestNewClientRefusesPlaintext(t *testing.T) {
+	for _, raw := range []string{
+		"http://api.example.com",
+		"http://localhost:8080",
+		"http://127.0.0.1:8080",
+	} {
+		if _, err := NewClient(raw); err == nil {
+			t.Errorf("NewClient(%q) must refuse plain http", raw)
+		}
 	}
-	if called {
-		t.Fatal("Renew reached the control plane for a credential that cannot renew")
+	if _, err := NewClient("https://api.example.com"); err != nil {
+		t.Fatalf("https must be accepted: %v", err)
 	}
 }
 
+func TestDefaultRenewAfterLeavesARetryBudget(t *testing.T) {
+	start := time.Now()
+	end := start.Add(30 * 24 * time.Hour)
+	got := defaultRenewAfter(start, end)
+	if !got.After(start) || !got.Before(end) {
+		t.Fatalf("renew_after %s is outside the certificate lifetime", got)
+	}
+	if remaining := end.Sub(got); remaining < 9*24*time.Hour {
+		t.Fatalf("retry budget %s is under a third of the lifetime", remaining)
+	}
+}
+
+// A sign-in must never reach the renewal endpoint. The server refuses it; this
+// is what stops the agent from asking.
+func TestRenewNeverCallsTheServerForASignInCredential(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Built directly rather than through NewClient, which enforces https. This
+	// test is about the refusal, not transport policy.
+	client := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+
+	signIn := &Material{
+		CertPEM: []byte("unused: the refusal happens before anything is parsed"),
+		Meta:    Meta{Identity: "jane@acme.com", Source: SourceSSO},
+	}
+	_, err := client.Renew(context.Background(), signIn)
+	if !errors.Is(err, ErrNotRenewable) {
+		t.Fatalf("Renew(sso) = %v, want ErrNotRenewable", err)
+	}
+	if calls != 0 {
+		t.Fatalf("the agent made %d request(s) to renew a sign-in; it must make none", calls)
+	}
+
+	// A property of the source, not of a caller remembering to check.
+	machine := &Material{Meta: Meta{Source: SourceToken}}
+	if _, err := client.Renew(context.Background(), machine); errors.Is(err, ErrNotRenewable) {
+		t.Fatal("a token credential must still renew")
+	}
+}
+
+// The device flow sends no renew_after; synthesizing one gave an 8-hour sign-in
+// the renewal schedule of a machine set up with a setup token.
+func TestSignInMaterialCarriesNoRenewalDeadline(t *testing.T) {
+	leaf := selfSigned(t, "spiffe://team_abc123.mtls.localport.dev/user/0mkppnsc7lsdcv")
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))
+	client := &Client{BaseURL: "https://api.localport.io"}
+
+	signIn, err := client.assemble(fileKey{testKey(t)}, issuedMaterial{CertPEM: certPEM, Source: SourceSSO})
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	if signIn.Meta.Source != SourceSSO {
+		t.Fatalf("source = %q, want %q: nothing downstream can tell a person from a machine without it",
+			signIn.Meta.Source, SourceSSO)
+	}
+	// Absent, not zero. A zero time serialises as year 1 and reads as a corrupt
+	// record to anyone opening meta.json; the field is simply not written.
+	if signIn.Meta.RenewAfter != nil {
+		t.Fatalf("renew_after = %s, but the control plane sent none", *signIn.Meta.RenewAfter)
+	}
+	if _, renews := signIn.Meta.NextRenewal(); renews {
+		t.Fatal("a sign-in must report that it does not renew, not a timestamp")
+	}
+
+	// The fallback still protects a machine, where nobody is watching.
+	machine, err := client.assemble(fileKey{testKey(t)}, issuedMaterial{CertPEM: certPEM, Source: SourceToken})
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	if _, renews := machine.Meta.NextRenewal(); !renews {
+		t.Fatal("a machine credential lost its renewal fallback")
+	}
+}
+
+func selfSigned(t *testing.T, uri string) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		URIs:         []*url.URL{u},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := leafOf(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return leaf
+}
+
+// The device-flow poll is driven by the codes the control plane returns, so the
+// two sides have to agree on them. A mismatch is silent and sign-in simply stops
+// working, which is why the values are pinned here rather than assumed.
+func TestLoginPollingIsDrivenByControlPlaneErrorCodes(t *testing.T) {
+	if codeAuthorizationPending != "SE021" || codeSlowDown != "SE022" {
+		t.Fatalf("polling codes drifted from the control plane: pending=%q slow_down=%q",
+			codeAuthorizationPending, codeSlowDown)
+	}
+
+	// Sequence: pending, slow_down, then the certificate. The loop must survive
+	// the first two and only stop on the third.
+	leaf := selfSigned(t, "spiffe://team_abc123.mtls.localport.dev/user/0mkppnsc7lsdcv")
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))
+
+	var polls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/mtls/device/start" {
+			w.WriteHeader(http.StatusCreated)
+			// The server owns the cadence, so the test sets a fast one rather
+			// than sleeping through the production default.
+			fmt.Fprint(w, `{"device_code":"dc","user_code":"ABCD-EFGH","interval":1,"expires_in":600}`)
+			return
+		}
+		polls++
+		switch polls {
+		case 1:
+			w.WriteHeader(http.StatusPreconditionRequired)
+			fmt.Fprint(w, `{"code":"SE021","error":"Authorization Pending","message":"Waiting for approval in the dashboard"}`)
+		case 2:
+			w.WriteHeader(http.StatusPreconditionRequired)
+			fmt.Fprint(w, `{"code":"SE022","error":"Polling Too Fast","message":"Polling faster than the interval"}`)
+		default:
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"cert_pem":%q,"identity":"jane@acme.com"}`, certPEM)
+		}
+	}))
+	defer srv.Close()
+
+	// Built directly rather than through NewClient, which enforces https. These
+	// tests are about the poll's branching, not transport policy.
+	client := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	// The floor is 5s per poll, so drive the loop with a deadline of its own
+	// rather than waiting on the real one.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	material, err := client.Login(ctx, nil)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if polls != 3 {
+		t.Fatalf("polled %d times, want 3: the loop must treat SE021 and SE022 as non-terminal", polls)
+	}
+	if material.Meta.Source != SourceSSO {
+		t.Fatalf("source = %q, want %q", material.Meta.Source, SourceSSO)
+	}
+}
+
+// An error the agent does not recognise must stop the loop. Treating an unknown
+// refusal as "keep waiting" would poll a refusing endpoint until the sign-in
+// expired, with nothing on screen explaining why.
+func TestLoginStopsOnAnUnrecognisedError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/mtls/device/start" {
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"device_code":"dc","user_code":"ABCD-EFGH","interval":1,"expires_in":600}`)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"code":"VAL001","error":"Input Error","message":"That sign-in is no longer valid."}`)
+	}))
+	defer srv.Close()
+
+	// Built directly rather than through NewClient, which enforces https. These
+	// tests are about the poll's branching, not transport policy.
+	client := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := client.Login(ctx, nil); err == nil {
+		t.Fatal("expected an unrecognised refusal to end the loop")
+	} else if !strings.Contains(err.Error(), "VAL001") {
+		t.Fatalf("the support code must reach the operator, got %v", err)
+	}
+}
+
+// credentialFor builds a self-signed leaf and the key that matches it, so a
+// Material round-trips through Save, Load and tls.X509KeyPair.
+func credentialFor(t *testing.T, uri string) Material {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 63))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		URIs:         []*url.URL{u},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Material{
+		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		Key:     fileKey{key},
+		// Source has to be set: Save validates the record it writes, so a helper
+		// that omitted it would be testing against a credential the store refuses.
+		Meta: Meta{APIURL: "https://api.localport.io", Source: SourceToken},
+	}
+}
+
+// Two writers renewing minutes apart issue two certificates where one is
+// immediately orphaned, which walks the identity through its live-certificate
+// cap until it can no longer renew at all. flock is held per open file
+// description, so a second holder conflicts even inside one process.
 func TestRenewalLockAdmitsOneWriter(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 	ref, err := store.Save(credentialFor(t, "spiffe://team_x.mtls.localport.dev/client/deploy-prod"))
@@ -344,46 +544,6 @@ func TestRenewalLockAdmitsOneWriter(t *testing.T) {
 		t.Fatalf("lock after release: held=%v err=%v", held, err)
 	}
 	release2()
-}
-
-// A stored record must never carry a timestamp that means "no value".
-//
-// Go's zero time is a real instant, so a sentinel serialises as
-// "0001-01-01T00:00:00Z": a date that looks like data, reads as a corrupt
-// record, and is in the past, so anything scheduling off it fires immediately
-// and keeps firing.
-func TestStoredMetadataNeverCarriesAZeroTimestamp(t *testing.T) {
-	store := &Store{Root: t.TempDir()}
-	cred := credentialFor(t, "spiffe://team_x.mtls.localport.dev/user/0mkppnsc7lsdcv")
-	cred.Meta.Source = SourceSSO
-
-	ref, err := store.Save(cred)
-	if err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
-	raw, err := os.ReadFile(filepath.Join(store.Dir(ref), metaFile))
-	if err != nil {
-		t.Fatalf("read meta: %v", err)
-	}
-	if bytes.Contains(raw, []byte("0001-01-01")) {
-		t.Fatalf("meta.json carries a zero timestamp:\n%s", raw)
-	}
-	// Absent, not present-and-empty: a sign-in has no renewal at all.
-	if bytes.Contains(raw, []byte("renew_after")) {
-		t.Fatalf("a credential that does not renew must omit renew_after:\n%s", raw)
-	}
-
-	loaded, err := store.Load(ref)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if _, renews := loaded.Meta.NextRenewal(); renews {
-		t.Fatal("a sign-in must report that it does not renew")
-	}
-	if loaded.Meta.NotAfter.IsZero() {
-		t.Fatal("expiry must be derived from the certificate, not left to the caller")
-	}
 }
 
 // systemd sets $HOME only for a unit that names a User=, so a service without
@@ -423,8 +583,42 @@ func TestHomeEnvOverridesEverything(t *testing.T) {
 	}
 }
 
-// Only a key that says it is persistent leaves a key.pem behind, and Load must
-// find whatever Save wrote.
+func testKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+// Renewal proves possession by signing with the credential's existing key.
+// Routing that through crypto.Signer instead of ecdsa.SignASN1 must not change
+// the bytes on the wire: a mismatch here is silent, and renewal would
+// never succeed until the certificate expired.
+func TestSignerProducesTheSameSignatureFormatAsSignASN1(t *testing.T) {
+	key := testKey(t)
+	digest := renewalDigest([]byte("csr-der-bytes"), 29000000, "beef")
+
+	viaSigner, err := fileKey{key}.Sign(rand.Reader, digest, crypto.SHA256)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if !ecdsa.VerifyASN1(&key.PublicKey, digest, viaSigner) {
+		t.Fatal("signature from crypto.Signer is not the ASN.1 DER the server verifies")
+	}
+
+	direct, err := ecdsa.SignASN1(rand.Reader, key, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ecdsa.VerifyASN1(&key.PublicKey, digest, direct) {
+		t.Fatal("control signature failed to verify")
+	}
+}
+
+// A hardware key has no bytes to write. Only a key that says it is persistent
+// leaves a key.pem behind, and Load must find whatever Save wrote.
 func TestSaveRoundTripsTheKeyBacking(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 	ref, err := store.Save(credentialFor(t, "spiffe://team_x.mtls.localport.dev/client/deploy-prod"))
@@ -447,20 +641,43 @@ func TestSaveRoundTripsTheKeyBacking(t *testing.T) {
 	}
 }
 
-// The setup token is a bearer secret. Sending it over http is the one mistake
-// that cannot be undone afterwards, so there is no host it is allowed for.
-func TestNewClientRefusesPlaintext(t *testing.T) {
-	for _, raw := range []string{
-		"http://api.example.com",
-		"http://localhost:8080",
-		"http://127.0.0.1:8080",
-	} {
-		if _, err := NewClient(raw); err == nil {
-			t.Errorf("NewClient(%q) must refuse plain http", raw)
-		}
+// A stored record must never carry a timestamp that means "no value".
+//
+// Go's zero time is a real instant, so a sentinel serialises as
+// "0001-01-01T00:00:00Z", a date that looks like data, reads as a corrupt
+// record, and is in the past, so anything scheduling off it fires immediately
+// and keeps firing.
+func TestStoredMetadataNeverCarriesAZeroTimestamp(t *testing.T) {
+	store := &Store{Root: t.TempDir()}
+	cred := credentialFor(t, "spiffe://team_x.mtls.localport.dev/user/0mkppnsc7lsdcv")
+	cred.Meta.Source = SourceSSO
+
+	ref, err := store.Save(cred)
+	if err != nil {
+		t.Fatalf("save: %v", err)
 	}
-	if _, err := NewClient("https://api.example.com"); err != nil {
-		t.Fatalf("https must be accepted: %v", err)
+
+	raw, err := os.ReadFile(filepath.Join(store.Dir(ref), metaFile))
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	if bytes.Contains(raw, []byte("0001-01-01")) {
+		t.Fatalf("meta.json carries a zero timestamp:\n%s", raw)
+	}
+	// Absent, not present-and-empty: a sign-in has no renewal at all.
+	if bytes.Contains(raw, []byte("renew_after")) {
+		t.Fatalf("a credential that does not renew must omit renew_after:\n%s", raw)
+	}
+
+	loaded, err := store.Load(ref)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, renews := loaded.Meta.NextRenewal(); renews {
+		t.Fatal("a sign-in must report that it does not renew")
+	}
+	if loaded.Meta.NotAfter.IsZero() {
+		t.Fatal("expiry must be derived from the certificate, not left to the caller")
 	}
 }
 
@@ -489,68 +706,6 @@ func TestUnusableMetadataIsRefusedOnRead(t *testing.T) {
 				t.Fatalf("readMeta accepted an unusable record (%s)", name)
 			}
 		})
-	}
-}
-
-func selfSigned(t *testing.T, uri string) *x509.Certificate {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	u, err := url.Parse(uri)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "test"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		URIs:         []*url.URL{u},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	leaf, err := leafOf(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return leaf
-}
-
-func credentialFor(t *testing.T, uri string) Material {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	u, err := url.Parse(uri)
-	if err != nil {
-		t.Fatal(err)
-	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 63))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "test"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		URIs:         []*url.URL{u},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return Material{
-		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		Key:     fileKey{key},
-		// Source has to be set: Save validates the record it writes, so a helper
-		// that omitted it would be testing against a credential the store refuses.
-		Meta: Meta{APIURL: "https://api.localport.io", Source: SourceToken},
 	}
 }
 

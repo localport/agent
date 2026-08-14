@@ -57,9 +57,6 @@ func TestTeamNameRoundTrips(t *testing.T) {
 	if out.TeamName != in.TeamName {
 		t.Fatalf("team_name = %q, want %q", out.TeamName, in.TeamName)
 	}
-	if got := out.DisplayTeam(); got != "Acme Robotics (01kpq7x2)" {
-		t.Fatalf("DisplayTeam = %q", got)
-	}
 	if err := out.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}

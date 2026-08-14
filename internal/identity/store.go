@@ -8,7 +8,6 @@ package identity
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -154,10 +153,6 @@ func defaultRoot() (string, error) {
 }
 
 func (s *Store) dir(ref Ref) string { return filepath.Join(s.Root, filepath.FromSlash(ref.dir())) }
-
-// Dir is where a Ref's files live, for messages that tell an operator what was
-// written and where.
-func (s *Store) Dir(ref Ref) string { return s.dir(ref) }
 
 // Skipped is a credential directory List could not read. Carried out rather
 // than dropped: to a caller shown only the survivors, an unreadable record and
@@ -335,6 +330,10 @@ func (s *Store) Save(m Material) (Ref, error) {
 	return ref, nil
 }
 
+// Dir is where a Ref's files live, for messages that tell an operator what was
+// written and where.
+func (s *Store) Dir(ref Ref) string { return s.dir(ref) }
+
 // TLSCertificate builds the chain to present. The key is attached as a
 // crypto.Signer.
 func (m *Material) TLSCertificate() (*tls.Certificate, error) {
@@ -413,16 +412,4 @@ func indentRefs(refs []Ref) string {
 		lines[i] = "    " + r.String()
 	}
 	return strings.Join(lines, "\n")
-}
-
-func leafOf(certPEM []byte) (*x509.Certificate, error) {
-	block, _ := pem.Decode(certPEM)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("no certificate in PEM data")
-	}
-	leaf, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse certificate: %w", err)
-	}
-	return leaf, nil
 }

@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/pem"
@@ -150,16 +151,6 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 	})
 }
 
-func renewalDigest(csrDER []byte, bucket int64, serial string) []byte {
-	h := sha256.New()
-	h.Write(csrDER)
-	var b [8]byte
-	binary.BigEndian.PutUint64(b[:], uint64(bucket))
-	h.Write(b[:])
-	h.Write([]byte(serial))
-	return h.Sum(nil)
-}
-
 // assemble turns a response into on-disk material. Leaf first, then the chain:
 // the order a PEM bundle requires.
 //
@@ -205,6 +196,16 @@ func (c *Client) assemble(key Key, in issuedMaterial) (*Material, error) {
 	return &Material{CertPEM: bundle, Key: key, Meta: meta}, nil
 }
 
+func renewalDigest(csrDER []byte, bucket int64, serial string) []byte {
+	h := sha256.New()
+	h.Write(csrDER)
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], uint64(bucket))
+	h.Write(b[:])
+	h.Write([]byte(serial))
+	return h.Sum(nil)
+}
+
 // defaultRenewAfter is the fallback when the control plane names no time for a
 // renewable credential: two thirds through the lifetime, leaving the last third
 // as retry budget, so a missing field cannot mean "never renew".
@@ -221,6 +222,18 @@ func parseTimeOr(raw string, fallback time.Time) time.Time {
 		return t.UTC()
 	}
 	return fallback
+}
+
+func leafOf(certPEM []byte) (*x509.Certificate, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("no certificate in PEM data")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse certificate: %w", err)
+	}
+	return leaf, nil
 }
 
 func ensureTrailingNewline(s string) string {
