@@ -81,9 +81,9 @@ func runConnect(args []string) error {
 		return fmt.Errorf("--audience uses the CI platform's own identity, so it cannot be combined with --pem or --p12")
 	}
 
-	// Decided BEFORE the signal handler is installed, because deciding it may
-	// PROMPT: a blocking read on stdin does not unblock on context cancellation,
-	// so Ctrl-C at the prompt would leave the process hung.
+	// Decided before the signal handler is installed, because deciding it may
+	// prompt, and a blocking read on stdin does not unblock on context
+	// cancellation. Resolving later would leave Ctrl-C at the prompt hanging.
 	var chosen *identity.Ref
 	if *pemFile == "" && *p12File == "" && *audience == "" && os.Getenv(identity.AudienceEnv) == "" {
 		store, storeErr := identity.DefaultStore()
@@ -106,8 +106,8 @@ func runConnect(args []string) error {
 	)
 	switch {
 	case *audience != "" || (*pemFile == "" && *p12File == "" && os.Getenv(identity.AudienceEnv) != ""):
-		// CI: the platform mints the credential, we exchange it for a short-lived
-		// certificate held IN MEMORY. Nothing on disk, nothing to rotate.
+		// In CI the platform mints the credential and we exchange it for a
+		// short-lived certificate held in memory. Nothing on disk to rotate.
 		tlsCfg, source, err = workloadTLSConfig(ctx, *audience, *apiURL, remote, *serverName)
 	case *pemFile == "" && *p12File == "":
 		// No credential file named: present the identity this machine holds.
@@ -144,16 +144,16 @@ func runConnect(args []string) error {
 }
 
 // identityTLSConfig presents the stored credential and keeps it fresh. The
-// certificate comes through a CALLBACK rather than being copied into the config,
+// certificate comes through a callback rather than being copied into the config,
 // so a renewal by this process or by `localport identity renew` is picked up on
-// the next handshake.
+// the next handshake without a restart.
 func identityTLSConfig(ctx context.Context, ref identity.Ref, remote, serverName string) (*tls.Config, string, error) {
 	store, err := identity.DefaultStore()
 	if err != nil {
 		return nil, "", err
 	}
-	// Opened by exact Ref: resolveCredential is the one place precedence and
-	// ambiguity are decided.
+	// Opened by exact Ref, since resolveCredential is the one place precedence
+	// and ambiguity are decided.
 	cred, err := identity.OpenRef(store, ref)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w\n  (or pass a credential file with --pem / --p12)", err)
@@ -167,7 +167,7 @@ func identityTLSConfig(ctx context.Context, ref identity.Ref, remote, serverName
 
 	meta := cred.Meta()
 	if !meta.Source.Renewable() {
-		// No renewal loop, so say when it ends: otherwise it stops being accepted
+		// No renewal loop, so say when it ends. Otherwise it stops being accepted
 		// mid-session and the far side answers with an opaque TLS refusal.
 		noteSignInExpiry(cred.Ref(), meta)
 		return cfg, "sign-in " + meta.Identity, nil
@@ -245,8 +245,8 @@ func runConnectFromConfig(path string) error {
 
 		var tlsCfg *tls.Config
 		if c.UsesIdentity() {
-			// NEVER interactive: this loop builds several connections, so prompting
-			// would ask once per entry.
+			// Never interactive, because this loop builds several connections and
+			// prompting would ask once per entry.
 			var ref identity.Ref
 			if ref, err = resolveCredential(store, c.Identity, false); err == nil {
 				tlsCfg, _, err = identityTLSConfig(ctx, ref, remote, "")
@@ -296,25 +296,22 @@ func runConnectFromConfig(path string) error {
 	return firstErr
 }
 
-// minPasswordLength is the floor Localport enforces on PKCS#12 passwords
-// we issue. Shorter passwords trip a clear error rather than being passed
-// to PKCS#12 decode where they would surface as opaque MAC failures.
+// minPasswordLength is the length of the passwords we issue with an archive.
 const minPasswordLength = 12
 
-// resolveP12Password reads the password in order: explicit flag, file,
-// env var. An empty string is returned (not an error) so callers using a
-// passwordless archive can still proceed; callers that need a password
-// will fail at decode time with a useful error.
+// resolveP12Password reads the password in order, flag then file then env var.
+// An empty string is not an error, so a passwordless archive still opens; one
+// that needs a password fails at decode.
 func resolveP12Password(inline, filePath, envName string) (string, error) {
 	switch {
 	case inline != "":
-		return assertStrongPassword(inline)
+		return noteWeakPassword(inline), nil
 	case filePath != "":
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			return "", fmt.Errorf("read p12 password file: %w", err)
 		}
-		return assertStrongPassword(strings.TrimSpace(string(data)))
+		return noteWeakPassword(strings.TrimSpace(string(data))), nil
 	}
 	if envName == "" {
 		envName = defaultP12PasswordEnv
@@ -323,14 +320,17 @@ func resolveP12Password(inline, filePath, envName string) (string, error) {
 	if !ok || v == "" {
 		return "", nil
 	}
-	return assertStrongPassword(v)
+	return noteWeakPassword(v), nil
 }
 
-func assertStrongPassword(p string) (string, error) {
-	if len(p) < minPasswordLength {
-		return "", fmt.Errorf("PKCS#12 password must be at least %d characters", minPasswordLength)
+// noteWeakPassword warns and carries on. It never refuses, because an archive
+// exported elsewhere is the holder's own key management, and rejecting it here
+// would block a working credential over a rule that applies to ours.
+func noteWeakPassword(p string) string {
+	if len(p) > 0 && len(p) < minPasswordLength {
+		fmt.Fprintf(os.Stderr, "  warning: PKCS#12 password is under %d characters\n", minPasswordLength)
 	}
-	return p, nil
+	return p
 }
 
 func signalCtx() (context.Context, context.CancelFunc) {
