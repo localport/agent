@@ -177,6 +177,15 @@ func identityTLSConfig(ctx context.Context, ref identity.Ref, remote, serverName
 	return cfg, "identity " + meta.Identity, nil
 }
 
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 // workloadTLSConfig exchanges the CI platform's token for a certificate and
 // keeps it in memory. No file is written and no renewal loop starts: the
 // certificate is scoped to the life of this process.
@@ -207,15 +216,6 @@ func workloadTLSConfig(ctx context.Context, audience, apiURL, remote, serverName
 	cfg := connect.BaseTLSConfig(remote, serverName)
 	cfg.Certificates = []tls.Certificate{*cert}
 	return cfg, "ci identity " + material.Meta.Identity, nil
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if s := strings.TrimSpace(v); s != "" {
-			return s
-		}
-	}
-	return ""
 }
 
 func runConnectFromConfig(path string) error {
@@ -346,37 +346,38 @@ func usageConnect(fs *flag.FlagSet) {
        localport connect <URL> --p12 <file> -p <local-port> [flags]
        localport connect --config connect.yaml
 
-  Reach a live mTLS tunnel as a consumer: presents your client certificate to
-  the edge and forwards a local port to it. Paste the tunnel URL straight from
-  the dashboard.
+  Reach a locked (mTLS) tunnel. Presents your client certificate and forwards a
+  local port to it. Paste the tunnel URL in whatever form you copied it.
 
-  <URL> accepts the dashboard forms (scheme picks the port):
-    https://sub.eu.localport.dev          -> :443 (mTLS terminates at the edge)
+  <URL> The scheme picks the port and nothing else. This connection is always
+  TLS, whatever the tunnel carries.
+    https://sub.eu.localport.dev          -> :443
     tcp://sub.eu.localport.dev:5432       -> :5432
     tls://sub.eu.localport.dev:5432       -> :5432
     sub.eu.localport.dev:5432             -> bare host:port also works
 
-  Credentials. With no flag, the identity this machine holds is used, so there
-  is no file to copy around. Supply a file only for a credential we did not
-  issue:
+  Credentials. With no flag, the identity this machine holds is used and
+  renewed in the background, so there is no file to copy and nothing that
+  expires while somebody is on holiday. Supply a file only for a credential we
+  did not issue.
     (none)              the stored identity (localport setup <TOKEN>)
-    --audience          CI: the pipeline's own OIDC identity, no secret at all
+    --audience          CI, the pipeline's own OIDC identity, no secret at all
     --pem               PEM file with client cert + key + tunnel CA
     --p12               PKCS#12 archive (password via --p12-pass-env / -file)
 
   Examples:
-    localport setup lps_...           # once per machine
+    localport setup lps_...            # once per machine
     localport connect https://de8yp41s.eu.localport.dev -p 3001
 
     localport connect https://de8yp41s.eu.localport.dev --pem client.pem -p 3001
     localport connect tcp://de8yp41s.eu.localport.dev:5432 --pem db.pem --port 5432
-    LOCALPORT_P12_PASSWORD=… \
+    LOCALPORT_P12_PASSWORD=... \
       localport connect https://de8yp41s.eu.localport.dev --p12 client.p12 -p 3001
     localport connect --config connect.yaml   # many targets at once
 
   From CI, with nothing stored anywhere. On GitHub Actions add
-  "permissions: { id-token: write }" to the job; the certificate is obtained
-  from the runner's own identity and kept in memory:
+  "permissions: { id-token: write }" to the job, and the certificate is obtained
+  from the runner's own identity and kept in memory.
 
     localport connect tcp://gw-01.eu.localport.dev:22 \
       --audience lpa_... -p 2222

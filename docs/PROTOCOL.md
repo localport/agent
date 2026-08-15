@@ -15,7 +15,7 @@ established, sends a `MuxBind` frame as its first message, and from there the
 connection speaks HTTP/2: the edge opens one stream per inbound visitor
 connection instead of asking the agent to dial back. Because it reuses the
 working carrier, it survives the same firewalls the tunnel does. It is an
-optimisation: an edge that does not accept the bind, or `--no-mux`, leave the
+optimization: an edge that does not accept the bind, or `--no-mux`, leave the
 tunnel working over dial-back.
 
 The agent runs one tunnel per config endpoint, and each tunnel opens its own
@@ -79,9 +79,9 @@ identical on either carrier.
 (the `--name` flag) is the device's name and its address. Whether it may be
 reached is decided server-side.
 
-`agent_version` and `agent_os` describe the BINARY, not the client. They land in
+`agent_version` and `agent_os` describe the binary, not the client. They land in
 the connection's server-side record so support can answer "which build was
-this" without asking, and they are FORENSIC ONLY: both are self-asserted, so
+this" without asking, and they are forensic only: both are self-asserted, so
 nothing on the server gates on either. `agent_version` is the build's version
 string; `agent_os` is `GOOS/GOARCH`. Both are optional.
 
@@ -102,10 +102,10 @@ registration without a resume match still replaces the sole existing client
   "tunnel_name": "my-api",
   "region": "eu",
   "region_name": "Europe",
-  "public_url": "https://foo.tunnel.localport.dev",
+  "public_url": "https://foo.eu.localport.dev",
   "urls": [
-    "https://foo.tunnel.localport.dev",
-    "http://foo.tunnel.localport.dev"
+    "https://foo.eu.localport.dev",
+    "http://foo.eu.localport.dev"
   ],
   "subdomain": "foo",
   "port": 0,
@@ -212,7 +212,7 @@ its ack of the edge's) always resets that window.
 
 `edge_addr` is a per-edge hostname (served by the platform's own NS); port
 defaults to 443 when omitted. The agent dials the new address verbatim and
-derives the SNI from the TARGET's zone (see Redirect under Reconnect Policy).
+derives the SNI from the target's zone (see Redirect under Reconnect Policy).
 
 ### MuxBind (11) / MuxBindAck (12)
 
@@ -226,7 +226,7 @@ derives the SNI from the TARGET's zone (see Redirect under Reconnect Policy).
 }
 ```
 
-Sent as the first frame on a second connection to the edge, over the SAME
+Sent as the first frame on a second connection to the edge, over the same
 carrier the control connection used (raw or WebSocket). No dedicated ALPN: the
 frame type is what tells the edge this connection is a mux rather than a control
 or data connection. It attaches that connection to a session already registered
@@ -298,7 +298,7 @@ initial control frame on that socket carries the matching `connection_id`.
 ## Error codes
 
 The `error_code` (in `RegisterAck`) and `code` (in `Shutdown` / `Error`) fields
-carry an **opaque, server-defined token**. The agent does NOT interpret it and
+carry an **opaque, server-defined token**. The agent does not interpret it and
 must not build behavior on specific values. It is surfaced verbatim so a user
 can read it back to support: in the TUI it appears as a bottom-right border
 capsule (`└────[ AT001 ]─┘`), and in `--noui` mode it is appended to the log
@@ -329,7 +329,22 @@ Public message families an agent may surface:
 | Tunnel limit              | tunnel limit reached                           | no        |
 | Tunnel terminated/deleted | tunnel terminated by an administrator          | no        |
 | Session replaced          | replaced by a newer session for this tunnel    | no        |
+| Unknown mesh device       | this device is not on the mesh: create it ...  | no        |
+| Mesh device limit         | this mesh has reached its device limit         | no        |
+| Duplicate device name     | another device on this tunnel is using this... | **yes**   |
 | Protocol / clock          | protocol error, update the agent ...           | no        |
+
+Two of those look alike and behave oppositely, on purpose.
+
+**Unknown mesh device** is non-retryable. Waiting cannot change the answer, and
+looping would bury the message that explains the refusal. The message says what
+to do.
+
+**Duplicate device name** is retryable, and that is the deviation. A mesh agent
+that restarts loses its resume id and collides with its own stale session, which
+clears on its own, so non-retryable would turn every unclean reconnect into a
+permanent outage. Two devices genuinely sharing a name keep failing visibly with
+the same message.
 
 Certificate / mTLS failures on a data connection surface at the TLS handshake
 layer, not as control-plane frames: a consumer either presents an acceptable
@@ -387,7 +402,7 @@ reconnects and data dial-backs present the same derived SNI. An explicit
    target zone's connect host, not the original one (which the target edge
    would treat as unknown tunnel traffic and close).
 2. The edge serves the region-zone wildcard cert (`*.<region-zone>`), which
-   covers `connect.<region-zone>` but NOT `connect.<per-edge-hostname>` (two
+   covers `connect.<region-zone>` but not `connect.<per-edge-hostname>` (two
    labels deep), so the derived SNI must sit one label under the target
    zone. The dial address itself stays the per-edge hostname, which resolves
    directly to the pinned edge (no extra DNS indirection).
@@ -402,7 +417,7 @@ edge presents its region zone wildcard certificate, publicly trusted and issued
 by Let's Encrypt, as its mTLS server identity. It is not signed by the tunnel CA,
 and never could be for a customer-registered CA, since the platform holds no key
 for one. The CA in a bundle or `.p12` is used for the other direction only: it is
-part of the chain the consumer PRESENTS so the edge can verify it.
+part of the chain the consumer presents so the edge can verify it.
 
 A bundle must still contain at least one CA certificate. That is checked when the
 bundle is loaded, so a chainless bundle fails locally with a clear message
@@ -414,48 +429,155 @@ the change: a revocation that only takes effect on the next connection is not a
 revocation. The agent sees an ordinary disconnect and reconnects; the new attempt
 is refused if the grant no longer covers it.
 
-### A refused certificate is REPORTED
+### Human sign-in (`localport login`)
 
-Under TLS 1.3 the client sends its certificate after the server's Finished, so a
-server that refuses it cannot say so during the handshake: `tls.Dial` returns a
-healthy connection and the rejection arrives on the FIRST READ as
-`remote error: tls: bad certificate`. `localport connect` therefore reports the
-error from the REMOTE side of the copy and stays quiet about the local side,
-where a client tool closing its own connection is ordinary.
+For a person, not a machine. RFC 8628 device authorization: nothing has to be
+transmitted to this machine beforehand (no token, no team, no identity), which
+is what makes it work over SSH into a jump box, where a browser redirect back to
+localhost does not.
 
-The message names what the holder can check: that the identity has been granted
-access to the device, and that the certificate is still valid and unrevoked. The
-agent is not told why the far side refused, and does not guess.
+```
+localport login
+  ├─ P-256 keypair generated locally
+  └─ POST /v1/mtls/device/start  { csr_pem, hostname, agent_os }
+       ← { device_code, user_code, verification_uri,
+           verification_uri_complete, interval, expires_in }
 
-### Stored identity
+     prints:  Open https://dashboard.localport.io/device?code=HBQX-4T2M
+              or go to https://dashboard.localport.io/device and enter  HBQX-4T2M
 
-A credential file is not the intended path. `localport setup <TOKEN>` spends a
-single-use setup token against the control plane, keeps a private key that never
-leaves the machine, and stores the result under `~/.localport/identity/`
-(directories `0700`, files `0600`):
+  POST /v1/mtls/device/token  { device_code, csr_pem }
+       ← 428 { "error": "authorization_pending" }   ... keep polling
+       ← 200 { cert_pem, ca_chain_pem, identity, team_id, not_after }
+
+  ~/.localport/identity/<team>/user-<id>/{cert.pem,key.pem,meta.json}
+```
+
+`hostname` and `agent_os` describe the machine, not the person. They are what
+the approval screen shows beside the requesting address, so somebody signing in
+from a laptop and a jump box can tell which one is asking, and they name the
+machine on the approval screen. Both are self-asserted and optional, like
+`agent_version` and `agent_os` on Register: nothing on the server gates on
+either.
+
+Four properties worth knowing:
+
+- **Both URIs are printed, and the prefilled one leads.** `verification_uri_complete`
+  (RFC 8628 §3.3.1) carries the code so the common path is one click; the bare
+  address and the code are printed beside it because that is what works when this
+  is running over SSH and the browser is on a phone. It does not weaken the
+  phishing defence: what catches that is the approval screen showing the
+  requesting IP and what the certificate will reach, and prefilling skips a
+  typing step, not that screen. Nothing auto-submits, and the code stays visible
+  so it can be read aloud and checked against what is on screen.
+
+- **The CSR goes up at the start**, and the server pins its hash. The human approves
+  one key, and only that key can collect. Sending it at redemption instead would
+  mean they approved key A while key B received the certificate.
+- **Two answers are distinguishable, and both mean "keep going".** `SE021`
+  (RFC 8628 `authorization_pending`) and `SE022` (`slow_down`, add 5 seconds to
+  the interval and continue). Every other refusal, whether unknown, denied,
+  already consumed or expired, is the same opaque message, so a guessed device
+  code cannot be used to map the state of somebody else's sign-in.
+
+  The agent branches on the code, never on message text. Codes are stable;
+  wording is not.
+- **A sign-in certificate does not renew.** It lives hours; re-running
+  `localport login` is how a fresh one is obtained. The identity is the person's
+  immutable username, so removing them from the team ends it.
+
+  Enforced on both sides. The control plane refuses
+  `/v1/mtls/certs/renew` for a sign-in certificate, which is the boundary and
+  holds against an agent of any vintage. The agent never asks either: the
+  credential records `source: sso`, and `Renew` refuses before building a
+  request.
+
+  A sign-in carries **no `renew_after`**: the device flow sends none and the
+  agent synthesizes none, so the two-thirds fallback below applies only to
+  credentials that renew. The field is omitted from `meta.json` rather than
+  written as a zero time. Go's zero instant serializes as
+  `0001-01-01T00:00:00Z`, which looks like a value, reads as a corrupt record,
+  and is in the past, so anything scheduling off it would fire immediately and
+  keep firing. `localport connect` prints the expiry and that `localport login`
+  is how it comes back.
+
+### Stored identity (`localport identity`)
+
+A credential file is not the intended path. `localport setup <TOKEN>`
+spends a single-use setup token against the control plane, keeps a private
+key that never leaves the machine, and stores the result under
+`~/.localport/identity/` (directories `0700`, files `0600`):
 
 ```
 <team>/<kind>-<identity>/
   cert.pem    leaf first, then the issuing chain, which is what the agent presents
   key.pem     P-256 private key, generated locally, never transmitted
   meta.json   identity, team, team_name, kind, spiffe_id, source, api_url,
-              serial, not_after and renew_after
+              serial, not_after, and renew_after only when the credential renews
 ```
 
-**The path and every identity field are read from the CERTIFICATE, never from
+`team_name` is the team's display name and is cosmetic. `localport identity list`
+prints it so a person holding credentials in two teams can tell them apart, and
+nothing else reads it. It is omitted when the control plane could not resolve it,
+and a record without it still loads. Requiring it would turn a missing display
+string into a missing credential. A renewal refreshes it but never blanks it, so
+a transient lookup failure on the server cannot erase a name already on disk.
+
+`source` is `token`, `oidc` or `sso`. Renewability is a property of the source
+and is decided by a positive allowlist: `token` and `oidc` renew, anything else
+does not, so a source this build has never heard of is not renewable rather than
+renewable by default. A renewal carries the source forward unchanged.
+
+`meta.json` is validated on read and on write, not merely parsed. A record naming
+an unknown kind or source, missing an expiry, or pairing a non-renewing source
+with a renewal deadline is refused at the store rather than surfacing later as an
+opaque handshake failure.
+
+**The path and every identity field are read from the certificate, never from
 the response body**, so the record and the material beside it cannot disagree.
 Both path components are load-bearing: one machine may hold credentials for
 several teams, and `user` and `client` are separate SPIFFE namespaces that may
 hold the same name, so keying on the team alone would let `localport login` and
 `localport setup` overwrite each other.
 
-The path carries no control-plane component. Which plane issued a credential is
-recorded as `api_url`, which is where renewal reads it.
+The path carries no control-plane component. `--api` exists for development, and
+a developer running two side by side sets `LOCALPORT_HOME` to isolate the whole
+store. Which plane issued a credential is recorded as `api_url`, which is where
+renewal reads it.
 
 Components are used verbatim, with case preserved: nothing is escaped, sanitized
 or folded. A component that is empty, `.`, `..`, or that contains `/`, `\` or
 `:` is refused rather than repaired, since a repaired component names a
 different credential than the certificate does.
+
+`localport connect` with no `--pem` and no `--p12` presents this credential.
+When a machine holds several, a selector picks one:
+
+```
+gw-01                     a bare identity
+<team>/gw-01              narrowed to one team
+<team>/client/gw-01       fully qualified
+```
+
+Two segments are team/identity, never kind/identity. The three-segment form
+exists for one reachable case: a team may hold a `client` and a `user`
+credential under the same name, because the server validates a client identity as
+lowercase alphanumerics and a username is exactly that.
+
+Precedence is `--identity` > `LOCALPORT_IDENTITY` > an interactive choice, and
+the ordering is load-bearing. A selector that was supplied and matches zero or
+several credentials is an error, never a prompt: otherwise a typo in the
+environment variable opens a menu and a person selects a principal they never
+meant to present. The prompt appears only when no selector was given at all, only
+on a terminal, and never under `--config`; everywhere else an ambiguous match is
+refused with the full form of each candidate so the fix is a copy and paste.
+
+The certificate reaches TLS through a callback rather than being copied
+into the config, so a renewal is picked up on the next handshake without
+restarting. A reload that finds a different SPIFFE identity in the file is
+refused, and the process keeps presenting what it opened with: a renewal carries
+the identity forward, so a change there is a swapped credential, never a
+rotation.
 
 **Renewal carries no bearer secret.** Requiring the setup token to renew
 would mean keeping that token forever, which is the thing this removes. Instead
@@ -480,97 +602,14 @@ This digest is a wire format shared with the control plane, and a mismatch is
 silent: renewal would simply never succeed. Both sides pin it with the same
 test vector; do not change one without the other.
 
-Renewal is due at `renew_after`, which the SERVER sets two thirds through the
-lifetime, so the last third is retry budget. Cadence is therefore policy the
-platform can change without shipping a new agent. The loop runs inside
-`localport connect`; a machine that is not permanently connected should run
-`localport identity renew` from a daily timer instead. The previous certificate
-stays valid until its own expiry, so rollover overlaps.
-
-### Human sign-in (`localport login`)
-
-For a PERSON, not a machine. RFC 8628 device authorization: nothing has to be
-transmitted to this machine beforehand (no token, no team, no identity), which
-is what makes it work over SSH into a jump box, where a browser redirect back to
-localhost does not.
-
-```
-localport login
-  |- P-256 keypair generated LOCALLY
-  `- POST /v1/mtls/device/start  { csr_pem, hostname, agent_os }
-       <- { device_code, user_code, verification_uri,
-            verification_uri_complete, interval, expires_in }
-
-     prints:  Open https://dashboard.localport.io/device?code=HBQX-4T2M
-              or go to https://dashboard.localport.io/device and enter  HBQX-4T2M
-
-  POST /v1/mtls/device/token  { device_code, csr_pem }
-       <- 428 { "error": "authorization_pending" }   ... keep polling
-       <- 200 { cert_pem, ca_chain_pem, identity, team_id, not_after }
-
-  ~/.localport/identity/<team>/user-<id>/{cert.pem,key.pem,meta.json}
-```
-
-`hostname` and `agent_os` describe the MACHINE, not the person. They are what
-the approval screen shows beside the requesting address, so somebody signing in
-from a laptop and a jump box can tell which one is asking. Both are
-self-asserted and optional, like `agent_version` and `agent_os` on Register:
-nothing on the server gates on either.
-
-Four properties worth knowing:
-
-- **Both URIs are printed, and the prefilled one leads.** `verification_uri_complete`
-  (RFC 8628 §3.3.1) carries the code so the common path is one click; the bare
-  address and the code are printed beside it because that is what works when this
-  is running over SSH and the browser is on a phone. It does not weaken the
-  phishing defence: what catches that is the approval screen showing the
-  requesting IP and what the certificate will reach, and prefilling skips a
-  typing step, not that screen. Nothing auto-submits, and the code stays visible
-  so it can be read aloud and CHECKED against what is on screen.
-
-- **The CSR goes up at START**, and the server pins its hash. The human approves
-  ONE key, and only that key can collect. Sending it at redemption instead would
-  mean they approved key A while key B received the certificate.
-- **Two answers are distinguishable, and both mean "keep going".** `SE021`
-  (RFC 8628 `authorization_pending`) and `SE022` (`slow_down`, add 5 seconds to
-  the interval and continue). Every other refusal, whether unknown, denied,
-  already consumed or expired, is the same opaque message, so a guessed device
-  code cannot be used to map the state of somebody else's sign-in.
-
-  The agent branches on the CODE, never on message text. Codes are stable;
-  wording is not.
-- **A sign-in certificate does not renew.** It lives hours; re-running
-  `localport login` is how a fresh one is obtained. The identity is the person's
-  immutable username, so removing them from the team ends it.
-
-  Enforced on both sides. The control plane refuses
-  `/v1/mtls/certs/renew` for a sign-in certificate, which is the boundary and
-  holds against an agent of any vintage. The agent never asks either: the
-  credential records `source: sso`, and `Renew` refuses before building a
-  request.
-
-`localport connect` with no `--pem` and no `--p12` presents this credential.
-When a machine holds several, a SELECTOR picks one:
-
-```
-gw-01                     a bare identity
-<team>/gw-01              narrowed to one team
-<team>/client/gw-01       fully qualified
-```
-
-Two segments are TEAM/identity, never kind/identity. The three-segment form
-exists for one reachable case: a team may hold a `client` and a `user`
-credential under the same name, because the server validates a client identity
-as lowercase alphanumerics and a username is exactly that.
-
-The signature is recomputed on every ATTEMPT rather than once, because the digest
+The signature is recomputed on every attempt rather than once, because the digest
 is bound to a minute bucket: a retry that crosses a minute boundary must re-sign,
 or it replays a signature the server no longer accepts.
 
 ### When the control plane cannot be reached
 
 A credential call that fails because nothing answered is retried; one that fails
-because it was REFUSED is not. The distinction is the whole policy:
+because it was refused is not. The distinction is the whole policy.
 
 | condition | behavior |
 |---|---|
@@ -589,6 +628,19 @@ before its network is ready, and `--wait 0` makes exactly one attempt for CI.
 **`--wait` applies only to retryable conditions.** A bad token fails at once
 whatever it is set to.
 
+### A refused certificate is reported
+
+Under TLS 1.3 the client sends its certificate after the server's Finished, so a
+server that refuses it cannot say so during the handshake: `tls.Dial` returns a
+healthy connection and the rejection arrives on the first read as
+`remote error: tls: bad certificate`. `localport connect` therefore reports the
+error from the remote side of the copy and stays quiet about the local side,
+where a client tool closing its own connection is ordinary.
+
+The message names what the holder can check: that the identity has been granted
+access to the device, and that the certificate is still valid and unrevoked. The
+agent is not told why the far side refused, and does not guess.
+
 The sign-in poll is more patient. A transport failure while waiting for approval
 does not end the sign-in: the code stays valid for its whole window and the poll
 keeps its `expires_in` deadline. If it does expire after a run of transport
@@ -597,7 +649,7 @@ sign-in was never approved.
 
 ### CI workload identity (`localport connect --audience`)
 
-A pipeline authenticates with a token its own PLATFORM minted. No secret is
+A pipeline authenticates with a token its own platform minted. No secret is
 stored in the repository, in the CI secret store, or on disk.
 
 ```
@@ -606,18 +658,18 @@ stored in the repository, in the CI secret store, or on disk.
 2  the job declares `permissions: { id-token: write }`
 3  the agent asks the runner for a token stamped with that audience
 4  POST /v1/mtls/certs with `X-Workload-Token: <jwt>` and a CSR
-5  the certificate is held IN MEMORY for the life of the process
+5  the certificate is held in memory for the life of the process
 ```
 
 Detection order, so an unknown platform is never a dead end:
 
 | Source | When |
 |---|---|
-| `LOCALPORT_OIDC_TOKEN` | always checked FIRST: the escape hatch for GitLab `id_tokens:`, Buildkite, a projected Kubernetes service-account token |
+| `LOCALPORT_OIDC_TOKEN` | always checked first: the escape hatch for GitLab `id_tokens:`, Buildkite, a projected Kubernetes service-account token |
 | GitHub Actions | `ACTIONS_ID_TOKEN_REQUEST_URL` + `ACTIONS_ID_TOKEN_REQUEST_TOKEN` present |
 
 The audience must be supplied (`--audience` or `LOCALPORT_OIDC_AUDIENCE`): it is
-what the platform stamps into the token, so the agent has to know it BEFORE
+what the platform stamps into the token, so the agent has to know it before
 asking for one. It is not a secret: it names a binding, it does not authorize
 one.
 
@@ -626,9 +678,9 @@ ephemeral; a certificate that outlives the job is one nobody cleans up, and a jo
 that outruns its certificate should fail loudly rather than quietly extend a
 credential the pipeline never intended to hold.
 
-A sign-in carries **no `renew_after`**: the device flow sends none and the agent
-synthesizes none, so the two-thirds fallback applies only to credentials that
-renew. The field is omitted from `meta.json` rather than written as a zero time.
-Go's zero instant serializes as `0001-01-01T00:00:00Z`, which looks like a value,
-reads as a corrupt record, and is in the past, so anything scheduling off it
-would fire immediately and keep firing.
+Renewal is due at `renew_after`, which the server sets two thirds through the
+lifetime, so the last third is retry budget. Cadence is therefore policy the
+platform can change without shipping a new agent. The loop runs inside
+`localport connect`; a machine that is not permanently connected should run
+`localport identity renew` from a daily timer instead. The previous certificate
+stays valid until its own expiry, so rollover overlaps.

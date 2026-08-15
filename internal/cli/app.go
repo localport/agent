@@ -74,7 +74,11 @@ Examples:
   localport connect https://sub.eu.localport.dev --pem client.pem -p 3001
   localport connect tcp://sub.eu.localport.dev:11434 --pem db.pem -p 11434
 
-  # Or set the machine up once and let the agent obtain the credential:
+  # Or set the machine up once and let the agent obtain and renew for you:
   localport setup <TOKEN>
+  localport connect https://sub.eu.localport.dev -p 3001
+
+  # See what this machine holds:
+  localport identity list
 `)
 }

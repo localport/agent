@@ -100,9 +100,9 @@ func usageSetup() {
   reach locked (mTLS) tunnels.
 
   An operator creates a setup token in the dashboard and gives you one string.
-  This machine spends it ONCE, keeps a private key that never leaves it, and
-  renews itself from then on, so there is no long-lived secret to rotate and no
-  certificate file to copy around.
+  This machine spends it once, keeps a private key that never leaves it, and
+  renews itself from then on, so there is no long-lived secret to rotate and
+  no certificate file to copy around.
 
     localport setup lps_...
     localport connect https://gw-01.eu.localport.dev -p 3001
@@ -112,16 +112,21 @@ func usageSetup() {
 
     LOCALPORT_SETUP_TOKEN=lps_... localport setup
 
-  LOCALPORT_SETUP_TOKEN_FILE names a file to read it from instead, which is
-  what systemd LoadCredential= and docker secrets provide.
+  LOCALPORT_SETUP_TOKEN_FILE names a file to read it from instead, which is what
+  systemd LoadCredential= and docker secrets provide.
 
   Credentials live under ~/.localport/identity/<team>/, one directory per
   identity (0700, keys 0600). Set LOCALPORT_HOME to keep them elsewhere; a
   service with no home directory falls back to a machine-wide state directory.
 
-  --wait covers a box that boots before its network is ready: the command keeps
-  retrying an UNREACHABLE control plane for that long, with backoff. A refused
-  token is not retried at any setting, it fails immediately. Use --wait 0 in CI
-  to make exactly one attempt.
+  --wait covers a box that boots before its network is ready. The command keeps
+  retrying an unreachable control plane for that long, with backoff. A refused
+  token is not retried at any setting, it fails immediately. Use --wait 0 in
+  CI to make exactly one attempt.
+
+  --api and `+identity.APIURLEnv+` point the agent at a different control plane.
+  There is one in production and this is not something a customer needs, it
+  exists for development against a local build. The value is remembered, so
+  renewal needs it only once.
 `)
 }

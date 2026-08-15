@@ -256,7 +256,8 @@ func usageIdentity() {
 
   Inspect and manage the credentials this machine holds.
 
-  Credentials arrive from "localport setup <TOKEN>". They live under
+  Credentials arrive from "localport setup <TOKEN>" (a machine, renews itself)
+  or "localport login" (you, short-lived). They live under
   ~/.localport/identity/<team>/, one directory per identity, 0700 with keys
   0600. Set LOCALPORT_HOME to keep them elsewhere.
 
@@ -275,7 +276,7 @@ func usageIdentity() {
   renew   force a renewal now. Renewal normally happens on its own inside
           "localport connect"; run this from a daily timer for a machine that is
           not always connected.
-  remove  delete a credential from THIS MACHINE. It does not revoke anything:
-          the certificate stays valid until it is revoked in the dashboard.
+  remove  delete a credential from this machine. It does not revoke anything.
+          The certificate stays valid until it is revoked in the dashboard.
 `)
 }

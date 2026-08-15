@@ -24,7 +24,26 @@ Accounts and tunnels are managed at [localport.io](https://localport.io).
 - **Reserved addresses.** Static subdomains and ports persist across sessions, keeping public links and webhook URLs stable.
 - **Mesh tunnels.** A single token serves an entire fleet. Each device receives its own address and remains reachable by name behind CGNAT or cellular networks.
 - **Shared tunnels.** One inbound request is delivered to every connected client, with a designated client returning the response.
-- **Locked tunnels.** Mutual TLS with ECDSA P-256 certificates restricts access to authorized devices, with per-device revocation.
+- **Locked tunnels.** Mutual TLS with per-device identity and scoped access. Each
+  certificate names a stable device identity; what an identity may reach is
+  managed server-side and can be changed without reissuing certificates. Bring
+  your own certificate authority if you prefer: only its public chain is ever
+  stored.
+- **Self-renewing credentials.** `localport setup <TOKEN>` spends a
+  single-use token once, generates its private key locally, and renews itself
+  from then on, so there is no certificate file to copy around and no long-lived
+  secret left on the machine.
+- **Sign in as yourself.** `localport login` prints a short code, you approve it
+  in the dashboard in any browser, and a short-lived certificate lands on this
+  machine. Nothing has to be copied here first, so it works over SSH into a jump
+  box. Off-boarding the person is removing them from the team.
+
+  A sign-in does not renew. It lasts hours, then you run `localport login`
+  again. Machines set up with a setup token renew themselves; sign-ins do not.
+- **CI with no secret at all.** In a pipeline the agent uses the platform's own
+  workload identity (GitHub Actions out of the box), exchanges it for a
+  short-lived certificate, and keeps it in memory. Nothing is stored in the
+  repository, in the CI secret store, or on the runner.
 - **Access control.** IP allow lists and password protection on any tunnel.
 - **Data privacy.** Traffic is never inspected, logged, or used for training, and each tunnel is pinned to a chosen region.
 - **Cross-platform.** Prebuilt binaries for macOS, Linux, and Windows.

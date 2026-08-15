@@ -7,21 +7,22 @@ import (
 )
 
 // ParseRemote normalizes a user-supplied remote endpoint into a canonical
-// host:port that tls.Dial accepts. It exists so a URL copied straight from
-// the tunnel dashboard can be pasted into `localport connect` unchanged.
+// host:port that tls.Dial accepts, so a tunnel URL can be pasted into
+// `localport connect` in whatever form it was copied.
 //
 // Accepted forms:
 //
 //	https://sub.eu.localport.dev            → sub.eu.localport.dev:443
 //	http://sub.eu.localport.dev             → sub.eu.localport.dev:443
 //	https://sub.eu.localport.dev:8443       → sub.eu.localport.dev:8443
-//	tcp://sub.eu.localport.dev:11434         → sub.eu.localport.dev:11434
-//	tls://sub.eu.localport.dev:11434         → sub.eu.localport.dev:11434
-//	sub.eu.localport.dev:11434               → sub.eu.localport.dev:11434 (bare)
+//	tcp://sub.eu.localport.dev:11434        → sub.eu.localport.dev:11434
+//	tls://sub.eu.localport.dev:11434        → sub.eu.localport.dev:11434
+//	sub.eu.localport.dev:11434              → sub.eu.localport.dev:11434 (bare)
 //
-// mTLS is always terminated by the edge on the HTTPS port, so http/https URLs
-// resolve to :443 unless the URL carries an explicit port. tcp/tls URLs and
-// bare inputs must include the port because there is no protocol default.
+// The scheme picks one thing, the default port. The connection itself is always
+// TLS, whatever the tunnel carries, because the client certificate is what gets
+// us in. So http/https resolve to :443 unless the URL names a port, and the
+// others must name one because there is no default to apply.
 func ParseRemote(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

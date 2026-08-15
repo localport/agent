@@ -1,4 +1,7 @@
 version: 1
+
+# Several tunnels from one agent process. Each spec carries one token; each
+# endpoint under it opens its own connection to the edge.
 specs:
   - token: ${env.LOCALPORT_TOKEN_EU}
     region: eu
@@ -6,6 +9,7 @@ specs:
       - name: api
         proto: http
         url: localhost:8080
+
   - token: ${env.LOCALPORT_TOKEN_US}
     region: us
     endpoints:
@@ -15,3 +19,27 @@ specs:
       - name: metrics
         proto: http
         url: localhost:9100
+
+  # Mesh, where one token serves the whole fleet and `name` is the device name.
+  #
+  # Each endpoint registers as its own device, so several devices can run from a
+  # single config. Names must be unique within the mesh; a duplicate is refused.
+  #
+  # The name is matched case-insensitively when access is checked, so `GW-01`
+  # and `gw-01` are one device. The address is derived separately and drops
+  # characters a DNS label cannot carry, so `gw.01` is reachable as `gw01-...`
+  # while still being granted as `gw.01`. Stick to lowercase letters, digits and
+  # dashes and the two are identical.
+  - token: ${env.LOCALPORT_TOKEN_FLEET}
+    region: eu
+    endpoints:
+      - name: gw-01
+        proto: tcp
+        url: 192.168.1.10:502
+      - name: gw-02
+        proto: tcp
+        url: 192.168.1.11:502
+
+# Tunnels authenticate with the token above and present no client certificate,
+# so nothing here takes an identity. Client certificates are for reaching a
+# locked tunnel, which is `localport connect` and connect.example.yaml.
