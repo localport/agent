@@ -396,11 +396,11 @@ configured connect label (`connect.eu.localport.dev`). Post-redirect
 reconnects and data dial-backs present the same derived SNI. An explicit
 `--server-name` override always wins. Reasons:
 
-1. The edge demuxes agent traffic by SNI: only `connect.<region-zone>` (and
-   `connect.<its-own-hostname>`) reach the agent handler; any other SNI is
-   treated as tunnel traffic. A cross-region redirect therefore needs the
-   target zone's connect host, not the original one (which the target edge
-   would treat as unknown tunnel traffic and close).
+1. The edge demuxes agent traffic by SNI: only `connect.<region-zone>` reaches
+   the agent handler; any other SNI is treated as tunnel traffic. A
+   cross-region redirect therefore needs the target zone's connect host, not
+   the original one (which the target edge would treat as unknown tunnel
+   traffic and close).
 2. The edge serves the region-zone wildcard cert (`*.<region-zone>`), which
    covers `connect.<region-zone>` but not `connect.<per-edge-hostname>` (two
    labels deep), so the derived SNI must sit one label under the target
