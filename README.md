@@ -22,8 +22,8 @@ Accounts and tunnels are managed at [localport.io](https://localport.io).
 
 - **Protocols.** HTTP, TCP, and TLS tunnels with automatic, browser-trusted HTTPS.
 - **Reserved addresses.** Static subdomains and ports persist across sessions, keeping public links and webhook URLs stable.
-- **Mesh tunnels.** A single token serves an entire fleet. Each device receives its own address and remains reachable by name behind CGNAT or cellular networks.
-- **Shared tunnels.** One inbound request is delivered to every connected client, with a designated client returning the response.
+- **Fleet tunnels.** A single token serves an entire fleet. Each device receives its own address and remains reachable by name behind CGNAT or cellular networks.
+- **Fanout tunnels.** One inbound request is delivered to every connected client, with a designated client returning the response.
 - **Locked tunnels.** Mutual TLS with per-device identity and scoped access. Each
   certificate names a stable device identity; what an identity may reach is
   managed server-side and can be changed without reissuing certificates. Bring
@@ -71,7 +71,7 @@ Create a tunnel in the [dashboard](https://dashboard.localport.io) to obtain a t
 
 - [Quick start](https://localport.io/docs/quick-start): first-tunnel walkthrough
 - [CLI reference](https://localport.io/docs/cli): commands, flags, and environment variables
-- Tunnel guides, by protocol ([HTTP](https://localport.io/docs/http-tunnels), [TCP](https://localport.io/docs/tcp-tunnels), TLS) and routing mode ([mesh](https://localport.io/docs/mesh-tunnels), [shared](https://localport.io/docs/shared-tunnels), [locked / mTLS](https://localport.io/docs/locked-tunnels))
+- Tunnel guides, by protocol ([HTTP](https://localport.io/docs/http-tunnels), [TCP](https://localport.io/docs/tcp-tunnels), TLS) and routing mode ([fleet](https://localport.io/docs/fleets), [fanout](https://localport.io/docs/fanout), [locked / mTLS](https://localport.io/docs/remote-access))
 
 ## Build from source
 

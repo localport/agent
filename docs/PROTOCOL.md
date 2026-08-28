@@ -19,7 +19,7 @@ optimization: an edge that does not accept the bind, or `--no-mux`, leave the
 tunnel working over dial-back.
 
 The agent runs one tunnel per config endpoint, and each tunnel opens its own
-control connection and its own mux, bound to that tunnel's session. A mesh set up
+control connection and its own mux, bound to that tunnel's session. A fleet set up
 as several same-token endpoints therefore gets one connection pair per device, so
 the devices stay independent, rather than sharing a single connection across
 every tunnel.
@@ -91,7 +91,7 @@ is replaced in place, so a reconnect after a network drop is instant on
 every tunnel kind. It is held in memory only (empty on first connect and after an
 agent restart) and ignored by older edges. On single tunnels a valid
 registration without a resume match still replaces the sole existing client
-(newest-wins); shared/mesh tunnels never replace without a resume match.
+(newest-wins); fanout/fleet tunnels never replace without a resume match.
 
 ### RegisterAck (2)
 
@@ -109,7 +109,7 @@ registration without a resume match still replaces the sole existing client
   ],
   "subdomain": "foo",
   "port": 0,
-  "mode": "shared",
+  "mode": "fanout",
   "protocol": "http",
   "error": "",
   "error_code": "",
@@ -262,7 +262,7 @@ already reaches it on. `--no-mux` skips the attempt entirely.
 
 Streams carry opaque bytes, exactly as a dialed-back connection did, so the same
 mechanism serves every tunnel type: http, tcp, tls, and both the primary and the
-secondaries of a shared tunnel. The visitor's address travels in the
+secondaries of a fanout tunnel. The visitor's address travels in the
 `Localport-Visitor-Addr` header on each stream, replacing the field NewConnection
 carried.
 
@@ -329,18 +329,18 @@ Public message families an agent may surface:
 | Tunnel limit              | tunnel limit reached                           | no        |
 | Tunnel terminated/deleted | tunnel terminated by an administrator          | no        |
 | Session replaced          | replaced by a newer session for this tunnel    | no        |
-| Unknown mesh device       | this device is not on the mesh: create it ...  | no        |
-| Mesh device limit         | this mesh has reached its device limit         | no        |
+| Unknown fleet device      | this device is not on the fleet: create it ... | no        |
+| Fleet device limit        | this fleet has reached its device limit        | no        |
 | Duplicate device name     | another device on this tunnel is using this... | **yes**   |
 | Protocol / clock          | protocol error, update the agent ...           | no        |
 
 Two of those look alike and behave oppositely, on purpose.
 
-**Unknown mesh device** is non-retryable. Waiting cannot change the answer, and
+**Unknown fleet device** is non-retryable. Waiting cannot change the answer, and
 looping would bury the message that explains the refusal. The message says what
 to do.
 
-**Duplicate device name** is retryable, and that is the deviation. A mesh agent
+**Duplicate device name** is retryable, and that is the deviation. A fleet agent
 that restarts loses its resume id and collides with its own stale session, which
 clears on its own, so non-retryable would turn every unclean reconnect into a
 permanent outage. Two devices genuinely sharing a name keep failing visibly with

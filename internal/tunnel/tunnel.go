@@ -702,7 +702,7 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 			_ = c.SendHeartbeatAck(hb.Timestamp)
 		}
 
-	// SetActive tells a shared-tunnel client it is now primary. The EDGE decides
+	// SetActive tells a fanout-tunnel client it is now primary. The EDGE decides
 	// routing, so an agent has nothing to do with it; it is matched here so the
 	// frame is a recognised no-op rather than falling through as unknown.
 	case proto.MsgHeartbeatAck, proto.MsgSetActive:

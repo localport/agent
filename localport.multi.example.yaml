@@ -20,10 +20,10 @@ specs:
         proto: http
         url: localhost:9100
 
-  # Mesh, where one token serves the whole fleet and `name` is the device name.
+  # Fleet, where one token serves the whole fleet and `name` is the device name.
   #
   # Each endpoint registers as its own device, so several devices can run from a
-  # single config. Names must be unique within the mesh; a duplicate is refused.
+  # single config. Names must be unique within the fleet; a duplicate is refused.
   #
   # The name is matched case-insensitively when access is checked, so `GW-01`
   # and `gw-01` are one device. The address is derived separately and drops
