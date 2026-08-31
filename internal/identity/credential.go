@@ -16,7 +16,7 @@ const reloadCheckInterval = time.Second
 
 // Credential is a live view of a stored identity. It hands tls.Config a
 // callback rather than a fixed certificate, so a long-running
-// `localport connect` picks up a renewal without restarting.
+// `localport access` picks up a renewal without restarting.
 type Credential struct {
 	store *Store
 	ref   Ref

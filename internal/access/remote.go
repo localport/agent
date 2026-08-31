@@ -1,4 +1,4 @@
-package connect
+package access
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 
 // ParseRemote normalizes a user-supplied remote endpoint into a canonical
 // host:port that tls.Dial accepts, so a tunnel URL can be pasted into
-// `localport connect` in whatever form it was copied.
+// `localport access` in whatever form it was copied.
 //
 // Accepted forms:
 //

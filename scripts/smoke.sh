@@ -14,9 +14,9 @@ if go run ./cmd/localport tunnel --token tok_test >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[smoke] connect command rejects bad invocation"
-if go run ./cmd/localport connect >/dev/null 2>&1; then
-  echo "expected connect to fail without a remote" >&2
+echo "[smoke] access command rejects bad invocation"
+if go run ./cmd/localport access >/dev/null 2>&1; then
+  echo "expected access to fail without a remote" >&2
   exit 1
 fi
 

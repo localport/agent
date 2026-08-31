@@ -5,7 +5,7 @@ connections:
   # presented (see `localport setup` and `localport login`). This is the intended
   # path, with nothing to copy around and no file that renewal has to chase.
   - name: gateway
-    remote: gw-01.eu.localport.dev:443
+    remote: gateway-warehouse.eu.localport.dev:443
     local_port: "3001"
 
   # `identity` picks one when the machine holds several. A config file is never
@@ -15,13 +15,13 @@ connections:
   #   <team>/gw-01              narrowed to one team
   #   <team>/client/gw-01       fully qualified
   - name: postgres
-    remote: db.eu.localport.dev:5432
+    remote: db-warehouse.eu.localport.dev:5432
     local_port: "5432"
     identity: 01kpq7x2/client/deploy-prod
 
   # A credential we did not issue (your own CA) still comes from a file.
   - name: redis
-    remote: cache.eu.localport.dev:6379
+    remote: cache-warehouse.eu.localport.dev:6379
     local_port: "6379"
     p12: certs/client.p12
     p12_pass_env: LOCALPORT_P12_PASSWORD

@@ -37,7 +37,7 @@ func openNoFollow(path string) (*os.File, error) {
 	// without it, and `WritePrivateFileAtomic` installs a renewed credential by
 	// renaming over exactly this path. With FILE_SHARE_READ alone, a reader that
 	// happened to hold the certificate open, the renewal loop re-reading it, a
-	// second `localport connect`, made the rename fail with "Access is denied"
+	// second `localport access`, made the rename fail with "Access is denied"
 	// and the renewal silently retried until the certificate expired.
 	//
 	// It is not a weakening: sharing DELETE lets someone who ALREADY has the

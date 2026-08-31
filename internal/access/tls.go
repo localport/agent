@@ -1,4 +1,4 @@
-package connect
+package access
 
 import (
 	"bytes"
@@ -90,7 +90,7 @@ func loadFromPEMBundle(path string) (tls.Certificate, error) {
 				"%s holds certificates but no private key.\n"+
 					"  --pem wants ONE file containing the leaf, its chain and the key.\n"+
 					"  If this came from the identity store, drop --pem entirely: "+
-					"`localport connect` presents a stored credential on its own.", path)
+					"`localport access` presents a stored credential on its own.", path)
 		}
 		return tls.Certificate{}, classify("parse pem bundle", err)
 	}
@@ -99,7 +99,7 @@ func loadFromPEMBundle(path string) (tls.Certificate, error) {
 		return tls.Certificate{}, fmt.Errorf("parse leaf: %w", err)
 	}
 	// Kept on the certificate so crypto/tls does not re-parse the leaf on every
-	// handshake. A long-lived connect session opens many.
+	// handshake. A long-lived access session opens many.
 	cert.Leaf = leaf
 
 	cas := 0

@@ -89,7 +89,7 @@ func runSetup(args []string) error {
 	if due, renews := material.Meta.NextRenewal(); renews {
 		fmt.Fprintf(os.Stderr, "  renews     %s\n", due.Format(time.RFC3339))
 	}
-	fmt.Fprintf(os.Stderr, "\n  next: localport connect https://<device>.<region>.localport.dev -p 3001\n")
+	fmt.Fprintf(os.Stderr, "\n  next: localport access https://<device>-<fleet>.<region>.localport.dev -p 3001\n")
 	return nil
 }
 
@@ -105,7 +105,7 @@ func usageSetup() {
   no certificate file to copy around.
 
     localport setup lps_...
-    localport connect https://gw-01.eu.localport.dev -p 3001
+    localport access https://gateway-warehouse.eu.localport.dev -p 3001
 
   The token is single-use. Prefer the environment over an argument, which is
   visible in shell history and to "ps":

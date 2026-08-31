@@ -1,4 +1,4 @@
-package connect
+package access
 
 import (
 	"fmt"
@@ -8,9 +8,9 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
-// ConnectConfig describes a list of mTLS targets that should each be
-// exposed locally via the connect subcommand.
-type ConnectConfig struct {
+// AccessConfig describes a list of mTLS targets that should each be
+// exposed locally via the access subcommand.
+type AccessConfig struct {
 	// Version gates the schema, as the tunnel config does. Required, so a file
 	// written for a later shape fails on the version line rather than on a field
 	// this build silently ignores.
@@ -41,13 +41,13 @@ type Connection struct {
 // rather than a credential file.
 func (c *Connection) UsesIdentity() bool { return c.Bundle == "" && c.P12 == "" }
 
-// LoadConnectConfig reads and validates a connect YAML file.
-func LoadConnectConfig(path string) (*ConnectConfig, error) {
+// LoadAccessConfig reads and validates an access YAML file.
+func LoadAccessConfig(path string) (*AccessConfig, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	var cc ConnectConfig
+	var cc AccessConfig
 	if err := yaml.Unmarshal(raw, &cc); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}

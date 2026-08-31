@@ -66,7 +66,7 @@ func runLogin(args []string) error {
 	// There is no renewal loop and the expiry is hours away, so say it here
 	// rather than let it surface as a failed connection overnight.
 	fmt.Fprintf(os.Stderr, "  renews     never; run `localport login` again when it expires\n")
-	fmt.Fprintf(os.Stderr, "\n  next: localport connect https://<device>.<region>.localport.dev -p 3001\n")
+	fmt.Fprintf(os.Stderr, "\n  next: localport access https://<device>-<fleet>.<region>.localport.dev -p 3001\n")
 	return nil
 }
 

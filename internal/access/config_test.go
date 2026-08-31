@@ -1,4 +1,4 @@
-package connect
+package access
 
 import (
 	"os"
@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestLoadConnectConfigBundleMode(t *testing.T) {
+func TestLoadAccessConfigBundleMode(t *testing.T) {
 	dir := t.TempDir()
 	bundle := filepath.Join(dir, "client.pem")
 	if err := os.WriteFile(bundle, []byte("not real but exists"), 0o600); err != nil {
@@ -21,7 +21,7 @@ connections:
     local_port: "5432"
     bundle: `+bundle+`
 `)
-	cc, err := LoadConnectConfig(yamlPath)
+	cc, err := LoadAccessConfig(yamlPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -33,7 +33,7 @@ connections:
 	}
 }
 
-func TestLoadConnectConfigRejectsAmbiguousMode(t *testing.T) {
+func TestLoadAccessConfigRejectsAmbiguousMode(t *testing.T) {
 	dir := t.TempDir()
 	bundle := filepath.Join(dir, "client.pem")
 	p12 := filepath.Join(dir, "client.p12")
@@ -49,12 +49,12 @@ connections:
     bundle: `+bundle+`
     p12: `+p12+`
 `)
-	if _, err := LoadConnectConfig(yamlPath); err == nil {
+	if _, err := LoadAccessConfig(yamlPath); err == nil {
 		t.Fatal("expected error when both bundle and p12 are set")
 	}
 }
 
-func TestLoadConnectConfigAcceptsIdentityMode(t *testing.T) {
+func TestLoadAccessConfigAcceptsIdentityMode(t *testing.T) {
 	// No bundle and no p12 is the stored-identity path, not a broken config.
 	yamlPath := writeYAML(t, t.TempDir(), `
 version: 1
@@ -63,7 +63,7 @@ connections:
     remote: gw-01.eu.localport.dev:22
     local_port: "2222"
 `)
-	cc, err := LoadConnectConfig(yamlPath)
+	cc, err := LoadAccessConfig(yamlPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -72,7 +72,7 @@ connections:
 	}
 }
 
-func TestLoadConnectConfigRejectsIdentityWithACredentialFile(t *testing.T) {
+func TestLoadAccessConfigRejectsIdentityWithACredentialFile(t *testing.T) {
 	dir := t.TempDir()
 	bundle := filepath.Join(dir, "client.pem")
 	_ = os.WriteFile(bundle, []byte("x"), 0o600)
@@ -86,12 +86,12 @@ connections:
     identity: 01kpq7x2/client/deploy-prod
     bundle: `+bundle+`
 `)
-	if _, err := LoadConnectConfig(yamlPath); err == nil {
+	if _, err := LoadAccessConfig(yamlPath); err == nil {
 		t.Fatal("expected 'identity' to be refused alongside a credential file")
 	}
 }
 
-func TestLoadConnectConfigRejectsMissing(t *testing.T) {
+func TestLoadAccessConfigRejectsMissing(t *testing.T) {
 	yamlPath := writeYAML(t, t.TempDir(), `
 version: 1
 connections:
@@ -100,19 +100,19 @@ connections:
     local_port: "5432"
     bundle: foo
 `)
-	if _, err := LoadConnectConfig(yamlPath); err == nil {
+	if _, err := LoadAccessConfig(yamlPath); err == nil {
 		t.Fatal("expected missing-remote rejection")
 	}
 }
 
 // A file written for another schema must fail on the version line, not on a
 // field this build happens to ignore.
-func TestLoadConnectConfigRejectsUnknownVersion(t *testing.T) {
+func TestLoadAccessConfigRejectsUnknownVersion(t *testing.T) {
 	for _, body := range []string{
 		"connections:\n  - name: gw\n    remote: gw:22\n    local_port: \"2222\"\n",
 		"version: 2\nconnections:\n  - name: gw\n    remote: gw:22\n    local_port: \"2222\"\n",
 	} {
-		if _, err := LoadConnectConfig(writeYAML(t, t.TempDir(), body)); err == nil {
+		if _, err := LoadAccessConfig(writeYAML(t, t.TempDir(), body)); err == nil {
 			t.Fatalf("expected a version rejection for:\n%s", body)
 		}
 	}
@@ -120,7 +120,7 @@ func TestLoadConnectConfigRejectsUnknownVersion(t *testing.T) {
 
 // Two connections on one port bind the same address, so the second listener
 // fails after the first is already serving.
-func TestLoadConnectConfigRejectsDuplicateLocalPort(t *testing.T) {
+func TestLoadAccessConfigRejectsDuplicateLocalPort(t *testing.T) {
 	yamlPath := writeYAML(t, t.TempDir(), `
 version: 1
 connections:
@@ -131,13 +131,13 @@ connections:
     remote: gw-02.eu.localport.dev:22
     local_port: "2222"
 `)
-	if _, err := LoadConnectConfig(yamlPath); err == nil {
+	if _, err := LoadAccessConfig(yamlPath); err == nil {
 		t.Fatal("expected a duplicate local_port rejection")
 	}
 }
 
 // Port 0 asks the OS for a free one, so repeats never collide.
-func TestLoadConnectConfigAllowsRepeatedEphemeralPort(t *testing.T) {
+func TestLoadAccessConfigAllowsRepeatedEphemeralPort(t *testing.T) {
 	yamlPath := writeYAML(t, t.TempDir(), `
 version: 1
 connections:
@@ -148,14 +148,14 @@ connections:
     remote: gw-02.eu.localport.dev:22
     local_port: "0"
 `)
-	if _, err := LoadConnectConfig(yamlPath); err != nil {
+	if _, err := LoadAccessConfig(yamlPath); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 }
 
 func writeYAML(t *testing.T, dir, body string) string {
 	t.Helper()
-	path := filepath.Join(dir, "connect.yaml")
+	path := filepath.Join(dir, "access.yaml")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write yaml: %v", err)
 	}

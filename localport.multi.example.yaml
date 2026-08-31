@@ -42,4 +42,4 @@ specs:
 
 # Tunnels authenticate with the token above and present no client certificate,
 # so nothing here takes an identity. Client certificates are for reaching a
-# locked tunnel, which is `localport connect` and connect.example.yaml.
+# locked tunnel, which is `localport access` and access.example.yaml.

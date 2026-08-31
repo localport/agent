@@ -236,7 +236,7 @@ func noteSignInExpiry(ref identity.Ref, meta identity.Meta) {
 }
 
 // startIdentityRenewal runs the renewal loop alongside a long-lived command, so
-// a months-long `localport connect` needs no separate timer.
+// a months-long `localport access` needs no separate timer.
 func startIdentityRenewal(ctx context.Context, store *identity.Store, ref identity.Ref) {
 	if _, running := renewalLoops.LoadOrStore(ref, true); running {
 		return
@@ -274,7 +274,7 @@ func usageIdentity() {
   list    every credential, with team, source, expiry and when it renews.
           Prints to stdout so it can be piped.
   renew   force a renewal now. Renewal normally happens on its own inside
-          "localport connect"; run this from a daily timer for a machine that is
+          "localport access"; run this from a daily timer for a machine that is
           not always connected.
   remove  delete a credential from this machine. It does not revoke anything.
           The certificate stays valid until it is revoked in the dashboard.

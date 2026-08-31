@@ -66,7 +66,7 @@ var ErrRenewalInProgress = errors.New("another process is renewing this credenti
 
 // RenewOnce renews unconditionally and stores the result.
 //
-// One renewal at a time per credential, across processes: a `localport connect`
+// One renewal at a time per credential, across processes: a `localport access`
 // and a cron `localport identity renew` are both legitimate writers, and
 // renewing minutes apart orphans a certificate against the live cap. The
 // in-process guard cannot see another process.

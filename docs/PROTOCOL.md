@@ -407,7 +407,7 @@ reconnects and data dial-backs present the same derived SNI. An explicit
    zone. The dial address itself stays the per-edge hostname, which resolves
    directly to the pinned edge (no extra DNS indirection).
 
-## mTLS consumer connections (`localport connect`)
+## mTLS consumer connections (`localport access`)
 
 A consumer presents a client certificate; the tunnel decides whether that
 certificate's identity may reach the device the connection is routed to.
@@ -498,7 +498,7 @@ Four properties worth knowing:
   written as a zero time. Go's zero instant serializes as
   `0001-01-01T00:00:00Z`, which looks like a value, reads as a corrupt record,
   and is in the past, so anything scheduling off it would fire immediately and
-  keep firing. `localport connect` prints the expiry and that `localport login`
+  keep firing. `localport access` prints the expiry and that `localport login`
   is how it comes back.
 
 ### Stored identity (`localport identity`)
@@ -550,7 +550,7 @@ or folded. A component that is empty, `.`, `..`, or that contains `/`, `\` or
 `:` is refused rather than repaired, since a repaired component names a
 different credential than the certificate does.
 
-`localport connect` with no `--pem` and no `--p12` presents this credential.
+`localport access` with no `--pem` and no `--p12` presents this credential.
 When a machine holds several, a selector picks one:
 
 ```
@@ -633,7 +633,7 @@ whatever it is set to.
 Under TLS 1.3 the client sends its certificate after the server's Finished, so a
 server that refuses it cannot say so during the handshake: `tls.Dial` returns a
 healthy connection and the rejection arrives on the first read as
-`remote error: tls: bad certificate`. `localport connect` therefore reports the
+`remote error: tls: bad certificate`. `localport access` therefore reports the
 error from the remote side of the copy and stays quiet about the local side,
 where a client tool closing its own connection is ordinary.
 
@@ -647,7 +647,7 @@ keeps its `expires_in` deadline. If it does expire after a run of transport
 failures, the error says the control plane was unreachable rather than that the
 sign-in was never approved.
 
-### CI workload identity (`localport connect --audience`)
+### CI workload identity (`localport access --audience`)
 
 A pipeline authenticates with a token its own platform minted. No secret is
 stored in the repository, in the CI secret store, or on disk.
@@ -681,6 +681,6 @@ credential the pipeline never intended to hold.
 Renewal is due at `renew_after`, which the server sets two thirds through the
 lifetime, so the last third is retry budget. Cadence is therefore policy the
 platform can change without shipping a new agent. The loop runs inside
-`localport connect`; a machine that is not permanently connected should run
+`localport access`; a machine that is not permanently connected should run
 `localport identity renew` from a daily timer instead. The previous certificate
 stays valid until its own expiry, so rollover overlaps.
