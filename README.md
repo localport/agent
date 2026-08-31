@@ -75,7 +75,7 @@ Create a tunnel in the [dashboard](https://dashboard.localport.io) to obtain a t
 
 ## Build from source
 
-Requires Go 1.24 or newer.
+Requires Go 1.25 or newer.
 
 ```sh
 git clone https://github.com/localport/agent.git
