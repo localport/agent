@@ -26,8 +26,20 @@ func (a *App) Run(args []string) error {
 	switch args[0] {
 	case "tunnel":
 		return runTunnel(a.version, args[1:])
+	case "access":
+		return runAccess(args[1:])
 	case "connect":
-		return runConnect(args[1:])
+		// Matched here so the old verb explains itself. Without this case it
+		// falls through to the default branch below, which reads an unknown first
+		// argument as a flat tunnel invocation and dies with "--local is required
+		// for token-based tunnel mode". That message never mentions the rename.
+		return fmt.Errorf(`"connect" is now "access": localport access <URL> -p <port>`)
+	case "setup":
+		return runSetup(args[1:])
+	case "identity":
+		return runIdentity(args[1:])
+	case "login":
+		return runLogin(args[1:])
 	case "version", "--version", "-version":
 		fmt.Printf("localport %s (%s) built %s\n", a.version, a.commit, a.date)
 		return nil
@@ -46,7 +58,10 @@ func printMainUsage(w io.Writer) {
 
 Commands:
   tunnel    Open tunnels to the Localport edge (default)
-  connect   Forward a local port through an mTLS tunnel
+  access    Reach a fleet device through your client certificate
+  setup     Redeem a setup token so this MACHINE can reach locked tunnels
+  login     Sign in as YOURSELF and get a short-lived certificate
+  identity  List, renew and remove the credentials on this machine
   version   Print version and exit
 
 Examples:
@@ -61,8 +76,15 @@ Examples:
   # Run several tunnels at once from a config file:
   localport tunnel --config localport.yaml
 
-  # Connect to a locked tunnel (mTLS) with your client certificate:
-  localport connect https://sub.eu.localport.dev --pem client.pem -p 3001
-  localport connect tcp://sub.eu.localport.dev:11434 --pem db.pem -p 11434
+  # Reach a fleet device with your client certificate:
+  localport access https://gateway-warehouse.eu.localport.dev --pem client.pem -p 3001
+  localport access tcp://db-warehouse.eu.localport.dev:5432 --pem db.pem -p 5432
+
+  # Or set the machine up once and let the agent obtain and renew for you:
+  localport setup <TOKEN>
+  localport access https://gateway-warehouse.eu.localport.dev -p 3001
+
+  # See what this machine holds:
+  localport identity list
 `)
 }

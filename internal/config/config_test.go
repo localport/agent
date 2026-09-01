@@ -157,7 +157,8 @@ func TestResolveEdge(t *testing.T) {
 		region string
 		addr   string
 	}{
-		{"", "connect.edge.localport.dev:443"},
+		// No region means the default landing zone, not a distinct hostname.
+		{"", "connect.eu.localport.dev:443"},
 		{"eu", "connect.eu.localport.dev:443"},
 		{"us", "connect.us.localport.dev:443"},
 		{"ap", "connect.ap.localport.dev:443"},
@@ -204,7 +205,7 @@ func TestFromFlagsDefaults(t *testing.T) {
 	if s.Endpoints[0].Name != "default" {
 		t.Errorf("name = %q, want default", s.Endpoints[0].Name)
 	}
-	if s.Edge != "connect.edge.localport.dev:443" {
+	if s.Edge != "connect.eu.localport.dev:443" {
 		t.Errorf("edge = %q", s.Edge)
 	}
 }
@@ -216,8 +217,8 @@ spec:
   token: tok
   endpoints: [{name: web, proto: http, url: localhost:3000}]
 `)
-	if cfg.Specs[0].Edge != "connect.edge.localport.dev:443" {
-		t.Errorf("edge = %q, want default fallback", cfg.Specs[0].Edge)
+	if cfg.Specs[0].Edge != "connect.eu.localport.dev:443" {
+		t.Errorf("edge = %q, want the default landing region", cfg.Specs[0].Edge)
 	}
 }
 
@@ -247,4 +248,20 @@ func loadString(t *testing.T, yaml string) (*Config, error) {
 		t.Fatalf("write temp config: %v", err)
 	}
 	return Load(path)
+}
+
+// The default landing region must be one that resolves. A default naming a
+// region we do not serve fails every run that omits --region.
+func TestDefaultRegionIsAServedRegion(t *testing.T) {
+	host, ok := regionHosts[defaultRegion]
+	if !ok {
+		t.Fatalf("defaultRegion %q is not in regionHosts", defaultRegion)
+	}
+	want := "connect." + host + ":" + edgePort
+	if got := ResolveEdge(""); got != want {
+		t.Errorf("ResolveEdge(\"\") = %q, want %q", got, want)
+	}
+	if got := ResolveEdge(defaultRegion); got != want {
+		t.Errorf("ResolveEdge(%q) = %q, want %q", defaultRegion, got, want)
+	}
 }

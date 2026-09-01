@@ -66,6 +66,16 @@ type RegisterPayload struct {
 	Nonce      string `json:"nonce"`
 	Subdomain  string `json:"subdomain,omitempty"`
 
+	// AgentVersion and AgentOS describe the BINARY, for the connection's audit
+	// record: "which build was this, on what platform". Both are SELF-ASSERTED
+	// and forensic only: nothing on the server gates on either, and an edge that
+	// does not read them simply sees them absent.
+	AgentVersion string `json:"agent_version,omitempty"`
+	AgentOS      string `json:"agent_os,omitempty"`
+
+	// A registering client asserts nothing that access depends on: a grant
+	// names devices directly (`*`, `gw-*`, `gw-01`).
+
 	// ResumeSessionID echoes the session_id from this tunnel's previous
 	// RegisterAck so the edge can replace the stale session on reconnect.
 	ResumeSessionID string `json:"resume_session_id,omitempty"`
@@ -95,11 +105,16 @@ type RegisterAckPayload struct {
 }
 
 // MTLSInfo describes the mutual-TLS posture of a tunnel. When Enabled is true,
-// consumers must present a client certificate signed by the tunnel's CA.
-// The fingerprint lets a consumer verify that CA out of band
+// consumers must present a client certificate the tunnel trusts.
+//
+// There is no CA fingerprint here. A tunnel trusts several certificate
+// authorities at once, ours and any the customer registered, so one fingerprint
+// would not name the one that matters. The field that used to be here was never
+// populated by the edge either, so the agent printed an empty value. Consumers
+// verify the SERVER against system roots; the CA they care about is the one in
+// their own bundle.
 type MTLSInfo struct {
-	Enabled       bool   `json:"enabled"`
-	CAFingerprint string `json:"ca_fingerprint,omitempty"`
+	Enabled bool `json:"enabled"`
 }
 
 type NewConnectionPayload struct {
@@ -117,10 +132,6 @@ type HeartbeatPayload struct {
 
 type HeartbeatAckPayload struct {
 	Timestamp int64 `json:"timestamp"`
-}
-
-type SetActivePayload struct {
-	Active bool `json:"active"`
 }
 
 type ShutdownPayload struct {

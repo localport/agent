@@ -7,26 +7,48 @@ import (
 	"strings"
 )
 
-// ResolveToken returns a token from the flag value or env variable, in that
-// order. It is an error for both to be empty.
+// ResolveToken returns a token from the flag value, the environment variable or
+// the file it names, in that order. It is an error for all three to be empty.
 func ResolveToken(flagValue, envName string) (string, error) {
-	token := ResolveOptionalToken(flagValue, envName)
+	token, err := ResolveOptionalToken(flagValue, envName)
+	if err != nil {
+		return "", err
+	}
 	if token == "" {
-		return "", fmt.Errorf("token required (set --token or %s)", envName)
+		return "", fmt.Errorf("token required (set --token, %s or %s_FILE)", envName, envName)
 	}
 	return token, nil
 }
 
-// ResolveOptionalToken is like ResolveToken but returns an empty token
-// instead of an error when neither source is set.
-func ResolveOptionalToken(flagValue, envName string) string {
+// ResolveOptionalToken is like ResolveToken but returns an empty token instead
+// of an error when no source is set.
+//
+// The `<NAME>_FILE` form keeps the secret out of the process environment, where
+// /proc/<pid>/environ exposes it to root and to anything running as the same
+// user. It is what systemd's LoadCredential= writes and what the services'
+// docker secrets use. Precedence matches theirs, so an explicit value still
+// wins over the file.
+func ResolveOptionalToken(flagValue, envName string) (string, error) {
 	if v := strings.TrimSpace(flagValue); v != "" {
-		return v
+		return v, nil
 	}
 	if envName == "" {
-		return ""
+		return "", nil
 	}
-	return strings.TrimSpace(os.Getenv(envName))
+	if v := strings.TrimSpace(os.Getenv(envName)); v != "" {
+		return v, nil
+	}
+	path := strings.TrimSpace(os.Getenv(envName + "_FILE"))
+	if path == "" {
+		return "", nil
+	}
+	// A token is a bearer secret, so the file holding it is read under the same
+	// owner-only rules as a private key.
+	data, err := ReadPrivateFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s_FILE: %w", envName, err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 // RedactString returns text with every occurrence of each secret swapped
@@ -50,19 +72,4 @@ func SanitizeError(err error, secrets ...string) error {
 		return nil
 	}
 	return errors.New(RedactString(err.Error(), secrets...))
-}
-
-// ValidatePrivateKeyPermissions refuses a key file that is readable by
-// group or other. The check is best-effort on Windows where mode bits
-// are mostly cosmetic.
-func ValidatePrivateKeyPermissions(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return fmt.Errorf("stat key %s: %w", path, err)
-	}
-	mode := info.Mode().Perm()
-	if mode&0o077 != 0 {
-		return fmt.Errorf("key file %s has too-open permissions %#o (want 0600 or stricter)", path, mode)
-	}
-	return nil
 }

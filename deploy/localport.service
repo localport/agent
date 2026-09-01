@@ -1,0 +1,56 @@
+; Localport agent as a systemd service.
+;
+;   sudo useradd --system --no-create-home --shell /usr/sbin/nologin localport
+;   sudo install -d -m 0700 -o localport -g localport /etc/localport
+;   printf '%s' 'tok_...' | sudo tee /etc/localport/token >/dev/null
+;   sudo chmod 0600 /etc/localport/token
+;   sudo cp localport.service /etc/systemd/system/
+;   sudo systemctl enable --now localport
+;
+; For a locked (mTLS) tunnel, run setup as the service user so it can read the
+; credential it will present:
+;
+;   sudo -u localport LOCALPORT_HOME=/var/lib/localport \
+;       localport setup lps_...
+
+[Unit]
+Description=Localport tunnel
+Documentation=https://localport.io/docs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+; User= is also what makes systemd set $HOME. Without it the service runs with
+; none, and the agent has no home directory to keep its credential in.
+User=localport
+Group=localport
+
+; systemd creates /var/lib/localport as 0700 owned by User=, and recreates it
+; if it is removed.
+StateDirectory=localport
+Environment=LOCALPORT_HOME=/var/lib/localport
+
+; The token is a bearer secret and never belongs in ExecStart, where
+; `systemctl show`, `ps` and the unit file itself expose it to every local
+; account. LoadCredential= places it at $CREDENTIALS_DIRECTORY/token, mode 0400
+; owned by User=, and keeps it out of the process environment.
+LoadCredential=token:/etc/localport/token
+Environment=LOCALPORT_TOKEN_FILE=%d/token
+
+ExecStart=/usr/local/bin/localport http 8080
+
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
