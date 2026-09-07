@@ -64,6 +64,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				Local:          ep.Local,
 				Protocol:       ep.Protocol,
 				ClientName:     clientName,
+				AgentVersion:   a.cfg.AgentVersion,
 				Handler:        a.handler,
 				DisableMux:     a.cfg.NoMux,
 				DisableInspect: a.cfg.NoInspect,

@@ -40,7 +40,6 @@ type Conn struct {
 
 func NewConn(c net.Conn) *Conn { return &Conn{raw: c, writeTimeout: defaultWriteTimeout} }
 
-func (c *Conn) Underlying() net.Conn              { return c.raw }
 func (c *Conn) Close() error                      { return c.raw.Close() }
 func (c *Conn) SetReadDeadline(t time.Time) error { return c.raw.SetReadDeadline(t) }
 
@@ -68,7 +67,7 @@ func (c *Conn) Send(t MessageType, payload any) error {
 	// once ConnectionReady is sent, which must run without a write deadline.
 	if c.writeTimeout > 0 {
 		_ = c.raw.SetWriteDeadline(time.Now().Add(c.writeTimeout))
-		defer c.raw.SetWriteDeadline(time.Time{})
+		defer func() { _ = c.raw.SetWriteDeadline(time.Time{}) }()
 	}
 
 	binary.BigEndian.PutUint32(c.hdrBuf[:4], total)
@@ -138,7 +137,6 @@ func ParseNewConnection(b []byte) (*NewConnectionPayload, error) {
 	return parse[NewConnectionPayload](b)
 }
 func ParseHeartbeat(b []byte) (*HeartbeatPayload, error) { return parse[HeartbeatPayload](b) }
-func ParseSetActive(b []byte) (*SetActivePayload, error) { return parse[SetActivePayload](b) }
 func ParseShutdown(b []byte) (*ShutdownPayload, error) {
 	if len(b) == 0 {
 		return &ShutdownPayload{}, nil

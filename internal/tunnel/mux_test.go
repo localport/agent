@@ -39,8 +39,7 @@ func echoService(t *testing.T) (dial func() (net.Conn, error), stop func()) {
 		}
 }
 
-// A stream must carry bytes to the local service and its reply back, which is
-// the whole contract the dial-back path used to provide.
+// A stream must carry bytes to the local service and its reply back.
 func TestMuxServerPipesStreamToLocalService(t *testing.T) {
 	dial, stop := echoService(t)
 	defer stop()

@@ -6,11 +6,9 @@ import (
 	"strings"
 )
 
-// Color palette mirrored from the web dashboard's dark-theme tokens
-// (web/src/routes/layout.css). OKLCH values were resolved to sRGB so we
-// can drive truecolor terminals exactly; 256-color terminals get the
-// nearest xterm code. Brand identity: warm-dark surface, JetBrains-Mono
-// green accent.
+// The Localport dark palette, as terminal colors. Brand values are authored in
+// OKLCH and resolved to sRGB here so a truecolor terminal renders them exactly;
+// a 256-color terminal gets the nearest xterm code.
 //
 // Use the Sty* functions, not raw ANSI strings. Each function honors
 // NO_COLOR (returns the bare string) and the detected color mode.
@@ -20,18 +18,18 @@ type swatch struct {
 	rgb     rgb
 	x256    uint8  // 256-color (xterm) approximation
 	ansi16  string // 16-color fallback ANSI escape
-	cssName string // for grep-ability against layout.css
+	cssName string // brand token this swatch renders
 }
 
 var (
-	// Resolved from layout.css `.dark`:
+	// Dark surface:
 	colForeground    = swatch{rgb{0xeb, 0xe6, 0xd4}, 230, "\x1b[97m", "--foreground"}
 	colForegroundMid = swatch{rgb{0xc8, 0xc0, 0xad}, 187, "\x1b[37m", "--foreground-mid"}
 	colForegroundDim = swatch{rgb{0xad, 0x9f, 0x80}, 144, "\x1b[37m", "--foreground-dim"}
 	colMuted         = swatch{rgb{0x6e, 0x67, 0x59}, 244, "\x1b[2;37m", "--muted-foreground"}
 	// Border uses a brighter chrome value than --border so the frame
 	// stays visible against the warm-dark surface without dominating.
-	// Sits between web's --muted-foreground and --foreground-dim.
+	// Sits between --muted-foreground and --foreground-dim.
 	colBorder         = swatch{rgb{0x80, 0x77, 0x65}, 242, "\x1b[37m", "--chrome"}
 	colPrimary        = swatch{rgb{0x5f, 0xb8, 0x6a}, 78, "\x1b[1;32m", "--primary"}
 	colPrimaryMid     = swatch{rgb{0x3a, 0x7a, 0x44}, 65, "\x1b[32m", "--primary-mid"}
@@ -95,14 +93,6 @@ func (s swatch) fg(m ColorMode) string {
 		return s.ansi16
 	}
 	return ""
-}
-
-// paint wraps text in the swatch color + reset, honoring the mode.
-func (s swatch) paint(text string, m ColorMode) string {
-	if m == ColorOff || text == "" {
-		return text
-	}
-	return s.fg(m) + text + sgrReset
 }
 
 // StyleFn is a curried colorizer bound to a single swatch. The TUI/Plain

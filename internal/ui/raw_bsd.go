@@ -23,6 +23,6 @@ func enterRaw(f *os.File) (restore func(), err error) {
 		return nil, e
 	}
 	return func() {
-		syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), syscall.TIOCSETA, uintptr(unsafe.Pointer(&orig)))
+		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), syscall.TIOCSETA, uintptr(unsafe.Pointer(&orig)))
 	}, nil
 }

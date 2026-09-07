@@ -73,6 +73,8 @@ func runTunnel(version string, args []string) error {
 	if *noMux {
 		cfg.NoMux = true
 	}
+	// The ldflags value from main, sent on registration.
+	cfg.AgentVersion = version
 	// No TUI means no consumer for the request view, so headless skips parsing by
 	// default. --log-requests opts back in; --no-inspect forces off and wins.
 	mode := ui.DetectMode(*noUI, os.Stderr)
@@ -153,7 +155,9 @@ func usageTunnel(fs *flag.FlagSet) {
     localport tls 8443 -t <token>
 
 Environment:
-  LOCALPORT_TOKEN   tunnel token (alternative to --token)
+  LOCALPORT_TOKEN        tunnel token (alternative to --token)
+  LOCALPORT_TOKEN_FILE   file to read the token from, for systemd LoadCredential=
+                         and docker secrets
   NO_COLOR          disable colored output
 
 Flags:

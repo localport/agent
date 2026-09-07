@@ -114,7 +114,7 @@ func (p *Plain) OnConnected(label string, info tunnel.Info) {
 		))
 	}
 	if info.MTLS != nil && info.MTLS.Enabled {
-		p.line("mtls", label, "enabled fp="+info.MTLS.CAFingerprint)
+		p.line("mtls", label, "enabled")
 	}
 }
 

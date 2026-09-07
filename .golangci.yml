@@ -1,0 +1,29 @@
+version: "2"
+
+linters:
+  default: standard
+
+  settings:
+    errcheck:
+      # Close on a deferred cleanup, and a write to an already-failing or
+      # in-memory sink, have no answer a caller could act on. Everywhere the
+      # error does matter it is checked, so excluding these keeps `make lint`
+      # a real gate rather than a wall of noise a contributor learns to skip.
+      exclude-functions:
+        - (io.Closer).Close
+        - (net.Conn).Close
+        - (net.Listener).Close
+        - (*os.File).Close
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      # A test asserts on what it drives, and a helper's Close or Read there has
+      # nothing to report to.
+      - path: _test\.go
+        linters:
+          - errcheck

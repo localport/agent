@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -141,7 +142,12 @@ type Options struct {
 	Local      string
 	Protocol   string
 	ClientName string
-	Handler    EventHandler
+
+	// AgentVersion is reported on registration for the connection's audit
+	// record. Self-asserted and forensic only.
+	AgentVersion string
+
+	Handler EventHandler
 
 	// Transport tunes the agent's edge transport (raw vs ws probe order,
 	// dial timeout, WS path). The zero value uses Phase 1 secure defaults:
@@ -334,8 +340,6 @@ func (t *Tunnel) Stop() {
 	t.interruptReader()
 }
 
-func (t *Tunnel) CurrentState() State { return State(t.state.Load()) }
-
 func (t *Tunnel) Label() string { return t.opts.Label }
 
 // Stats returns the cumulative byte and connection counters.
@@ -451,12 +455,17 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 		resumeID := t.sessionID
 		t.mu.RUnlock()
 		reg := &proto.RegisterPayload{
-			Token:           t.opts.Token,
-			Protocol:        t.opts.Protocol,
-			ClientID:        t.clientID,
-			ClientName:      t.opts.ClientName,
-			Timestamp:       time.Now().Unix(),
-			Nonce:           nonce,
+			Token:      t.opts.Token,
+			Protocol:   t.opts.Protocol,
+			ClientID:   t.clientID,
+			ClientName: t.opts.ClientName,
+			Timestamp:  time.Now().Unix(),
+			Nonce:      nonce,
+			// GOOS/GOARCH rather than anything probed at runtime: it is a compile-time
+			// constant, it needs no plumbing, and "darwin/arm64" is what support
+			// actually asks for.
+			AgentVersion:    t.opts.AgentVersion,
+			AgentOS:         runtime.GOOS + "/" + runtime.GOARCH,
 			ResumeSessionID: resumeID,
 		}
 		if err := pc.SendRegister(reg); err != nil {
@@ -464,9 +473,9 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			return fmt.Errorf("send register: %w", err)
 		}
 
-		raw.SetReadDeadline(time.Now().Add(registrationTimeout))
+		_ = raw.SetReadDeadline(time.Now().Add(registrationTimeout))
 		msgType, body, err := pc.Recv()
-		raw.SetReadDeadline(time.Time{})
+		_ = raw.SetReadDeadline(time.Time{})
 		if err != nil {
 			raw.Close()
 			return fmt.Errorf("register response: %w", err)
@@ -614,7 +623,7 @@ func (t *Tunnel) receiveLoop() {
 			return
 		}
 
-		raw.SetReadDeadline(t.readDeadline(lastInbound))
+		_ = raw.SetReadDeadline(t.readDeadline(lastInbound))
 		msgType, body, err := pc.Recv()
 		if err != nil {
 			var ne net.Error
@@ -693,6 +702,9 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 			_ = c.SendHeartbeatAck(hb.Timestamp)
 		}
 
+	// SetActive tells a fanout-tunnel client it is now primary. The EDGE decides
+	// routing, so an agent has nothing to do with it; it is matched here so the
+	// frame is a recognised no-op rather than falling through as unknown.
 	case proto.MsgHeartbeatAck, proto.MsgSetActive:
 		// nothing to do; edge liveness / dispatch hints
 
