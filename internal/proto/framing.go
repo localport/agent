@@ -128,6 +128,9 @@ func (c *Conn) SendShutdown(reason string) error {
 	return c.Send(MsgShutdown, &ShutdownPayload{Reason: reason})
 }
 func (c *Conn) SendMuxBind(p *MuxBindPayload) error { return c.Send(MsgMuxBind, p) }
+func (c *Conn) SendPortsAck(p *PortsAckPayload) error {
+	return c.Send(MsgPortsAck, p)
+}
 
 // Payload parsers. Each one validates the JSON and returns a typed payload.
 
@@ -135,6 +138,9 @@ func ParseRegisterAck(b []byte) (*RegisterAckPayload, error) { return parse[Regi
 func ParseMuxBindAck(b []byte) (*MuxBindAckPayload, error)   { return parse[MuxBindAckPayload](b) }
 func ParseNewConnection(b []byte) (*NewConnectionPayload, error) {
 	return parse[NewConnectionPayload](b)
+}
+func ParsePortsUpdate(b []byte) (*PortsUpdatePayload, error) {
+	return parse[PortsUpdatePayload](b)
 }
 func ParseHeartbeat(b []byte) (*HeartbeatPayload, error) { return parse[HeartbeatPayload](b) }
 func ParseShutdown(b []byte) (*ShutdownPayload, error) {

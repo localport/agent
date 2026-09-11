@@ -55,6 +55,8 @@ identical on either carrier.
 | Redirect        | 10  | E → C     | Reconnect to a different edge    |
 | MuxBind         | 11  | C → E     | Attach a multiplexed data conn   |
 | MuxBindAck      | 12  | E → C     | Mux bind result                  |
+| PortsUpdate     | 13  | E → C     | A device's new open ports        |
+| PortsAck        | 14  | C → E     | The port version now served      |
 
 ## Payloads
 
@@ -63,6 +65,7 @@ identical on either carrier.
 ```json
 {
   "token": "tok_xxx",
+  "kind": "tunnel",
   "protocol": "http",
   "client_id": "agent-a1b2c3d4e5f6",
   "client_name": "hostname",
@@ -74,6 +77,11 @@ identical on either carrier.
   "resume_session_id": "optional"
 }
 ```
+
+`kind` is `tunnel` or `device`; absent reads as `tunnel`. A **tunnel** publishes
+one local service and names its `protocol` (`http`, `tcp`, `tls`). A **device**
+joins a fleet, sends no protocol, and serves the ports the dashboard opens on it.
+Sending the wrong kind for the token is refused with `PR009`.
 
 **A registering client asserts nothing that access depends on.** `client_name`
 (the `--name` flag) is the device's name and its address. Whether it may be
@@ -138,20 +146,54 @@ tunnel trusts. It reports nothing else: which authorities those are, and what an
 certificate may reach, are decided server-side. Consumers verify the server
 against system roots.
 
+### PortsUpdate (13) / PortsAck (14)
+
+A device's open ports are set in the dashboard. The list arrives in `RegisterAck`
+and is replaced by `PortsUpdate`:
+
+```json
+{ "version": 41, "ports": [{ "port": 502, "protocol": "tcp" }, { "port": 80, "protocol": "http" }] }
+```
+
+`version` orders the list. A device applies an update only when the version is
+higher than the one it holds, and answers every update with the version it
+serves:
+
+```json
+{ "version": 41 }
+```
+
+`protocol` is `tcp` (opaque bytes) or `http` (requests are parsed for this
+agent's own request view and for the status counters in the access log).
+
 ### NewConnection (3)
 
 ```json
-{ "connection_id": "conn_xxx", "remote_addr": "203.0.113.7:54321" }
+{
+  "connection_id": "conn_xxx",
+  "remote_addr": "203.0.113.7:54321",
+  "target_port": 502,
+  "target_protocol": "tcp",
+  "consumer": "user:0mkppnsc7lsdcv"
+}
 ```
 
 `remote_addr` is the L4 peer (host:port) of the inbound connection as seen by the
 edge. Agents surface it as the originating address in their live-connections view.
 
+The last three are set for a device: which of its ports to dial, how to treat the
+stream, and which identity asked. `consumer` is display text for this agent's own
+output and is never forwarded to the local service.
+
 ### ConnectionReady (4)
 
 ```json
-{ "connection_id": "conn_xxx" }
+{ "connection_id": "conn_xxx", "status": 200 }
 ```
+
+`status` is the agent's verdict. Absent or `0` reads as `200`. The agent answers
+`403` for a port it does not serve and `502` when the local target could not be
+dialled; the edge passes both to the visitor or consumer.
 
 ### Heartbeat / HeartbeatAck (5, 6)
 

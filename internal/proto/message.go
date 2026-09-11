@@ -21,6 +21,8 @@ const (
 	MsgRedirect        MessageType = 10
 	MsgMuxBind         MessageType = 11
 	MsgMuxBindAck      MessageType = 12
+	MsgPortsUpdate     MessageType = 13
+	MsgPortsAck        MessageType = 14
 )
 
 var msgNames = map[MessageType]string{
@@ -36,6 +38,8 @@ var msgNames = map[MessageType]string{
 	MsgRedirect:        "Redirect",
 	MsgMuxBind:         "MuxBind",
 	MsgMuxBindAck:      "MuxBindAck",
+	MsgPortsUpdate:     "PortsUpdate",
+	MsgPortsAck:        "PortsAck",
 }
 
 func (m MessageType) String() string {
@@ -57,9 +61,16 @@ const (
 	LimitBlocked           LimitType = "blocked"
 )
 
+// Register kinds. A tunnel publishes a local service. A device joins a fleet.
+const (
+	KindTunnel = "tunnel"
+	KindDevice = "device"
+)
+
 type RegisterPayload struct {
 	Token      string `json:"token"`
-	Protocol   string `json:"protocol"`
+	Kind       string `json:"kind,omitempty"` // tunnel or device
+	Protocol   string `json:"protocol"`       // http, tcp or tls for a tunnel, empty for a device
 	ClientID   string `json:"client_id"`
 	ClientName string `json:"client_name"`
 	Timestamp  int64  `json:"timestamp"`
@@ -102,6 +113,29 @@ type RegisterAckPayload struct {
 	// SessionID identifies this session; send it back as resume_session_id
 	// on the next Register to reclaim the slot immediately.
 	SessionID string `json:"session_id,omitempty"`
+
+	// Ports lists the device's open ports as set in the dashboard, with their
+	// version.
+	PortsVersion uint64       `json:"ports_version,omitempty"`
+	Ports        []DevicePort `json:"ports,omitempty"`
+}
+
+// DevicePort is one open port on a device.
+type DevicePort struct {
+	Port     uint16 `json:"port"`
+	Protocol string `json:"protocol"` // tcp | http
+}
+
+// PortsUpdatePayload replaces a device's open ports when Version is higher than
+// the current one. The device answers with PortsAck.
+type PortsUpdatePayload struct {
+	Version uint64       `json:"version"`
+	Ports   []DevicePort `json:"ports"`
+}
+
+// PortsAckPayload reports the port version the device serves.
+type PortsAckPayload struct {
+	Version uint64 `json:"version"`
 }
 
 // MTLSInfo describes the mutual-TLS posture of a tunnel. When Enabled is true,
@@ -120,10 +154,20 @@ type MTLSInfo struct {
 type NewConnectionPayload struct {
 	ConnectionID string `json:"connection_id"`
 	RemoteAddr   string `json:"remote_addr"`
+
+	// A device connection carries the port to dial, its protocol and the
+	// consumer identity. Consumer is shown in agent output and is not sent to
+	// the local service.
+	TargetPort     uint16 `json:"target_port,omitempty"`
+	TargetProtocol string `json:"target_protocol,omitempty"`
+	Consumer       string `json:"consumer,omitempty"`
 }
 
 type ConnectionReadyPayload struct {
 	ConnectionID string `json:"connection_id"`
+	// Status is 0 or 200 when accepted, 403 for a port not served and 502 for
+	// an unreachable target.
+	Status int `json:"status,omitempty"`
 }
 
 type HeartbeatPayload struct {
