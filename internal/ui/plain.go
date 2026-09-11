@@ -181,12 +181,12 @@ func (p *Plain) ensureReqLogDrain() {
 	})
 }
 
-func (p *Plain) OnDataConn(label, connID, local, remote string) {
-	from := remote
+func (p *Plain) OnDataConn(label string, info tunnel.DataConnInfo) {
+	from := info.Remote
 	if from == "" {
 		from = "-"
 	}
-	p.line("conn.open", label, fmt.Sprintf("id=%s from=%s -> %s", shortID(connID), from, local))
+	p.line("conn.open", label, fmt.Sprintf("id=%s from=%s -> %s", shortID(info.ConnID), from, info.Target))
 
 	p.mu.Lock()
 	s := p.statsFor(label)

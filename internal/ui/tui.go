@@ -343,7 +343,7 @@ func (t *TUI) OnError(label string, err error) {
 
 // These only ask for a redraw; the bottom panel reads live data from the tunnel
 // at render time, so the callbacks carry no state.
-func (t *TUI) OnDataConn(_, _, _, _ string)                                        { t.requestRender() }
+func (t *TUI) OnDataConn(_ string, _ tunnel.DataConnInfo)                          { t.requestRender() }
 func (t *TUI) OnDataClose(_, _, _, _ string, _, _ int64, _ time.Duration, _ error) { t.requestRender() }
 func (t *TUI) OnHTTPRequest(_ string, _ tunnel.RequestInfo)                        { t.requestRender() }
 

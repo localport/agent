@@ -98,11 +98,18 @@ type EventHandler interface {
 	OnConnected(label string, info Info)
 	OnDisconnected(label string, err error)
 	OnError(label string, err error)
-	OnDataConn(label, connID, local, remote string)
+	OnDataConn(label string, info DataConnInfo)
 	OnDataClose(label, connID, local, remote string, bytesIn, bytesOut int64, dur time.Duration, err error)
 	OnHTTPRequest(label string, r RequestInfo)
 	OnRedirect(label, from, to string)
 	OnShutdownPolicy(label, reason, code string, limit proto.LimitType, retryable bool)
+}
+
+// DataConnInfo describes one inbound connection.
+type DataConnInfo struct {
+	ConnID string
+	Target string
+	Remote string
 }
 
 // RequestInfo is one finished HTTP request for the live view. Metadata only: no
@@ -850,7 +857,11 @@ func (t *Tunnel) proxyData(connID, remote string) {
 	defer t.removeActiveConn(connID)
 
 	if h := t.opts.Handler; h != nil {
-		h.OnDataConn(t.opts.Label, connID, t.opts.Local, remote)
+		h.OnDataConn(t.opts.Label, DataConnInfo{
+			ConnID: connID,
+			Target: t.opts.Local,
+			Remote: remote,
+		})
 	}
 
 	// http tunnels: the scanner reads a copy off the read side; forwarding is

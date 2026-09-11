@@ -302,7 +302,11 @@ func (t *Tunnel) Begin(remote string) *activeConn {
 	t.totalConns.Add(1)
 
 	if h := t.opts.Handler; h != nil {
-		h.OnDataConn(t.opts.Label, ac.id, t.opts.Local, remote)
+		h.OnDataConn(t.opts.Label, DataConnInfo{
+			ConnID: ac.id,
+			Target: t.opts.Local,
+			Remote: remote,
+		})
 	}
 	return ac
 }
