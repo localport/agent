@@ -234,7 +234,13 @@ its ack of the edge's) always resets that window.
 | `client_connections` | Too many concurrent clients across the team      | no        |
 | `tunnel_count`       | Team hit its max tunnel count                    | no        |
 | `no_plan`            | Team has no active paid or trialing subscription | no        |
+| `payment_due_paused` | Team holds a plan, payment is overdue, and its grace window has elapsed | no |
 | `blocked`            | Access blocked for this tunnel or team           | no        |
+
+`payment_due_paused` and `no_plan` are both terminal. The first asks the team
+to pay an overdue invoice, the second to subscribe. The agent uses `limit_type`
+only to pick the hint it appends to `reason`. Whether it reconnects is decided
+by `retryable`.
 
 ### Error (9)
 
@@ -366,6 +372,7 @@ Public message families an agent may surface:
 | Rate limited              | too many connection attempts, retry shortly    | yes       |
 | Bandwidth limit           | bandwidth limit reached for this billing cycle | no        |
 | Plan limit                | plan limit reached, upgrade to continue        | no        |
+| Payment overdue           | payment is overdue, update your payment method | no        |
 | Resource limit            | resource limit reached                         | no        |
 | Client limit              | client connection limit reached                | no        |
 | Tunnel limit              | tunnel limit reached                           | no        |
