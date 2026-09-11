@@ -163,6 +163,12 @@ serves:
 { "version": 41 }
 ```
 
+A removed port stops being served the moment the edge applies the update, and
+its live streams are closed at both ends. The edge closes them, and the agent
+closes the local sockets it holds for that port when it applies the update. An
+added port is accepted by the edge only after this acknowledgement, since
+control frames and data streams travel on different connections.
+
 `protocol` is `tcp` (opaque bytes) or `http` (requests are parsed for this
 agent's own request view and for the status counters in the access log).
 
@@ -381,6 +387,7 @@ Public message families an agent may surface:
 | Unknown fleet device      | this device is not on the fleet: create it ... | no        |
 | Fleet device limit        | this fleet has reached its device limit        | no        |
 | Duplicate device name     | another device on this tunnel is using this... | **yes**   |
+| Token kind mismatch       | invalid token usage                            | no        |
 | Protocol / clock          | protocol error, update the agent ...           | no        |
 
 Two of those look alike and behave oppositely, on purpose.
@@ -455,6 +462,22 @@ reconnects and data dial-backs present the same derived SNI. An explicit
    labels deep), so the derived SNI must sit one label under the target
    zone. The dial address itself stays the per-edge hostname, which resolves
    directly to the pinned edge (no extra DNS indirection).
+
+## Data streams on the multiplexed connection
+
+A stream stands in for one inbound connection. The edge sets these headers; the
+bytes a consumer sends are the stream body and can never reach them.
+
+| Header                      | Meaning                                  |
+| --------------------------- | ---------------------------------------- |
+| `Localport-Visitor-Addr`    | L4 peer of the inbound connection         |
+| `Localport-Target-Port`     | device port to dial                       |
+| `Localport-Target-Protocol` | `tcp` or `http`                           |
+| `Localport-Consumer`        | identity that opened the stream           |
+
+The last three are set for a device only. A stream naming a port the device does
+not serve is answered `403` before anything is dialled; a target that cannot be
+reached is `502`.
 
 ## mTLS consumer connections (`localport access`)
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/localport/agent/internal/proto"
@@ -264,9 +265,9 @@ func (t *Tunnel) serveMux(conn net.Conn) {
 	}
 
 	handler := &muxServer{
-		dialLocal: func() (net.Conn, error) {
-			return net.DialTimeout("tcp", t.opts.Local, dialTimeout)
-		},
+		dialTarget:   t.dialTarget,
+		device:       t.IsDevice(),
+		defaultProto: t.opts.Protocol,
 		tracker:      t,
 		totalIn:      &t.totalBytesIn,
 		totalOut:     &t.totalBytesOut,
@@ -288,14 +289,20 @@ func newStreamID() string {
 	return "mux-" + hex.EncodeToString(b[:])
 }
 
-// Begin registers a stream in the same connection view proxyData feeds, so the
-// live list and its counters are identical whichever transport carried the
-// traffic. Without this a muxed tunnel would show no connections at all.
-func (t *Tunnel) Begin(remote string) *activeConn {
+// Begin adds a stream to the live connection view used by proxyData. Closing
+// localConn ends both copies, which is how a closed port cuts a mux stream.
+func (t *Tunnel) Begin(remote string, target connTarget, localConn net.Conn) *activeConn {
+	local := t.opts.Local
+	if t.IsDevice() {
+		local = net.JoinHostPort(t.opts.Host, strconv.Itoa(int(target.port)))
+	}
 	ac := &activeConn{
 		id:        newStreamID(),
-		local:     t.opts.Local,
+		local:     local,
+		localConn: localConn,
 		remote:    remote,
+		port:      target.port,
+		consumer:  target.consumer,
 		startedAt: time.Now(),
 	}
 	t.addActiveConn(ac)
@@ -303,9 +310,11 @@ func (t *Tunnel) Begin(remote string) *activeConn {
 
 	if h := t.opts.Handler; h != nil {
 		h.OnDataConn(t.opts.Label, DataConnInfo{
-			ConnID: ac.id,
-			Target: t.opts.Local,
-			Remote: remote,
+			ConnID:   ac.id,
+			Target:   local,
+			Remote:   remote,
+			Consumer: target.consumer,
+			Port:     target.port,
 		})
 	}
 	return ac
@@ -320,7 +329,7 @@ func (t *Tunnel) End(ac *activeConn, err error) {
 	t.removeActiveConn(ac.id)
 
 	if h := t.opts.Handler; h != nil {
-		h.OnDataClose(t.opts.Label, ac.id, t.opts.Local, ac.remote,
+		h.OnDataClose(t.opts.Label, ac.id, ac.local, ac.remote,
 			ac.bytesIn.Load(), ac.bytesOut.Load(), time.Since(ac.startedAt), ignoreClosed(err))
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -19,9 +20,15 @@ import (
 // local service's bytes untouched on the way through, and keeps the agent from
 // having to understand any protocol it is carrying.
 type muxServer struct {
-	// dialLocal opens a connection to the tunnelled service. Injected so the
-	// stream path can be exercised without a real listener.
-	dialLocal func() (net.Conn, error)
+	// dialTarget connects to the local target or returns the status to answer
+	// with. Tests replace it.
+	dialTarget func(port uint16) (net.Conn, int, error)
+
+	// device marks a fleet device, whose streams name a port.
+	device bool
+
+	// defaultProto is the tunnel protocol for streams that name none.
+	defaultProto string
 
 	// tracker publishes stream lifecycle into the tunnel's live connection view.
 	// Nil disables tracking, which is what the tests use.
@@ -40,7 +47,9 @@ type muxServer struct {
 // live view and its counters look identical whichever transport carried the
 // traffic.
 type muxTracker interface {
-	Begin(remote string) *activeConn
+	// local is the dialed target. Closing it cuts the stream when its port
+	// closes.
+	Begin(remote string, target connTarget, local net.Conn) *activeConn
 	End(ac *activeConn, err error)
 }
 
@@ -51,13 +60,28 @@ func (s *muxServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	remote := r.Header.Get(headerVisitorAddr)
+	remote := sanitizeAddr(r.Header.Get(headerVisitorAddr))
+	target := connTarget{
+		protocol: sanitizeAddr(r.Header.Get(headerTargetProtocol)),
+		consumer: sanitizeAddr(r.Header.Get(headerConsumer)),
+	}
+	if s.device {
+		port, err := strconv.ParseUint(r.Header.Get(headerTargetPort), 10, 16)
+		if err != nil {
+			http.Error(w, "no port requested", http.StatusForbidden)
+			return
+		}
+		target.port = uint16(port)
+	}
+	if target.protocol == "" {
+		target.protocol = s.defaultProto
+	}
 
-	local, err := s.dialLocal()
+	// dialTarget refuses unserved ports before dialing and returns the status
+	// the edge relays to the consumer.
+	local, status, err := s.dialTarget(target.port)
 	if err != nil {
-		// A refused stream is reported by status so the edge can surface a
-		// gateway error to the visitor instead of leaving it waiting.
-		http.Error(w, "local service unreachable", http.StatusBadGateway)
+		http.Error(w, http.StatusText(status), status)
 		return
 	}
 	defer local.Close()
@@ -71,7 +95,7 @@ func (s *muxServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var ac *activeConn
 	if s.tracker != nil {
-		ac = s.tracker.Begin(remote)
+		ac = s.tracker.Begin(remote, target, local)
 	}
 
 	inCounters := s.counters(ac, true)
@@ -153,7 +177,11 @@ func ignoreClosed(err error) error {
 	return err
 }
 
-// headerVisitorAddr carries the visitor's address, which the dial-back path
-// delivered in the NewConnection frame. It is the peer address only; no visitor
-// payload is ever inspected or logged here.
-const headerVisitorAddr = "Localport-Visitor-Addr"
+// Stream headers set by the edge. They carry the NewConnection fields of the
+// dial-back path. Consumer bytes travel in the body and cannot set them.
+const (
+	headerVisitorAddr    = "Localport-Visitor-Addr"
+	headerTargetPort     = "Localport-Target-Port"
+	headerTargetProtocol = "Localport-Target-Protocol"
+	headerConsumer       = "Localport-Consumer"
+)

@@ -44,7 +44,7 @@ func TestMuxServerPipesStreamToLocalService(t *testing.T) {
 	dial, stop := echoService(t)
 	defer stop()
 
-	srv := &muxServer{dialLocal: dial}
+	srv := &muxServer{dialTarget: tunnelTarget(dial)}
 
 	payload := "the quick brown fox"
 	req := httptest.NewRequest(http.MethodPost, "/v1/stream", bytes.NewReader([]byte(payload)))
@@ -64,9 +64,9 @@ func TestMuxServerPipesStreamToLocalService(t *testing.T) {
 // than a hung stream, so the visitor gets an error instead of a timeout.
 func TestMuxServerReportsUnreachableLocalService(t *testing.T) {
 	srv := &muxServer{
-		dialLocal: func() (net.Conn, error) {
+		dialTarget: tunnelTarget(func() (net.Conn, error) {
 			return nil, net.ErrClosed
-		},
+		}),
 	}
 
 	rec := httptest.NewRecorder()
@@ -77,6 +77,17 @@ func TestMuxServerReportsUnreachableLocalService(t *testing.T) {
 	}
 }
 
+// tunnelTarget adapts a plain dialer to the dialTarget signature.
+func tunnelTarget(dial func() (net.Conn, error)) func(uint16) (net.Conn, int, error) {
+	return func(uint16) (net.Conn, int, error) {
+		conn, err := dial()
+		if err != nil {
+			return nil, http.StatusBadGateway, err
+		}
+		return conn, http.StatusOK, nil
+	}
+}
+
 // recordingTracker stands in for the tunnel's live connection view.
 type recordingTracker struct {
 	began  []string
@@ -84,7 +95,7 @@ type recordingTracker struct {
 	stream *activeConn
 }
 
-func (r *recordingTracker) Begin(remote string) *activeConn {
+func (r *recordingTracker) Begin(remote string, _ connTarget, _ net.Conn) *activeConn {
 	r.began = append(r.began, remote)
 	r.stream = &activeConn{id: "test-stream", remote: remote, startedAt: time.Now()}
 	return r.stream
@@ -102,10 +113,10 @@ func TestMuxServerCountsBytesPerStreamAndTotal(t *testing.T) {
 	tracker := &recordingTracker{}
 	var totalIn, totalOut atomic.Int64
 	srv := &muxServer{
-		dialLocal: dial,
-		tracker:   tracker,
-		totalIn:   &totalIn,
-		totalOut:  &totalOut,
+		dialTarget: tunnelTarget(dial),
+		tracker:    tracker,
+		totalIn:    &totalIn,
+		totalOut:   &totalOut,
 	}
 
 	payload := bytes.Repeat([]byte("x"), 4096)
@@ -134,7 +145,7 @@ func TestMuxServerTracksStreamLifecycle(t *testing.T) {
 	defer stop()
 
 	tracker := &recordingTracker{}
-	srv := &muxServer{dialLocal: dial, tracker: tracker}
+	srv := &muxServer{dialTarget: tunnelTarget(dial), tracker: tracker}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/stream", nil)
 	req.Header.Set(headerVisitorAddr, "203.0.113.7:54321")

@@ -10,9 +10,11 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -90,6 +92,9 @@ type Info struct {
 	Mode       string
 	Protocol   string
 	MTLS       *proto.MTLSInfo
+	// Device marks a fleet device. Ports lists the ports it serves.
+	Device bool
+	Ports  []proto.DevicePort
 }
 
 // EventHandler observes tunnel lifecycle events. A nil handler is allowed.
@@ -103,13 +108,19 @@ type EventHandler interface {
 	OnHTTPRequest(label string, r RequestInfo)
 	OnRedirect(label, from, to string)
 	OnShutdownPolicy(label, reason, code string, limit proto.LimitType, retryable bool)
+	// OnPortsUpdate reports a device's new port list.
+	OnPortsUpdate(label string, ports []proto.DevicePort)
 }
 
-// DataConnInfo describes one inbound connection.
+// DataConnInfo describes one inbound connection. On a device, Port is the
+// requested port and Consumer the requesting identity. Consumer is not sent to
+// the local service.
 type DataConnInfo struct {
-	ConnID string
-	Target string
-	Remote string
+	ConnID   string
+	Target   string
+	Remote   string
+	Consumer string
+	Port     uint16
 }
 
 // RequestInfo is one finished HTTP request for the live view. Metadata only: no
@@ -143,11 +154,18 @@ type Stats struct {
 }
 
 type Options struct {
-	Label      string
-	Token      string
-	Edge       string
-	Local      string
-	Protocol   string
+	Label string
+	Token string
+	Edge  string
+	// Local is the tunnel upstream address. It is empty on a device, which
+	// dials Host at the port the edge names.
+	Local string
+	// Protocol is the tunnel protocol, empty on a device.
+	Protocol string
+	// Kind is proto.KindTunnel or proto.KindDevice. Empty reads as a tunnel.
+	Kind string
+	// Host is the device target, resolved on each dial.
+	Host       string
 	ClientName string
 
 	// AgentVersion is reported on registration for the connection's audit
@@ -212,6 +230,9 @@ type Tunnel struct {
 	// probe. Zero when no probe is in flight.
 	fastProbeAt atomic.Int64
 
+	// ports is the device's open ports, nil on a tunnel.
+	ports *devicePorts
+
 	totalBytesIn  atomic.Int64
 	totalBytesOut atomic.Int64
 	totalConns    atomic.Int64
@@ -236,6 +257,10 @@ type activeConn struct {
 	bytesIn   atomic.Int64
 	bytesOut  atomic.Int64
 
+	// Set on a device connection. Shown only in agent output.
+	port     uint16
+	consumer string
+
 	edge      net.Conn
 	localConn net.Conn
 }
@@ -244,8 +269,13 @@ func New(opts Options) *Tunnel {
 	if opts.ClientName == "" {
 		opts.ClientName, _ = os.Hostname()
 	}
-	if opts.Protocol == "" {
+	device := opts.Kind == proto.KindDevice
+	if opts.Protocol == "" && !device {
 		opts.Protocol = "http"
+	}
+	if device {
+		// A device has no protocol. Each port has its own.
+		opts.Protocol = ""
 	}
 	t := &Tunnel{
 		opts:         opts,
@@ -256,8 +286,54 @@ func New(opts Options) *Tunnel {
 		disconnected: make(chan struct{}),
 		retryNow:     make(chan struct{}, 1),
 	}
+	if device {
+		t.ports = newDevicePorts()
+	}
 	t.state.Store(int32(StateIdle))
 	return t
+}
+
+// IsDevice reports whether this runtime serves a fleet device.
+func (t *Tunnel) IsDevice() bool { return t.ports != nil }
+
+// Ports lists the device's open ports, nil on a tunnel.
+func (t *Tunnel) Ports() []proto.DevicePort {
+	if t.ports == nil {
+		return nil
+	}
+	return t.ports.List()
+}
+
+// Target returns the tunnel upstream or the device host.
+func (t *Tunnel) Target() string {
+	if t.IsDevice() {
+		return t.opts.Host
+	}
+	return t.opts.Local
+}
+
+// dialTarget connects to the local target. A device first checks the requested
+// port against its own port list, independent of the edge check.
+func (t *Tunnel) dialTarget(port uint16) (net.Conn, int, error) {
+	if !t.IsDevice() {
+		conn, err := net.DialTimeout("tcp", t.opts.Local, dialTimeout)
+		if err != nil {
+			return nil, http.StatusBadGateway, fmt.Errorf("local dial %s: %w", t.opts.Local, err)
+		}
+		return conn, http.StatusOK, nil
+	}
+	if port == 0 {
+		return nil, http.StatusForbidden, errors.New("no port requested")
+	}
+	if _, open := t.ports.Protocol(port); !open {
+		return nil, http.StatusForbidden, fmt.Errorf("port %d is not open on this device", port)
+	}
+	addr := net.JoinHostPort(t.opts.Host, strconv.Itoa(int(port)))
+	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
+	if err != nil {
+		return nil, http.StatusBadGateway, fmt.Errorf("local dial %s: %w", addr, err)
+	}
+	return conn, http.StatusOK, nil
 }
 
 // Run drives the connect/register/serve loop until Stop or ctx cancellation.
@@ -414,6 +490,31 @@ func (t *Tunnel) removeActiveConn(id string) {
 	t.acMu.Unlock()
 }
 
+// closeConnsForPorts closes both sockets of every live connection on the
+// closed ports.
+func (t *Tunnel) closeConnsForPorts(ports []uint16) {
+	if len(ports) == 0 {
+		return
+	}
+	closing := make(map[uint16]struct{}, len(ports))
+	for _, port := range ports {
+		closing[port] = struct{}{}
+	}
+	t.acMu.RLock()
+	defer t.acMu.RUnlock()
+	for _, ac := range t.activeConns {
+		if _, hit := closing[ac.port]; !hit {
+			continue
+		}
+		if ac.edge != nil {
+			_ = ac.edge.Close()
+		}
+		if ac.localConn != nil {
+			_ = ac.localConn.Close()
+		}
+	}
+}
+
 func (t *Tunnel) closeActiveConns() {
 	t.acMu.RLock()
 	defer t.acMu.RUnlock()
@@ -463,6 +564,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 		t.mu.RUnlock()
 		reg := &proto.RegisterPayload{
 			Token:      t.opts.Token,
+			Kind:       t.opts.Kind,
 			Protocol:   t.opts.Protocol,
 			ClientID:   t.clientID,
 			ClientName: t.opts.ClientName,
@@ -505,6 +607,9 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			t.edgeAddr = addr
 			t.dialer = chosen
 			t.sessionID = ack.SessionID
+			if t.ports != nil {
+				t.ports.Set(ack.PortsVersion, ack.Ports)
+			}
 			t.info = Info{
 				TunnelID:   ack.TunnelID,
 				TunnelName: ack.TunnelName,
@@ -698,7 +803,35 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 		}
 		t.wg.Add(1)
 
-		go t.proxyData(nc.ConnectionID, sanitizeAddr(nc.RemoteAddr))
+		go t.proxyData(nc.ConnectionID, sanitizeAddr(nc.RemoteAddr), connTarget{
+			port:     nc.TargetPort,
+			protocol: sanitizeAddr(nc.TargetProtocol),
+			consumer: sanitizeAddr(nc.Consumer),
+		})
+
+	case proto.MsgPortsUpdate:
+		if t.ports == nil {
+			return
+		}
+		pu, err := proto.ParsePortsUpdate(body)
+		if err != nil {
+			return
+		}
+		removed, applied := t.ports.Set(pu.Version, pu.Ports)
+		// Ack the current version even for a stale update, in case an earlier
+		// ack was lost.
+		if c := t.snapshotConn(); c != nil {
+			_ = c.SendPortsAck(&proto.PortsAckPayload{Version: t.ports.Version()})
+		}
+		if !applied {
+			return
+		}
+		// dialTarget refuses new connections to closed ports. Close the live
+		// ones.
+		t.closeConnsForPorts(removed)
+		if h := t.opts.Handler; h != nil {
+			h.OnPortsUpdate(t.opts.Label, t.ports.List())
+		}
 
 	case proto.MsgHeartbeat:
 		hb, _ := proto.ParseHeartbeat(body)
@@ -804,7 +937,15 @@ func (t *Tunnel) RecentRequests() []RequestInfo {
 	return append([]RequestInfo(nil), t.recentReqs...)
 }
 
-func (t *Tunnel) proxyData(connID, remote string) {
+// connTarget describes an inbound device connection, the port, its protocol
+// and the consumer. It is zero on a tunnel.
+type connTarget struct {
+	port     uint16
+	protocol string
+	consumer string
+}
+
+func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
 	defer t.wg.Done()
 
 	t.mu.RLock()
@@ -816,11 +957,16 @@ func (t *Tunnel) proxyData(connID, remote string) {
 		id:        connID,
 		local:     t.opts.Local,
 		remote:    remote,
+		port:      target.port,
+		consumer:  target.consumer,
 		startedAt: time.Now(),
+	}
+	if t.IsDevice() {
+		ac.local = net.JoinHostPort(t.opts.Host, strconv.Itoa(int(target.port)))
 	}
 	closeEvt := func(in, out int64, err error) {
 		if h := t.opts.Handler; h != nil {
-			h.OnDataClose(t.opts.Label, connID, t.opts.Local, remote, in, out, time.Since(ac.startedAt), err)
+			h.OnDataClose(t.opts.Label, connID, ac.local, remote, in, out, time.Since(ac.startedAt), err)
 		}
 	}
 	if dialer == nil {
@@ -843,10 +989,10 @@ func (t *Tunnel) proxyData(connID, remote string) {
 		return
 	}
 
-	local, err := net.DialTimeout("tcp", t.opts.Local, dialTimeout)
+	local, _, err := t.dialTarget(target.port)
 	if err != nil {
 		edge.Close()
-		closeEvt(0, 0, fmt.Errorf("local dial %s: %w", t.opts.Local, err))
+		closeEvt(0, 0, err)
 		return
 	}
 
@@ -858,9 +1004,11 @@ func (t *Tunnel) proxyData(connID, remote string) {
 
 	if h := t.opts.Handler; h != nil {
 		h.OnDataConn(t.opts.Label, DataConnInfo{
-			ConnID: connID,
-			Target: t.opts.Local,
-			Remote: remote,
+			ConnID:   connID,
+			Target:   ac.local,
+			Remote:   remote,
+			Consumer: target.consumer,
+			Port:     target.port,
 		})
 	}
 
@@ -990,7 +1138,10 @@ func (t *Tunnel) snapshotConnPair() (net.Conn, *proto.Conn) {
 
 func (t *Tunnel) emitConnected() {
 	if h := t.opts.Handler; h != nil {
-		h.OnConnected(t.opts.Label, t.info)
+		info := t.info
+		info.Device = t.IsDevice()
+		info.Ports = t.Ports()
+		h.OnConnected(t.opts.Label, info)
 	}
 }
 func (t *Tunnel) emitDisconnected(err error) {

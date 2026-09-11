@@ -113,6 +113,11 @@ func (p *Plain) OnConnected(label string, info tunnel.Info) {
 			sub, port, info.Mode, info.Protocol,
 		))
 	}
+	if info.Device {
+		// Log the initial ports from the ack. OnPortsUpdate fires only on a
+		// change.
+		p.line("ports", label, formatPorts(info.Ports))
+	}
 	if info.MTLS != nil && info.MTLS.Enabled {
 		p.line("mtls", label, "enabled")
 	}
@@ -128,6 +133,11 @@ func (p *Plain) OnDisconnected(label string, err error) {
 
 func (p *Plain) OnError(label string, err error) {
 	p.line("error", label, withCode(err.Error(), errorCode(err)))
+}
+
+// OnPortsUpdate logs the device's new port list.
+func (p *Plain) OnPortsUpdate(label string, ports []proto.DevicePort) {
+	p.line("ports", label, formatPorts(ports))
 }
 
 // OnHTTPRequest runs on the forwarding goroutine, so it must not block. Counts
@@ -186,7 +196,14 @@ func (p *Plain) OnDataConn(label string, info tunnel.DataConnInfo) {
 	if from == "" {
 		from = "-"
 	}
-	p.line("conn.open", label, fmt.Sprintf("id=%s from=%s -> %s", shortID(info.ConnID), from, info.Target))
+	line := fmt.Sprintf("id=%s ip=%s -> %s", shortID(info.ConnID), from, info.Target)
+	if info.Port != 0 {
+		line += fmt.Sprintf(" port=%d", info.Port)
+	}
+	if info.Consumer != "" {
+		line += " identity=" + info.Consumer
+	}
+	p.line("conn.open", label, line)
 
 	p.mu.Lock()
 	s := p.statsFor(label)

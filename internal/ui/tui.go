@@ -74,6 +74,11 @@ type tState struct {
 	lastCode    string
 	mtls        bool
 	connected   bool
+
+	// device marks a fleet device. ports are the open ports and local is the
+	// target host.
+	device bool
+	ports  []proto.DevicePort
 }
 
 const (
@@ -312,6 +317,10 @@ func (t *TUI) OnConnected(label string, info tunnel.Info) {
 		if info.MTLS != nil {
 			ts.mtls = info.MTLS.Enabled
 		}
+		if info.Device {
+			ts.device = true
+			ts.ports = info.Ports
+		}
 	}
 	if info.EdgeAddr != "" {
 		t.edge = info.EdgeAddr
@@ -346,6 +355,17 @@ func (t *TUI) OnError(label string, err error) {
 func (t *TUI) OnDataConn(_ string, _ tunnel.DataConnInfo)                          { t.requestRender() }
 func (t *TUI) OnDataClose(_, _, _, _ string, _, _ int64, _ time.Duration, _ error) { t.requestRender() }
 func (t *TUI) OnHTTPRequest(_ string, _ tunnel.RequestInfo)                        { t.requestRender() }
+
+// OnPortsUpdate replaces a device's port list in the view.
+func (t *TUI) OnPortsUpdate(label string, ports []proto.DevicePort) {
+	t.mu.Lock()
+	if st, ok := t.tunnels[label]; ok {
+		st.ports = ports
+		st.device = true
+	}
+	t.mu.Unlock()
+	t.requestRender()
+}
 
 func (t *TUI) OnRedirect(_, _, to string) {
 	t.mu.Lock()
