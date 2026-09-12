@@ -957,16 +957,11 @@ func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
 		id:        connID,
 		local:     t.opts.Local,
 		remote:    remote,
-		port:      target.port,
-		consumer:  target.consumer,
 		startedAt: time.Now(),
-	}
-	if t.IsDevice() {
-		ac.local = net.JoinHostPort(t.opts.Host, strconv.Itoa(int(target.port)))
 	}
 	closeEvt := func(in, out int64, err error) {
 		if h := t.opts.Handler; h != nil {
-			h.OnDataClose(t.opts.Label, connID, ac.local, remote, in, out, time.Since(ac.startedAt), err)
+			h.OnDataClose(t.opts.Label, connID, t.opts.Local, remote, in, out, time.Since(ac.startedAt), err)
 		}
 	}
 	if dialer == nil {
@@ -983,21 +978,43 @@ func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
 		return
 	}
 	pc := proto.NewConn(edge)
-	if err := pc.SendConnectionReady(&proto.ConnectionReadyPayload{ConnectionID: connID}); err != nil {
+
+	// Dial the local service before reporting ready, as on the mux path. The
+	// edge answers the visitor with a non-OK status. The dial uses part of the
+	// edge connect-back timeout.
+	local, status, dialErr := t.dialTarget(target.port)
+	if dialErr != nil {
+		_ = pc.SendConnectionReady(&proto.ConnectionReadyPayload{ConnectionID: connID, Status: status})
+		edge.Close()
+		closeEvt(0, 0, dialErr)
+		return
+	}
+	if err := pc.SendConnectionReady(&proto.ConnectionReadyPayload{ConnectionID: connID, Status: http.StatusOK}); err != nil {
+		local.Close()
 		edge.Close()
 		closeEvt(0, 0, err)
 		return
 	}
 
-	local, _, err := t.dialTarget(target.port)
-	if err != nil {
-		edge.Close()
-		closeEvt(0, 0, err)
-		return
+	t.serveData(ac, connID, edge, local, remote, target)
+}
+
+// serveData copies between the edge and local connections and reports the
+// connection in the live view.
+func (t *Tunnel) serveData(ac *activeConn, connID string, edge, local net.Conn, remote string, target connTarget) {
+	closeEvt := func(in, out int64, err error) {
+		if h := t.opts.Handler; h != nil {
+			h.OnDataClose(t.opts.Label, connID, ac.local, remote, in, out, time.Since(ac.startedAt), err)
+		}
 	}
 
 	ac.edge = edge
 	ac.localConn = local
+	if t.IsDevice() {
+		ac.local = net.JoinHostPort(t.opts.Host, strconv.Itoa(int(target.port)))
+		ac.port = target.port
+		ac.consumer = target.consumer
+	}
 	t.addActiveConn(ac)
 	t.totalConns.Add(1)
 	defer t.removeActiveConn(connID)

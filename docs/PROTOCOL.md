@@ -191,6 +191,9 @@ The last three are set for a device: which of its ports to dial, how to treat th
 stream, and which identity asked. `consumer` is display text for this agent's own
 output and is never forwarded to the local service.
 
+A device checks the port against its own list and dials the target before it
+sends `ConnectionReady`, which carries the result.
+
 ### ConnectionReady (4)
 
 ```json
