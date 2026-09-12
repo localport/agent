@@ -27,7 +27,7 @@ tunnels:
     token: tunnel-token
     upstream: tcp://localhost:5432
 fleets:
-  - token: ${env.FLEET_TOKEN}
+  - token: ${FLEET_TOKEN}
     devices:
       - name: hub
       - name: plc-01
@@ -71,7 +71,6 @@ func TestLoadRefusesBadFiles(t *testing.T) {
 		{"duplicate device", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n      - name: GW\n"},
 		{"host with port", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        host: 10.0.0.2:502\n"},
 		{"host with scheme", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        host: tcp://10.0.0.2\n"},
-		{"unset variable", "version: 1\nfleets:\n  - token: ${env.LOCALPORT_UNSET_FOR_TEST}\n    devices:\n      - name: gw\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,6 +89,58 @@ func TestDeviceHostAcceptsIPv6(t *testing.T) {
 	}
 	if cfg.Devices[0].Host != "fd00::1" {
 		t.Fatalf("host = %q", cfg.Devices[0].Host)
+	}
+}
+
+func TestInterpolate(t *testing.T) {
+	t.Setenv("SET", "value")
+	t.Setenv("EMPTY", "")
+
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "plain", in: "${SET}", want: "value"},
+		{name: "unset", in: "${MISSING}", wantErr: true},
+		{name: "empty counts as unset", in: "${EMPTY}", wantErr: true},
+		{name: "default used", in: "${MISSING:-fallback}", want: "fallback"},
+		{name: "default ignored", in: "${SET:-fallback}", want: "value"},
+		{name: "empty takes the default", in: "${EMPTY:-fallback}", want: "fallback"},
+		{name: "message", in: "${MISSING:?set this first}", wantErr: true},
+		{name: "message satisfied", in: "${SET:?set this first}", want: "value"},
+		{name: "literal dollar", in: "$$SET", want: "$SET"},
+		{name: "bare dollar", in: "cost $5", want: "cost $5"},
+		{name: "unterminated", in: "${SET", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := interpolate(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want an error, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("interpolate: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The error names the unset variable.
+func TestInterpolateMessageNamesTheVariable(t *testing.T) {
+	_, err := interpolate("${FLEET_TOKEN:?set FLEET_TOKEN}")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if got := err.Error(); got != "FLEET_TOKEN: set FLEET_TOKEN" {
+		t.Fatalf("error = %q", got)
 	}
 }
 

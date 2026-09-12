@@ -3,5 +3,5 @@ version: 1
 # One tunnel publishing a local service at a public URL.
 tunnels:
   - name: web
-    token: ${env.LOCALPORT_TOKEN}
+    token: ${LOCALPORT_TOKEN:?set LOCALPORT_TOKEN}
     upstream: http://localhost:3000

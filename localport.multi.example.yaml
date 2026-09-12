@@ -1,24 +1,30 @@
 version: 1
 
 # Several tunnels and a fleet from one agent process.
+#
+# Environment references use Compose syntax.
+#   ${VAR}             required, an error when unset
+#   ${VAR:-default}    a default when unset
+#   ${VAR:?message}    an error carrying your own message
+#   $$                 a literal $
 
 tunnels:
   - name: api
-    token: ${env.TUNNEL_TOKEN}
+    token: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN}
     upstream: http://localhost:8080
 
   - name: db
-    token: ${env.TUNNEL_TOKEN}
+    token: ${TUNNEL_TOKEN}
     upstream: tcp://localhost:5432
 
   - name: search
-    token: ${env.TUNNEL_TOKEN}
+    token: ${TUNNEL_TOKEN}
     upstream: tls://192.168.1.34:9200
 
 # A fleet groups devices under one token. Their ports are set in the dashboard.
 # `host` is the address this machine forwards a device's traffic to.
 fleets:
-  - token: ${env.FLEET_TOKEN}
+  - token: ${FLEET_TOKEN:?set FLEET_TOKEN}
     devices:
       # This machine.
       - name: hub

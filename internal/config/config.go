@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -18,8 +17,6 @@ var regionHosts = map[string]string{
 	"us": "us.localport.dev",
 	"ap": "ap.localport.dev",
 }
-
-var envRef = regexp.MustCompile(`\$\{env\.([^}]+)\}`)
 
 // Config is the validated runtime configuration.
 type Config struct {
@@ -88,17 +85,17 @@ type deviceFile struct {
 	Host string `yaml:"host,omitempty"`
 }
 
-// Load reads the YAML at path, substitutes ${env.VAR} references, and
-// returns a validated Config.
+// Load reads the YAML at path, substitutes environment references and returns
+// a validated Config.
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	expanded, missing := expand(string(raw))
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("undefined env vars: %s", strings.Join(missing, ", "))
+	expanded, err := interpolate(string(raw))
+	if err != nil {
+		return nil, err
 	}
 
 	var fc fileConfig
@@ -292,17 +289,4 @@ func hasExplicitPort(host string) bool {
 	}
 	_, err := strconv.Atoi(host[idx+1:])
 	return err == nil
-}
-
-func expand(raw string) (string, []string) {
-	var missing []string
-	out := envRef.ReplaceAllStringFunc(raw, func(m string) string {
-		name := envRef.FindStringSubmatch(m)[1]
-		val, ok := os.LookupEnv(name)
-		if !ok || val == "" {
-			missing = append(missing, name)
-		}
-		return val
-	})
-	return out, missing
 }
