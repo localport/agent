@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -20,65 +21,71 @@ var regionHosts = map[string]string{
 
 var envRef = regexp.MustCompile(`\$\{env\.([^}]+)\}`)
 
-// Public runtime types.
-
+// Config is the validated runtime configuration.
 type Config struct {
-	Specs []Spec
+	// Tunnels publish a local service at a public URL.
+	Tunnels []TunnelSpec
+	// Devices join a fleet and serve the ports configured in the dashboard to
+	// `localport access` clients.
+	Devices []DeviceSpec
 
-	// NoMux forces every inbound connection onto its own dial-back instead of
-	// multiplexing them over one connection. Multiplexing is the better default
-	// on nearly every network; this exists for the ones where it is not, such as
-	// a lossy link where one dropped packet stalls unrelated streams.
+	// NoMux gives each inbound connection its own dial-back connection. Use it
+	// on lossy links, where one dropped packet stalls every multiplexed stream.
 	NoMux bool
 
-	// NoInspect turns off HTTP request inspection on http tunnels.
+	// NoInspect turns off HTTP request inspection.
 	NoInspect bool
 
-	// AgentVersion is this build's version string, set from ldflags in main and
-	// sent on registration. Not part of the YAML schema: it describes the
-	// binary, not the user's configuration.
+	// AgentVersion is the build version from ldflags, sent on registration.
+	// It is not part of the YAML schema.
 	AgentVersion string
 }
 
-type Spec struct {
-	Token     string
-	Region    string
-	Edge      string
-	Endpoints []Endpoint
-}
-
-type Endpoint struct {
+// TunnelSpec is one published endpoint.
+type TunnelSpec struct {
 	Name     string
+	Token    string
 	Protocol string
 	Local    string
+	Edge     string
 }
 
-func (c *Config) TotalEndpoints() int {
-	n := 0
-	for _, s := range c.Specs {
-		n += len(s.Endpoints)
-	}
-	return n
+// DeviceSpec is one device on a fleet. Host is the address traffic is sent to
+// and may name another machine on the local network. Ports come from the
+// dashboard.
+type DeviceSpec struct {
+	Name  string
+	Token string
+	Host  string
+	Edge  string
 }
 
-// YAML schema. Kept unexported so the parsed shape doesn't leak into callers.
+// DefaultDeviceHost is the device host when none is configured.
+const DefaultDeviceHost = "localhost"
 
+func (c *Config) Total() int { return len(c.Tunnels) + len(c.Devices) }
+
+// fileConfig is the YAML schema.
 type fileConfig struct {
-	Version int    `yaml:"version"`
-	Spec    *spec  `yaml:"spec,omitempty"`
-	Specs   []spec `yaml:"specs,omitempty"`
+	Version int          `yaml:"version"`
+	Tunnels []tunnelFile `yaml:"tunnels,omitempty"`
+	Fleets  []fleetFile  `yaml:"fleets,omitempty"`
 }
 
-type spec struct {
-	Token     string     `yaml:"token"`
-	Region    string     `yaml:"region,omitempty"`
-	Endpoints []endpoint `yaml:"endpoints"`
+type tunnelFile struct {
+	Name     string `yaml:"name"`
+	Token    string `yaml:"token"`
+	Upstream string `yaml:"upstream"`
 }
 
-type endpoint struct {
-	Name  string `yaml:"name"`
-	Proto string `yaml:"proto"`
-	URL   string `yaml:"url"`
+type fleetFile struct {
+	Token   string       `yaml:"token"`
+	Devices []deviceFile `yaml:"devices"`
+}
+
+type deviceFile struct {
+	Name string `yaml:"name"`
+	Host string `yaml:"host,omitempty"`
 }
 
 // Load reads the YAML at path, substitutes ${env.VAR} references, and
@@ -101,23 +108,20 @@ func Load(path string) (*Config, error) {
 	return build(&fc)
 }
 
-// FromFlags builds a single-endpoint config from CLI arguments. The
-// endpoint name defaults to "default" when blank.
+// FromFlags builds a one-tunnel config from CLI arguments. The name defaults
+// to "default" when blank.
 func FromFlags(token, region, local, proto, name string) *Config {
 	if name == "" {
 		name = "default"
 	}
 	resolvedProto, resolvedLocal := ParseLocal(local, proto)
-	return &Config{
-		Specs: []Spec{{
-			Token:  token,
-			Region: region,
-			Edge:   ResolveEdge(region),
-			Endpoints: []Endpoint{
-				{Name: name, Protocol: resolvedProto, Local: resolvedLocal},
-			},
-		}},
-	}
+	return &Config{Tunnels: []TunnelSpec{{
+		Name:     name,
+		Token:    token,
+		Protocol: resolvedProto,
+		Local:    resolvedLocal,
+		Edge:     ResolveEdge(region),
+	}}}
 }
 
 // ParseLocal splits a `local` value into (protocol, addr). A scheme in
@@ -184,67 +188,110 @@ func build(fc *fileConfig) (*Config, error) {
 	if fc.Version != 1 {
 		return nil, fmt.Errorf("unsupported config version %d (only v1 is recognized)", fc.Version)
 	}
-
-	var specs []spec
-	switch {
-	case fc.Spec != nil && len(fc.Specs) > 0:
-		return nil, fmt.Errorf("set either 'spec' or 'specs', not both")
-	case fc.Spec != nil:
-		specs = []spec{*fc.Spec}
-	case len(fc.Specs) > 0:
-		specs = fc.Specs
-	default:
-		return nil, fmt.Errorf("at least one spec is required")
+	if len(fc.Tunnels) == 0 && len(fc.Fleets) == 0 {
+		return nil, errors.New("the file lists no tunnels and no fleets")
 	}
 
 	out := &Config{}
-	for i, s := range specs {
-		built, err := buildSpec(i+1, s)
+	for i, t := range fc.Tunnels {
+		built, err := buildTunnel(i+1, t)
 		if err != nil {
 			return nil, err
 		}
-		out.Specs = append(out.Specs, *built)
+		out.Tunnels = append(out.Tunnels, *built)
+	}
+	for i, f := range fc.Fleets {
+		devices, err := buildFleet(i+1, f)
+		if err != nil {
+			return nil, err
+		}
+		out.Devices = append(out.Devices, devices...)
 	}
 	return out, nil
 }
 
-func buildSpec(idx int, s spec) (*Spec, error) {
-	if s.Token == "" {
-		return nil, fmt.Errorf("spec %d: token is required", idx)
+func buildTunnel(idx int, t tunnelFile) (*TunnelSpec, error) {
+	if t.Name == "" {
+		return nil, fmt.Errorf("tunnel %d: name is required", idx)
 	}
-	if len(s.Endpoints) == 0 {
-		return nil, fmt.Errorf("spec %d: at least one endpoint is required", idx)
+	if t.Token == "" {
+		return nil, fmt.Errorf("tunnel %q: token is required", t.Name)
 	}
-
-	out := &Spec{
-		Token:  s.Token,
-		Region: s.Region,
-		Edge:   ResolveEdge(s.Region),
+	if t.Upstream == "" {
+		return nil, fmt.Errorf("tunnel %q: upstream is required", t.Name)
 	}
-	for j, ep := range s.Endpoints {
-		built, err := buildEndpoint(idx, j+1, ep)
-		if err != nil {
-			return nil, err
-		}
-		out.Endpoints = append(out.Endpoints, *built)
-	}
-	return out, nil
-}
-
-func buildEndpoint(specIdx, epIdx int, ep endpoint) (*Endpoint, error) {
-	if ep.Name == "" {
-		return nil, fmt.Errorf("spec %d endpoint %d: name is required", specIdx, epIdx)
-	}
-	if ep.URL == "" {
-		return nil, fmt.Errorf("spec %d endpoint %q: url is required", specIdx, ep.Name)
-	}
-	proto, local := ParseLocal(ep.URL, ep.Proto)
+	proto, local := ParseLocal(t.Upstream, "")
 	switch proto {
 	case "http", "tcp", "tls":
 	default:
-		return nil, fmt.Errorf("spec %d endpoint %q: protocol %q is not one of http, tcp, tls", specIdx, ep.Name, ep.Proto)
+		return nil, fmt.Errorf("tunnel %q: upstream scheme %q is not one of http, tcp, tls", t.Name, proto)
 	}
-	return &Endpoint{Name: ep.Name, Protocol: proto, Local: local}, nil
+	return &TunnelSpec{
+		Name:     t.Name,
+		Token:    t.Token,
+		Protocol: proto,
+		Local:    local,
+		Edge:     ResolveEdge(""),
+	}, nil
+}
+
+func buildFleet(idx int, f fleetFile) ([]DeviceSpec, error) {
+	if f.Token == "" {
+		return nil, fmt.Errorf("fleet %d: token is required", idx)
+	}
+	if len(f.Devices) == 0 {
+		return nil, fmt.Errorf("fleet %d: at least one device is required", idx)
+	}
+
+	seen := make(map[string]struct{}, len(f.Devices))
+	out := make([]DeviceSpec, 0, len(f.Devices))
+	for _, d := range f.Devices {
+		if d.Name == "" {
+			return nil, fmt.Errorf("fleet %d: every device needs a name", idx)
+		}
+		key := strings.ToLower(d.Name)
+		if _, dup := seen[key]; dup {
+			return nil, fmt.Errorf("fleet %d: device %q is listed twice", idx, d.Name)
+		}
+		seen[key] = struct{}{}
+
+		host, err := parseDeviceHost(d.Name, d.Host)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, DeviceSpec{Name: d.Name, Token: f.Token, Host: host, Edge: ResolveEdge("")})
+	}
+	return out, nil
+}
+
+// parseDeviceHost accepts an address without port or scheme. Ports and their
+// protocols come from the dashboard.
+func parseDeviceHost(name, host string) (string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return DefaultDeviceHost, nil
+	}
+	if strings.Contains(host, "://") {
+		return "", fmt.Errorf("device %q: host takes an address without a scheme", name)
+	}
+	if hasExplicitPort(host) {
+		return "", fmt.Errorf("device %q: host takes an address without a port, the dashboard opens the ports", name)
+	}
+	return host, nil
+}
+
+// hasExplicitPort reports whether host has a ":port" suffix. A bare IPv6
+// literal is not treated as host:port.
+func hasExplicitPort(host string) bool {
+	idx := strings.LastIndex(host, ":")
+	if idx < 0 || strings.Contains(host[idx+1:], "]") {
+		return false
+	}
+	if strings.Count(host, ":") > 1 && !strings.HasPrefix(host, "[") {
+		return false
+	}
+	_, err := strconv.Atoi(host[idx+1:])
+	return err == nil
 }
 
 func expand(raw string) (string, []string) {

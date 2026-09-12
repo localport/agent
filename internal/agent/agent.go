@@ -7,6 +7,7 @@ import (
 
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/netmon"
+	"github.com/localport/agent/internal/proto"
 	"github.com/localport/agent/internal/tunnel"
 )
 
@@ -48,42 +49,55 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}()
 
-	for _, spec := range a.cfg.Specs {
-		for _, ep := range spec.Endpoints {
-			// "default" is the placeholder name FromFlags assigns when the
-			// user didn't pick one; passing it through to the edge would
-			// have every CLI invocation collide on the same client name.
-			clientName := ep.Name
-			if clientName == "default" {
-				clientName = ""
+	start := func(opts tunnel.Options) {
+		opts.AgentVersion = a.cfg.AgentVersion
+		opts.Handler = a.handler
+		opts.DisableMux = a.cfg.NoMux
+		opts.DisableInspect = a.cfg.NoInspect
+		t := tunnel.New(opts)
+
+		a.mu.Lock()
+		a.tunnels = append(a.tunnels, t)
+		a.mu.Unlock()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := t.Run(ctx); err != nil {
+				a.mu.Lock()
+				a.runErrs = append(a.runErrs, err)
+				a.mu.Unlock()
 			}
-			t := tunnel.New(tunnel.Options{
-				Label:          ep.Name,
-				Token:          spec.Token,
-				Edge:           spec.Edge,
-				Local:          ep.Local,
-				Protocol:       ep.Protocol,
-				ClientName:     clientName,
-				AgentVersion:   a.cfg.AgentVersion,
-				Handler:        a.handler,
-				DisableMux:     a.cfg.NoMux,
-				DisableInspect: a.cfg.NoInspect,
-			})
+		}()
+	}
 
-			a.mu.Lock()
-			a.tunnels = append(a.tunnels, t)
-			a.mu.Unlock()
-
-			wg.Add(1)
-			go func(t *tunnel.Tunnel) {
-				defer wg.Done()
-				if err := t.Run(ctx); err != nil {
-					a.mu.Lock()
-					a.runErrs = append(a.runErrs, err)
-					a.mu.Unlock()
-				}
-			}(t)
+	for _, spec := range a.cfg.Tunnels {
+		// "default" is the flag path placeholder. Sending it would give every
+		// unnamed invocation the same client name.
+		clientName := spec.Name
+		if clientName == "default" {
+			clientName = ""
 		}
+		start(tunnel.Options{
+			Label:      spec.Name,
+			Kind:       proto.KindTunnel,
+			Token:      spec.Token,
+			Edge:       spec.Edge,
+			Local:      spec.Local,
+			Protocol:   spec.Protocol,
+			ClientName: clientName,
+		})
+	}
+
+	for _, device := range a.cfg.Devices {
+		start(tunnel.Options{
+			Label:      device.Name,
+			Kind:       proto.KindDevice,
+			Token:      device.Token,
+			Edge:       device.Edge,
+			Host:       device.Host,
+			ClientName: device.Name,
+		})
 	}
 	wg.Wait()
 	a.mu.Lock()

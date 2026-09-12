@@ -18,11 +18,8 @@ working carrier, it survives the same firewalls the tunnel does. It is an
 optimization: an edge that does not accept the bind, or `--no-mux`, leave the
 tunnel working over dial-back.
 
-The agent runs one tunnel per config endpoint, and each tunnel opens its own
-control connection and its own mux, bound to that tunnel's session. A fleet set up
-as several same-token endpoints therefore gets one connection pair per device, so
-the devices stay independent, rather than sharing a single connection across
-every tunnel.
+Each tunnel and each fleet device in a config opens its own control connection
+and its own mux, bound to its own session.
 
 The agent connects with SNI `connect.<edge-domain>`; the edge routes that SNI to
 its agent handler and all other SNIs to tunnel traffic. The wire format below is

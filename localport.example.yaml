@@ -1,14 +1,7 @@
 version: 1
-spec:
-  token: ${env.LOCALPORT_TOKEN}
-  region: eu
-  endpoints:
-    - name: web
-      proto: http
-      url: localhost:3000
-    - name: db
-      proto: tcp
-      url: localhost:5432
-    - name: search
-      proto: tls
-      url: 192.168.1.34:9200
+
+# One tunnel publishing a local service at a public URL.
+tunnels:
+  - name: web
+    token: ${env.LOCALPORT_TOKEN}
+    upstream: http://localhost:3000

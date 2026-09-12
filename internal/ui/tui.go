@@ -118,25 +118,32 @@ func (t *TUI) SetTunnelProvider(p func() []*tunnel.Tunnel) {
 func (t *TUI) Banner(version string, cfg *config.Config) {
 	t.mu.Lock()
 	t.version = version
-	for _, s := range cfg.Specs {
+	add := func(name, protocol, local string, device bool) {
+		if name == "" {
+			name = "default"
+		}
+		if _, ok := t.tunnels[name]; !ok {
+			t.order = append(t.order, name)
+		}
+		t.tunnels[name] = &tState{
+			name:   name,
+			proto:  protocol,
+			local:  local,
+			device: device,
+			state:  tunnel.StateIdle,
+		}
+	}
+	for _, spec := range cfg.Tunnels {
 		if t.edge == "" {
-			t.edge = s.Edge
+			t.edge = spec.Edge
 		}
-		for _, ep := range s.Endpoints {
-			name := ep.Name
-			if name == "" {
-				name = "default"
-			}
-			if _, ok := t.tunnels[name]; !ok {
-				t.order = append(t.order, name)
-			}
-			t.tunnels[name] = &tState{
-				name:  name,
-				proto: ep.Protocol,
-				local: ep.Local,
-				state: tunnel.StateIdle,
-			}
+		add(spec.Name, spec.Protocol, spec.Local, false)
+	}
+	for _, device := range cfg.Devices {
+		if t.edge == "" {
+			t.edge = device.Edge
 		}
+		add(device.Name, "", device.Host, true)
 	}
 	t.cols, t.rows = TermSize(t.out)
 	t.mu.Unlock()

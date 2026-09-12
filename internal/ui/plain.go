@@ -66,15 +66,11 @@ func NewPlain() *Plain {
 
 func (p *Plain) Banner(version string, cfg *config.Config) {
 	p.line("startup", "", "localport "+version)
-	for _, s := range cfg.Specs {
-		region := s.Region
-		if region == "" {
-			region = "auto"
-		}
-		p.line("startup", "", fmt.Sprintf("region=%s edge=%s", region, s.Edge))
-		for _, ep := range s.Endpoints {
-			p.line("startup", ep.Name, fmt.Sprintf("proto=%s local=%s", ep.Protocol, ep.Local))
-		}
+	for _, t := range cfg.Tunnels {
+		p.line("startup", t.Name, fmt.Sprintf("proto=%s local=%s", t.Protocol, t.Local))
+	}
+	for _, d := range cfg.Devices {
+		p.line("startup", d.Name, "device host="+d.Host)
 	}
 }
 
