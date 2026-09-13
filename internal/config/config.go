@@ -121,6 +121,75 @@ func FromFlags(token, region, local, proto, name string) *Config {
 	}}}
 }
 
+// DeviceFromFlags builds a one-device config from CLI arguments.
+func DeviceFromFlags(token, region, name, host string) (*Config, error) {
+	if !ValidDeviceName(name) {
+		return nil, fmt.Errorf("--name %q is not a valid device name, expected 1-%d characters of "+
+			"lowercase letters, digits and internal dashes", name, MaxDeviceNameLength)
+	}
+
+	host, err := parseDeviceHost(name, host)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Config{Devices: []DeviceSpec{{
+		Name:  name,
+		Token: token,
+		Host:  host,
+		Edge:  ResolveEdge(region),
+	}}}, nil
+}
+
+// MaxDeviceNameLength matches the control plane limit. A device name becomes a
+// DNS label under the fleet's base label.
+const MaxDeviceNameLength = 48
+
+// ValidDeviceName reports whether the control plane accepts s as a device
+// name. Invalid names are refused and not repaired, because a device name is
+// an address and a grant target.
+func ValidDeviceName(s string) bool {
+	if s == "" || len(s) > MaxDeviceNameLength {
+		return false
+	}
+	if s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// DefaultDeviceName derives a device name from a hostname, for example
+// "MacBook-Pro.local" becomes "macbook-pro". It returns "" when nothing usable
+// remains.
+func DefaultDeviceName(hostname string) string {
+	if i := strings.IndexByte(hostname, '.'); i >= 0 {
+		hostname = hostname[:i]
+	}
+	var b strings.Builder
+	b.Grow(len(hostname))
+	for _, r := range strings.ToLower(strings.TrimSpace(hostname)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case b.Len() > 0 && b.String()[b.Len()-1] != '-':
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > MaxDeviceNameLength {
+		out = strings.TrimRight(out[:MaxDeviceNameLength], "-")
+	}
+	return out
+}
+
 // ParseLocal splits a `local` value into (protocol, addr). A scheme in
 // the URL wins over fallbackProto. A bare port ("18789") is rewritten
 // to "localhost:18789". Empty input passes through.

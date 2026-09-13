@@ -75,17 +75,8 @@ func runTunnel(version string, args []string) error {
 	}
 	// The ldflags value from main, sent on registration.
 	cfg.AgentVersion = version
-	// No TUI means no consumer for the request view, so headless skips parsing by
-	// default. --log-requests opts back in; --no-inspect forces off and wins.
 	mode := ui.DetectMode(*noUI, os.Stderr)
-	switch {
-	case *noInspect:
-		cfg.NoInspect = true
-	case *logRequests:
-		cfg.NoInspect = false
-	default:
-		cfg.NoInspect = mode == ui.ModePlain
-	}
+	cfg.NoInspect = inspectDisabled(mode, *noInspect, *logRequests)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -115,6 +106,20 @@ func runTunnel(version string, args []string) error {
 	return err
 }
 
+// inspectDisabled reports whether the HTTP request view is off. --no-inspect
+// turns it off. Otherwise it is on in the TUI, and in plain mode only with
+// --log-requests. Used by connect and the flat tunnel form.
+func inspectDisabled(mode ui.Mode, noInspect, logRequests bool) bool {
+	switch {
+	case noInspect:
+		return true
+	case logRequests:
+		return false
+	default:
+		return mode == ui.ModePlain
+	}
+}
+
 func pickRenderer(mode ui.Mode, a *agent.Agent) tunnelUI {
 	if mode == ui.ModePlain {
 		return ui.NewPlain()
@@ -139,11 +144,11 @@ func buildTunnelConfig(path, flagToken, region, local, proto, name string) (*con
 }
 
 func usageTunnel(fs *flag.FlagSet) {
-	fmt.Fprint(os.Stderr, `Usage: localport tunnel [flags]
-       localport <proto> <port|host:port> [flags]
+	fmt.Fprint(os.Stderr, `Usage: localport <proto> <port|host:port> [flags]
+       localport --token <token> --local <address> [flags]
 
   Config file:
-    localport tunnel --config localport.yaml
+    localport connect --config localport.yaml
 
   Single endpoint, scheme in --local sets the protocol:
     localport --token <token> --local tcp://localhost:18789

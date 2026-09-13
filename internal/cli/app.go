@@ -24,16 +24,14 @@ func (a *App) Run(args []string) error {
 		return runTunnel(a.version, args)
 	}
 	switch args[0] {
-	case "tunnel":
-		return runTunnel(a.version, args[1:])
+	case "connect":
+		return runConnect(a.version, args[1:])
 	case "access":
 		return runAccess(args[1:])
-	case "connect":
-		// Matched here so the old verb explains itself. Without this case it
-		// falls through to the default branch below, which reads an unknown first
-		// argument as a flat tunnel invocation and dies with "--local is required
-		// for token-based tunnel mode". That message never mentions the rename.
-		return fmt.Errorf(`"connect" is now "access": localport access <URL> -p <port>`)
+	case "tunnel":
+		// Without this case the flat tunnel form would reject "tunnel" with a
+		// missing --local error.
+		return fmt.Errorf(`"tunnel" is now "connect": localport connect --config <file>`)
 	case "setup":
 		return runSetup(args[1:])
 	case "identity":
@@ -47,8 +45,7 @@ func (a *App) Run(args []string) error {
 		printMainUsage(a.stderr)
 		return nil
 	default:
-		// Legacy: anything that doesn't match a subcommand is treated as
-		// a flat tunnel invocation so old scripts keep working.
+		// Anything else is the flat tunnel form.
 		return runTunnel(a.version, args)
 	}
 }
@@ -57,7 +54,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage: localport <command> [flags]
 
 Commands:
-  tunnel    Open tunnels to the Localport edge (default)
+  connect   Join a fleet as a device, or run a config file
   access    Reach a fleet device through your client certificate
   setup     Redeem a setup token so this MACHINE can reach locked tunnels
   login     Sign in as YOURSELF and get a short-lived certificate
@@ -73,8 +70,11 @@ Examples:
   localport --token <token> --local 192.168.1.13:3000 --region eu
   localport --token <token> --local tcp://192.168.1.13:11434 --region eu
 
-  # Run several tunnels at once from a config file:
-  localport tunnel --config localport.yaml
+  # Run several tunnels and devices from one config file:
+  localport connect --config localport.yaml
+
+  # Join a fleet as a device (ports are set in the dashboard):
+  localport connect -t <token> --name plc-01 --host 192.168.1.100
 
   # Reach a fleet device with your client certificate:
   localport access https://gateway-warehouse.eu.localport.dev --pem client.pem -p 3001
