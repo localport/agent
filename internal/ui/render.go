@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -142,6 +143,10 @@ func headerSingle(s snap, ts tState) []string {
 	lines := make([]string, 0, 12)
 	lines = append(lines, "") // top padding inside the box
 
+	if ts.device {
+		return append(lines, deviceHeader(s, ts, row, labelW)...)
+	}
+
 	tname := ts.tunnelName
 	if tname == "" {
 		tname = ts.name
@@ -200,6 +205,60 @@ func headerSingle(s snap, ts tState) []string {
 	}
 	lines = append(lines, "") // bottom padding before the divider
 	return lines
+}
+
+// deviceHeader renders the header of a fleet device, its target host and its
+// ports.
+func deviceHeader(s snap, ts tState, row func(label, value string) string, labelW int) []string {
+	pal := s.palette
+	lines := make([]string, 0, 10)
+
+	lines = append(lines, row("Device", ts.name))
+	if ts.tunnelName != "" {
+		lines = append(lines, row("Fleet", ts.tunnelName))
+	}
+	if ts.region != "" {
+		name := ts.regionName
+		if name == "" {
+			name = regionName(ts.region)
+		}
+		lines = append(lines, row("Region", name))
+	}
+	if addr := FirstEndpoint(ts.urls, ts.url, "", 0); addr != "" {
+		lines = append(lines,
+			pal.ForegroundDim(padRight("Address", labelW))+pal.Primary(addr))
+	}
+	if ts.local != "" {
+		lines = append(lines, row("Serving", ts.local))
+	}
+
+	portsLine := pal.ForegroundDim(padRight("Ports", labelW))
+	if len(ts.ports) == 0 {
+		portsLine += pal.Warning(formatPorts(nil))
+	} else {
+		portsLine += pal.Foreground(formatPorts(ts.ports))
+	}
+	lines = append(lines, portsLine)
+
+	st := s.stats[ts.name]
+	lines = append(lines,
+		pal.ForegroundDim(padRight("Bandwidth", labelW))+
+			pal.ForegroundDim("\u2193 ")+pal.Foreground(HumanBytes(st.BytesIn))+
+			pal.ForegroundDim("   \u2191 ")+pal.Foreground(HumanBytes(st.BytesOut)),
+		row("Connections", strconv.FormatInt(st.ConnectionsServed, 10)),
+	)
+
+	if ts.lastErr != "" && ts.state != tunnel.StateActive {
+		inner := max(s.cols-4, 20)
+		for i, line := range wrapPlain("\u2715 "+ts.lastErr, inner) {
+			if i == 0 {
+				lines = append(lines, pal.Destructive(line))
+			} else {
+				lines = append(lines, pal.DestructiveDim(line))
+			}
+		}
+	}
+	return append(lines, "")
 }
 
 // buildLocalURL composes the local-side address as a scheme://host:port
@@ -280,6 +339,9 @@ func statePill(ts tState, pal Palette) string {
 }
 
 func protoTarget(ts *tState) string {
+	if ts.device {
+		return formatPorts(ts.ports)
+	}
 	switch {
 	case ts.port > 0 && ts.subdomain != "":
 		return fmt.Sprintf("%s :%d (%s)", ts.proto, ts.port, ts.subdomain)
@@ -370,7 +432,10 @@ func bottomCount(ts tState, s snap) int {
 }
 
 func bottomEmptyMsg(ts tState, pal Palette) string {
-	if httpProto(ts.proto) {
+	switch {
+	case ts.device && len(ts.ports) == 0:
+		return pal.Muted("no ports open: edit this device in the dashboard")
+	case httpProto(ts.proto):
 		return pal.Muted("no requests yet")
 	}
 	return pal.Muted("no live connections")
