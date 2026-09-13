@@ -190,7 +190,7 @@ func headerSingle(s snap, ts tState) []string {
 		pal.ForegroundDim("   ↑ ") + pal.Foreground(HumanBytes(st.BytesOut))
 	lines = append(lines,
 		pal.ForegroundDim(padRight("Bandwidth", labelW))+bandwidth,
-		row("Connections", fmt.Sprintf("%d", st.ConnectionsServed)),
+		row("Connections", strconv.FormatInt(st.ConnectionsServed, 10)),
 	)
 
 	if ts.lastErr != "" && ts.state != tunnel.StateActive {
@@ -409,22 +409,28 @@ func renderConnections(s snap, capacity int) []string {
 	return lines
 }
 
-// panelDivider labels the bottom panel: requests for a single http tunnel, live
-// connections otherwise.
+// panelDivider labels the bottom panel as connections for a single device,
+// requests for a single http tunnel and live connections otherwise.
 func panelDivider(s snap) (label, count string) {
+	if len(s.tunnels) == 1 && s.tunnels[0].device {
+		return "connections", strconv.FormatInt(s.stats[s.tunnels[0].name].ConnectionsServed, 10)
+	}
 	if len(s.tunnels) == 1 && httpProto(s.tunnels[0].proto) {
-		return "requests", fmt.Sprintf("%d", s.stats[s.tunnels[0].name].RequestsServed)
+		return "requests", strconv.FormatInt(s.stats[s.tunnels[0].name].RequestsServed, 10)
 	}
 	total := 0
 	for _, list := range s.conns {
 		total += len(list)
 	}
-	return "live connections", fmt.Sprintf("%d", total)
+	return "live connections", strconv.Itoa(total)
 }
 
 func httpProto(proto string) bool { return proto == "http" || proto == "https" }
 
 func bottomCount(ts tState, s snap) int {
+	if ts.device {
+		return len(ts.events)
+	}
 	if httpProto(ts.proto) {
 		return len(s.reqs[ts.name])
 	}
@@ -435,6 +441,8 @@ func bottomEmptyMsg(ts tState, pal Palette) string {
 	switch {
 	case ts.device && len(ts.ports) == 0:
 		return pal.Muted("no ports open: edit this device in the dashboard")
+	case ts.device:
+		return pal.Muted("no connections yet")
 	case httpProto(ts.proto):
 		return pal.Muted("no requests yet")
 	}
@@ -442,6 +450,9 @@ func bottomEmptyMsg(ts tState, pal Palette) string {
 }
 
 func bottomRows(ts tState, s snap, capacity, cols int, pal Palette) []string {
+	if ts.device {
+		return renderDeviceLog(ts, capacity, cols, pal)
+	}
 	if httpProto(ts.proto) {
 		return renderRequestTable(s.reqs[ts.name], capacity, cols, pal)
 	}
@@ -550,7 +561,7 @@ func renderRequestTable(reqs []tunnel.RequestInfo, capacity, cols int, pal Palet
 		row := padVisible(pal.Muted(r.StartedAt.Format("15:04:05")), timeW) + gapStr +
 			padVisible(pal.Foreground(padMethod(r.Method, methodW)), methodW) + gapStr +
 			padVisible(pal.Foreground(truncate(r.Path, pathW)), pathW) + gapStr +
-			padVisible(statusStyle(r.Status, pal)(fmt.Sprintf("%d", r.Status)), statusW) + gapStr +
+			padVisible(statusStyle(r.Status, pal)(strconv.Itoa(r.Status)), statusW) + gapStr +
 			padLeftVisible(pal.Foreground(humanLatency(r.Duration)), durW)
 		rows = append(rows, row)
 	}
@@ -865,4 +876,119 @@ func humanDuration(d time.Duration) string {
 	h := int(d.Hours())
 	m := int(d.Minutes()) - h*60
 	return fmt.Sprintf("%dh%02dm", h, m)
+}
+
+// renderDeviceLog renders the bottom panel of a fleet device, oldest first.
+// Connection open and close rows and HTTP request rows share one log to keep
+// their order.
+//
+//	TIME      PORT      EVENT                      STATUS   DUR    BYTES
+//	15:04:05  tcp 502   open  203.0.113.4 gw-ci                        -
+//	15:04:06  http 80   GET /health                 200     3ms   1.2 KB
+//	15:04:12  tcp 502   close 203.0.113.4 gw-ci             7s    1.4 MB
+func renderDeviceLog(ts tState, capacity, cols int, pal Palette) []string {
+	if capacity <= 0 || len(ts.events) == 0 {
+		return nil
+	}
+	protocols := make(map[uint16]string, len(ts.ports))
+	for _, p := range ts.ports {
+		protocols[p.Port] = p.Protocol
+	}
+
+	innerW := max(cols-4, 20)
+	const timeW, portW, statusW, durW, byteW, gap = 8, 9, 6, 7, 9, 2
+	eventW := max(innerW-timeW-portW-statusW-durW-byteW-gap*5, 12)
+	gapStr := strings.Repeat(" ", gap)
+
+	header := padVisible(pal.Muted("TIME"), timeW) + gapStr +
+		padVisible(pal.Muted("PORT"), portW) + gapStr +
+		padVisible(pal.Muted("EVENT"), eventW) + gapStr +
+		padVisible(pal.Muted("STATUS"), statusW) + gapStr +
+		padLeftVisible(pal.Muted("DUR"), durW) + gapStr +
+		padLeftVisible(pal.Muted("BYTES"), byteW)
+
+	rows := make([]string, 0, capacity)
+	rows = append(rows, header)
+
+	bodyCap := capacity - 1
+	start := 0
+	if len(ts.events) > bodyCap {
+		start = len(ts.events) - bodyCap
+	}
+	for _, ev := range ts.events[start:] {
+		rows = append(rows, deviceLogRow(ev, protocols, pal, eventW,
+			timeW, portW, statusW, durW, byteW, gapStr))
+	}
+	if start > 0 && len(rows) > 1 {
+		rows[1] = pal.Muted(fmt.Sprintf("…%d earlier", start))
+	}
+	return rows
+}
+
+func deviceLogRow(
+	ev devEvent, protocols map[uint16]string, pal Palette, eventW int,
+	timeW, portW, statusW, durW, byteW int, gapStr string,
+) string {
+	port := "-"
+	if ev.port > 0 {
+		port = strconv.FormatUint(uint64(ev.port), 10)
+		if proto, ok := protocols[ev.port]; ok {
+			port = proto + " " + port
+		}
+	}
+
+	event, status := pal.Foreground(truncate(deviceEventText(ev), eventW)), ""
+	switch {
+	case ev.err != "":
+		event = pal.Destructive(truncate(deviceEventText(ev), eventW))
+	case ev.kind == devRequest:
+		status = statusStyle(ev.status, pal)(strconv.Itoa(ev.status))
+	}
+
+	// Requests show latency, connections show duration.
+	dur, bytes := "", ""
+	switch ev.kind {
+	case devRequest:
+		dur = humanLatency(ev.dur)
+	case devConnClose:
+		dur = humanDuration(ev.dur)
+		bytes = HumanBytes(ev.bytes)
+	}
+
+	return padVisible(pal.Muted(ev.at.Format("15:04:05")), timeW) + gapStr +
+		padVisible(pal.ForegroundMid(truncate(port, portW)), portW) + gapStr +
+		padVisible(event, eventW) + gapStr +
+		padVisible(status, statusW) + gapStr +
+		padLeftVisible(pal.Foreground(dur), durW) + gapStr +
+		padLeftVisible(pal.Primary(bytes), byteW)
+}
+
+// deviceEventText returns the EVENT column, the consumer or the request.
+func deviceEventText(ev devEvent) string {
+	if ev.kind == devRequest {
+		path := ev.path
+		if path == "" {
+			path = "-"
+		}
+		return padMethod(ev.method, 7) + " " + path
+	}
+
+	verb := "open "
+	if ev.kind == devConnClose {
+		verb = "close"
+	}
+	remote := ev.remote
+	if remote == "" {
+		remote = "-"
+	} else if host, _, err := net.SplitHostPort(remote); err == nil && host != "" {
+		remote = host
+	}
+	text := verb + " " + remote
+	if ev.consumer != "" {
+		text += " " + ev.consumer
+	}
+	if ev.err != "" {
+		text += ": " + ev.err
+	}
+	return text
 }

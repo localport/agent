@@ -39,8 +39,9 @@ type muxServer struct {
 	totalIn  *atomic.Int64
 	totalOut *atomic.Int64
 
-	// newInspector returns an inspector for the stream, nil when uninspected.
-	newInspector func() *httpInspector
+	// newInspector returns an inspector for the stream's protocol and port, or
+	// nil.
+	newInspector func(protocol string, port uint16) *httpInspector
 }
 
 // muxTracker mirrors what proxyData does for a dialed-back connection, so the
@@ -105,7 +106,7 @@ func (s *muxServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// untouched.
 	reqSrc, respSrc := io.Reader(r.Body), io.Reader(local)
 	if s.newInspector != nil {
-		if insp := s.newInspector(); insp != nil {
+		if insp := s.newInspector(target.protocol, target.port); insp != nil {
 			reqSrc = insp.wrapRequest(r.Body)
 			respSrc = insp.wrapResponse(local)
 		}

@@ -79,7 +79,39 @@ type tState struct {
 	// target host.
 	device bool
 	ports  []proto.DevicePort
+
+	// events is a device's log of connection and request rows, newest last.
+	// openConns keeps each open connection's port and consumer for its close
+	// row.
+	events    []devEvent
+	openConns map[string]devEvent
 }
+
+type devEventKind int
+
+const (
+	devConnOpen devEventKind = iota
+	devConnClose
+	devRequest
+)
+
+// devEvent is one row of a device's connection log.
+type devEvent struct {
+	at       time.Time
+	kind     devEventKind
+	port     uint16
+	remote   string
+	consumer string
+	method   string
+	path     string
+	status   int
+	dur      time.Duration
+	bytes    int64
+	err      string
+}
+
+// maxDeviceEvents bounds the log's memory.
+const maxDeviceEvents = 200
 
 const (
 	minCols = 24
@@ -340,6 +372,9 @@ func (t *TUI) OnDisconnected(label string, _ error) {
 	t.mu.Lock()
 	if ts := t.ensure(label); ts != nil {
 		ts.connected = false
+		// The session's connections are gone. Drop entries without a close
+		// event.
+		clear(ts.openConns)
 	}
 	t.mu.Unlock()
 	t.requestRender()
@@ -357,11 +392,27 @@ func (t *TUI) OnError(label string, err error) {
 	t.requestRender()
 }
 
-// These only ask for a redraw; the bottom panel reads live data from the tunnel
-// at render time, so the callbacks carry no state.
-func (t *TUI) OnDataConn(_ string, _ tunnel.DataConnInfo)                          { t.requestRender() }
-func (t *TUI) OnDataClose(_, _, _, _ string, _, _ int64, _ time.Duration, _ error) { t.requestRender() }
-func (t *TUI) OnHTTPRequest(_ string, _ tunnel.RequestInfo)                        { t.requestRender() }
+// OnDataConn records device connections in the log so closed ones stay
+// visible. Tunnels read live connections at render time.
+func (t *TUI) OnDataConn(label string, info tunnel.DataConnInfo) {
+	t.mu.Lock()
+	if ts := t.ensure(label); ts != nil && ts.device {
+		ev := devEvent{
+			at:       time.Now(),
+			kind:     devConnOpen,
+			port:     info.Port,
+			remote:   info.Remote,
+			consumer: info.Consumer,
+		}
+		if ts.openConns == nil {
+			ts.openConns = make(map[string]devEvent)
+		}
+		ts.openConns[info.ConnID] = ev
+		ts.appendEvent(ev)
+	}
+	t.mu.Unlock()
+	t.requestRender()
+}
 
 // OnPortsUpdate replaces a device's port list in the view.
 func (t *TUI) OnPortsUpdate(label string, ports []proto.DevicePort) {
@@ -372,6 +423,57 @@ func (t *TUI) OnPortsUpdate(label string, ports []proto.DevicePort) {
 	}
 	t.mu.Unlock()
 	t.requestRender()
+}
+
+func (t *TUI) OnDataClose(label, connID, _, remote string, bytesIn, bytesOut int64, dur time.Duration, err error) {
+	t.mu.Lock()
+	if ts := t.ensure(label); ts != nil && ts.device {
+		ev := devEvent{
+			at:     time.Now(),
+			kind:   devConnClose,
+			remote: remote,
+			dur:    dur,
+			bytes:  bytesIn + bytesOut,
+		}
+		// Take port and consumer from the open row.
+		if opened, ok := ts.openConns[connID]; ok {
+			ev.port, ev.consumer = opened.port, opened.consumer
+			delete(ts.openConns, connID)
+		}
+		if err != nil {
+			ev.err = err.Error()
+		}
+		ts.appendEvent(ev)
+	}
+	t.mu.Unlock()
+	t.requestRender()
+}
+
+func (t *TUI) OnHTTPRequest(label string, r tunnel.RequestInfo) {
+	t.mu.Lock()
+	if ts := t.ensure(label); ts != nil && ts.device {
+		ts.appendEvent(devEvent{
+			at:     r.StartedAt,
+			kind:   devRequest,
+			port:   r.Port,
+			method: r.Method,
+			path:   r.Path,
+			status: r.Status,
+			dur:    r.Duration,
+		})
+	}
+	t.mu.Unlock()
+	t.requestRender()
+}
+
+// appendEvent adds a row to the ring, newest last. Callers hold t.mu.
+func (ts *tState) appendEvent(ev devEvent) {
+	if len(ts.events) == maxDeviceEvents {
+		copy(ts.events, ts.events[1:])
+		ts.events[len(ts.events)-1] = ev
+		return
+	}
+	ts.events = append(ts.events, ev)
 }
 
 func (t *TUI) OnRedirect(_, _, to string) {
@@ -426,7 +528,9 @@ func (t *TUI) snapshot() snap {
 		if ts == nil {
 			continue
 		}
-		tunnels = append(tunnels, *ts)
+		copied := *ts
+		copied.events = append([]devEvent(nil), ts.events...)
+		tunnels = append(tunnels, copied)
 	}
 
 	conns := make(map[string][]tunnel.ActiveConn, len(tunnels))

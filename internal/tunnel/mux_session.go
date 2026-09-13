@@ -271,7 +271,7 @@ func (t *Tunnel) serveMux(conn net.Conn) {
 		tracker:      t,
 		totalIn:      &t.totalBytesIn,
 		totalOut:     &t.totalBytesOut,
-		newInspector: t.newRequestInspector,
+		newInspector: t.newInspectorFor,
 	}
 
 	// ServeConn blocks for the life of the connection.

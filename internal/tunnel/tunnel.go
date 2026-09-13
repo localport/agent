@@ -126,6 +126,8 @@ type DataConnInfo struct {
 // RequestInfo is one finished HTTP request for the live view. Metadata only: no
 // header or body content is captured.
 type RequestInfo struct {
+	// Port is the device port of the request, 0 on a tunnel.
+	Port      uint16
 	Method    string
 	Path      string
 	Status    int
@@ -902,12 +904,29 @@ func isHTTPProto(proto string) bool {
 // newRequestInspector returns nil unless this is an http tunnel with inspection
 // enabled.
 func (t *Tunnel) newRequestInspector() *httpInspector {
+	return t.newInspectorFor(t.opts.Protocol, 0)
+}
+
+// newInspectorFor returns the request inspector for one stream. A device passes
+// the port protocol.
+func (t *Tunnel) newInspectorFor(protocolName string, port uint16) *httpInspector {
+	if t.IsDevice() {
+		if t.opts.DisableInspect || !isHTTPProto(protocolName) {
+			return nil
+		}
+		return t.buildInspector(port)
+	}
 	if t.opts.DisableInspect || !isHTTPProto(t.opts.Protocol) {
 		return nil
 	}
+	return t.buildInspector(0)
+}
+
+func (t *Tunnel) buildInspector(port uint16) *httpInspector {
 	label := t.opts.Label
 	handler := t.opts.Handler
 	return newHTTPInspector(func(r RequestInfo) {
+		r.Port = port
 		t.recordRequest(r)
 		if handler != nil {
 			handler.OnHTTPRequest(label, r)
@@ -1029,10 +1048,10 @@ func (t *Tunnel) serveData(ac *activeConn, connID string, edge, local net.Conn, 
 		})
 	}
 
-	// http tunnels: the scanner reads a copy off the read side; forwarding is
-	// untouched.
+	// The inspector reads a copy of the traffic. On a device it uses the port
+	// protocol.
 	reqSrc, respSrc := io.Reader(edge), io.Reader(local)
-	if insp := t.newRequestInspector(); insp != nil {
+	if insp := t.newInspectorFor(target.protocol, target.port); insp != nil {
 		reqSrc = insp.wrapRequest(edge)
 		respSrc = insp.wrapResponse(local)
 	}
