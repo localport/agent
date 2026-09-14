@@ -24,7 +24,7 @@ func runAccess(args []string) error {
 	fs.SetOutput(os.Stderr)
 
 	var (
-		pemFile     = fs.String("pem", "", "PEM file (client cert + key + tunnel CA)")
+		pemFile     = fs.String("pem", "", "PEM file (client cert + key + fleet CA)")
 		p12File     = fs.String("p12", "", "PKCS#12 archive (.p12 / .pfx)")
 		p12Pass     = fs.String("p12-pass", "", "PKCS#12 password (use --p12-pass-env in production)")
 		p12PassEnv  = fs.String("p12-pass-env", defaultP12PasswordEnv, "env var carrying the PKCS#12 password (required for Localport-issued .p12)")
@@ -330,7 +330,7 @@ func runAccessFromConfig(path string) error {
 				password, err = resolveP12Password(entry.P12Pass, entry.P12PassFile, entry.P12PassEnv)
 			}
 			if err == nil {
-				tlsCfg, err = access.BuildTLSConfig(entry.Bundle, entry.P12, password, deviceAddr, deviceHost)
+				tlsCfg, err = access.BuildTLSConfig(entry.PEM, entry.P12, password, deviceAddr, deviceHost)
 			}
 		}
 		if err != nil {

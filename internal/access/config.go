@@ -17,7 +17,7 @@ type AccessConfig struct {
 	Access  []Entry `yaml:"access"`
 }
 
-// Entry is one device and the ports forwarded from it. At most one of Bundle or
+// Entry is one device and the ports forwarded from it. At most one of PEM or
 // P12 is set. With neither, the stored identity is used (see `localport
 // identity`). The P12 password comes inline, from a file or from an env
 // variable.
@@ -25,7 +25,7 @@ type Entry struct {
 	Device string `yaml:"device"`
 	// Forward lists `[local:]remote` pairs in -L syntax.
 	Forward     []string `yaml:"forward"`
-	Bundle      string   `yaml:"bundle"`
+	PEM         string   `yaml:"pem"`
 	P12         string   `yaml:"p12"`
 	P12Pass     string   `yaml:"p12_pass,omitempty"`
 	P12PassFile string   `yaml:"p12_pass_file,omitempty"`
@@ -37,7 +37,7 @@ type Entry struct {
 }
 
 // UsesIdentity reports whether the entry presents the stored identity.
-func (e *Entry) UsesIdentity() bool { return e.Bundle == "" && e.P12 == "" }
+func (e *Entry) UsesIdentity() bool { return e.PEM == "" && e.P12 == "" }
 
 // LoadAccessConfig reads and validates an access YAML file.
 func LoadAccessConfig(path string) (*AccessConfig, error) {
@@ -92,15 +92,15 @@ func (e *Entry) validate() error {
 	if len(e.Forward) == 0 {
 		return errors.New("'forward' needs at least one port")
 	}
-	if e.Bundle != "" && e.P12 != "" {
-		return errors.New("set at most one of 'bundle' or 'p12' (omit both to use the stored identity)")
+	if e.PEM != "" && e.P12 != "" {
+		return errors.New("set at most one of 'pem' or 'p12' (omit both to use the stored identity)")
 	}
 	if e.Identity != "" && !e.UsesIdentity() {
-		return errors.New("'identity' selects a stored credential, so it cannot be combined with 'bundle' or 'p12'")
+		return errors.New("'identity' selects a stored credential, so it cannot be combined with 'pem' or 'p12'")
 	}
 
 	var missing []string
-	for _, f := range []string{e.Bundle, e.P12, e.P12PassFile} {
+	for _, f := range []string{e.PEM, e.P12, e.P12PassFile} {
 		if f == "" {
 			continue
 		}

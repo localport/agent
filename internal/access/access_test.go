@@ -193,7 +193,7 @@ func TestLoadAccessConfigRefusesTwoCredentialFiles(t *testing.T) {
 		}
 	}
 	path := filepath.Join(dir, "access.yaml")
-	body := "version: 1\naccess:\n  - device: gw.example.com\n    forward: [\"502\"]\n    bundle: " +
+	body := "version: 1\naccess:\n  - device: gw.example.com\n    forward: [\"502\"]\n    pem: " +
 		pemFile + "\n    p12: " + p12 + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write: %v", err)

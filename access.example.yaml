@@ -14,5 +14,5 @@ access:
 
   - device: gw-01-factory.ap.localport.dev
     # A credential issued elsewhere is read from a file.
-    bundle: ./gw-01.pem
+    pem: ./gw-01.pem
     forward: ["2222:22"]

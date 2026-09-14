@@ -513,16 +513,15 @@ chain expires, when a grant is narrowed, and when the certificate is revoked.
 The command re-dials on the next forward, and the new attempt is refused if the
 grant no longer covers it.
 
-**Server verification uses the system trust store, not the bundle's CA.** The
-edge presents its region zone wildcard certificate, publicly trusted and issued
-by Let's Encrypt, as its mTLS server identity. It is not signed by the tunnel CA,
-and never could be for a customer-registered CA, since the platform holds no key
-for one. The CA in a bundle or `.p12` is used for the other direction only: it is
-part of the chain the consumer presents so the edge can verify it.
+**Server verification uses the system trust store.** The edge presents its
+region zone wildcard certificate, publicly trusted and issued by Let's Encrypt,
+as its mTLS server identity. It is not signed by the tunnel CA. The CA in a
+`--pem` file or `.p12` archive is used for the other direction only, as part of
+the chain the consumer presents.
 
-A bundle must still contain at least one CA certificate. That is checked when the
-bundle is loaded, so a chainless bundle fails locally with a clear message
-instead of as an opaque handshake alert from the far side.
+A `--pem` file must still contain at least one CA certificate. That is checked
+when the file is loaded, so a file without a chain fails locally with a clear
+message instead of as a handshake alert from the edge.
 
 ### Human sign-in (`localport login`)
 
