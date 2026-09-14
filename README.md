@@ -12,9 +12,9 @@
   <a href="https://localport.io/docs"><img src="https://img.shields.io/badge/docs-localport.io-2eb67d" alt="Documentation" /></a>
 </p>
 
-Localport exposes local services to the internet over secure tunnels. It supports HTTP, TCP, TLS, and mutual TLS, and operates through NAT, CGNAT, and corporate firewalls without port forwarding, router configuration, or a public IP.
+Localport exposes local services to the internet over secure tunnels and gives remote access to devices by identity. It supports HTTP, TCP, TLS, and mutual TLS, and operates through NAT, CGNAT, and corporate firewalls without port forwarding, router configuration, or a public IP.
 
-This repository contains the Localport agent: the client process that runs on the host machine and maintains tunnel connections to the Localport network. The agent is the only component that runs in your environment, and it is released as open source under the Apache License 2.0. The remainder of the platform, including the edge network, control plane, and dashboard, is operated by Localport as a managed service.
+This repository contains the Localport agent, the client process that runs on the host machine and maintains tunnel connections to the Localport network. The agent is the only component that runs in your environment, and it is released as open source under the Apache License 2.0. The remainder of the platform, including the edge network, control plane, and dashboard, is operated by Localport as a managed service.
 
 Accounts and tunnels are managed at [localport.io](https://localport.io).
 
@@ -22,29 +22,13 @@ Accounts and tunnels are managed at [localport.io](https://localport.io).
 
 - **Protocols.** HTTP, TCP, and TLS tunnels with automatic, browser-trusted HTTPS.
 - **Reserved addresses.** Static subdomains and ports persist across sessions, keeping public links and webhook URLs stable.
-- **Fleet tunnels.** A single token serves an entire fleet. Each device receives its own address and remains reachable by name behind CGNAT or cellular networks.
-- **Fanout tunnels.** One inbound request is delivered to every connected client, with a designated client returning the response.
-- **Locked tunnels.** Mutual TLS with per-device identity and scoped access. Each
-  certificate names a stable device identity; what an identity may reach is
-  managed server-side and can be changed without reissuing certificates. Bring
-  your own certificate authority if you prefer: only its public chain is ever
-  stored.
-- **Self-renewing credentials.** `localport setup <TOKEN>` spends a
-  single-use token once, generates its private key locally, and renews itself
-  from then on, so there is no certificate file to copy around and no long-lived
-  secret left on the machine.
-- **Sign in as yourself.** `localport login` prints a short code, you approve it
-  in the dashboard in any browser, and a short-lived certificate lands on this
-  machine. Nothing has to be copied here first, so it works over SSH into a jump
-  box. Off-boarding the person is removing them from the team.
-
-  A sign-in does not renew. It lasts hours, then you run `localport login`
-  again. Machines set up with a setup token renew themselves; sign-ins do not.
-- **CI with no secret at all.** In a pipeline the agent uses the platform's own
-  workload identity (GitHub Actions out of the box), exchanges it for a
-  short-lived certificate, and keeps it in memory. Nothing is stored in the
-  repository, in the CI secret store, or on the runner.
-- **Access control.** IP allow lists and password protection on any tunnel.
+- **Remote access.** A fleet is a group of devices sharing one token. Each device receives its own address, remains reachable by name behind CGNAT or cellular networks, and serves the ports opened on it in the dashboard. A fleet has no public endpoint. Consumers reach a device with `localport access <device> -L <local>:<remote>` over one mutual TLS connection, presenting a client certificate.
+- **Fanout tunnels.** One inbound HTTP request is delivered to every connected client, with a designated client returning the response.
+- **Scoped access.** Each certificate names a stable identity. What an identity may reach is managed server-side and can be changed without reissuing certificates, and narrowing a grant or revoking a certificate closes live connections. Bring your own certificate authority if you prefer, since only its public chain is stored.
+- **Self-renewing credentials.** `localport setup <TOKEN>` redeems a single-use token, generates its private key locally, and renews itself from then on. No certificate file to copy around and no long-lived secret on the machine.
+- **Sign in as yourself.** `localport login` prints a short code, you approve it in the dashboard in any browser, and a short-lived certificate lands on this machine. It works over SSH into a jump box. A sign-in lasts hours and does not renew; run `localport login` again. Removing the person from the team ends their access.
+- **CI with no secret.** In a pipeline the agent exchanges the platform's workload identity (GitHub Actions out of the box) for a short-lived certificate held in memory. Nothing is stored in the repository, the CI secret store, or on the runner.
+- **Access control.** IP allow lists and password protection on public tunnels. Fleets are reached by client certificate.
 - **Data privacy.** Traffic is never inspected, logged, or used for training, and each tunnel is pinned to a chosen region.
 - **Cross-platform.** Prebuilt binaries for macOS, Linux, and Windows.
 
@@ -67,11 +51,28 @@ For manual installation, download a binary from the [releases page](https://gith
 
 ## Usage
 
-Create a tunnel in the [dashboard](https://dashboard.localport.io) to obtain a token, then run the agent against the local service. Complete command, flag, configuration, and protocol documentation is maintained on the documentation site:
+Create a tunnel or a fleet in the [dashboard](https://dashboard.localport.io) to obtain a token, then run the agent:
+
+```sh
+# Publish a local service
+localport http 3000 -t <token>
+
+# Join a fleet as a device (its ports are set in the dashboard)
+localport connect -t <token> --name plc-01 --host 192.168.1.100
+
+# Reach that device's ports
+localport access plc-01-factory.ap.localport.dev -L 5020:502 -L 8080:80
+
+# Run several tunnels and devices from one file
+localport connect --config localport.yaml
+```
+
+Complete command, flag, configuration, and protocol documentation is maintained on the documentation site:
 
 - [Quick start](https://localport.io/docs/quick-start): first-tunnel walkthrough
 - [CLI reference](https://localport.io/docs/cli): commands, flags, and environment variables
-- Tunnel guides, by protocol ([HTTP](https://localport.io/docs/http-tunnels), [TCP](https://localport.io/docs/tcp-tunnels), TLS) and routing mode ([fleet](https://localport.io/docs/fleets), [fanout](https://localport.io/docs/fanout), [locked / mTLS](https://localport.io/docs/remote-access))
+- Tunnel guides, by protocol ([HTTP](https://localport.io/docs/http-tunnels), [TCP](https://localport.io/docs/tcp-tunnels), TLS) and delivery mode ([fanout](https://localport.io/docs/fanout))
+- Remote access guides ([fleets](https://localport.io/docs/fleets), [`localport access`](https://localport.io/docs/remote-access))
 
 ## Build from source
 
@@ -90,6 +91,14 @@ make build
 
 - Product and guides: [localport.io/docs](https://localport.io/docs)
 - Wire protocol: [docs/PROTOCOL.md](docs/PROTOCOL.md)
+
+## How it works
+
+- **Single port.** Every agent and consumer connection goes to the edge on 443. The edge routes by SNI and ALPN, so any network that allows HTTPS allows Localport.
+- **Firewall traversal.** The agent tries raw TLS first and falls back to WebSocket, which passes deep packet inspection and TLS-intercepting proxies.
+- **Multiplexing.** Each tunnel holds one control connection and one HTTP/2 connection carrying a stream per visitor. If the HTTP/2 connection is unavailable, the agent dials back once per visitor.
+- **Network changes.** The agent watches interfaces and detects wake from sleep. After either, it probes the edge and reconnects within seconds when the old connection is gone.
+- **Remote access.** `localport access` holds one mutual TLS HTTP/2 connection per device and opens a CONNECT stream per forward. The edge checks the certificate and grant before a stream reaches the device.
 
 ## Contributing
 
