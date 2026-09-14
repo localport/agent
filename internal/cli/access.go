@@ -30,6 +30,7 @@ func runAccess(args []string) error {
 		p12PassEnv  = fs.String("p12-pass-env", defaultP12PasswordEnv, "env var carrying the PKCS#12 password (required for Localport-issued .p12)")
 		p12PassFile = fs.String("p12-pass-file", "", "file containing the PKCS#12 password")
 		localAddr   = fs.String("local-addr", "127.0.0.1", "local bind address")
+		stdio       = fs.Int("stdio", 0, "carry one connection to this device port over stdin and stdout, for ssh ProxyCommand")
 		configPath  = fs.String("config", "", "path to an access YAML config")
 		identityArg = fs.String("identity", "", "credential to present: `<identity>`, <team>/<identity> or <team>/<kind>/<identity>")
 		audience    = fs.String("audience", "", "OIDC audience for a CI workload identity (or "+identity.AudienceEnv+")")
@@ -72,9 +73,12 @@ func runAccess(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(forwards) == 0 {
+	if len(forwards) == 0 && *stdio == 0 {
 		fs.Usage()
-		return errors.New("pass -L <local>:<remote>")
+		return errors.New("pass -L <local>:<remote>, or --stdio <port>")
+	}
+	if len(forwards) > 0 && *stdio != 0 {
+		return errors.New("--stdio carries one connection, so it cannot be combined with -L")
 	}
 	parsedForwards := make([]access.Forward, 0, len(forwards))
 	for _, raw := range forwards {
@@ -148,6 +152,13 @@ func runAccess(args []string) error {
 			fmt.Fprintf(os.Stderr, "  [conn] %s -> port %d\n", l, port)
 		},
 		OnError: func(err error) { fmt.Fprintln(os.Stderr, "  [error]", err) },
+	}
+
+	if *stdio != 0 {
+		if *stdio < 1 || *stdio > 65535 {
+			return errors.New("--stdio port must be 1-65535")
+		}
+		return proxy.ServeStdio(ctx, os.Stdin, os.Stdout, uint16(*stdio))
 	}
 
 	fmt.Fprintln(os.Stderr, "  localport access")
@@ -408,6 +419,7 @@ func signalCtx() (context.Context, context.CancelFunc) {
 
 func usageAccess(fs *flag.FlagSet) {
 	fmt.Fprint(os.Stderr, `Usage: localport access <device-host> -L [local:]remote [flags]
+       localport access <device-host> --stdio <port> [flags]
        localport access --config access.yaml
 
   Reach a fleet device's ports. Every forward runs over one mTLS connection to
@@ -416,6 +428,9 @@ func usageAccess(fs *flag.FlagSet) {
   -L  [local:]remote, repeatable.
         -L 5020:502      listen on 5020, reach the device's port 502
         -L 502           reach 502 on a local port the system picks
+
+  --stdio  Carry one connection over stdin and stdout, for ssh:
+        ssh -o ProxyCommand="localport access plc-01.ap.localport.dev --stdio 22" user@plc-01
 
   Credentials. With no flag, the identity this machine holds is used and
   renewed in the background, so there is no file to copy and nothing that
