@@ -1,0 +1,258 @@
+package access
+
+import (
+	"errors"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+)
+
+func TestParseDevice(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantHost string
+		wantAddr string
+		wantErr  bool
+	}{
+		{in: "plc-01-factory.ap.localport.dev", wantHost: "plc-01-factory.ap.localport.dev", wantAddr: "plc-01-factory.ap.localport.dev:443"},
+		{in: "https://plc-01.example.com", wantHost: "plc-01.example.com", wantAddr: "plc-01.example.com:443"},
+		{in: "plc-01.example.com:443/path", wantHost: "plc-01.example.com", wantAddr: "plc-01.example.com:443"},
+		{in: "", wantErr: true},
+	}
+	for _, tc := range cases {
+		host, addr, err := ParseDevice(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("ParseDevice(%q) accepted an empty address", tc.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("ParseDevice(%q): %v", tc.in, err)
+		}
+		if host != tc.wantHost || addr != tc.wantAddr {
+			t.Fatalf("ParseDevice(%q) = (%q, %q), want (%q, %q)", tc.in, host, addr, tc.wantHost, tc.wantAddr)
+		}
+	}
+}
+
+// -L uses OpenSSH order, local port then device port.
+func TestParseForward(t *testing.T) {
+	cases := []struct {
+		in        string
+		wantLocal string
+		wantPort  uint16
+		wantErr   bool
+	}{
+		{in: "5020:502", wantLocal: "127.0.0.1:5020", wantPort: 502},
+		{in: "502", wantLocal: "127.0.0.1:0", wantPort: 502},
+		{in: "0:22", wantLocal: "127.0.0.1:0", wantPort: 22},
+		{in: "5020:0", wantErr: true},
+		{in: "5020:70000", wantErr: true},
+		{in: "", wantErr: true},
+	}
+	for _, tc := range cases {
+		got, err := ParseForward(tc.in, "127.0.0.1")
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("ParseForward(%q) accepted a bad value", tc.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("ParseForward(%q): %v", tc.in, err)
+		}
+		if got.LocalAddr != tc.wantLocal || got.RemotePort != tc.wantPort {
+			t.Fatalf("ParseForward(%q) = %+v, want %s -> %d", tc.in, got, tc.wantLocal, tc.wantPort)
+		}
+	}
+}
+
+// Each refusal status maps to an actionable message.
+func TestStatusErrorsAreActionable(t *testing.T) {
+	cases := map[int]string{
+		403: "port 502 is open",
+		421: "address does not match",
+		405: "not a fleet device address",
+		502: "nothing is listening on port 502",
+		503: "device is busy",
+	}
+	for status, want := range cases {
+		err := statusError(502, status)
+		if err == nil {
+			t.Fatalf("status %d produced no error", status)
+		}
+		if !contains(err.Error(), want) {
+			t.Fatalf("status %d says %q, want it to mention %q", status, err.Error(), want)
+		}
+	}
+}
+
+func contains(haystack, needle string) bool {
+	return len(haystack) >= len(needle) && (haystack == needle || indexOf(haystack, needle) >= 0)
+}
+
+func indexOf(haystack, needle string) int {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestLoadAccessConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access.yaml")
+	body := `
+version: 1
+access:
+  - device: plc-01-factory.ap.localport.dev
+    identity: deploy-prod
+    forward: ["5020:502", "8080:80"]
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cc, err := LoadAccessConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cc.Access) != 1 || len(cc.Access[0].Forward) != 2 {
+		t.Fatalf("config = %+v", cc)
+	}
+	if !cc.Access[0].UsesIdentity() {
+		t.Fatal("an entry with no file must use the stored identity")
+	}
+}
+
+func TestLoadAccessConfigRefusesIncompleteEntries(t *testing.T) {
+	cases := map[string]string{
+		"version 2":   "version: 2\naccess: []\n",
+		"no devices":  "version: 1\naccess: []\n",
+		"no forward":  "version: 1\naccess:\n  - device: gw.example.com\n",
+		"no device":   "version: 1\naccess:\n  - forward: [\"502\"]\n",
+		"file and id": "version: 1\naccess:\n  - device: gw.example.com\n    forward: [\"502\"]\n    identity: x\n    p12: /tmp/x.p12\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "access.yaml")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if _, err := LoadAccessConfig(path); err == nil {
+				t.Fatal("want the file refused")
+			}
+		})
+	}
+}
+
+// A certificate alert carries no reason. The message names the next step
+// without guessing one.
+func TestStreamErrorNamesTheNextStep(t *testing.T) {
+	cases := map[string]string{
+		"remote error: tls: bad certificate":     "identity list",
+		"remote error: tls: certificate expired": "localport login",
+	}
+	for alert, want := range cases {
+		got := streamError("gw-01.eu.localport.dev", errors.New(alert)).Error()
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q -> %q, want it to mention %q", alert, got, want)
+		}
+		if !strings.Contains(got, "gw-01.eu.localport.dev") {
+			t.Fatalf("%q -> %q, want the device named", alert, got)
+		}
+	}
+	if msg := streamError("gw-01", io.ErrUnexpectedEOF).Error(); !strings.Contains(msg, "ended") {
+		t.Fatalf("an unmapped failure reads as %q", msg)
+	}
+}
+
+// Closed connections end every forward and are not reported as errors.
+func TestNormalCloseIsNotReported(t *testing.T) {
+	for _, err := range []error{nil, io.EOF, net.ErrClosed, syscall.ECONNRESET, syscall.EPIPE} {
+		if !isNormalClose(err) {
+			t.Fatalf("%v must count as a normal close", err)
+		}
+	}
+	if isNormalClose(errors.New("connection reset by peer, mid-write")) {
+		t.Fatal("an unrecognised failure must still be reported")
+	}
+}
+
+func TestLoadAccessConfigRefusesTwoCredentialFiles(t *testing.T) {
+	dir := t.TempDir()
+	pemFile := filepath.Join(dir, "client.pem")
+	p12 := filepath.Join(dir, "client.p12")
+	for _, f := range []string{pemFile, p12} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	path := filepath.Join(dir, "access.yaml")
+	body := "version: 1\naccess:\n  - device: gw.example.com\n    forward: [\"502\"]\n    bundle: " +
+		pemFile + "\n    p12: " + p12 + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := LoadAccessConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "at most one") {
+		t.Fatalf("want both credential files refused, got %v", err)
+	}
+}
+
+// A missing credential file fails at load time.
+func TestLoadAccessConfigRefusesMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "access.yaml")
+	body := "version: 1\naccess:\n  - device: gw.example.com\n    forward: [\"502\"]\n    p12: " +
+		filepath.Join(dir, "absent.p12") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := LoadAccessConfig(path); err == nil {
+		t.Fatal("want a missing credential file refused")
+	}
+}
+
+// A local port used by two entries fails at load time.
+func TestLoadAccessConfigRefusesDuplicateLocalPort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access.yaml")
+	body := `
+version: 1
+access:
+  - device: gw-01.eu.localport.dev
+    forward: ["8080:80"]
+  - device: gw-02.eu.localport.dev
+    forward: ["8080:8080"]
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := LoadAccessConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "8080") {
+		t.Fatalf("err = %v, want both devices named on port 8080", err)
+	}
+}
+
+// Repeated OS-assigned local ports do not collide.
+func TestLoadAccessConfigAllowsRepeatedOSPort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access.yaml")
+	body := `
+version: 1
+access:
+  - device: gw-01.eu.localport.dev
+    forward: ["502", "80"]
+  - device: gw-02.eu.localport.dev
+    forward: ["502"]
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := LoadAccessConfig(path); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+}

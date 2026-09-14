@@ -29,10 +29,10 @@ func TestAppAccessRefusesAudienceWithCredentialFile(t *testing.T) {
 	for _, flag := range []string{"--pem", "--p12"} {
 		err := app.Run([]string{
 			"access", "https://gateway-warehouse.eu.localport.dev",
-			flag, "creds.pem", "--audience", "lpa_test", "-p", "0",
+			flag, "creds.pem", "--audience", "lpa_test", "-L", "0:22",
 		})
-		if err == nil {
-			t.Fatalf("access with --audience and %s must error", flag)
+		if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+			t.Fatalf("access with --audience and %s must be refused, got %v", flag, err)
 		}
 	}
 }

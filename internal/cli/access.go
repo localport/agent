@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -29,20 +30,17 @@ func runAccess(args []string) error {
 		p12PassEnv  = fs.String("p12-pass-env", defaultP12PasswordEnv, "env var carrying the PKCS#12 password (required for Localport-issued .p12)")
 		p12PassFile = fs.String("p12-pass-file", "", "file containing the PKCS#12 password")
 		localAddr   = fs.String("local-addr", "127.0.0.1", "local bind address")
-		serverName  = fs.String("server-name", "", "TLS SNI / server name override")
 		configPath  = fs.String("config", "", "path to an access YAML config")
 		identityArg = fs.String("identity", "", "credential to present: `<identity>`, <team>/<identity> or <team>/<kind>/<identity>")
 		audience    = fs.String("audience", "", "OIDC audience for a CI workload identity (or "+identity.AudienceEnv+")")
 		apiURL      = fs.String("api", "", "control plane base URL (CI identity only; default "+identity.DefaultAPIURL+")")
 	)
-	// -p and --port both set the local listen port.
-	var localPort string
-	fs.StringVar(&localPort, "p", "0", "local TCP port to listen on")
-	fs.StringVar(&localPort, "port", "0", "local TCP port to listen on [alias of -p]")
+	// -L is repeatable, one listener per device port.
+	var forwards stringList
+	fs.Var(&forwards, "L", "forward `[local:]remote`, repeatable (5020:502, or 502 for an OS-picked local port)")
 	fs.Usage = func() { usageAccess(fs) }
 
-	// Accept the remote as a leading positional, but tolerate it being
-	// supplied after flags as well.
+	// The remote is positional, before or after the flags.
 	remoteFromHead := ""
 	parsed := args
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -61,40 +59,50 @@ func runAccess(args []string) error {
 	if remote == "" {
 		if fs.NArg() < 1 {
 			fs.Usage()
-			return fmt.Errorf("remote address required")
+			return errors.New("remote address required")
 		}
 		remote = fs.Arg(0)
 	}
 	if (remoteFromHead == "" && fs.NArg() > 1) || (remoteFromHead != "" && fs.NArg() > 0) {
 		fs.Usage()
-		return fmt.Errorf("unexpected extra positional arguments")
+		return errors.New("unexpected extra positional arguments")
 	}
 
-	remote, err := access.ParseRemote(remote)
+	deviceHost, deviceAddr, err := access.ParseDevice(remote)
+	if err != nil {
+		return err
+	}
+	if len(forwards) == 0 {
+		fs.Usage()
+		return errors.New("pass -L <local>:<remote>")
+	}
+	parsedForwards := make([]access.Forward, 0, len(forwards))
+	for _, raw := range forwards {
+		f, parseErr := access.ParseForward(raw, *localAddr)
+		if parseErr != nil {
+			return parseErr
+		}
+		parsedForwards = append(parsedForwards, f)
+	}
+
+	src, err := pickCredentialSource(*pemFile, *p12File, *audience)
 	if err != nil {
 		return err
 	}
 
-	// Refused rather than ranked. Both name a credential, and silently preferring
-	// one presents a principal the caller did not ask for.
-	if *audience != "" && (*pemFile != "" || *p12File != "") {
-		return fmt.Errorf("--audience uses the CI platform's own identity, so it cannot be combined with --pem or --p12")
-	}
-
-	// Decided before the signal handler is installed, because deciding it may
-	// prompt, and a blocking read on stdin does not unblock on context
-	// cancellation. Resolving later would leave Ctrl-C at the prompt hanging.
-	var chosen *identity.Ref
-	if *pemFile == "" && *p12File == "" && *audience == "" && os.Getenv(identity.AudienceEnv) == "" {
+	// Resolve before installing the signal handler. Resolving may prompt, and
+	// a blocked stdin read ignores context cancellation, so Ctrl-C at the
+	// prompt must use the default handler.
+	var chosen identity.Ref
+	if src == credentialStored {
 		store, storeErr := identity.DefaultStore()
 		if storeErr != nil {
 			return storeErr
 		}
-		ref, resolveErr := resolveCredential(store, firstNonEmpty(*identityArg, os.Getenv(identityEnv)), true)
-		if resolveErr != nil {
-			return fmt.Errorf("%w\n  (or pass a credential file with --pem / --p12)", resolveErr)
+		chosen, err = resolveCredential(store, firstNonEmpty(*identityArg, os.Getenv(identityEnv)), true)
+		if err != nil {
+			return fmt.Errorf("%w\n  (or pass a credential file with --pem / --p12)", err)
 		}
-		chosen = &ref
 	}
 
 	ctx, cancel := signalCtx()
@@ -104,24 +112,22 @@ func runAccess(args []string) error {
 		tlsCfg *tls.Config
 		source string
 	)
-	switch {
-	case *audience != "" || (*pemFile == "" && *p12File == "" && os.Getenv(identity.AudienceEnv) != ""):
-		// In CI the platform mints the credential and we exchange it for a
-		// short-lived certificate held in memory. Nothing on disk to rotate.
-		tlsCfg, source, err = workloadTLSConfig(ctx, *audience, *apiURL, remote, *serverName)
-	case *pemFile == "" && *p12File == "":
-		// No credential file named: present the identity this machine holds.
-		tlsCfg, source, err = identityTLSConfig(ctx, *chosen, remote, *serverName)
-	default:
-		// The password is only resolved for --p12. Reading it on the --pem path
-		// would fail a PEM run on a box where LOCALPORT_P12_PASSWORD happens
-		// to be set, over a flag the caller never passed.
+	switch src {
+	case credentialWorkload:
+		// Exchange the CI platform token for a short-lived in-memory
+		// certificate.
+		tlsCfg, source, err = workloadTLSConfig(ctx, *audience, *apiURL, deviceAddr, deviceHost)
+	case credentialStored:
+		tlsCfg, source, err = identityTLSConfig(ctx, chosen, deviceAddr, deviceHost)
+	case credentialFile:
+		// Resolve the password only for --p12, so a stray
+		// LOCALPORT_P12_PASSWORD cannot fail a --pem run.
 		var password string
 		if *p12File != "" {
 			password, err = resolveP12Password(*p12Pass, *p12PassFile, *p12PassEnv)
 		}
 		if err == nil {
-			tlsCfg, err = access.BuildTLSConfig(*pemFile, *p12File, password, remote, *serverName)
+			tlsCfg, err = access.BuildTLSConfig(*pemFile, *p12File, password, deviceAddr, deviceHost)
 			source = "file"
 		}
 	}
@@ -129,18 +135,67 @@ func runAccess(args []string) error {
 		return err
 	}
 
-	listen := fmt.Sprintf("%s:%s", *localAddr, localPort)
-	proxy := &access.Proxy{
-		Remote:    remote,
-		LocalAddr: listen,
-		TLSConfig: tlsCfg,
-		OnConn:    func(l, r string) { fmt.Fprintf(os.Stderr, "  [conn] %s -> %s\n", l, r) },
-		OnError:   func(err error) { fmt.Fprintln(os.Stderr, "  [error]", err) },
-	}
-	fmt.Fprintln(os.Stderr, "  localport access")
-	fmt.Fprintf(os.Stderr, "  listening on %s -> %s (mTLS, %s)\n", listen, remote, source)
+	session := &access.Session{Device: deviceHost, Addr: deviceAddr, TLSConfig: tlsCfg}
+	defer session.Close()
 
+	proxy := &access.Proxy{
+		Session:  session,
+		Forwards: parsedForwards,
+		OnListen: func(f access.Forward, addr string) {
+			fmt.Fprintf(os.Stderr, "  %s -> %s:%d\n", addr, deviceHost, f.RemotePort)
+		},
+		OnConn: func(l string, port uint16) {
+			fmt.Fprintf(os.Stderr, "  [conn] %s -> port %d\n", l, port)
+		},
+		OnError: func(err error) { fmt.Fprintln(os.Stderr, "  [error]", err) },
+	}
+
+	fmt.Fprintln(os.Stderr, "  localport access")
+	fmt.Fprintf(os.Stderr, "  %s (mTLS, %s)\n", deviceHost, source)
 	return proxy.Run(ctx)
+}
+
+// credentialSource is the credential `localport access` presents.
+type credentialSource int
+
+const (
+	// credentialStored presents the stored identity from `localport setup`
+	// or `localport login`.
+	credentialStored credentialSource = iota
+	// credentialWorkload exchanges the CI platform's OIDC token for a
+	// short-lived certificate held in memory.
+	credentialWorkload
+	// credentialFile presents --pem or --p12.
+	credentialFile
+)
+
+// pickCredentialSource resolves the flags to one source. The resolve and
+// config steps both call it so they agree.
+func pickCredentialSource(pemFile, p12File, audience string) (credentialSource, error) {
+	fileNamed := pemFile != "" || p12File != ""
+	// Both flags name a credential. Picking one would present a principal the
+	// caller did not choose, so the combination is an error.
+	if audience != "" && fileNamed {
+		return 0, errors.New("--audience uses the CI platform's own identity, so it cannot be combined with --pem or --p12")
+	}
+	switch {
+	case fileNamed:
+		return credentialFile, nil
+	case audience != "" || os.Getenv(identity.AudienceEnv) != "":
+		return credentialWorkload, nil
+	default:
+		return credentialStored, nil
+	}
+}
+
+// stringList collects a repeatable flag.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(value string) error {
+	*l = append(*l, value)
+	return nil
 }
 
 // identityTLSConfig presents the stored credential and keeps it fresh. The
@@ -186,9 +241,8 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// workloadTLSConfig exchanges the CI platform's token for a certificate and
-// keeps it in memory. No file is written and no renewal loop starts: the
-// certificate is scoped to the life of this process.
+// workloadTLSConfig exchanges the CI platform token for a certificate held in
+// memory for the life of the process. Nothing is written and nothing renews.
 func workloadTLSConfig(ctx context.Context, audience, apiURL, remote, serverName string) (*tls.Config, string, error) {
 	if audience == "" {
 		audience = strings.TrimSpace(os.Getenv(identity.AudienceEnv))
@@ -204,8 +258,7 @@ func workloadTLSConfig(ctx context.Context, audience, apiURL, remote, serverName
 	}
 	material, err := client.ExchangeWorkloadToken(ctx, token)
 	if err != nil {
-		// The platform token is a bearer credential for its few minutes; keep it
-		// out of any log the CI system captures.
+		// The platform token is a bearer credential. Keep it out of CI logs.
 		return nil, "", security.SanitizeError(err, token)
 	}
 
@@ -236,62 +289,74 @@ func runAccessFromConfig(path string) error {
 		firstErr error
 		errMu    sync.Mutex
 	)
-	for _, c := range cc.Connections {
-		remote, err := access.ParseRemote(c.Remote)
-		if err != nil {
+	for _, entry := range cc.Access {
+		deviceHost, deviceAddr, parseErr := access.ParseDevice(entry.Device)
+		if parseErr != nil {
 			cancel()
-			return fmt.Errorf("connection %q: %w", c.Name, err)
+			return fmt.Errorf("device %q: %w", entry.Device, parseErr)
+		}
+
+		forwards := make([]access.Forward, 0, len(entry.Forward))
+		for _, raw := range entry.Forward {
+			f, forwardErr := access.ParseForward(raw, "127.0.0.1")
+			if forwardErr != nil {
+				cancel()
+				return fmt.Errorf("device %q: %w", entry.Device, forwardErr)
+			}
+			forwards = append(forwards, f)
 		}
 
 		var tlsCfg *tls.Config
-		if c.UsesIdentity() {
-			// Never interactive, because this loop builds several connections and
-			// prompting would ask once per entry.
+		if entry.UsesIdentity() {
+			// Not interactive. This loop builds one session per entry.
 			var ref identity.Ref
-			if ref, err = resolveCredential(store, c.Identity, false); err == nil {
-				tlsCfg, _, err = identityTLSConfig(ctx, ref, remote, "")
+			if ref, err = resolveCredential(store, entry.Identity, false); err == nil {
+				tlsCfg, _, err = identityTLSConfig(ctx, ref, deviceAddr, deviceHost)
 			}
 		} else {
 			var password string
-			if c.P12 != "" {
-				password, err = resolveP12Password(c.P12Pass, c.P12PassFile, c.P12PassEnv)
+			if entry.P12 != "" {
+				password, err = resolveP12Password(entry.P12Pass, entry.P12PassFile, entry.P12PassEnv)
 			}
 			if err == nil {
-				tlsCfg, err = access.BuildTLSConfig(c.Bundle, c.P12, password, remote, "")
+				tlsCfg, err = access.BuildTLSConfig(entry.Bundle, entry.P12, password, deviceAddr, deviceHost)
 			}
 		}
 		if err != nil {
 			cancel()
-			return fmt.Errorf("connection %q: %w", c.Name, err)
+			return fmt.Errorf("device %q: %w", entry.Device, err)
 		}
 
-		name := c.Name
-		if name == "" {
-			name = c.Remote
-		}
-		listen := "127.0.0.1:" + c.LocalPort
+		session := &access.Session{Device: deviceHost, Addr: deviceAddr, TLSConfig: tlsCfg}
+		defer session.Close()
+
+		name := deviceHost
 		proxy := &access.Proxy{
-			Remote:    remote,
-			LocalAddr: listen,
-			TLSConfig: tlsCfg,
-			OnConn:    func(l, r string) { fmt.Fprintf(os.Stderr, "  [%s] [conn] %s -> %s\n", name, l, r) },
-			OnError:   func(err error) { fmt.Fprintf(os.Stderr, "  [%s] [error] %s\n", name, err) },
+			Session:  session,
+			Forwards: forwards,
+			OnListen: func(f access.Forward, addr string) {
+				fmt.Fprintf(os.Stderr, "  [%s] %s -> port %d\n", name, addr, f.RemotePort)
+			},
+			OnConn: func(l string, port uint16) {
+				fmt.Fprintf(os.Stderr, "  [%s] [conn] %s -> port %d\n", name, l, port)
+			},
+			OnError: func(err error) { fmt.Fprintf(os.Stderr, "  [%s] [error] %s\n", name, err) },
 		}
-		fmt.Fprintf(os.Stderr, "  [%s] listening on %s -> %s (mTLS)\n", name, listen, remote)
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := proxy.Run(ctx); err != nil {
+			if runErr := proxy.Run(ctx); runErr != nil {
 				errMu.Lock()
 				if firstErr == nil {
-					firstErr = err
+					firstErr = runErr
 				}
 				errMu.Unlock()
-				fmt.Fprintf(os.Stderr, "  [%s] error: %s\n", name, err)
+				fmt.Fprintf(os.Stderr, "  [%s] error: %s\n", name, runErr)
 			}
 		}()
 	}
+
 	wg.Wait()
 	return firstErr
 }
@@ -342,19 +407,15 @@ func signalCtx() (context.Context, context.CancelFunc) {
 }
 
 func usageAccess(fs *flag.FlagSet) {
-	fmt.Fprint(os.Stderr, `Usage: localport access <URL> --pem <file> -p <local-port> [flags]
-       localport access <URL> --p12 <file> -p <local-port> [flags]
+	fmt.Fprint(os.Stderr, `Usage: localport access <device-host> -L [local:]remote [flags]
        localport access --config access.yaml
 
-  Reach a locked (mTLS) tunnel. Presents your client certificate and forwards a
-  local port to it. Paste the tunnel URL in whatever form you copied it.
+  Reach a fleet device's ports. Every forward runs over one mTLS connection to
+  the device, and the ports it serves are set in the dashboard.
 
-  <URL> The scheme picks the port and nothing else. This connection is always
-  TLS, whatever the tunnel carries.
-    https://sub.eu.localport.dev          -> :443
-    tcp://sub.eu.localport.dev:5432       -> :5432
-    tls://sub.eu.localport.dev:5432       -> :5432
-    sub.eu.localport.dev:5432             -> bare host:port also works
+  -L  [local:]remote, repeatable.
+        -L 5020:502      listen on 5020, reach the device's port 502
+        -L 502           reach 502 on a local port the system picks
 
   Credentials. With no flag, the identity this machine holds is used and
   renewed in the background, so there is no file to copy and nothing that
@@ -362,25 +423,23 @@ func usageAccess(fs *flag.FlagSet) {
   did not issue.
     (none)              the stored identity (localport setup <TOKEN>)
     --audience          CI, the pipeline's own OIDC identity, no secret at all
-    --pem               PEM file with client cert + key + tunnel CA
+    --pem               PEM file with client cert + key + fleet CA
     --p12               PKCS#12 archive (password via --p12-pass-env / -file)
 
   Examples:
     localport setup lps_...            # once per machine
-    localport access https://gateway-warehouse.eu.localport.dev -p 3001
+    localport access plc-01-factory.ap.localport.dev -L 5020:502 -L 8080:80
 
-    localport access https://gateway-warehouse.eu.localport.dev --pem client.pem -p 3001
-    localport access tcp://db-warehouse.eu.localport.dev:5432 --pem db.pem --port 5432
+    localport access plc-01-factory.ap.localport.dev --pem client.pem -L 502
     LOCALPORT_P12_PASSWORD=... \
-      localport access https://gateway-warehouse.eu.localport.dev --p12 client.p12 -p 3001
-    localport access --config access.yaml   # many targets at once
+      localport access plc-01-factory.ap.localport.dev --p12 client.p12 -L 502
+    localport access --config access.yaml   # several devices at once
 
   From CI, with nothing stored anywhere. On GitHub Actions add
   "permissions: { id-token: write }" to the job, and the certificate is obtained
   from the runner's own identity and kept in memory.
 
-    localport access tcp://gateway-warehouse.eu.localport.dev:22 \
-      --audience lpa_... -p 2222
+    localport access gw-01-factory.ap.localport.dev --audience lpa_... -L 2222:22
 
   Other platforms: put the token in LOCALPORT_OIDC_TOKEN and the audience in
   LOCALPORT_OIDC_AUDIENCE.

@@ -479,10 +479,39 @@ The last three are set for a device only. A stream naming a port the device does
 not serve is answered `403` before anything is dialled; a target that cannot be
 reached is `502`.
 
-## mTLS consumer connections (`localport access`)
+## Remote access (`localport access`)
 
-A consumer presents a client certificate; the tunnel decides whether that
-certificate's identity may reach the device the connection is routed to.
+A fleet has no public endpoint. A consumer presents a client certificate; the
+fleet's grants decide whether that certificate's identity may reach the device,
+and the device decides which of its ports are open.
+
+One connection carries every forward:
+
+```
+localport access plc-01-factory.ap.localport.dev -L 5020:502 -L 8080:80
+
+  one TLS connection   SNI = the device host, ALPN h2, client certificate
+  one CONNECT stream   per accepted local connection
+      CONNECT plc-01-factory.ap.localport.dev:502
+      CONNECT plc-01-factory.ap.localport.dev:80
+```
+
+The CONNECT authority must be the device the connection was opened to, and its
+port must be one the device serves. Refusals come back as status codes:
+
+| Status | Meaning                                                      |
+| ------ | ------------------------------------------------------------ |
+| `405`  | not a fleet device address                                    |
+| `421`  | the authority is not the device this connection was opened to |
+| `400`  | the authority carries no usable port                          |
+| `403`  | the identity has no access, or the port is not open           |
+| `502`  | nothing is listening on that port on the device               |
+| `503`  | the device is busy                                            |
+
+The connection is closed when the device disconnects, when the certificate
+chain expires, when a grant is narrowed, and when the certificate is revoked.
+The command re-dials on the next forward, and the new attempt is refused if the
+grant no longer covers it.
 
 **Server verification uses the system trust store, not the bundle's CA.** The
 edge presents its region zone wildcard certificate, publicly trusted and issued
@@ -494,12 +523,6 @@ part of the chain the consumer presents so the edge can verify it.
 A bundle must still contain at least one CA certificate. That is checked when the
 bundle is loaded, so a chainless bundle fails locally with a clear message
 instead of as an opaque handshake alert from the far side.
-
-Access can be narrowed while a connection is open. When it is, the edge closes
-that consumer's live connections rather than letting an existing session outlive
-the change: a revocation that only takes effect on the next connection is not a
-revocation. The agent sees an ordinary disconnect and reconnects; the new attempt
-is refused if the grant no longer covers it.
 
 ### Human sign-in (`localport login`)
 

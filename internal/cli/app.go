@@ -55,8 +55,8 @@ func printMainUsage(w io.Writer) {
 
 Commands:
   connect   Join a fleet as a device, or run a config file
-  access    Reach a fleet device through your client certificate
-  setup     Redeem a setup token so this MACHINE can reach locked tunnels
+  access    Reach a fleet device's ports through your client certificate
+  setup     Redeem a setup token so this MACHINE can reach fleet devices
   login     Sign in as YOURSELF and get a short-lived certificate
   identity  List, renew and remove the credentials on this machine
   version   Print version and exit
@@ -76,13 +76,12 @@ Examples:
   # Join a fleet as a device (ports are set in the dashboard):
   localport connect -t <token> --name plc-01 --host 192.168.1.100
 
-  # Reach a fleet device with your client certificate:
-  localport access https://gateway-warehouse.eu.localport.dev --pem client.pem -p 3001
-  localport access tcp://db-warehouse.eu.localport.dev:5432 --pem db.pem -p 5432
+  # Reach a device's ports with your client certificate:
+  localport access plc-01-factory.ap.localport.dev -L 5020:502 -L 8080:80
 
   # Or set the machine up once and let the agent obtain and renew for you:
   localport setup <TOKEN>
-  localport access https://gateway-warehouse.eu.localport.dev -p 3001
+  localport access plc-01-factory.ap.localport.dev -L 502
 
   # See what this machine holds:
   localport identity list

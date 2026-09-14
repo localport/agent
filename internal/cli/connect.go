@@ -105,7 +105,9 @@ func usageConnect(fs *flag.FlagSet) {
        localport connect --config localport.yaml
 
   Join a fleet as one device. The ports this device serves are set in the
-  dashboard.
+  dashboard, and consumers reach them with:
+
+    localport access <device-host> -L <local>:<remote>
 
   One device, named after this machine:
     localport connect -t <token>
