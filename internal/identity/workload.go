@@ -40,11 +40,6 @@ const (
 	githubRequestTokenEnv = "ACTIONS_ID_TOKEN_REQUEST_TOKEN"
 )
 
-// WorkloadAvailable reports whether a platform token can be obtained here.
-func WorkloadAvailable() bool {
-	return os.Getenv(TokenEnv) != "" || os.Getenv(githubTokenURLEnv) != ""
-}
-
 // FetchWorkloadToken obtains an OIDC token for the given audience from whatever
 // CI platform this process is running on.
 func FetchWorkloadToken(ctx context.Context, audience string) (string, error) {
