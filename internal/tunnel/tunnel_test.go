@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -274,4 +275,56 @@ func TestCopyWithCountersTakesItsBufferFromThePool(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("allocs per copy = %.1f, want 0: the buffer must come from copyBufPool", n)
 	}
+}
+
+// At the limit, dial-back drops new connections without a reply.
+func TestDispatchBoundsInFlightDataConnections(t *testing.T) {
+	tn := New(Options{Local: "127.0.0.1:1"})
+
+	// Fill every slot.
+	for i := range maxConcurrentDataConns {
+		select {
+		case tn.dataSlots <- struct{}{}:
+		default:
+			t.Fatalf("slot %d refused, want %d available", i, maxConcurrentDataConns)
+		}
+	}
+
+	var refused []error
+	tn.opts.Handler = handlerFunc{onError: func(_ string, err error) { refused = append(refused, err) }}
+
+	before := runtime.NumGoroutine()
+	tn.dispatch(proto.MsgNewConnection, []byte(`{"connection_id":"conn_over","remote_addr":"203.0.113.9:1"}`))
+
+	if len(refused) != 1 {
+		t.Fatalf("got %d error events, want exactly 1 refusal", len(refused))
+	}
+	if after := runtime.NumGoroutine(); after > before {
+		t.Fatalf("goroutines %d -> %d: a refused connection must not spawn one", before, after)
+	}
+
+	// A freed slot admits the next connection.
+	<-tn.dataSlots
+	select {
+	case tn.dataSlots <- struct{}{}:
+	default:
+		t.Fatal("a released slot was not reusable")
+	}
+}
+
+// handlerFunc is a no-op EventHandler with one hook overridden.
+type handlerFunc struct {
+	onError func(label string, err error)
+}
+
+func (h handlerFunc) OnStateChange(string, State, State)                             {}
+func (h handlerFunc) OnConnected(string, Info)                                       {}
+func (h handlerFunc) OnDisconnected(string, error)                                   {}
+func (h handlerFunc) OnError(label string, err error)                                { h.onError(label, err) }
+func (h handlerFunc) OnDataConn(string, DataConnInfo)                                {}
+func (h handlerFunc) OnHTTPRequest(string, RequestInfo)                              {}
+func (h handlerFunc) OnRedirect(string, string, string)                              {}
+func (h handlerFunc) OnPortsUpdate(string, []proto.DevicePort)                       {}
+func (h handlerFunc) OnShutdownPolicy(string, string, string, proto.LimitType, bool) {}
+func (h handlerFunc) OnDataClose(string, string, string, string, int64, int64, time.Duration, error) {
 }

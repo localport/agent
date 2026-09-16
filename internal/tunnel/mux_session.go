@@ -29,11 +29,6 @@ const (
 	muxUploadBufferPerConnection = 16 << 20
 	muxUploadBufferPerStream     = 4 << 20
 
-	// Concurrency ceiling for streams the edge may have open at once. Generous
-	// for a tunnel, and bounded so a misbehaving edge cannot exhaust local file
-	// descriptors through the local service.
-	muxMaxConcurrentStreams = 512
-
 	// Bind exchange bound. A silent edge must not hold the connection.
 	muxBindTimeout = 10 * time.Second
 
@@ -256,7 +251,7 @@ func (t *Tunnel) dialAndBindMux(ctx context.Context, edgeAddr, sessionID string)
 // serveMux carries streams until the connection drops.
 func (t *Tunnel) serveMux(conn net.Conn) {
 	server := &http2.Server{
-		MaxConcurrentStreams:         muxMaxConcurrentStreams,
+		MaxConcurrentStreams:         maxConcurrentDataConns,
 		MaxUploadBufferPerConnection: muxUploadBufferPerConnection,
 		MaxUploadBufferPerStream:     muxUploadBufferPerStream,
 		// The edge pings an idle connection; answering is automatic. This bounds
@@ -267,11 +262,11 @@ func (t *Tunnel) serveMux(conn net.Conn) {
 	handler := &muxServer{
 		dialTarget:   t.dialTarget,
 		device:       t.IsDevice(),
-		defaultProto: t.opts.Protocol,
 		tracker:      t,
 		totalIn:      &t.totalBytesIn,
 		totalOut:     &t.totalBytesOut,
 		newInspector: t.newInspectorFor,
+		defaultProto: t.opts.Protocol,
 	}
 
 	// ServeConn blocks for the life of the connection.

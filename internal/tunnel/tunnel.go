@@ -35,6 +35,10 @@ const (
 	// copyBufferSize is the per-direction proxy buffer, the io.Copy default.
 	copyBufferSize = 32 * 1024
 
+	// maxConcurrentDataConns caps concurrent inbound connections on mux and
+	// dial-back, so a faulty edge cannot exhaust local file descriptors.
+	maxConcurrentDataConns = 512
+
 	// edgeFallbackAfter is how long a previously assigned edge address may
 	// keep failing before the agent returns to the configured connect host.
 	// Long enough to ride out an edge restart without losing the session.
@@ -248,6 +252,11 @@ type Tunnel struct {
 	// OnNetworkChange while no session is connected: a fresh network makes
 	// the previous failures' backoff schedule meaningless.
 	retryNow chan struct{}
+
+	// dataSlots bounds concurrent inbound connections, one slot per
+	// proxyData. It persists across reconnects, so a closing connection still
+	// holds its slot.
+	dataSlots chan struct{}
 }
 
 // activeConn is the internal record for one live edge↔local proxy. Byte
@@ -289,6 +298,7 @@ func New(opts Options) *Tunnel {
 		shutdown:     make(chan struct{}),
 		disconnected: make(chan struct{}),
 		retryNow:     make(chan struct{}, 1),
+		dataSlots:    make(chan struct{}, maxConcurrentDataConns),
 	}
 	if device {
 		t.ports = newDevicePorts()
@@ -811,6 +821,16 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 		if err != nil {
 			return
 		}
+		// Take a slot before dialing, since the limit protects local
+		// descriptors. When full, drop the request without a reply and let the
+		// edge time it out.
+		select {
+		case t.dataSlots <- struct{}{}:
+		default:
+			t.emitError(fmt.Errorf("refused an inbound connection: %d already in flight", maxConcurrentDataConns))
+			return
+		}
+
 		go t.proxyData(nc.ConnectionID, sanitizeAddr(nc.RemoteAddr), connTarget{
 			port:     nc.TargetPort,
 			protocol: sanitizeAddr(nc.TargetProtocol),
@@ -971,6 +991,9 @@ type connTarget struct {
 }
 
 func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
+	// dispatch took the slot.
+	defer func() { <-t.dataSlots }()
+
 	t.mu.RLock()
 	addr := t.edgeAddr
 	dialer := t.dialer
