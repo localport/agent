@@ -1,7 +1,9 @@
 package tunnel
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -240,5 +242,19 @@ func TestNetworkChangeSkipsBackoff(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("network change did not cut the backoff wait short")
+	}
+}
+
+// The copy allocates nothing. The reader is reset outside the measured
+// closure.
+func TestCopyWithCountersTakesItsBufferFromThePool(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 256*1024)
+	src := bytes.NewReader(nil)
+	n := testing.AllocsPerRun(50, func() {
+		src.Reset(payload)
+		copyWithCounters(io.Discard, src)
+	})
+	if n != 0 {
+		t.Fatalf("allocs per copy = %.1f, want 0: the buffer must come from copyBufPool", n)
 	}
 }

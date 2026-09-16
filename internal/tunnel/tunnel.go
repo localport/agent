@@ -32,6 +32,9 @@ const (
 	maxBackoff          = 30 * time.Second
 	maxRedirectHops     = 5
 
+	// copyBufferSize is the per-direction proxy buffer, the io.Copy default.
+	copyBufferSize = 32 * 1024
+
 	// edgeFallbackAfter is how long a previously assigned edge address may
 	// keep failing before the agent returns to the configured connect host.
 	// Long enough to ride out an edge restart without losing the session.
@@ -1085,11 +1088,22 @@ func halfCloseOrClose(c net.Conn) {
 	_ = c.Close()
 }
 
-// copyWithCounters streams src→dst and accumulates each successful write
-// into every counter atomically. Per-conn and tunnel-total counters stay
-// in sync because both see the same bytes the same moment.
+// copyBufPool holds per-direction proxy buffers, two per connection. It stores
+// slice pointers because boxing a slice header allocates.
+var copyBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, copyBufferSize)
+		return &buf
+	},
+}
+
+// copyWithCounters copies src to dst and adds each write to every counter.
+// It avoids io.Copy, whose splice path between TCP connections would bypass
+// the counters.
 func copyWithCounters(dst io.Writer, src io.Reader, counters ...*atomic.Int64) {
-	buf := make([]byte, 32*1024)
+	bufp := copyBufPool.Get().(*[]byte)
+	defer copyBufPool.Put(bufp)
+	buf := *bufp
 	for {
 		nr, rerr := src.Read(buf)
 		if nr > 0 {

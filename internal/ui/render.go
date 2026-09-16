@@ -284,7 +284,9 @@ func padRight(s string, w int) string {
 func headerMulti(s snap) []string {
 	pal := s.palette
 	header := pal.ForegroundDim("edge ") + pal.Foreground(s.edge)
-	lines := []string{header, ""}
+	// Header, blank line, column titles, one row per tunnel.
+	lines := make([]string, 0, 3+len(s.tunnels))
+	lines = append(lines, header, "")
 
 	const stateW = 14
 	nameW := 4

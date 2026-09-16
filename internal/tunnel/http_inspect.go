@@ -163,6 +163,13 @@ type dirScanner struct {
 	dead   bool
 }
 
+// die stops scanning this direction and releases the header buffer.
+func (d *dirScanner) die() {
+	d.dead = true
+	d.hdr = nil
+	d.chunk = chunkSkipper{}
+}
+
 func (d *dirScanner) feed(data []byte, onHeaders func(hdr []byte) bodyPlan) {
 	for len(data) > 0 && !d.dead {
 		switch d.mode {
@@ -171,15 +178,19 @@ func (d *dirScanner) feed(data []byte, onHeaders func(hdr []byte) bodyPlan) {
 			data = data[consumed:]
 			if !complete {
 				if len(d.hdr) > maxHeaderBytes {
-					d.dead = true
+					d.die()
 				}
 				return
 			}
 			plan := onHeaders(d.hdr)
+			// Reuse the buffer for the next message unless it grew too large.
 			d.hdr = d.hdr[:0]
+			if cap(d.hdr) > maxHeaderBytes {
+				d.hdr = nil
+			}
 			switch plan.mode {
 			case bodyDead:
-				d.dead = true
+				d.die()
 				return
 			case bodyLen:
 				if plan.remain > 0 {
@@ -204,7 +215,7 @@ func (d *dirScanner) feed(data []byte, onHeaders func(hdr []byte) bodyPlan) {
 			used, done := d.chunk.consume(data)
 			data = data[used:]
 			if d.chunk.dead {
-				d.dead = true
+				d.die()
 				return
 			}
 			if done {
