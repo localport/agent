@@ -27,14 +27,19 @@ import (
 // any write that can't finish in this window means the session is over.
 const defaultWriteTimeout = 10 * time.Second
 
+// maxRetainedWriteBuffer bounds the send buffer kept between frames. A larger
+// buffer is released after use.
+const maxRetainedWriteBuffer = 4 << 10
+
 // Conn wraps a net.Conn with framed JSON messages. Sends and receives are
-// independently serialized so the wrapper is safe for one writer and one
-// reader running concurrently.
+// serialized separately, so one reader and several writers may run
+// concurrently.
 type Conn struct {
-	raw          net.Conn
-	wmu          sync.Mutex
-	rmu          sync.Mutex
-	hdrBuf       [5]byte
+	raw net.Conn
+	wmu sync.Mutex
+	rmu sync.Mutex
+	// wbuf holds a whole frame for a single Write. Guarded by wmu.
+	wbuf         []byte
 	writeTimeout time.Duration
 }
 
@@ -54,31 +59,35 @@ func (c *Conn) Send(t MessageType, payload any) error {
 		body = b
 	}
 
-	total := uint32(1 + len(body))
-	if total > MaxMessageSize {
-		return fmt.Errorf("proto: frame too large: %d > %d", total, MaxMessageSize)
+	// Check the size before narrowing, which could truncate it.
+	size := len(body) + 1
+	if size > MaxMessageSize {
+		return fmt.Errorf("proto: frame too large: %d > %d", size, MaxMessageSize)
 	}
+	total := uint32(size)
 
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 
-	// Bound the write so a stuck socket can't wedge this and every queued
-	// sender behind wmu. Cleared after: the data path reuses raw for io.Copy
-	// once ConnectionReady is sent, which must run without a write deadline.
+	// The deadline keeps a stuck socket from blocking every sender behind wmu.
+	// It is cleared afterwards because the data path reuses raw for io.Copy
+	// after ConnectionReady.
 	if c.writeTimeout > 0 {
 		_ = c.raw.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 		defer func() { _ = c.raw.SetWriteDeadline(time.Time{}) }()
 	}
 
-	binary.BigEndian.PutUint32(c.hdrBuf[:4], total)
-	c.hdrBuf[4] = byte(t)
-	if _, err := c.raw.Write(c.hdrBuf[:]); err != nil {
-		return fmt.Errorf("proto: write header: %w", err)
+	// Write header and body in one call. Separate writes cost two TLS records,
+	// and a partial frame desyncs the peer.
+	c.wbuf = binary.BigEndian.AppendUint32(c.wbuf[:0], total)
+	c.wbuf = append(c.wbuf, byte(t))
+	c.wbuf = append(c.wbuf, body...)
+
+	if _, err := c.raw.Write(c.wbuf); err != nil {
+		return fmt.Errorf("proto: write frame %s: %w", t, err)
 	}
-	if len(body) > 0 {
-		if _, err := c.raw.Write(body); err != nil {
-			return fmt.Errorf("proto: write body: %w", err)
-		}
+	if cap(c.wbuf) > maxRetainedWriteBuffer {
+		c.wbuf = nil
 	}
 	return nil
 }

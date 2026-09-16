@@ -1,6 +1,7 @@
 package proto
 
 import (
+	"bytes"
 	"net"
 	"testing"
 	"time"
@@ -59,3 +60,53 @@ func TestSendNoDeadlineWhenDisabled(t *testing.T) {
 		t.Fatalf("SetWriteDeadline called %d times with timeout disabled, want 0", len(dc.setCalls))
 	}
 }
+
+// countingConn counts Write calls.
+type countingConn struct {
+	net.Conn
+	buf    bytes.Buffer
+	writes int
+}
+
+func (c *countingConn) Write(p []byte) (int, error) {
+	c.writes++
+	return c.buf.Write(p)
+}
+func (c *countingConn) SetWriteDeadline(time.Time) error { return nil }
+
+// Each frame is sent in one Write.
+func TestSendEmitsOneWritePerFrame(t *testing.T) {
+	cc := &countingConn{}
+	c := NewConn(cc)
+
+	if err := c.Send(MsgRegister, &RegisterPayload{Token: "tok", ClientID: "agent-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if cc.writes != 1 {
+		t.Fatalf("payload frame took %d writes, want 1", cc.writes)
+	}
+
+	cc.writes = 0
+	if err := c.Send(MsgHeartbeat, nil); err != nil {
+		t.Fatal(err)
+	}
+	if cc.writes != 1 {
+		t.Fatalf("bodyless frame took %d writes, want 1", cc.writes)
+	}
+
+	// The written bytes parse as two frames.
+	rc := NewConn(&readOnlyConn{r: bytes.NewReader(cc.buf.Bytes())})
+	if mt, body, err := rc.Recv(); err != nil || mt != MsgRegister || len(body) == 0 {
+		t.Fatalf("first frame: type=%v bodyLen=%d err=%v", mt, len(body), err)
+	}
+	if mt, body, err := rc.Recv(); err != nil || mt != MsgHeartbeat || body != nil {
+		t.Fatalf("second frame: type=%v body=%v err=%v", mt, body, err)
+	}
+}
+
+type readOnlyConn struct {
+	net.Conn
+	r *bytes.Reader
+}
+
+func (c *readOnlyConn) Read(p []byte) (int, error) { return c.r.Read(p) }
