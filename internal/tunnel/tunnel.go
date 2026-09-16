@@ -248,7 +248,6 @@ type Tunnel struct {
 	// OnNetworkChange while no session is connected: a fresh network makes
 	// the previous failures' backoff schedule meaningless.
 	retryNow chan struct{}
-	wg       sync.WaitGroup
 }
 
 // activeConn is the internal record for one live edge↔local proxy. Byte
@@ -348,8 +347,11 @@ func (t *Tunnel) Run(ctx context.Context) error {
 	attempt := 0
 	var failingSince time.Time
 	for {
+		// Capture the channel here. The next iteration replaces
+		// t.disconnected.
 		t.mu.Lock()
-		t.disconnected = make(chan struct{})
+		sessionDone := make(chan struct{})
+		t.disconnected = sessionDone
 		t.mu.Unlock()
 		t.closing.Store(false)
 
@@ -402,7 +404,7 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		// a slow or refused bind costs nothing.
 		stopMux := t.startMux(ctx)
 
-		t.runSession(ctx)
+		t.runSession(ctx, sessionDone)
 		stopMux()
 
 		if t.cancelled(ctx) {
@@ -662,34 +664,38 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 	return fmt.Errorf("too many redirects (>%d)", maxRedirectHops)
 }
 
-func (t *Tunnel) runSession(ctx context.Context) {
-	t.wg.Add(2)
-	go t.heartbeatLoop()
-	go t.receiveLoop()
+// runSession serves one registered session and returns when it ends.
+// sessionDone is a parameter because Run replaces t.disconnected on each
+// iteration. The local wait group covers the two loops. Data goroutines end
+// through closeActiveConns.
+func (t *Tunnel) runSession(ctx context.Context, sessionDone <-chan struct{}) {
+	var loops sync.WaitGroup
+	loops.Go(func() { t.heartbeatLoop(sessionDone) })
+	loops.Go(func() { t.receiveLoop(sessionDone) })
 
 	select {
 	case <-ctx.Done():
 	case <-t.shutdown:
-	case <-t.disconnected:
+	case <-sessionDone:
 	}
 
-	// Wake the reader off its long deadline so it observes the teardown now
-	// instead of stalling the drain below.
-	t.interruptReader()
+	// The loops select on sessionDone and shutdown, not ctx, so signal them
+	// here. This also wakes the reader.
+	t.signalDisconnected()
 
-	// Tear down in-flight proxy sockets so their copy loops return now
+	// Close live proxy sockets so their copy loops return. A proxyData still
+	// dialing has no activeConn yet and ends within dialTimeout.
 	t.closeActiveConns()
 
 	done := make(chan struct{})
-	go func() { t.wg.Wait(); close(done) }()
+	go func() { loops.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(sessionDrainTimeout):
 	}
 }
 
-func (t *Tunnel) heartbeatLoop() {
-	defer t.wg.Done()
+func (t *Tunnel) heartbeatLoop(sessionDone <-chan struct{}) {
 	tick := time.NewTicker(heartbeatInterval)
 	defer tick.Stop()
 
@@ -697,7 +703,7 @@ func (t *Tunnel) heartbeatLoop() {
 		select {
 		case <-t.shutdown:
 			return
-		case <-t.disconnected:
+		case <-sessionDone:
 			return
 		case <-tick.C:
 			c := t.snapshotConn()
@@ -717,14 +723,13 @@ func (t *Tunnel) heartbeatLoop() {
 // probe's window), so an idle session costs zero wake-ups. Socket errors and
 // inbound frames wake it immediately; interruptReader wakes it early to
 // re-evaluate (probe armed, session tearing down).
-func (t *Tunnel) receiveLoop() {
-	defer t.wg.Done()
+func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 	lastInbound := time.Now()
 	for {
 		select {
 		case <-t.shutdown:
 			return
-		case <-t.disconnected:
+		case <-sessionDone:
 			return
 		default:
 		}
@@ -806,8 +811,6 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 		if err != nil {
 			return
 		}
-		t.wg.Add(1)
-
 		go t.proxyData(nc.ConnectionID, sanitizeAddr(nc.RemoteAddr), connTarget{
 			port:     nc.TargetPort,
 			protocol: sanitizeAddr(nc.TargetProtocol),
@@ -968,8 +971,6 @@ type connTarget struct {
 }
 
 func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
-	defer t.wg.Done()
-
 	t.mu.RLock()
 	addr := t.edgeAddr
 	dialer := t.dialer

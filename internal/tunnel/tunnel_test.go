@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -131,8 +132,7 @@ func TestReceiveLoopIdleDisconnect(t *testing.T) {
 	tn.conn = proto.NewConn(a)
 	tn.mu.Unlock()
 
-	tn.wg.Add(1)
-	go tn.receiveLoop()
+	loop := startReceiveLoop(tn)
 
 	select {
 	case <-tn.disconnected:
@@ -140,7 +140,23 @@ func TestReceiveLoopIdleDisconnect(t *testing.T) {
 		t.Fatal("receive loop did not disconnect on an idle link")
 	}
 	tn.Stop()
-	tn.wg.Wait()
+	loop.Wait()
+}
+
+// startReceiveLoop starts a receive loop as runSession does, with the session
+// channel and a caller-owned wait group.
+func startReceiveLoop(tn *Tunnel) *sync.WaitGroup {
+	tn.mu.RLock()
+	sessionDone := tn.disconnected
+	tn.mu.RUnlock()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tn.receiveLoop(sessionDone)
+	}()
+	return &wg
 }
 
 func TestDialBudget(t *testing.T) {
@@ -167,6 +183,7 @@ func TestNetworkChangeProbe(t *testing.T) {
 	netChangeProbeWindow = 700 * time.Millisecond
 	defer func() { edgeIdleTimeout, netChangeProbeWindow = oldIdle, oldWindow }()
 
+	var loops []*sync.WaitGroup
 	runLoop := func(tn *Tunnel) net.Conn {
 		a, b := net.Pipe()
 		t.Cleanup(func() { a.Close(); b.Close() })
@@ -174,8 +191,7 @@ func TestNetworkChangeProbe(t *testing.T) {
 		tn.raw = a
 		tn.conn = proto.NewConn(a)
 		tn.mu.Unlock()
-		tn.wg.Add(1)
-		go tn.receiveLoop()
+		loops = append(loops, startReceiveLoop(tn))
 		return b
 	}
 
@@ -223,8 +239,9 @@ func TestNetworkChangeProbe(t *testing.T) {
 	// Stop both receive loops before the deferred timeout restore runs.
 	tn.Stop()
 	tn2.Stop()
-	tn.wg.Wait()
-	tn2.wg.Wait()
+	for _, loop := range loops {
+		loop.Wait()
+	}
 }
 
 // A network change while disconnected must cut the reconnect backoff short
