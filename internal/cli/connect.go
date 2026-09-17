@@ -1,13 +1,10 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/localport/agent/internal/agent"
 	"github.com/localport/agent/internal/config"
@@ -53,26 +50,20 @@ func runConnect(version string, args []string) error {
 	mode := ui.DetectMode(*noUI, os.Stderr)
 	cfg.NoInspect = inspectDisabled(mode, *noInspect, *logRequests)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	a := agent.New(cfg, nil)
+	a := agent.New(cfg)
 	renderer := pickRenderer(mode, a)
-	a.SetHandler(renderer)
 	renderer.Banner(version, cfg)
+	defer renderer.Shutdown()
 
-	// The renderer shuts down first to restore the terminal before teardown
-	// output. Stop ends all sessions at once.
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sig
+	// Stop ends all sessions at once. The renderer shuts down first to
+	// restore the terminal before teardown output.
+	ctx, stop := signalContext(func() {
 		renderer.Shutdown()
 		a.Stop()
-		cancel()
-	}()
+	})
+	defer stop()
 
-	runErr := a.Run(ctx)
+	runErr := a.Run(ctx, renderer)
 	renderer.Shutdown()
 
 	var regErr *tunnel.RegistrationError

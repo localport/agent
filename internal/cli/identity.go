@@ -129,7 +129,7 @@ func runIdentityRenew(args []string) error {
 		return err
 	}
 
-	ctx, cancel := signalCtx()
+	ctx, cancel := signalContext(nil)
 	defer cancel()
 
 	material, err := (&identity.Renewer{Store: store, Ref: ref}).RenewOnce(ctx)

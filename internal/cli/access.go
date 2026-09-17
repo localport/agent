@@ -7,10 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/localport/agent/internal/access"
 	"github.com/localport/agent/internal/identity"
@@ -109,7 +107,7 @@ func runAccess(args []string) error {
 		}
 	}
 
-	ctx, cancel := signalCtx()
+	ctx, cancel := signalContext(nil)
 	defer cancel()
 
 	var (
@@ -292,7 +290,7 @@ func runAccessFromConfig(path string) error {
 		return err
 	}
 
-	ctx, cancel := signalCtx()
+	ctx, cancel := signalContext(nil)
 	defer cancel()
 
 	var (
@@ -407,14 +405,6 @@ func noteWeakPassword(p string) string {
 		fmt.Fprintf(os.Stderr, "  warning: PKCS#12 password is under %d characters\n", minPasswordLength)
 	}
 	return p
-}
-
-func signalCtx() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() { <-sig; cancel() }()
-	return ctx, cancel
 }
 
 func usageAccess(fs *flag.FlagSet) {

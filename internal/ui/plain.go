@@ -74,9 +74,13 @@ func (p *Plain) Banner(version string, cfg *config.Config) {
 	}
 }
 
+// Shutdown is idempotent. Callers invoke it from the signal handler, after Run
+// and in a defer.
 func (p *Plain) Shutdown() {
-	p.stopOnce.Do(func() { close(p.stop) })
-	p.line("shutdown", "", "stopping")
+	p.stopOnce.Do(func() {
+		close(p.stop)
+		p.line("shutdown", "", "stopping")
+	})
 }
 
 func (p *Plain) OnStateChange(label string, _ tunnel.State, to tunnel.State) {

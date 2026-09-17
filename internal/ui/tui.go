@@ -194,15 +194,21 @@ func (t *TUI) start() {
 
 	fmt.Fprint(t.out, AltScreenOn+CursorHide+ClearScreen)
 
+	// Set the teardown hooks under the lock. Shutdown reads them from the
+	// signal goroutine.
 	if IsTTY(os.Stdin) {
 		if restore, err := enterRaw(os.Stdin); err == nil {
+			t.mu.Lock()
 			t.rawRestore = restore
+			t.mu.Unlock()
 			go t.drainStdin()
 		}
 	}
 
 	resizeCh, stop := notifyResize()
+	t.mu.Lock()
 	t.resizeStop = stop
+	t.mu.Unlock()
 	go t.renderLoop()
 	go t.resizeLoop(resizeCh)
 	go t.animationLoop()
@@ -278,11 +284,16 @@ func (t *TUI) drainStdin() {
 func (t *TUI) Shutdown() {
 	t.stopOnce.Do(func() {
 		close(t.stopCh)
-		if t.resizeStop != nil {
-			t.resizeStop()
+		// Read under the lock and call outside it, since both hooks block on
+		// syscalls.
+		t.mu.Lock()
+		resizeStop, rawRestore := t.resizeStop, t.rawRestore
+		t.mu.Unlock()
+		if resizeStop != nil {
+			resizeStop()
 		}
-		if t.rawRestore != nil {
-			t.rawRestore()
+		if rawRestore != nil {
+			rawRestore()
 		}
 		fmt.Fprint(t.out, wrapOn+CursorShow+AltScreenOff)
 	})

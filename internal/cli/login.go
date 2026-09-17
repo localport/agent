@@ -34,7 +34,7 @@ func runLogin(args []string) error {
 		return err
 	}
 
-	ctx, cancel := signalCtx()
+	ctx, cancel := signalContext(nil)
 	defer cancel()
 
 	material, err := client.Login(ctx, func(p identity.LoginPrompt) {

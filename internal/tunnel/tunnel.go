@@ -1211,12 +1211,16 @@ func (t *Tunnel) snapshotConnPair() (net.Conn, *proto.Conn) {
 }
 
 func (t *Tunnel) emitConnected() {
-	if h := t.opts.Handler; h != nil {
-		info := t.info
-		info.Device = t.IsDevice()
-		info.Ports = t.Ports()
-		h.OnConnected(t.opts.Label, info)
+	h := t.opts.Handler
+	if h == nil {
+		return
 	}
+	t.mu.RLock()
+	info := t.info
+	t.mu.RUnlock()
+	info.Device = t.IsDevice()
+	info.Ports = t.Ports()
+	h.OnConnected(t.opts.Label, info)
 }
 func (t *Tunnel) emitDisconnected(err error) {
 	if h := t.opts.Handler; h != nil {

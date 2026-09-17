@@ -1,14 +1,11 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/localport/agent/internal/agent"
 	"github.com/localport/agent/internal/config"
@@ -78,27 +75,20 @@ func runTunnel(version string, args []string) error {
 	mode := ui.DetectMode(*noUI, os.Stderr)
 	cfg.NoInspect = inspectDisabled(mode, *noInspect, *logRequests)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	a := agent.New(cfg, nil) // handler attached below so renderer can poll a.Tunnels()
+	a := agent.New(cfg)
 	renderer := pickRenderer(mode, a)
-	a.SetHandler(renderer)
 	renderer.Banner(version, cfg)
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sig
+
+	ctx, stop := signalContext(func() {
 		renderer.Shutdown()
 		a.Stop()
-		cancel()
-	}()
+	})
+	defer stop()
 
-	err = a.Run(ctx)
+	err = a.Run(ctx, renderer)
 	renderer.Shutdown()
-	// One final line for a terminal error, with the opaque debug code
-	// appended so support can decode it (the message itself stays the
-	// public, sanitized one).
+	// Print one line for a fatal error. The sanitized message is followed by
+	// the opaque debug code for support.
 	var regErr *tunnel.RegistrationError
 	if errors.As(err, &regErr) && regErr.Code != "" {
 		return fmt.Errorf("%s [%s]", regErr.Error(), regErr.Code)

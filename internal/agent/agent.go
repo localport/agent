@@ -11,29 +11,31 @@ import (
 	"github.com/localport/agent/internal/tunnel"
 )
 
-// Agent fans a config out into one tunnel.Tunnel per endpoint and runs them
-// concurrently. Stop tears all of them down.
+// Agent runs one tunnel.Tunnel per configured endpoint concurrently. Stop
+// ends all of them.
 type Agent struct {
-	cfg     *config.Config
-	handler tunnel.EventHandler
+	cfg *config.Config
 
 	mu      sync.Mutex
 	tunnels []*tunnel.Tunnel
 	runErrs []error
 }
 
-func New(cfg *config.Config, handler tunnel.EventHandler) *Agent {
-	return &Agent{cfg: cfg, handler: handler}
+func New(cfg *config.Config) *Agent {
+	return &Agent{cfg: cfg}
 }
 
-// Run starts every endpoint and blocks until they have all returned.
-func (a *Agent) Run(ctx context.Context) error {
+// Run starts every endpoint with handler and blocks until all return.
+//
+// handler is a parameter because the renderer reads a.Tunnels and is built
+// after the Agent, and each tunnel copies the handler at construction.
+func (a *Agent) Run(ctx context.Context, handler tunnel.EventHandler) error {
 	var wg sync.WaitGroup
 
-	// One network monitor for the whole agent: on a host network change it
-	// nudges every tunnel to fast-probe its edge link, so a change that killed
-	// the connection is detected in seconds instead of the ~75s idle timeout.
-	// Zero idle cost (event-driven on Linux/BSD/macOS; light poll elsewhere).
+	// One network monitor for the agent. A host network change makes every
+	// tunnel probe its edge link, which detects a dead connection in seconds
+	// instead of after the ~75s idle timeout. Event driven on Linux, BSD and
+	// macOS, polled elsewhere.
 	mon := netmon.New(nil)
 	go mon.Run(ctx)
 	go func() {
@@ -51,7 +53,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	start := func(opts tunnel.Options) {
 		opts.AgentVersion = a.cfg.AgentVersion
-		opts.Handler = a.handler
+		opts.Handler = handler
 		opts.DisableMux = a.cfg.NoMux
 		opts.DisableInspect = a.cfg.NoInspect
 		t := tunnel.New(opts)
@@ -113,18 +115,8 @@ func (a *Agent) Stop() {
 	}
 }
 
-// SetHandler swaps the EventHandler. Useful when the renderer needs the
-// Agent reference (e.g. for ActiveConnections polling) and therefore
-// can't be supplied at construction time.
-func (a *Agent) SetHandler(h tunnel.EventHandler) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.handler = h
-}
-
-// Tunnels returns a snapshot of the currently-running tunnel pointers.
-// The TUI uses this to poll ActiveConnections() without going through
-// the event handler.
+// Tunnels returns a snapshot of the running tunnels. The TUI polls
+// ActiveConnections through it.
 func (a *Agent) Tunnels() []*tunnel.Tunnel {
 	a.mu.Lock()
 	defer a.mu.Unlock()

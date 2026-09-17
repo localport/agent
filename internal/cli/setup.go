@@ -66,7 +66,7 @@ func runSetup(args []string) error {
 		return err
 	}
 
-	ctx, cancel := signalCtx()
+	ctx, cancel := signalContext(nil)
 	defer cancel()
 
 	notice := func(attempt int, in time.Duration, err error) {
