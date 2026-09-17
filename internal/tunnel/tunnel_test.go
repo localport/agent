@@ -36,6 +36,16 @@ func TestAllowedRedirectHost(t *testing.T) {
 		"127.0.0.1:443",
 		"localport.dev.attacker.io:443",
 		"",
+		// Not hostnames. A suffix check alone would accept these.
+		"evil.com/x.localport.dev:443",
+		"evil.com\\x.localport.dev:443",
+		"a\x1b[2J.eu.localport.dev:443",
+		"user@e1.eu.localport.dev:443",
+		"e1..eu.localport.dev:443",
+		"-bad.eu.localport.dev:443",
+		"bad-.eu.localport.dev:443",
+		strings.Repeat("a", 64) + ".eu.localport.dev:443",
+		".localport.dev:443",
 	}
 	for _, d := range deny {
 		if allowedRedirectHost(d) {

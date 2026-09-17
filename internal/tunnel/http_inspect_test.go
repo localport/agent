@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // inspect feeds request then response bytes through a fresh inspector and
@@ -201,5 +202,38 @@ func TestNewRequestInspectorGating(t *testing.T) {
 		if got := tn.newRequestInspector() != nil; got != tc.want {
 			t.Errorf("proto=%s disabled=%v: present=%v want=%v", tc.proto, tc.disabled, got, tc.want)
 		}
+	}
+}
+
+// Method and path are capped because up to maxPending requests hold them.
+func TestParseRequestLineCapsVisitorControlledFields(t *testing.T) {
+	long := strings.Repeat("a", 64<<10)
+	method, path, ok := parseRequestLine([]byte("GET /" + long + " HTTP/1.1\r\n"))
+	if !ok {
+		t.Fatal("request line did not parse")
+	}
+	if got := utf8.RuneCountInString(path); got != maxPathRunes {
+		t.Fatalf("path kept %d runes, want %d", got, maxPathRunes)
+	}
+	if method != "GET" {
+		t.Fatalf("method = %q", method)
+	}
+
+	_, _, ok = parseRequestLine([]byte(strings.Repeat("M", 64) + " / HTTP/1.1\r\n"))
+	if !ok {
+		t.Fatal("long-method request line did not parse")
+	}
+
+	// Truncation cuts on a rune boundary.
+	wide := strings.Repeat(string(rune(0x65e5)), maxPathRunes+50)
+	_, path, ok = parseRequestLine([]byte("GET /" + wide + " HTTP/1.1\r\n"))
+	if !ok {
+		t.Fatal("multibyte request line did not parse")
+	}
+	if !utf8.ValidString(path) {
+		t.Fatalf("truncation split a rune: %q", path)
+	}
+	if got := utf8.RuneCountInString(path); got != maxPathRunes {
+		t.Fatalf("multibyte path kept %d runes, want %d", got, maxPathRunes)
 	}
 }

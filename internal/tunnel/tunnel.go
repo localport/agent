@@ -906,10 +906,42 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 
 const edgeBaseDomain = "localport.dev"
 
+// allowedRedirectHost reports whether addr is an edge the agent may follow a
+// redirect to. The host must be a valid DNS name before the suffix check, which
+// alone would accept "evil.com/x.localport.dev".
 func allowedRedirectHost(addr string) bool {
 	host, _ := transport.SplitHostPort(addr)
 	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if !validHostname(host) {
+		return false
+	}
 	return host == edgeBaseDomain || strings.HasSuffix(host, "."+edgeBaseDomain)
+}
+
+// validHostname reports whether s is a lowercase DNS name of at most 253
+// characters, with labels of 1 to 63 [a-z0-9-] characters that do not start or
+// end with a hyphen.
+func validHostname(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for label := range strings.SplitSeq(s, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			switch {
+			case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-':
+			default:
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // sanitizeDisplay strips terminal control characters from a wire value.

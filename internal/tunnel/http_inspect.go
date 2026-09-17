@@ -21,6 +21,10 @@ import (
 const (
 	maxHeaderBytes = 16 << 10
 	maxLineBytes   = 256 // one chunk-size or trailer line
+
+	// Limits on the request line fields stored in a pendingRequest.
+	maxMethodRunes = 16
+	maxPathRunes   = 512
 )
 
 // maxPending caps requests awaiting a response. Ordered, non-pipelined traffic
@@ -298,7 +302,26 @@ func parseRequestLine(hdr []byte) (method, path string, ok bool) {
 	if q := bytes.IndexByte(target, '?'); q >= 0 {
 		target = target[:q]
 	}
-	return string(line[:sp1]), string(target), true
+	// Visitor-controlled values. They are capped because up to maxPending
+	// requests per connection hold them until the response. The renderer
+	// truncates them further.
+	return truncateRunes(sanitizeDisplay(string(line[:sp1])), maxMethodRunes),
+		truncateRunes(sanitizeDisplay(string(target)), maxPathRunes), true
+}
+
+// truncateRunes clips s to at most n runes.
+func truncateRunes(s string, n int) string {
+	if len(s) <= n { // byte length bounds rune count
+		return s
+	}
+	count := 0
+	for i := range s {
+		if count == n {
+			return s[:i]
+		}
+		count++
+	}
+	return s
 }
 
 func parseStatusLine(hdr []byte) (status int, ok bool) {
