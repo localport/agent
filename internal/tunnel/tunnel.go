@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/localport/agent/internal/proto"
+	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/transport"
 )
 
@@ -912,14 +913,7 @@ func allowedRedirectHost(addr string) bool {
 }
 
 // sanitizeDisplay strips terminal control characters from a wire value.
-func sanitizeDisplay(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == 0x7f || r < 0x20 || (r >= 0x80 && r <= 0x9f) {
-			return -1
-		}
-		return r
-	}, s)
-}
+func sanitizeDisplay(s string) string { return security.SanitizeDisplay(s) }
 
 const maxRecentRequests = 100
 

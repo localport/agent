@@ -73,3 +73,26 @@ func SanitizeError(err error, secrets ...string) error {
 	}
 	return errors.New(RedactString(err.Error(), secrets...))
 }
+
+// SanitizeDisplay strips characters that a terminal or log viewer could
+// interpret, such as escape sequences for title changes, hidden text or OSC 52
+// clipboard writes. Call it where an untrusted value enters the agent.
+//
+// It removes C0 including ESC, DEL, C1, and the bidi and zero-width formatting
+// characters of CVE-2021-42574. The bidi set is explicit because Unicode Cf
+// also contains marks used in Arabic.
+func SanitizeDisplay(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+			return -1
+		case r >= 0x200b && r <= 0x200f, // ZWSP, ZWNJ, ZWJ, LRM, RLM
+			r >= 0x202a && r <= 0x202e, // LRE, RLE, PDF, LRO, RLO
+			r >= 0x2060 && r <= 0x2064, // word joiner, invisible operators
+			r >= 0x2066 && r <= 0x2069, // LRI, RLI, FSI, PDI
+			r == 0xfeff:                // ZWNBSP
+			return -1
+		}
+		return r
+	}, s)
+}

@@ -7,21 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/localport/agent/internal/security"
 )
 
-// sanitize strips terminal control characters (C0 including ESC, DEL and C1)
-// from wire values.
-func sanitize(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-			return -1
-		}
-		return r
-	}, s)
-}
+// sanitize strips control and invisible formatting characters from wire
+// values.
+func sanitize(s string) string { return security.SanitizeDisplay(s) }
 
 // Frame layout on the wire:
 //

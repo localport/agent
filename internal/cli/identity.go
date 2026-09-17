@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/security"
+	"github.com/localport/agent/internal/ui"
 )
 
 // identityEnv selects a credential when a machine holds several.
@@ -82,8 +84,11 @@ func runIdentityList(args []string) error {
 		if due, ok := m.Meta.NextRenewal(); ok {
 			renews = humanUntil(now, due)
 		}
+		// Identity and team name come from the certificate and control plane.
+		// Strip terminal escape sequences.
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			ref.Identity, ref.Kind.Label(), m.Meta.DisplayTeam(),
+			security.SanitizeDisplay(ref.Identity), ref.Kind.Label(),
+			security.SanitizeDisplay(m.Meta.DisplayTeam()),
 			m.Meta.Source, humanUntil(now, m.Meta.NotAfter), renews)
 	}
 	if err := w.Flush(); err != nil {
@@ -181,26 +186,27 @@ func runIdentityRemove(args []string) error {
 	return nil
 }
 
-// printCredential reports what a credential is and where it landed.
+// printCredential reports a credential and its path. Identity and team name
+// are stripped of terminal escape sequences.
 func printCredential(store *identity.Store, ref identity.Ref, meta identity.Meta) {
-	fmt.Fprintf(os.Stderr, "  identity   %s\n", meta.SpiffeID)
+	fmt.Fprintf(os.Stderr, "  identity   %s\n", security.SanitizeDisplay(meta.SpiffeID))
 	team := ref.Team
 	if meta.TeamName != "" {
-		team = fmt.Sprintf("%s (%s)", meta.TeamName, ref.Team)
+		team = fmt.Sprintf("%s (%s)", security.SanitizeDisplay(meta.TeamName), ref.Team)
 	}
 	fmt.Fprintf(os.Stderr, "  team       %s\n", team)
 	fmt.Fprintf(os.Stderr, "  stored in  %s\n", store.Dir(ref))
 	fmt.Fprintf(os.Stderr, "  expires    %s\n", meta.NotAfter.Format(time.RFC3339))
 }
 
-// humanUntil renders a deadline relative to now. "overdue" rather than a
-// negative duration, which reads as arithmetic instead of a state to act on.
+// humanUntil renders a deadline relative to now, or "overdue" once passed.
 func humanUntil(now, t time.Time) string {
 	if t.IsZero() {
 		return "unknown"
 	}
-	if d := time.Until(t); d > 0 {
-		return "in " + d.Round(time.Minute).String()
+	// now comes from the caller so all rows of a listing agree.
+	if d := t.Sub(now); d > 0 {
+		return "in " + ui.HumanDuration(d)
 	}
 	return "overdue"
 }
@@ -229,7 +235,7 @@ func noteSignInExpiry(ref identity.Ref, meta identity.Meta) {
 	if _, seen := signInNotices.LoadOrStore(ref, true); seen {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "  signed in as %s\n", meta.SpiffeID)
+	fmt.Fprintf(os.Stderr, "  signed in as %s\n", security.SanitizeDisplay(meta.SpiffeID))
 	fmt.Fprintf(os.Stderr, "  sign-in expires %s (%s)\n",
 		meta.NotAfter.Format(time.RFC3339), humanUntil(time.Now(), meta.NotAfter))
 	fmt.Fprintf(os.Stderr, "  it does not renew; run `localport login` again to sign back in\n")

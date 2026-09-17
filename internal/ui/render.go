@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/tunnel"
 )
 
@@ -48,23 +49,23 @@ type snap struct {
 // connected/total count + agent uptime.
 func buildRightCaps(tunnels []tState, agentUptime time.Duration) (status, uptime string) {
 	if len(tunnels) == 0 {
-		return "starting…", humanDuration(agentUptime)
+		return "starting…", HumanDuration(agentUptime)
 	}
 	if len(tunnels) == 1 {
 		ts := tunnels[0]
 		switch {
 		case ts.connected && ts.state == tunnel.StateActive:
-			return "Connected", humanDuration(time.Since(ts.connectedAt))
+			return "Connected", HumanDuration(time.Since(ts.connectedAt))
 		case ts.state == tunnel.StateConnecting:
-			return "Connecting…", humanDuration(agentUptime)
+			return "Connecting…", HumanDuration(agentUptime)
 		case ts.state == tunnel.StateRegistering:
-			return "Registering…", humanDuration(agentUptime)
+			return "Registering…", HumanDuration(agentUptime)
 		case ts.state == tunnel.StateReconnecting:
-			return "Reconnecting…", humanDuration(agentUptime)
+			return "Reconnecting…", HumanDuration(agentUptime)
 		case ts.state == tunnel.StateStopped:
-			return "Stopped", humanDuration(agentUptime)
+			return "Stopped", HumanDuration(agentUptime)
 		}
-		return "Idle", humanDuration(agentUptime)
+		return "Idle", HumanDuration(agentUptime)
 	}
 	connected := 0
 	for _, ts := range tunnels {
@@ -72,7 +73,7 @@ func buildRightCaps(tunnels []tState, agentUptime time.Duration) (status, uptime
 			connected++
 		}
 	}
-	return fmt.Sprintf("%d/%d connected", connected, len(tunnels)), humanDuration(agentUptime)
+	return fmt.Sprintf("%d/%d connected", connected, len(tunnels)), HumanDuration(agentUptime)
 }
 
 // buildFrame returns exactly s.rows formatted lines. Line N renders at row N+1.
@@ -517,7 +518,7 @@ func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette)
 			remote = host
 		}
 		row := padVisible(pal.Foreground(truncate(remote, remoteW)), remoteW) + gapStr +
-			padVisible(pal.Foreground(humanDuration(now.Sub(c.StartedAt))), durW) + gapStr +
+			padVisible(pal.Foreground(HumanDuration(now.Sub(c.StartedAt))), durW) + gapStr +
 			padLeftVisible(pal.Primary(HumanBytes(c.BytesIn)), byteW) + gapStr +
 			padLeftVisible(pal.Primary(HumanBytes(c.BytesOut)), byteW)
 		rows = append(rows, row)
@@ -692,18 +693,8 @@ func boxBottom(cols int, code string, pal Palette) string {
 		pal.ForegroundDim(code) + pal.Border(" ]─┘")
 }
 
-// sanitizeForDisplay strips terminal control characters (C0 incl. ESC, DEL, and C1)
-func sanitizeForDisplay(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		if r == 0x7f || r < 0x20 || (r >= 0x80 && r <= 0x9f) {
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
+// sanitizeForDisplay strips terminal control characters from an external value.
+func sanitizeForDisplay(s string) string { return security.SanitizeDisplay(s) }
 
 // boxDivider renders:  ├─[ live connections ]──────[ N ]─┤
 func boxDivider(label, right string, cols int, pal Palette) string {
@@ -860,9 +851,8 @@ func padVisible(s string, w int) string {
 	return s + strings.Repeat(" ", w-rl)
 }
 
-// humanDuration prints durations the way ops people read them: 3s, 1m12s,
-// 1h04m. Sub-second rounds to seconds for stability between frames.
-func humanDuration(d time.Duration) string {
+// HumanDuration formats durations as 3s, 1m12s or 1h04m, rounded to seconds.
+func HumanDuration(d time.Duration) string {
 	if d < time.Second {
 		return "0s"
 	}
@@ -953,7 +943,7 @@ func deviceLogRow(
 	case devRequest:
 		dur = humanLatency(ev.dur)
 	case devConnClose:
-		dur = humanDuration(ev.dur)
+		dur = HumanDuration(ev.dur)
 		bytes = HumanBytes(ev.bytes)
 	}
 
