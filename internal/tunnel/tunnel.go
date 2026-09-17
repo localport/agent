@@ -651,7 +651,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 				return fmt.Errorf("parse redirect: %w", err)
 			}
 			if !allowedRedirectHost(rd.EdgeAddr) {
-				return fmt.Errorf("refusing redirect to untrusted host %q", sanitizeAddr(rd.EdgeAddr))
+				return fmt.Errorf("refusing redirect to untrusted host %q", sanitizeDisplay(rd.EdgeAddr))
 			}
 			if h := t.opts.Handler; h != nil {
 				h.OnRedirect(t.opts.Label, addr, rd.EdgeAddr)
@@ -831,10 +831,11 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 			return
 		}
 
-		go t.proxyData(nc.ConnectionID, sanitizeAddr(nc.RemoteAddr), connTarget{
+		// ParseNewConnection already sanitized the fields.
+		go t.proxyData(nc.ConnectionID, nc.RemoteAddr, connTarget{
 			port:     nc.TargetPort,
-			protocol: sanitizeAddr(nc.TargetProtocol),
-			consumer: sanitizeAddr(nc.Consumer),
+			protocol: nc.TargetProtocol,
+			consumer: nc.Consumer,
 		})
 
 	case proto.MsgPortsUpdate:
@@ -910,7 +911,8 @@ func allowedRedirectHost(addr string) bool {
 	return host == edgeBaseDomain || strings.HasSuffix(host, "."+edgeBaseDomain)
 }
 
-func sanitizeAddr(s string) string {
+// sanitizeDisplay strips terminal control characters from a wire value.
+func sanitizeDisplay(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == 0x7f || r < 0x20 || (r >= 0x80 && r <= 0x9f) {
 			return -1

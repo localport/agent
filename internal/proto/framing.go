@@ -7,9 +7,21 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
+
+// sanitize strips terminal control characters (C0 including ESC, DEL and C1)
+// from wire values.
+func sanitize(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, s)
+}
 
 // Frame layout on the wire:
 //
@@ -141,25 +153,108 @@ func (c *Conn) SendPortsAck(p *PortsAckPayload) error {
 	return c.Send(MsgPortsAck, p)
 }
 
-// Payload parsers. Each one validates the JSON and returns a typed payload.
+// Payload parsers validate the JSON, strip control characters from displayed
+// fields and return a typed payload. They are the sanitization boundary for
+// inbound strings.
+//
+// These fields are matched or dialed, so they stay verbatim.
+//
+//   - SessionID, compared byte for byte by the edge on resume.
+//   - TunnelID, EdgeID.
+//   - EdgeAddr, a dial target checked by allowedRedirectHost.
+//   - ConnectionID, echoed in ConnectionReady and sanitized for display in
+//     ui.shortID.
 
-func ParseRegisterAck(b []byte) (*RegisterAckPayload, error) { return parse[RegisterAckPayload](b) }
-func ParseMuxBindAck(b []byte) (*MuxBindAckPayload, error)   { return parse[MuxBindAckPayload](b) }
+func ParseRegisterAck(b []byte) (*RegisterAckPayload, error) {
+	p, err := parse[RegisterAckPayload](b)
+	if err != nil {
+		return nil, err
+	}
+	p.TunnelName = sanitize(p.TunnelName)
+	p.Region = sanitize(p.Region)
+	p.RegionName = sanitize(p.RegionName)
+	p.PublicURL = sanitize(p.PublicURL)
+	for i := range p.URLs {
+		p.URLs[i] = sanitize(p.URLs[i])
+	}
+	p.Subdomain = sanitize(p.Subdomain)
+	p.Mode = sanitize(p.Mode)
+	p.Protocol = sanitize(p.Protocol)
+	p.Error = sanitize(p.Error)
+	p.ErrorCode = sanitize(p.ErrorCode)
+	p.LimitType = LimitType(sanitize(string(p.LimitType)))
+	for i := range p.Ports {
+		p.Ports[i].Protocol = sanitize(p.Ports[i].Protocol)
+	}
+	return p, nil
+}
+
+func ParseMuxBindAck(b []byte) (*MuxBindAckPayload, error) {
+	p, err := parse[MuxBindAckPayload](b)
+	if err != nil {
+		return nil, err
+	}
+	p.Error = sanitize(p.Error)
+	p.Code = sanitize(p.Code)
+	return p, nil
+}
+
 func ParseNewConnection(b []byte) (*NewConnectionPayload, error) {
-	return parse[NewConnectionPayload](b)
+	p, err := parse[NewConnectionPayload](b)
+	if err != nil {
+		return nil, err
+	}
+	p.RemoteAddr = sanitize(p.RemoteAddr)
+	p.TargetProtocol = sanitize(p.TargetProtocol)
+	p.Consumer = sanitize(p.Consumer)
+	return p, nil
 }
+
 func ParsePortsUpdate(b []byte) (*PortsUpdatePayload, error) {
-	return parse[PortsUpdatePayload](b)
+	p, err := parse[PortsUpdatePayload](b)
+	if err != nil {
+		return nil, err
+	}
+	for i := range p.Ports {
+		p.Ports[i].Protocol = sanitize(p.Ports[i].Protocol)
+	}
+	return p, nil
 }
+
 func ParseHeartbeat(b []byte) (*HeartbeatPayload, error) { return parse[HeartbeatPayload](b) }
+
 func ParseShutdown(b []byte) (*ShutdownPayload, error) {
 	if len(b) == 0 {
 		return &ShutdownPayload{}, nil
 	}
-	return parse[ShutdownPayload](b)
+	p, err := parse[ShutdownPayload](b)
+	if err != nil {
+		return nil, err
+	}
+	p.Reason = sanitize(p.Reason)
+	p.Code = sanitize(p.Code)
+	p.LimitType = LimitType(sanitize(string(p.LimitType)))
+	return p, nil
 }
-func ParseError(b []byte) (*ErrorPayload, error)       { return parse[ErrorPayload](b) }
-func ParseRedirect(b []byte) (*RedirectPayload, error) { return parse[RedirectPayload](b) }
+
+func ParseError(b []byte) (*ErrorPayload, error) {
+	p, err := parse[ErrorPayload](b)
+	if err != nil {
+		return nil, err
+	}
+	p.Code = sanitize(p.Code)
+	p.Message = sanitize(p.Message)
+	return p, nil
+}
+
+func ParseRedirect(b []byte) (*RedirectPayload, error) {
+	p, err := parse[RedirectPayload](b)
+	if err != nil {
+		return nil, err
+	}
+	p.Reason = sanitize(p.Reason)
+	return p, nil
+}
 
 func parse[T any](b []byte) (*T, error) {
 	var v T

@@ -61,10 +61,11 @@ func (s *muxServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	remote := sanitizeAddr(r.Header.Get(headerVisitorAddr))
+	// Header values are displayed and logged, so strip control characters.
+	remote := sanitizeDisplay(r.Header.Get(headerVisitorAddr))
 	target := connTarget{
-		protocol: sanitizeAddr(r.Header.Get(headerTargetProtocol)),
-		consumer: sanitizeAddr(r.Header.Get(headerConsumer)),
+		protocol: sanitizeDisplay(r.Header.Get(headerTargetProtocol)),
+		consumer: sanitizeDisplay(r.Header.Get(headerConsumer)),
 	}
 	if s.device {
 		port, err := strconv.ParseUint(r.Header.Get(headerTargetPort), 10, 16)

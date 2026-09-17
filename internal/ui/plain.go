@@ -354,7 +354,10 @@ func (p *Plain) line(event, label, msg string) {
 	fmt.Fprintf(p.out, "%s %s %s\n", ts, event, msg)
 }
 
+// shortID trims and sanitizes a connection ID for display. The parsers keep it
+// verbatim because it is echoed to the edge.
 func shortID(id string) string {
+	id = sanitizeForDisplay(id)
 	if len(id) > 8 {
 		return id[:8]
 	}

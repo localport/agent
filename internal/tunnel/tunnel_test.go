@@ -277,6 +277,36 @@ func TestCopyWithCountersTakesItsBufferFromThePool(t *testing.T) {
 	}
 }
 
+// Wire values shown to the operator are stripped of terminal control
+// characters.
+func TestSanitizeDisplayStripsTerminalControl(t *testing.T) {
+	cases := map[string]string{
+		// The escape is removed and its text kept.
+		"/orders\x1b]0;pwned\x07": "/orders]0;pwned",
+		"GET\r\nX-Injected: 1":    "GETX-Injected: 1",
+		"ops-laptop\x1b[8m":       "ops-laptop[8m",
+		"plain/path?ok=1":         "plain/path?ok=1",
+		"h\u00e9llo":              "h\u00e9llo",
+		// Encoded C1, CSI as U+009B.
+		"\u009b31mred": "31mred",
+	}
+	for in, want := range cases {
+		if got := sanitizeDisplay(in); got != want {
+			t.Errorf("sanitizeDisplay(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	// No control characters remain for any input. A raw C1 byte is invalid
+	// UTF-8 and is replaced.
+	for _, in := range []string{"\x00\x1b\x7f\x9b", "a\x08b\x0cc", "\x1b_hidden\x9c"} {
+		for _, r := range sanitizeDisplay(in) {
+			if r == 0x7f || r < 0x20 || (r >= 0x80 && r <= 0x9f) {
+				t.Fatalf("sanitizeDisplay(%q) kept %U", in, r)
+			}
+		}
+	}
+}
+
 // At the limit, dial-back drops new connections without a reply.
 func TestDispatchBoundsInFlightDataConnections(t *testing.T) {
 	tn := New(Options{Local: "127.0.0.1:1"})
