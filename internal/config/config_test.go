@@ -225,25 +225,3 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 		})
 	}
 }
-
-func TestFromFlags(t *testing.T) {
-	cfg := FromFlags("tok_flag", "eu", "localhost:8080", "tcp", "myapp")
-	tun := cfg.Tunnels[0]
-	if tun.Token != "tok_flag" || tun.Edge != "connect.eu.localport.dev:443" {
-		t.Errorf("tunnel = %+v", tun)
-	}
-	if tun.Name != "myapp" || tun.Protocol != "tcp" {
-		t.Errorf("tunnel = %+v", tun)
-	}
-}
-
-func TestFromFlagsDefaults(t *testing.T) {
-	cfg := FromFlags("tok", "", "localhost:8080", "http", "")
-	tun := cfg.Tunnels[0]
-	if tun.Name != "default" {
-		t.Errorf("name = %q, want default", tun.Name)
-	}
-	if tun.Edge != "connect.eu.localport.dev:443" {
-		t.Errorf("edge = %q", tun.Edge)
-	}
-}

@@ -130,7 +130,7 @@ func buildTunnelConfig(path, flagToken, region, local, proto, name string) (*con
 	if local == "" {
 		return nil, fmt.Errorf("--local is required for token-based tunnel mode")
 	}
-	return config.FromFlags(token, region, local, proto, name), nil
+	return config.TunnelFromFlags(token, region, local, proto, name)
 }
 
 func usageTunnel(fs *flag.FlagSet) {

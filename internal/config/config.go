@@ -140,24 +140,42 @@ func redactQuoted(msg string) string {
 	return b.String()
 }
 
-// FromFlags builds a one-tunnel config from CLI arguments. The name defaults
-// to "default" when blank.
-func FromFlags(token, region, local, proto, name string) *Config {
+// TunnelFromFlags builds a one-tunnel config from CLI arguments. Validation
+// happens here so a typo fails immediately instead of causing a reconnect loop.
+func TunnelFromFlags(token, region, local, proto, name string) (*Config, error) {
+	if err := validRegion(region); err != nil {
+		return nil, err
+	}
 	if name == "" {
 		name = "default"
+	} else if err := validTunnelName(name); err != nil {
+		return nil, err
 	}
+
 	resolvedProto, resolvedLocal := ParseLocal(local, proto)
+	switch resolvedProto {
+	case "http", "tcp", "tls":
+	default:
+		return nil, fmt.Errorf("protocol %q is not one of http, tcp, tls", resolvedProto)
+	}
+	if resolvedLocal == "" {
+		return nil, errors.New("no upstream address to forward to")
+	}
+
 	return &Config{Tunnels: []TunnelSpec{{
 		Name:     name,
 		Token:    token,
 		Protocol: resolvedProto,
 		Local:    resolvedLocal,
 		Edge:     ResolveEdge(region),
-	}}}
+	}}}, nil
 }
 
 // DeviceFromFlags builds a one-device config from CLI arguments.
 func DeviceFromFlags(token, region, name, host string) (*Config, error) {
+	if err := validRegion(region); err != nil {
+		return nil, err
+	}
 	if !ValidDeviceName(name) {
 		return nil, fmt.Errorf("--name %q is not a valid device name, expected 1-%d characters of "+
 			"lowercase letters, digits and internal dashes", name, MaxDeviceNameLength)
@@ -223,6 +241,31 @@ func DefaultDeviceName(hostname string) string {
 		out = strings.TrimRight(out[:MaxDeviceNameLength], "-")
 	}
 	return out
+}
+
+// maxTunnelNameLength bounds the tunnel name shown in agent output.
+const maxTunnelNameLength = 64
+
+// validTunnelName refuses terminal control characters. Mixed case and spaces
+// are allowed because the control plane slugifies the name.
+func validTunnelName(name string) error {
+	if len(name) > maxTunnelNameLength {
+		return fmt.Errorf("--name is %d characters, over the %d character limit", len(name), maxTunnelNameLength)
+	}
+	if name != security.SanitizeDisplay(name) {
+		return errors.New("--name contains control characters")
+	}
+	return nil
+}
+
+// validRegion accepts a single DNS label. ResolveEdge builds the dial host from
+// it. Unknown regions are allowed so new regions need no agent release.
+func validRegion(region string) error {
+	if region == "" || ValidDeviceName(region) {
+		return nil
+	}
+	return fmt.Errorf("--region %q is not a valid region, expected lowercase letters, "+
+		"digits and internal dashes", region)
 }
 
 // ParseLocal splits a `local` value into (protocol, addr). A scheme in
