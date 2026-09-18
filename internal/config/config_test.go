@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -116,7 +117,7 @@ func TestInterpolate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := interpolate(tc.in)
+			got, _, err := interpolate(tc.in)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("want an error, got %q", got)
@@ -135,7 +136,7 @@ func TestInterpolate(t *testing.T) {
 
 // The error names the unset variable.
 func TestInterpolateMessageNamesTheVariable(t *testing.T) {
-	_, err := interpolate("${FLEET_TOKEN:?set FLEET_TOKEN}")
+	_, _, err := interpolate("${FLEET_TOKEN:?set FLEET_TOKEN}")
 	if err == nil {
 		t.Fatal("want an error")
 	}
@@ -157,6 +158,71 @@ func TestParseLocal(t *testing.T) {
 		if proto != tc.wantProto || addr != tc.wantAddr {
 			t.Fatalf("ParseLocal(%q) = (%q, %q), want (%q, %q)", tc.in, proto, addr, tc.wantProto, tc.wantAddr)
 		}
+	}
+}
+
+// A parse error must not quote a substituted secret, whole or shortened. The
+// parser quotes a value that fails to decode and shortens one over ten
+// characters to its first seven.
+func TestLoadRedactsResolvedSecretsFromParseErrors(t *testing.T) {
+	t.Setenv("LOCALPORT_TOKEN", "tok_supersecretvalue")
+	t.Setenv("LOCALPORT_SHORT", "hunter2")
+
+	for _, body := range []string{
+		"version: ${LOCALPORT_TOKEN}\n",
+		"version: ${LOCALPORT_SHORT}\n",
+	} {
+		path := filepath.Join(t.TempDir(), "localport.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		_, err := Load(path)
+		if err == nil {
+			t.Fatalf("want %q refused", body)
+		}
+		for _, secret := range []string{"tok_sup", "hunter2"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("the error carries %q: %v", secret, err)
+			}
+		}
+	}
+}
+
+// Unknown keys are errors. A mistyped `host` would default to localhost.
+func TestLoadRejectsUnknownFields(t *testing.T) {
+	cases := []struct {
+		name, yaml, want string
+	}{
+		{
+			name: "device host typo",
+			yaml: "version: 1\nfleets:\n  - token: tok\n    devices:\n      - name: plc-01\n        hosts: 192.168.1.100\n",
+			want: "hosts",
+		},
+		{
+			name: "tunnel upstream typo",
+			yaml: "version: 1\ntunnels:\n  - name: web\n    token: tok\n    upsteam: http://localhost:3000\n",
+			want: "upsteam",
+		},
+		{
+			name: "top level typo",
+			yaml: "version: 1\ntunnel:\n  - name: web\n",
+			want: "tunnel",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "localport.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("expected the unknown field to be refused")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error should name %q, got %q", tc.want, err)
+			}
+		})
 	}
 }
 

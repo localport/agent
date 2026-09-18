@@ -1,6 +1,7 @@
 package access
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -45,12 +46,17 @@ func LoadAccessConfig(path string) (*AccessConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	// Unknown keys are errors. A misspelled `forward` or `identity` would
+	// otherwise read as absent and change the ports or the credential used.
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+
 	var cc AccessConfig
-	if err := yaml.Unmarshal(raw, &cc); err != nil {
+	if err := dec.Decode(&cc); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if cc.Version != 1 {
-		return nil, fmt.Errorf("parse %s: unsupported config version %d (only v1 is recognized)", path, cc.Version)
+		return nil, fmt.Errorf("parse %s: unsupported config version %d: this agent reads version 1", path, cc.Version)
 	}
 	if len(cc.Access) == 0 {
 		return nil, errors.New("access config: no devices listed")

@@ -15,11 +15,13 @@ import (
 //	$$                 a literal $
 //
 // References are resolved before YAML parsing. An unterminated `${` is an
-// error.
-func interpolate(raw string) (string, error) {
+// error. The second result lists the substituted values so callers can redact
+// them from errors.
+func interpolate(raw string) (string, []string, error) {
 	var (
-		out     strings.Builder
-		missing []string
+		out      strings.Builder
+		missing  []string
+		resolved []string
 	)
 	out.Grow(len(raw))
 
@@ -42,21 +44,24 @@ func interpolate(raw string) (string, error) {
 		}
 		end := strings.IndexByte(raw[i:], '}')
 		if end < 0 {
-			return "", errors.New("unterminated ${ in config")
+			return "", nil, errors.New("unterminated ${ in config")
 		}
 		ref := raw[i+2 : i+end]
 		value, err := resolveRef(ref)
 		if err != nil {
 			missing = append(missing, err.Error())
 		}
+		if value != "" {
+			resolved = append(resolved, value)
+		}
 		out.WriteString(value)
 		i += end + 1
 	}
 
 	if len(missing) > 0 {
-		return "", fmt.Errorf("%s", strings.Join(missing, "; "))
+		return "", nil, fmt.Errorf("%s", strings.Join(missing, "; "))
 	}
-	return out.String(), nil
+	return out.String(), resolved, nil
 }
 
 func resolveRef(ref string) (string, error) {

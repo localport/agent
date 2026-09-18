@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/localport/agent/internal/security"
+
 	"go.yaml.in/yaml/v4"
 )
 
@@ -93,16 +95,49 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	expanded, err := interpolate(string(raw))
+	expanded, resolved, err := interpolate(string(raw))
 	if err != nil {
 		return nil, err
 	}
 
+	// Unknown keys are errors. A misspelled `host` would default to localhost
+	// and proxy to the wrong machine.
+	dec := yaml.NewDecoder(strings.NewReader(expanded))
+	dec.KnownFields(true)
+
 	var fc fileConfig
-	if err := yaml.Unmarshal([]byte(expanded), &fc); err != nil {
-		return nil, fmt.Errorf("parse yaml: %w", err)
+	if err := dec.Decode(&fc); err != nil {
+		// Parser errors can quote a substituted secret. A value longer than
+		// ten characters is quoted shortened, which RedactString cannot
+		// match, so every quoted value is redacted as well.
+		msg := security.RedactString(err.Error(), resolved...)
+		if len(resolved) > 0 {
+			msg = redactQuoted(msg)
+		}
+		return nil, fmt.Errorf("parse yaml: %s", msg)
 	}
 	return build(&fc)
+}
+
+// redactQuoted replaces every backtick-quoted span in a YAML error, which is
+// how the parser quotes a value, with [REDACTED].
+func redactQuoted(msg string) string {
+	var b strings.Builder
+	for {
+		start := strings.IndexByte(msg, '`')
+		if start < 0 {
+			break
+		}
+		end := strings.IndexByte(msg[start+1:], '`')
+		if end < 0 {
+			break
+		}
+		b.WriteString(msg[:start])
+		b.WriteString("`[REDACTED]`")
+		msg = msg[start+1+end+1:]
+	}
+	b.WriteString(msg)
+	return b.String()
 }
 
 // FromFlags builds a one-tunnel config from CLI arguments. The name defaults
@@ -252,7 +287,7 @@ func NormProto(p string) string {
 
 func build(fc *fileConfig) (*Config, error) {
 	if fc.Version != 1 {
-		return nil, fmt.Errorf("unsupported config version %d (only v1 is recognized)", fc.Version)
+		return nil, fmt.Errorf("unsupported config version %d: this agent reads version 1, see https://localport.io/docs/configuration", fc.Version)
 	}
 	if len(fc.Tunnels) == 0 && len(fc.Fleets) == 0 {
 		return nil, errors.New("the file lists no tunnels and no fleets")

@@ -256,3 +256,20 @@ access:
 		t.Fatalf("load: %v", err)
 	}
 }
+
+// Unknown keys in an access file are errors.
+func TestLoadAccessConfigRejectsUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "access.yaml")
+	body := "version: 1\naccess:\n  - device: gw-01.eu.localport.dev\n    forwards: [\"5020:502\"]\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadAccessConfig(path)
+	if err == nil {
+		t.Fatal("expected the unknown field to be refused")
+	}
+	if !strings.Contains(err.Error(), "forwards") {
+		t.Fatalf("error should name the field, got %q", err)
+	}
+}
