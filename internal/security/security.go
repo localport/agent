@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 )
 
 // ResolveToken returns a token from the flag value, the environment variable or
@@ -20,16 +21,15 @@ func ResolveToken(flagValue, envName string) (string, error) {
 	return token, nil
 }
 
-// ResolveOptionalToken is like ResolveToken but returns an empty token instead
-// of an error when no source is set.
+// ResolveOptionalToken is like ResolveToken but returns an empty token when no
+// source is set.
 //
-// The `<NAME>_FILE` form keeps the secret out of the process environment, where
-// /proc/<pid>/environ exposes it to root and to anything running as the same
-// user. It is what systemd's LoadCredential= writes and what the services'
-// docker secrets use. Precedence matches theirs, so an explicit value still
-// wins over the file.
+// The `<NAME>_FILE` form keeps the secret out of /proc/<pid>/environ and
+// works with systemd LoadCredential= and Docker secrets. An explicit value
+// takes precedence over the file.
 func ResolveOptionalToken(flagValue, envName string) (string, error) {
 	if v := strings.TrimSpace(flagValue); v != "" {
+		warnTokenOnCommandLine(envName)
 		return v, nil
 	}
 	if envName == "" {
@@ -42,8 +42,7 @@ func ResolveOptionalToken(flagValue, envName string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
-	// A token is a bearer secret, so the file holding it is read under the same
-	// owner-only rules as a private key.
+	// Token files follow the owner-only rules for private keys.
 	data, err := ReadPrivateFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read %s_FILE: %w", envName, err)
@@ -95,4 +94,32 @@ func SanitizeDisplay(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// warnedCommandLineToken limits the notice to one per process.
+var warnedCommandLineToken atomic.Bool
+
+// warnTokenOnCommandLine warns once that a token on the command line is visible
+// to all local accounts through `ps`, `/proc/<pid>/cmdline` and shell history.
+func warnTokenOnCommandLine(envName string) {
+	if envName == "" || warnedCommandLineToken.Swap(true) {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"  warning: the token was passed on the command line, where every local account can read it.\n"+
+			"           Use %s_FILE, or %s, instead.\n", envName, envName)
+}
+
+// warnedCommandLineSecret limits the notice to one per process.
+var warnedCommandLineSecret atomic.Bool
+
+// WarnSecretOnCommandLine warns once that a secret flag is visible to all local
+// accounts and names the supported alternatives.
+func WarnSecretOnCommandLine(flag, alternatives string) {
+	if warnedCommandLineSecret.Swap(true) {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"  warning: %s was passed on the command line, where every local account can read it.\n"+
+			"           Use %s instead.\n", flag, alternatives)
 }

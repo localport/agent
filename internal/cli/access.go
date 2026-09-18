@@ -370,43 +370,6 @@ func runAccessFromConfig(path string) error {
 	return firstErr
 }
 
-// minPasswordLength is the length of the passwords we issue with an archive.
-const minPasswordLength = 12
-
-// resolveP12Password reads the password in order, flag then file then env var.
-// An empty string is not an error, so a passwordless archive still opens; one
-// that needs a password fails at decode.
-func resolveP12Password(inline, filePath, envName string) (string, error) {
-	switch {
-	case inline != "":
-		return noteWeakPassword(inline), nil
-	case filePath != "":
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			return "", fmt.Errorf("read p12 password file: %w", err)
-		}
-		return noteWeakPassword(strings.TrimSpace(string(data))), nil
-	}
-	if envName == "" {
-		envName = defaultP12PasswordEnv
-	}
-	v, ok := os.LookupEnv(envName)
-	if !ok || v == "" {
-		return "", nil
-	}
-	return noteWeakPassword(v), nil
-}
-
-// noteWeakPassword warns and carries on. It never refuses, because an archive
-// exported elsewhere is the holder's own key management, and rejecting it here
-// would block a working credential over a rule that applies to ours.
-func noteWeakPassword(p string) string {
-	if len(p) > 0 && len(p) < minPasswordLength {
-		fmt.Fprintf(os.Stderr, "  warning: PKCS#12 password is under %d characters\n", minPasswordLength)
-	}
-	return p
-}
-
 func usageAccess(fs *flag.FlagSet) {
 	fmt.Fprint(os.Stderr, `Usage: localport access <device-host> -L [local:]remote [flags]
        localport access <device-host> --stdio <port> [flags]
@@ -452,4 +415,41 @@ func usageAccess(fs *flag.FlagSet) {
 Flags:
 `)
 	fs.PrintDefaults()
+}
+
+// minPasswordLength is the shortest PKCS#12 password accepted without a
+// warning, matching the archives Localport issues.
+const minPasswordLength = 12
+
+func resolveP12Password(inline, filePath, envName string) (string, error) {
+	switch {
+	case inline != "":
+		security.WarnSecretOnCommandLine("--p12-pass", "--p12-pass-env or --p12-pass-file")
+		return noteWeakPassword(inline), nil
+	case filePath != "":
+		// Owner-only and no symlink, as for the archive. This file unlocks the
+		// key.
+		data, err := security.ReadPrivateFile(filePath)
+		if err != nil {
+			return "", fmt.Errorf("read p12 password file: %w", err)
+		}
+		return noteWeakPassword(strings.TrimSpace(string(data))), nil
+	}
+	if envName == "" {
+		envName = defaultP12PasswordEnv
+	}
+	v, ok := os.LookupEnv(envName)
+	if !ok || v == "" {
+		return "", nil
+	}
+	return noteWeakPassword(v), nil
+}
+
+// noteWeakPassword warns and continues. Archives from other issuers follow
+// their own password policy.
+func noteWeakPassword(p string) string {
+	if len(p) > 0 && len(p) < minPasswordLength {
+		fmt.Fprintf(os.Stderr, "  warning: PKCS#12 password is under %d characters\n", minPasswordLength)
+	}
+	return p
 }
