@@ -1,7 +1,6 @@
 package tunnel
 
 import (
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -114,20 +113,18 @@ func (s *muxServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		copyWithCounters(local, reqSrc, inCounters...)
-		// Propagate the visitor's half-close so a local service waiting on EOF
-		// (anything request/response shaped) sees it and replies.
+	var reqErr error
+	wg.Go(func() {
+		reqErr = copyWithCounters(local, reqSrc, inCounters...)
+		// Forward the visitor half-close so a service waiting for EOF replies.
 		halfCloseOrClose(local)
-	}()
+	})
 
-	copyWithCounters(&flushWriter{w: w, f: flusher}, respSrc, outCounters...)
+	respErr := copyWithCounters(&flushWriter{w: w, f: flusher}, respSrc, outCounters...)
 	wg.Wait()
 
 	if s.tracker != nil {
-		s.tracker.End(ac, nil)
+		s.tracker.End(ac, firstCopyError(respErr, reqErr))
 	}
 }
 
@@ -165,18 +162,6 @@ func (fw *flushWriter) Write(p []byte) (int, error) {
 		fw.f.Flush()
 	}
 	return n, err
-}
-
-// ignoreClosed drops the errors that simply mean the peer finished, so a normal
-// teardown is not reported as a failure.
-func ignoreClosed(err error) error {
-	if err == nil ||
-		errors.Is(err, io.EOF) ||
-		errors.Is(err, net.ErrClosed) ||
-		errors.Is(err, http.ErrBodyReadAfterClose) {
-		return nil
-	}
-	return err
 }
 
 // Stream headers set by the edge. They carry the NewConnection fields of the

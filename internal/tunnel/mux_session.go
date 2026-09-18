@@ -315,8 +315,8 @@ func (t *Tunnel) Begin(remote string, target connTarget, localConn net.Conn) *ac
 	return ac
 }
 
-// End removes a finished stream from the live view. Byte counts were folded in
-// as they moved, so nothing is added here.
+// End removes a finished stream from the live view. Bytes were counted during
+// the copy. The caller filters err through firstCopyError.
 func (t *Tunnel) End(ac *activeConn, err error) {
 	if ac == nil {
 		return
@@ -325,6 +325,6 @@ func (t *Tunnel) End(ac *activeConn, err error) {
 
 	if h := t.opts.Handler; h != nil {
 		h.OnDataClose(t.opts.Label, ac.id, ac.local, ac.remote,
-			ac.bytesIn.Load(), ac.bytesOut.Load(), time.Since(ac.startedAt), ignoreClosed(err))
+			ac.bytesIn.Load(), ac.bytesOut.Load(), time.Since(ac.startedAt), err)
 	}
 }

@@ -18,11 +18,14 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/localport/agent/internal/proto"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/transport"
+
+	"golang.org/x/net/http2"
 )
 
 const (
@@ -1111,23 +1114,23 @@ func (t *Tunnel) serveData(ac *activeConn, connID string, edge, local net.Conn, 
 		respSrc = insp.wrapResponse(local)
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		copyWithCounters(local, reqSrc, &ac.bytesIn, &t.totalBytesIn)
+	var (
+		wg            sync.WaitGroup
+		inErr, outErr error
+	)
+	wg.Go(func() {
+		inErr = copyWithCounters(local, reqSrc, &ac.bytesIn, &t.totalBytesIn)
 		halfCloseOrClose(local)
-	}()
-	go func() {
-		defer wg.Done()
-		copyWithCounters(edge, respSrc, &ac.bytesOut, &t.totalBytesOut)
+	})
+	wg.Go(func() {
+		outErr = copyWithCounters(edge, respSrc, &ac.bytesOut, &t.totalBytesOut)
 		halfCloseOrClose(edge)
-	}()
+	})
 	wg.Wait()
 	edge.Close()
 	local.Close()
 
-	closeEvt(ac.bytesIn.Load(), ac.bytesOut.Load(), nil)
+	closeEvt(ac.bytesIn.Load(), ac.bytesOut.Load(), firstCopyError(inErr, outErr))
 }
 
 // halfCloseOrClose signals EOF to the peer: half-close when supported,
@@ -1151,8 +1154,9 @@ var copyBufPool = sync.Pool{
 
 // copyWithCounters copies src to dst and adds each write to every counter.
 // It avoids io.Copy, whose splice path between TCP connections would bypass
-// the counters.
-func copyWithCounters(dst io.Writer, src io.Reader, counters ...*atomic.Int64) {
+// the counters. It returns nil at end of stream, otherwise the read or write
+// error.
+func copyWithCounters(dst io.Writer, src io.Reader, counters ...*atomic.Int64) error {
 	bufp := copyBufPool.Get().(*[]byte)
 	defer copyBufPool.Put(bufp)
 	buf := *bufp
@@ -1165,14 +1169,53 @@ func copyWithCounters(dst io.Writer, src io.Reader, counters ...*atomic.Int64) {
 					c.Add(int64(nw))
 				}
 			}
-			if werr != nil || nr != nw {
-				return
+			if werr != nil {
+				return werr
+			}
+			if nr != nw {
+				return io.ErrShortWrite
 			}
 		}
 		if rerr != nil {
-			return
+			if errors.Is(rerr, io.EOF) {
+				return nil
+			}
+			return rerr
 		}
 	}
+}
+
+// ignoreClosed drops errors from a normal peer close, ECONNRESET or EPIPE on
+// dial-back and RST_STREAM with CANCEL, NO_ERROR or STREAM_CLOSED on the mux.
+// Keep in sync with access.isNormalClose.
+func ignoreClosed(err error) error {
+	if err == nil ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, http.ErrBodyReadAfterClose) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) {
+		return nil
+	}
+	var streamErr http2.StreamError
+	if errors.As(err, &streamErr) {
+		switch streamErr.Code {
+		case http2.ErrCodeCancel, http2.ErrCodeNo, http2.ErrCodeStreamClosed:
+			return nil
+		}
+	}
+	return err
+}
+
+// firstCopyError returns the first error from either copy direction that is
+// not a normal close.
+func firstCopyError(errs ...error) error {
+	for _, err := range errs {
+		if e := ignoreClosed(err); e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 func (t *Tunnel) closeConn() {

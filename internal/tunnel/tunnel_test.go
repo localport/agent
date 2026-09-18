@@ -3,15 +3,21 @@ package tunnel
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/localport/agent/internal/proto"
+
+	"golang.org/x/net/http2"
 )
 
 func TestAllowedRedirectHost(t *testing.T) {
@@ -273,20 +279,6 @@ func TestNetworkChangeSkipsBackoff(t *testing.T) {
 	}
 }
 
-// The copy allocates nothing. The reader is reset outside the measured
-// closure.
-func TestCopyWithCountersTakesItsBufferFromThePool(t *testing.T) {
-	payload := bytes.Repeat([]byte("x"), 256*1024)
-	src := bytes.NewReader(nil)
-	n := testing.AllocsPerRun(50, func() {
-		src.Reset(payload)
-		copyWithCounters(io.Discard, src)
-	})
-	if n != 0 {
-		t.Fatalf("allocs per copy = %.1f, want 0: the buffer must come from copyBufPool", n)
-	}
-}
-
 // Wire values shown to the operator are stripped of terminal control
 // characters.
 func TestSanitizeDisplayStripsTerminalControl(t *testing.T) {
@@ -314,6 +306,62 @@ func TestSanitizeDisplayStripsTerminalControl(t *testing.T) {
 				t.Fatalf("sanitizeDisplay(%q) kept %U", in, r)
 			}
 		}
+	}
+}
+
+// ECONNRESET and EPIPE from a visitor hanging up are not reported.
+func TestIgnoreClosedSwallowsOrdinaryDisconnects(t *testing.T) {
+	ordinary := []error{
+		nil,
+		io.EOF,
+		net.ErrClosed,
+		http.ErrBodyReadAfterClose,
+		syscall.ECONNRESET,
+		syscall.EPIPE,
+		fmt.Errorf("read tcp 10.0.0.1:443: %w", syscall.ECONNRESET),
+		&net.OpError{Op: "write", Err: syscall.EPIPE},
+		// A visitor closing the tab resets the mux stream.
+		http2.StreamError{StreamID: 7, Code: http2.ErrCodeCancel},
+		http2.StreamError{StreamID: 9, Code: http2.ErrCodeNo},
+		http2.StreamError{StreamID: 11, Code: http2.ErrCodeStreamClosed},
+		fmt.Errorf("copy: %w", http2.StreamError{StreamID: 13, Code: http2.ErrCodeCancel}),
+	}
+	for _, err := range ordinary {
+		if got := ignoreClosed(err); got != nil {
+			t.Errorf("ignoreClosed(%v) = %v, want nil", err, got)
+		}
+	}
+
+	// Protocol errors are still reported.
+	if got := ignoreClosed(http2.StreamError{StreamID: 3, Code: http2.ErrCodeProtocol}); got == nil {
+		t.Error("a PROTOCOL_ERROR stream reset must be reported")
+	}
+
+	real := errors.New("connection reset by the local service")
+	if got := ignoreClosed(real); got == nil {
+		t.Fatal("a genuine failure must survive ignoreClosed")
+	}
+	if got := firstCopyError(nil, io.EOF, real); got != real {
+		t.Fatalf("firstCopyError = %v, want the genuine failure", got)
+	}
+	if got := firstCopyError(io.EOF, syscall.ECONNRESET); got != nil {
+		t.Fatalf("firstCopyError = %v, want nil when every copy ended normally", got)
+	}
+}
+
+// The copy allocates nothing. The reader is reset outside the measured
+// closure.
+func TestCopyWithCountersTakesItsBufferFromThePool(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 256*1024)
+	src := bytes.NewReader(nil)
+	n := testing.AllocsPerRun(50, func() {
+		src.Reset(payload)
+		if err := copyWithCounters(io.Discard, src); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if n != 0 {
+		t.Fatalf("allocs per copy = %.1f, want 0: the buffer must come from copyBufPool", n)
 	}
 }
 
