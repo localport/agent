@@ -1,6 +1,8 @@
 package access
 
 import (
+	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestParseDevice(t *testing.T) {
@@ -254,6 +257,51 @@ access:
 	}
 	if _, err := LoadAccessConfig(path); err != nil {
 		t.Fatalf("load: %v", err)
+	}
+}
+
+// clientConn holds s.mu across dial and handshake, so an unreachable device
+// must time out on connectTimeout independent of ctx.
+func TestSessionDialIsBoundedIndependentlyOfTheCallerContext(t *testing.T) {
+	old := connectTimeout
+	connectTimeout = 300 * time.Millisecond
+	defer func() { connectTimeout = old }()
+
+	// The listener accepts and never writes, so the TLS handshake hangs as
+	// with a blackholed edge.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { c.Close() })
+		}
+	}()
+
+	s := &Session{
+		Device:    "gw-01.eu.localport.dev",
+		Addr:      ln.Addr().String(),
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13},
+	}
+
+	start := time.Now()
+	_, err = s.Open(context.Background(), 502)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected the handshake to fail against a silent listener")
+	}
+	if elapsed > connectTimeout+2*time.Second {
+		t.Fatalf("Open took %v, want it bounded near connectTimeout (%v)", elapsed, connectTimeout)
+	}
+	if elapsed < connectTimeout {
+		t.Fatalf("Open returned in %v, before connectTimeout (%v) could have elapsed", elapsed, connectTimeout)
 	}
 }
 

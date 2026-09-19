@@ -16,6 +16,18 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// connectTimeout bounds one dial and TLS handshake, so an unreachable device
+// cannot hold the session lock indefinitely. Tests override it.
+var connectTimeout = 20 * time.Second
+
+const (
+	// h2ReadIdleTimeout is the idle time before the transport sends a ping.
+	// h2PingTimeout is the time a ping may go unanswered before the
+	// connection is closed.
+	h2ReadIdleTimeout = 30 * time.Second
+	h2PingTimeout     = 15 * time.Second
+)
+
 // Session carries all forwards to a device over one HTTP/2 connection to the
 // edge, with one CONNECT stream per accepted local connection. A dropped
 // connection is dialed again by the next forward.
@@ -88,7 +100,12 @@ func (s *Session) clientConn(ctx context.Context) (*http2.ClientConn, error) {
 	}
 
 	if s.transport == nil {
-		s.transport = &http2.Transport{}
+		// Pings detect a connection lost to a network switch before the next
+		// forward uses it.
+		s.transport = &http2.Transport{
+			ReadIdleTimeout: h2ReadIdleTimeout,
+			PingTimeout:     h2PingTimeout,
+		}
 	}
 	if s.TLSConfig == nil {
 		return nil, errors.New("no certificate to present")
@@ -98,13 +115,18 @@ func (s *Session) clientConn(ctx context.Context) (*http2.ClientConn, error) {
 	cfg.ServerName = s.Device
 	cfg.NextProtos = []string{"h2"}
 
+	// ctx lives as long as the process. The dial holds s.mu, so it needs its
+	// own bound.
+	dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+
 	dialer := &net.Dialer{}
-	raw, err := dialer.DialContext(ctx, "tcp", s.Addr)
+	raw, err := dialer.DialContext(dialCtx, "tcp", s.Addr)
 	if err != nil {
 		return nil, dialError(s.Device, err)
 	}
 	tlsConn := tls.Client(raw, cfg)
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
+	if err := tlsConn.HandshakeContext(dialCtx); err != nil {
 		_ = raw.Close()
 		return nil, handshakeError(s.Device, err)
 	}

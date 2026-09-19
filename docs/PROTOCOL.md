@@ -511,7 +511,8 @@ port must be one the device serves. Refusals come back as status codes:
 The connection is closed when the device disconnects, when the certificate
 chain expires, when a grant is narrowed, and when the certificate is revoked.
 The command re-dials on the next forward, and the new attempt is refused if the
-grant no longer covers it.
+grant no longer covers it. An idle connection is pinged after 30 s and dropped
+if the ping goes unanswered for 15 s.
 
 **Server verification uses the system trust store.** The edge presents its
 region zone wildcard certificate, publicly trusted and issued by Let's Encrypt,
