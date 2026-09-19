@@ -110,8 +110,11 @@ func (e *APIError) RetryAfter() (time.Duration, bool) {
 	return e.retryAfter, e.retryAfter > 0
 }
 
-// isRetryable reports whether waiting could change the answer. Transport
-// failures, 5xx and 429 are retried; every other 4xx is a refusal.
+// isRetryable reports whether a retry could succeed. Transport failures, 5xx
+// and 429 are retryable. Other 4xx responses are refusals.
+//
+// Cancellation is checked by retry on ctx. http.Client.Timeout also matches
+// context.DeadlineExceeded, so the error cannot tell the two apart.
 func isRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -120,9 +123,9 @@ func isRetryable(err error) bool {
 	if errors.As(err, &apiErr) {
 		return apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= 500
 	}
-	// No status at all: dial, DNS, TLS, timeout, reset, EOF mid-body.
-	// Cancellation is not retried; the caller asked us to stop.
-	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+	// No status means a transport failure such as DNS, dial, TLS, timeout,
+	// reset or truncated body.
+	return true
 }
 
 const (
@@ -138,22 +141,28 @@ const (
 // RetryNotice reports one wait before the next attempt. Optional.
 type RetryNotice func(attempt int, wait time.Duration, err error)
 
-// retry runs fn until it succeeds, hits a terminal error, or spends the budget.
-// Waits carry full jitter so agents recovering from one outage do not retry in
-// lockstep. A zero budget makes exactly one attempt.
+// retry runs fn until it succeeds, returns a terminal error or exhausts the
+// budget. Waits use full jitter to spread retries across agents. A zero budget
+// makes one attempt.
 func retry(ctx context.Context, budget time.Duration, onWait RetryNotice, fn func() error) error {
 	deadline := time.Now().Add(budget)
 	delay := retryBaseDelay
 
 	for attempt := 1; ; attempt++ {
 		err := fn()
-		if err == nil || !isRetryable(err) {
+		if err == nil {
+			return nil
+		}
+		// Check ctx. See isRetryable.
+		if ctx.Err() != nil {
+			return err
+		}
+		if !isRetryable(err) {
 			return err
 		}
 
 		wait := jitter(delay)
-		// Retry-After wins, clamped below to the remaining budget so a bad
-		// value cannot park the agent.
+		// Retry-After takes precedence, capped at the remaining budget.
 		var apiErr *APIError
 		if errors.As(err, &apiErr) {
 			if asked, ok := apiErr.RetryAfter(); ok {

@@ -76,6 +76,11 @@ func fetchGitHubActionsToken(ctx context.Context, audience string) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("parse %s: %w", githubTokenURLEnv, err)
 	}
+	// The URL comes from the environment and receives the request token, so
+	// require https. The URL is not echoed in the error.
+	if u.Scheme != "https" {
+		return "", fmt.Errorf("%s must be an https URL", githubTokenURLEnv)
+	}
 	q := u.Query()
 	q.Set("audience", audience)
 	u.RawQuery = q.Encode()
