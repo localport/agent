@@ -34,7 +34,10 @@ type Proxy struct {
 
 // Run binds every forward and serves until ctx ends.
 func (p *Proxy) Run(ctx context.Context) error {
-	var listeners []net.Listener
+	var (
+		wg        sync.WaitGroup
+		listeners []net.Listener
+	)
 	defer func() {
 		for _, ln := range listeners {
 			_ = ln.Close()
@@ -50,15 +53,25 @@ func (p *Proxy) Run(ctx context.Context) error {
 		if p.OnListen != nil {
 			p.OnListen(f, ln.Addr().String())
 		}
-		go p.serve(ctx, ln, f)
+
+		wg.Add(1)
+		go func(ln net.Listener, f Forward) {
+			defer wg.Done()
+			p.serve(ctx, ln, f, &wg)
+		}(ln, f)
 	}
 
 	<-ctx.Done()
+	for _, ln := range listeners {
+		_ = ln.Close()
+	}
+	wg.Wait()
 	return nil
 }
 
-// serve accepts on one listener until it is closed.
-func (p *Proxy) serve(ctx context.Context, ln net.Listener, f Forward) {
+// serve accepts on one listener. Connections are tracked so Run returns only
+// after all forwards finish.
+func (p *Proxy) serve(ctx context.Context, ln net.Listener, f Forward, wg *sync.WaitGroup) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -70,7 +83,11 @@ func (p *Proxy) serve(ctx context.Context, ln net.Listener, f Forward) {
 			}
 			continue
 		}
-		go p.handle(ctx, conn, f)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.handle(ctx, conn, f)
+		}()
 	}
 }
 
@@ -85,6 +102,18 @@ func (p *Proxy) handle(ctx context.Context, local net.Conn, f Forward) {
 		return
 	}
 	defer stream.Close()
+
+	// On cancel, close both sides to unblock pending reads.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = local.Close()
+			_ = stream.Close()
+		case <-done:
+		}
+	}()
 
 	if p.OnConn != nil {
 		p.OnConn(local.RemoteAddr().String(), f.RemotePort)

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -257,6 +259,61 @@ access:
 	}
 	if _, err := LoadAccessConfig(path); err != nil {
 		t.Fatalf("load: %v", err)
+	}
+}
+
+// Cancelling ends a forward that is mid-copy with an idle peer. The device
+// accepts the CONNECT and then sends nothing, so only closing the stream and
+// the local connection can end the copy.
+func TestProxyRunReturnsWithAForwardOpen(t *testing.T) {
+	release := make(chan struct{})
+	device := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	device.EnableHTTP2 = true
+	device.StartTLS()
+	defer device.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &Proxy{
+		Session: &Session{
+			Device:    "gw-01",
+			Addr:      device.Listener.Addr().String(),
+			TLSConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}, //nolint:gosec // test server
+		},
+		Forwards: []Forward{{LocalAddr: "127.0.0.1:0", RemotePort: 502}},
+	}
+	bound := make(chan string, 1)
+	connected := make(chan struct{}, 1)
+	p.OnListen = func(_ Forward, addr string) { bound <- addr }
+	p.OnConn = func(string, uint16) { connected <- struct{}{} }
+
+	returned := make(chan error, 1)
+	go func() { returned <- p.Run(ctx) }()
+
+	client, err := net.Dial("tcp", <-bound)
+	if err != nil {
+		t.Fatalf("dial forward: %v", err)
+	}
+	defer client.Close()
+
+	select {
+	case <-connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the forward never opened a stream to the device")
+	}
+
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s of cancellation")
 	}
 }
 
