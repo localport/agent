@@ -5,7 +5,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"strings"
@@ -168,9 +170,9 @@ func assertLeafFresh(cert tls.Certificate) error {
 // classify names the two failures an operator can act on.
 func classify(prefix string, err error) error {
 	switch {
-	case os.IsNotExist(err):
+	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("%s: file not found: %w", prefix, err)
-	case os.IsPermission(err):
+	case errors.Is(err, fs.ErrPermission):
 		return fmt.Errorf("%s: permission denied: %w", prefix, err)
 	}
 	return fmt.Errorf("%s: %w", prefix, err)

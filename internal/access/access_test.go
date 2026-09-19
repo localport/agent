@@ -378,3 +378,58 @@ func TestLoadAccessConfigRejectsUnknownFields(t *testing.T) {
 		t.Fatalf("error should name the field, got %q", err)
 	}
 }
+
+// classify matches wrapped errors, which os.IsNotExist does not unwrap.
+func TestBuildTLSConfigNamesFileErrors(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent.pem")
+	_, err := BuildTLSConfig(missing, "", "", "gw-01.eu.localport.dev:443", "")
+	if err == nil {
+		t.Fatal("want an error for a missing PEM file")
+	}
+	if !strings.Contains(err.Error(), "file not found") {
+		t.Fatalf("error should name the cause, got %q", err)
+	}
+
+	// A PEM file readable by group or other is refused before parsing.
+	open := filepath.Join(t.TempDir(), "open.pem")
+	if err := os.WriteFile(open, []byte("not a PEM file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = BuildTLSConfig(open, "", "", "gw-01.eu.localport.dev:443", "")
+	if err == nil {
+		t.Fatal("want an error for a world-readable PEM file")
+	}
+	if !strings.Contains(err.Error(), "too-open permissions") {
+		t.Fatalf("error should name the permissions, got %q", err)
+	}
+}
+
+// Revoked certificates and withdrawn grants get specific messages.
+func TestStreamErrorExplainsEveryCertificateAlert(t *testing.T) {
+	// crypto/tls alertText strings, wrapped in net.OpError as for a
+	// post-handshake alert.
+	cases := []struct{ alert, want string }{
+		{"tls: bad certificate", "refused this certificate"},
+		{"tls: unknown certificate", "refused this certificate"},
+		{"tls: certificate required", "refused this certificate"},
+		{"tls: unknown certificate authority", "refused this certificate"},
+		{"tls: revoked certificate", "cannot be renewed"},
+		{"tls: access denied", "denied this identity"},
+		{"tls: expired certificate", "run `localport login` again"},
+	}
+	for _, tc := range cases {
+		err := streamError("gw-01.eu.localport.dev", errors.New("remote error: "+tc.alert))
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%q produced %q, want it to mention %q", tc.alert, err, tc.want)
+		}
+		if !strings.Contains(err.Error(), "gw-01.eu.localport.dev") {
+			t.Errorf("%q: error should name the device, got %q", tc.alert, err)
+		}
+	}
+
+	// Other alerts keep the generic message.
+	other := streamError("gw-01.eu.localport.dev", errors.New("connection reset by peer"))
+	if !strings.Contains(other.Error(), "ended") {
+		t.Fatalf("unrecognised failure = %q", other)
+	}
+}

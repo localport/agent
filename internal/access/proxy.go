@@ -200,6 +200,10 @@ func streamError(device string, err error) error {
 		strings.Contains(msg, "tls: certificate required"),
 		strings.Contains(msg, "tls: unknown certificate authority"):
 		return fmt.Errorf("%s refused this certificate: check that the identity has access to the device, and run `localport identity list`: %w", device, err)
+	case strings.Contains(msg, "tls: revoked certificate"):
+		return fmt.Errorf("%s reports this certificate as revoked: it cannot be renewed, so obtain a new one with `localport setup <TOKEN>` or `localport login`: %w", device, err)
+	case strings.Contains(msg, "tls: access denied"):
+		return fmt.Errorf("%s denied this identity: its access to the device was withdrawn or narrowed, check the grants in the dashboard: %w", device, err)
 	case strings.Contains(msg, "tls: certificate expired"),
 		strings.Contains(msg, "tls: expired certificate"):
 		return fmt.Errorf("%s rejected the certificate as expired: run `localport login` again, or `localport identity renew`: %w", device, err)
