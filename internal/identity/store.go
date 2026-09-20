@@ -7,9 +7,11 @@
 package identity
 
 import (
+	"crypto"
 	"crypto/tls"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -353,6 +355,19 @@ func (m *Material) TLSCertificate() (*tls.Certificate, error) {
 	}
 	if len(cert.Certificate) == 0 {
 		return nil, fmt.Errorf("credential holds no certificate")
+	}
+	// Check the key matches the leaf. A mismatch otherwise fails as an opaque
+	// bad_certificate alert.
+	signer, ok := m.Key.(interface{ Public() crypto.PublicKey })
+	if !ok {
+		return nil, errors.New("credential key cannot report its public half")
+	}
+	matches, ok := leaf.PublicKey.(interface{ Equal(crypto.PublicKey) bool })
+	if !ok {
+		return nil, fmt.Errorf("certificate carries an unsupported public key type %T", leaf.PublicKey)
+	}
+	if !matches.Equal(signer.Public()) {
+		return nil, fmt.Errorf("the stored key does not match the stored certificate (serial %s): the credential is unusable and must be obtained again with `localport setup <TOKEN>` or `localport login`", m.Meta.Serial)
 	}
 	return cert, nil
 }

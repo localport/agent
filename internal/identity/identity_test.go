@@ -61,17 +61,17 @@ func TestRefFromCertReadsTheCertificate(t *testing.T) {
 		want Ref
 	}{
 		{
-			"spiffe://team_abc123.mtls.localport.dev/client/deploy-prod",
-			Ref{Team: "team_abc123", Kind: KindClient, Identity: "deploy-prod"},
+			"spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod",
+			Ref{Team: "01kpq7x2abcd34", Kind: KindClient, Identity: "deploy-prod"},
 		},
 		{
-			"spiffe://team_abc123.mtls.localport.dev/user/0mkppnsc7lsdcv",
-			Ref{Team: "team_abc123", Kind: KindUser, Identity: "0mkppnsc7lsdcv"},
+			"spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv",
+			Ref{Team: "01kpq7x2abcd34", Kind: KindUser, Identity: "0mkppnsc7lsdcv"},
 		},
 		{
 			// A device carries its tunnel between kind and identity.
-			"spiffe://team_abc123.mtls.localport.dev/device/tun12345/gw-01",
-			Ref{Team: "team_abc123", Kind: KindDevice, Identity: "gw-01"},
+			"spiffe://01kpq7x2abcd34.mtls.localport.dev/device/tun12345/gw-01",
+			Ref{Team: "01kpq7x2abcd34", Kind: KindDevice, Identity: "gw-01"},
 		},
 	} {
 		got, err := RefFromCert(selfSigned(t, tc.uri))
@@ -96,7 +96,7 @@ func TestRefFromCertRefusesAForeignURI(t *testing.T) {
 
 func TestSaveWritesKeyMaterialUnreadableByOthers(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
-	ref, err := store.Save(credentialFor(t, "spiffe://team_x.mtls.localport.dev/client/deploy-prod"))
+	ref, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestSaveWritesKeyMaterialUnreadableByOthers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.Meta.Identity != "deploy-prod" || got.Meta.Team != "team_x" || got.Meta.Kind != KindClient {
+	if got.Meta.Identity != "deploy-prod" || got.Meta.Team != "01kpq7x2abcd34" || got.Meta.Kind != KindClient {
 		t.Fatalf("metadata round trip lost data: %+v", got.Meta)
 	}
 }
@@ -133,9 +133,9 @@ func TestSaveWritesKeyMaterialUnreadableByOthers(t *testing.T) {
 func TestSignInAndSetupTokenDoNotOverwriteEachOther(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 
-	machine := credentialFor(t, "spiffe://team_x.mtls.localport.dev/client/deploy-prod")
+	machine := credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod")
 	machine.Meta.Source = SourceToken
-	person := credentialFor(t, "spiffe://team_x.mtls.localport.dev/user/0mkppnsc7lsdcv")
+	person := credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv")
 	person.Meta.Source = SourceSSO
 
 	machineRef, err := store.Save(machine)
@@ -172,8 +172,8 @@ func TestSignInAndSetupTokenDoNotOverwriteEachOther(t *testing.T) {
 func TestResolveRefusesToGuessBetweenIdentities(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 	for _, uri := range []string{
-		"spiffe://team_a.mtls.localport.dev/client/deploy-prod",
-		"spiffe://team_b.mtls.localport.dev/client/deploy-prod",
+		"spiffe://02mfr8y3bcde45.mtls.localport.dev/client/deploy-prod",
+		"spiffe://03ngs9z4cdef56.mtls.localport.dev/client/deploy-prod",
 	} {
 		if _, err := store.Save(credentialFor(t, uri)); err != nil {
 			t.Fatal(err)
@@ -186,12 +186,12 @@ func TestResolveRefusesToGuessBetweenIdentities(t *testing.T) {
 	if _, err := store.Resolve(Selector{Identity: "deploy-prod"}); err == nil {
 		t.Fatal("expected an ambiguous identity to be refused")
 	}
-	got, err := store.Resolve(Selector{Team: "team_b"})
+	got, err := store.Resolve(Selector{Team: "03ngs9z4cdef56"})
 	if err != nil {
-		t.Fatalf("Resolve(team_b): %v", err)
+		t.Fatalf("Resolve(03ngs9z4cdef56): %v", err)
 	}
-	if got.Team != "team_b" {
-		t.Fatalf("Resolve(team_b) = %+v", got)
+	if got.Team != "03ngs9z4cdef56" {
+		t.Fatalf("Resolve(03ngs9z4cdef56) = %+v", got)
 	}
 }
 
@@ -200,7 +200,7 @@ func TestResolveRefusesToGuessBetweenIdentities(t *testing.T) {
 // as another party and attribute its traffic to them.
 func TestReloadRefusesASwappedPrincipal(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
-	ref, err := store.Save(credentialFor(t, "spiffe://team_x.mtls.localport.dev/client/deploy-prod"))
+	ref, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestReloadRefusesASwappedPrincipal(t *testing.T) {
 
 	// Overwrite in place with a different principal, as the old team-keyed
 	// layout did whenever the other command ran.
-	other := credentialFor(t, "spiffe://team_x.mtls.localport.dev/user/0mkppnsc7lsdcv")
+	other := credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv")
 	otherKeyPEM, err := other.Key.(persistentKey).marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -332,7 +332,7 @@ func TestRenewNeverCallsTheServerForASignInCredential(t *testing.T) {
 // The device flow sends no renew_after; synthesizing one gave an 8-hour sign-in
 // the renewal schedule of a machine set up with a setup token.
 func TestSignInMaterialCarriesNoRenewalDeadline(t *testing.T) {
-	leaf := selfSigned(t, "spiffe://team_abc123.mtls.localport.dev/user/0mkppnsc7lsdcv")
+	leaf := selfSigned(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv")
 	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))
 	client := &Client{BaseURL: "https://api.localport.io"}
 
@@ -402,7 +402,7 @@ func TestLoginPollingIsDrivenByControlPlaneErrorCodes(t *testing.T) {
 
 	// Sequence: pending, slow_down, then the certificate. The loop must survive
 	// the first two and only stop on the third.
-	leaf := selfSigned(t, "spiffe://team_abc123.mtls.localport.dev/user/0mkppnsc7lsdcv")
+	leaf := selfSigned(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv")
 	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))
 
 	var polls int
@@ -521,7 +521,7 @@ func credentialFor(t *testing.T, uri string) Material {
 // description, so a second holder conflicts even inside one process.
 func TestRenewalLockAdmitsOneWriter(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
-	ref, err := store.Save(credentialFor(t, "spiffe://team_x.mtls.localport.dev/client/deploy-prod"))
+	ref, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -621,7 +621,7 @@ func TestSignerProducesTheSameSignatureFormatAsSignASN1(t *testing.T) {
 // leaves a key.pem behind, and Load must find whatever Save wrote.
 func TestSaveRoundTripsTheKeyBacking(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
-	ref, err := store.Save(credentialFor(t, "spiffe://team_x.mtls.localport.dev/client/deploy-prod"))
+	ref, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -649,7 +649,7 @@ func TestSaveRoundTripsTheKeyBacking(t *testing.T) {
 // and keeps firing.
 func TestStoredMetadataNeverCarriesAZeroTimestamp(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
-	cred := credentialFor(t, "spiffe://team_x.mtls.localport.dev/user/0mkppnsc7lsdcv")
+	cred := credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv")
 	cred.Meta.Source = SourceSSO
 
 	ref, err := store.Save(cred)

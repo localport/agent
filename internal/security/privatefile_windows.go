@@ -214,6 +214,10 @@ func assertOwnerIsTrusted(owner *windows.SID, path string) error {
 	return nil
 }
 
+// setPrivateDACL applies the protected DACL to an existing directory through
+// an open handle, so the path cannot be swapped between check and use.
+// FILE_FLAG_OPEN_REPARSE_POINT opens a junction itself, so a planted junction
+// cannot redirect the DACL to another directory.
 func setPrivateDACL(path string) error {
 	sd, err := privateSecurityDescriptor()
 	if err != nil {
@@ -223,7 +227,24 @@ func setPrivateDACL(path string) error {
 	if err != nil {
 		return fmt.Errorf("read DACL for %s: %w", path, err)
 	}
-	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return fmt.Errorf("secure %s: %w", path, err)
+	}
+	h, err := windows.CreateFile(p,
+		windows.WRITE_DAC|windows.READ_CONTROL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer windows.CloseHandle(h)
+
+	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		nil, nil, dacl, nil); err != nil {
 		return fmt.Errorf("secure %s: %w", path, err)

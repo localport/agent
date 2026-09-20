@@ -17,9 +17,9 @@ const (
 	KindDevice Kind = "device"
 )
 
-// Valid reports whether k is a namespace this build knows. A positive allowlist:
-// an unrecognised kind would be filed under its own directory and resolved
-// through the wrong SPIFFE namespace, so it is refused rather than carried.
+// Valid reports whether k is a namespace this build knows. An unknown kind is
+// refused, since it would be stored under its own directory and resolved
+// through the wrong SPIFFE namespace.
 func (k Kind) Valid() bool {
 	switch k {
 	case KindUser, KindClient, KindDevice:
@@ -29,45 +29,52 @@ func (k Kind) Valid() bool {
 	}
 }
 
-// Ref locates one stored credential: `<team>/<kind>-<identity>`.
-//
-// Both components are load-bearing. Team, because one machine legitimately holds
-// credentials for several. Kind, because `user` and `client` may hold the same
-// identity string, so keying on team alone lets `localport login` and
-// `localport setup` overwrite each other.
-//
-// No control-plane component: which plane issued a credential is recorded in
-// Meta.APIURL, which is what renewal reads.
+// Ref locates one stored credential at `<team>/<kind>-<identity>`. A machine
+// can hold credentials for several teams, and `user` and `client` may share an
+// identity string, so both components are required. The issuing control plane
+// is recorded in Meta.APIURL.
 type Ref struct {
 	Team     string
 	Kind     Kind
 	Identity string
 }
 
-// String is the CANONICAL selector form, `<team>/<kind>/<identity>`. Every
-// ambiguity error prints it, so the value a person reads pastes straight back
-// into --identity.
+// String returns the full selector form, `<team>/<kind>/<identity>`.
+// Ambiguity errors print it so it can be passed back to --identity.
 func (r Ref) String() string {
 	return r.Team + "/" + string(r.Kind) + "/" + r.Identity
 }
 
 // dir is the Ref's path relative to the store root. Components are used
-// verbatim; valid() is what keeps them safe as path segments.
+// verbatim, and valid() keeps them safe as path segments.
 func (r Ref) dir() string {
 	return r.Team + "/" + string(r.Kind) + "-" + r.Identity
 }
 
-// valid reports whether every component is safe to use as a path segment.
-//
-// RefFromCert reads these out of a certificate, so a component of `..` would
-// escape the store root. Refused rather than repaired: a repaired component
-// names a different credential than the certificate does.
+// maxRefComponent bounds a path component for path safety. The control plane
+// applies its own, stricter limits.
+const maxRefComponent = 64
+
+// valid reports whether every component is a safe path segment. Components
+// come from certificates, so they must match the server grammar of lowercase
+// alphanumerics and internal dashes. Invalid components are refused and not
+// repaired.
 func (r Ref) valid() bool {
-	for _, part := range []string{r.Team, string(r.Kind), r.Identity} {
-		if part == "" || part == "." || part == ".." {
-			return false
-		}
-		if strings.ContainsAny(part, `/\:`) {
+	return r.Kind.Valid() && validRefComponent(r.Team) && validRefComponent(r.Identity)
+}
+
+func validRefComponent(s string) bool {
+	if s == "" || len(s) > maxRefComponent {
+		return false
+	}
+	if s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-':
+		default:
 			return false
 		}
 	}
@@ -147,9 +154,8 @@ func ParseSelector(raw string) (Selector, error) {
 	}
 }
 
-// RefFromCert reads the identity out of a leaf's SPIFFE URI SAN. The
-// certificate is authoritative: a directory named from a response field could
-// disagree with the material inside it.
+// RefFromCert reads the Ref from the leaf's SPIFFE URI SAN. The certificate is
+// authoritative over response fields.
 func RefFromCert(leaf *x509.Certificate) (Ref, error) {
 	for _, u := range leaf.URIs {
 		if u.Scheme != "spiffe" {
@@ -160,7 +166,7 @@ func RefFromCert(leaf *x509.Certificate) (Ref, error) {
 			continue
 		}
 		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-		// device carries its tunnel between kind and identity.
+		// A device path has the tunnel between kind and identity.
 		switch {
 		case len(parts) == 2:
 			return Ref{Team: team, Kind: Kind(parts[0]), Identity: parts[1]}, nil
