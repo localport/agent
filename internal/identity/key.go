@@ -7,23 +7,24 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"path/filepath"
 
 	"github.com/localport/agent/internal/security"
 )
 
-// Backing names where a private key lives. Written to meta.json, so these are a
-// stored format: do not repurpose one.
+// Backing names where a private key is stored. Values are persisted in
+// meta.json and must not change meaning.
 type Backing string
 
 const BackingFile Backing = "file"
 
-// KeyRef records enough to find a key again. A file key needs nothing beyond
-// its backing: it always sits at key.pem beside the certificate, and recording
-// the path as well would let meta.json disagree with where the file is.
+// KeyRef locates a stored private key.
 type KeyRef struct {
 	Backing Backing `json:"backing"`
+	// File is the key file name next to the certificate.
+	File string `json:"file"`
 }
 
 // Key is a private key the agent holds and signs with. It is a crypto.Signer,
@@ -53,11 +54,10 @@ func (k fileKey) marshal() ([]byte, error) {
 	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), nil
 }
 
-// generateKey creates a key of the given backing. P-256 throughout: it is what
-// the control plane issues against.
+// generateKey creates a P-256 key with the given backing.
 func generateKey(b Backing) (Key, error) {
 	switch b {
-	case BackingFile, "":
+	case BackingFile:
 		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			return nil, fmt.Errorf("generate key: %w", err)
@@ -68,24 +68,24 @@ func generateKey(b Backing) (Key, error) {
 	}
 }
 
-// loadKey opens the key a credential's metadata points at.
+// loadKey opens the key referenced by the credential metadata.
 func loadKey(dir string, ref KeyRef) (Key, error) {
 	switch ref.Backing {
-	case BackingFile, "":
-		return loadFileKey(dir)
+	case BackingFile:
+		return loadFileKey(dir, ref.File)
 	default:
 		return nil, fmt.Errorf("unsupported key backing %q", ref.Backing)
 	}
 }
 
-func loadFileKey(dir string) (Key, error) {
-	pemBytes, err := security.ReadPrivateFile(filepath.Join(dir, keyFile))
+func loadFileKey(dir, name string) (Key, error) {
+	pemBytes, err := security.ReadPrivateFile(filepath.Join(dir, name))
 	if err != nil {
 		return nil, err
 	}
 	block, _ := pem.Decode(pemBytes)
 	if block == nil {
-		return nil, fmt.Errorf("no private key in PEM data")
+		return nil, errors.New("no private key in PEM data")
 	}
 	switch block.Type {
 	case "EC PRIVATE KEY":
@@ -101,7 +101,7 @@ func loadFileKey(dir string) (Key, error) {
 		}
 		key, ok := parsed.(*ecdsa.PrivateKey)
 		if !ok {
-			return nil, fmt.Errorf("private key is not ECDSA")
+			return nil, errors.New("private key is not ECDSA")
 		}
 		return fileKey{key}, nil
 	}

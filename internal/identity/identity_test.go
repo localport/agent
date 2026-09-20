@@ -101,7 +101,11 @@ func TestSaveWritesKeyMaterialUnreadableByOthers(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	for _, name := range []string{keyFile, certFile, metaFile} {
+	meta, err := readMeta(filepath.Join(store.Dir(ref), metaFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{meta.Key.File, meta.Cert, metaFile} {
 		info, err := os.Stat(filepath.Join(store.Dir(ref), name))
 		if err != nil {
 			t.Fatalf("stat %s: %v", name, err)
@@ -127,9 +131,8 @@ func TestSaveWritesKeyMaterialUnreadableByOthers(t *testing.T) {
 	}
 }
 
-// `localport login` and `localport setup` must resolve to different
-// directories: one replacing the other would swap the principal a running
-// access presents.
+// `localport login` and `localport setup` credentials resolve to different
+// directories.
 func TestSignInAndSetupTokenDoNotOverwriteEachOther(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 
@@ -157,7 +160,7 @@ func TestSignInAndSetupTokenDoNotOverwriteEachOther(t *testing.T) {
 	if len(refs) != 2 {
 		t.Fatalf("store holds %d credentials, want 2: %+v", len(refs), refs)
 	}
-	// Both must still be intact and still be themselves.
+	// Both credentials are unchanged.
 	for ref, want := range map[Ref]Source{machineRef: SourceToken, personRef: SourceSSO} {
 		m, err := store.Load(ref)
 		if err != nil {
@@ -182,7 +185,7 @@ func TestResolveRefusesToGuessBetweenIdentities(t *testing.T) {
 	if _, err := store.Resolve(Selector{}); err == nil {
 		t.Fatal("expected Resolve to refuse rather than pick one of two identities")
 	}
-	// The identity is the same on both, so it cannot disambiguate on its own.
+	// Both share the identity, so it alone is ambiguous.
 	if _, err := store.Resolve(Selector{Identity: "deploy-prod"}); err == nil {
 		t.Fatal("expected an ambiguous identity to be refused")
 	}
@@ -195,9 +198,8 @@ func TestResolveRefusesToGuessBetweenIdentities(t *testing.T) {
 	}
 }
 
-// A renewal carries the identity forward, so a changed principal means the file
-// was replaced by something else. Presenting it would authenticate this process
-// as another party and attribute its traffic to them.
+// A reloaded certificate with a different principal is refused. Renewal keeps
+// the identity, so a change means another credential replaced the file.
 func TestReloadRefusesASwappedPrincipal(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 	ref, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
@@ -213,15 +215,18 @@ func TestReloadRefusesASwappedPrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Overwrite in place with a different principal, as the old team-keyed
-	// layout did whenever the other command ran.
+	// Overwrite the file with a different principal.
 	other := credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv")
 	otherKeyPEM, err := other.Key.(persistentKey).marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
 	dir := store.Dir(ref)
-	for name, data := range map[string][]byte{certFile: other.CertPEM, keyFile: otherKeyPEM} {
+	meta, err := readMeta(filepath.Join(dir, metaFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{meta.Cert: other.CertPEM, meta.Key.File: otherKeyPEM} {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -237,12 +242,8 @@ func TestReloadRefusesASwappedPrincipal(t *testing.T) {
 	}
 }
 
-// Components are used verbatim, and a component that could escape the store is
-// refused rather than repaired.
-//
-// The Ref is built from a certificate, so `..` in an identity is the case that
-// matters: repairing it would file the credential under a name that is not the
-// one the certificate carries.
+// Components are used verbatim. A component that could escape the store, such
+// as `..`, is refused and not repaired.
 func TestRefRefusesComponentsThatEscapeTheStore(t *testing.T) {
 	base := Ref{Team: "01kppnsc7lsdcv", Kind: KindClient, Identity: "deploy-prod"}
 	if !base.valid() {
@@ -329,8 +330,7 @@ func TestRenewNeverCallsTheServerForASignInCredential(t *testing.T) {
 	}
 }
 
-// The device flow sends no renew_after; synthesizing one gave an 8-hour sign-in
-// the renewal schedule of a machine set up with a setup token.
+// A device flow credential has no renew_after.
 func TestSignInMaterialCarriesNoRenewalDeadline(t *testing.T) {
 	leaf := selfSigned(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv")
 	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))
@@ -344,8 +344,7 @@ func TestSignInMaterialCarriesNoRenewalDeadline(t *testing.T) {
 		t.Fatalf("source = %q, want %q: nothing downstream can tell a person from a machine without it",
 			signIn.Meta.Source, SourceSSO)
 	}
-	// Absent, not zero. A zero time serialises as year 1 and reads as a corrupt
-	// record to anyone opening meta.json; the field is simply not written.
+	// The field is omitted. A zero time would serialize as year 1.
 	if signIn.Meta.RenewAfter != nil {
 		t.Fatalf("renew_after = %s, but the control plane sent none", *signIn.Meta.RenewAfter)
 	}
@@ -353,7 +352,7 @@ func TestSignInMaterialCarriesNoRenewalDeadline(t *testing.T) {
 		t.Fatal("a sign-in must report that it does not renew, not a timestamp")
 	}
 
-	// The fallback still protects a machine, where nobody is watching.
+	// A setup token credential still gets the fallback deadline.
 	machine, err := client.assemble(fileKey{testKey(t)}, issuedMaterial{CertPEM: certPEM, Source: SourceToken})
 	if err != nil {
 		t.Fatalf("assemble: %v", err)
@@ -391,17 +390,15 @@ func selfSigned(t *testing.T, uri string) *x509.Certificate {
 	return leaf
 }
 
-// The device-flow poll is driven by the codes the control plane returns, so the
-// two sides have to agree on them. A mismatch is silent and sign-in simply stops
-// working, which is why the values are pinned here rather than assumed.
+// Pins the device flow error codes shared with the control plane.
 func TestLoginPollingIsDrivenByControlPlaneErrorCodes(t *testing.T) {
 	if codeAuthorizationPending != "SE021" || codeSlowDown != "SE022" {
 		t.Fatalf("polling codes drifted from the control plane: pending=%q slow_down=%q",
 			codeAuthorizationPending, codeSlowDown)
 	}
 
-	// Sequence: pending, slow_down, then the certificate. The loop must survive
-	// the first two and only stop on the third.
+	// The server answers pending, slow_down, then the certificate. The loop
+	// continues on the first two.
 	leaf := selfSigned(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv")
 	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))
 
@@ -410,8 +407,7 @@ func TestLoginPollingIsDrivenByControlPlaneErrorCodes(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/mtls/device/start" {
 			w.WriteHeader(http.StatusCreated)
-			// The server owns the cadence, so the test sets a fast one rather
-			// than sleeping through the production default.
+			// Short interval to keep the test fast.
 			fmt.Fprint(w, `{"device_code":"dc","user_code":"ABCD-EFGH","interval":1,"expires_in":600}`)
 			return
 		}
@@ -430,11 +426,9 @@ func TestLoginPollingIsDrivenByControlPlaneErrorCodes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Built directly rather than through NewClient, which enforces https. These
-	// tests are about the poll's branching, not transport policy.
+	// Built directly to bypass the https check in NewClient.
 	client := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
-	// The floor is 5s per poll, so drive the loop with a deadline of its own
-	// rather than waiting on the real one.
+	// The poll floor is 5s, so the test sets its own deadline.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -466,8 +460,7 @@ func TestLoginStopsOnAnUnrecognisedError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Built directly rather than through NewClient, which enforces https. These
-	// tests are about the poll's branching, not transport policy.
+	// Built directly to bypass the https check in NewClient.
 	client := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -479,8 +472,8 @@ func TestLoginStopsOnAnUnrecognisedError(t *testing.T) {
 	}
 }
 
-// credentialFor builds a self-signed leaf and the key that matches it, so a
-// Material round-trips through Save, Load and tls.X509KeyPair.
+// credentialFor builds a self-signed leaf and its key for Save and Load round
+// trips.
 func credentialFor(t *testing.T, uri string) Material {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -509,16 +502,14 @@ func credentialFor(t *testing.T, uri string) Material {
 	return Material{
 		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 		Key:     fileKey{key},
-		// Source has to be set: Save validates the record it writes, so a helper
-		// that omitted it would be testing against a credential the store refuses.
+		// Save validates Source.
 		Meta: Meta{APIURL: "https://api.localport.io", Source: SourceToken},
 	}
 }
 
-// Two writers renewing minutes apart issue two certificates where one is
-// immediately orphaned, which walks the identity through its live-certificate
-// cap until it can no longer renew at all. flock is held per open file
-// description, so a second holder conflicts even inside one process.
+// Only one writer holds the renewal lock. Concurrent renewals would orphan
+// certificates and exhaust the live certificate cap. flock is per open file
+// description, so a second holder conflicts within one process.
 func TestRenewalLockAdmitsOneWriter(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 	ref, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
@@ -592,10 +583,8 @@ func testKey(t *testing.T) *ecdsa.PrivateKey {
 	return key
 }
 
-// Renewal proves possession by signing with the credential's existing key.
-// Routing that through crypto.Signer instead of ecdsa.SignASN1 must not change
-// the bytes on the wire: a mismatch here is silent, and renewal would
-// never succeed until the certificate expired.
+// Signing the renewal proof through crypto.Signer verifies the same as
+// ecdsa.SignASN1.
 func TestSignerProducesTheSameSignatureFormatAsSignASN1(t *testing.T) {
 	key := testKey(t)
 	digest := renewalDigest([]byte("csr-der-bytes"), 29000000, "beef")
@@ -617,16 +606,19 @@ func TestSignerProducesTheSameSignatureFormatAsSignASN1(t *testing.T) {
 	}
 }
 
-// A hardware key has no bytes to write. Only a key that says it is persistent
-// leaves a key.pem behind, and Load must find whatever Save wrote.
+// Load reads what Save wrote through the names in meta.json.
 func TestSaveRoundTripsTheKeyBacking(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 	ref, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(store.Dir(ref), keyFile)); err != nil {
-		t.Fatalf("a file-backed key must leave key.pem: %v", err)
+	meta, err := readMeta(filepath.Join(store.Dir(ref), metaFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(store.Dir(ref), meta.Key.File)); err != nil {
+		t.Fatalf("a file-backed key must be written: %v", err)
 	}
 
 	m, err := store.Load(ref)
@@ -641,12 +633,8 @@ func TestSaveRoundTripsTheKeyBacking(t *testing.T) {
 	}
 }
 
-// A stored record must never carry a timestamp that means "no value".
-//
-// Go's zero time is a real instant, so a sentinel serialises as
-// "0001-01-01T00:00:00Z", a date that looks like data, reads as a corrupt
-// record, and is in the past, so anything scheduling off it fires immediately
-// and keeps firing.
+// meta.json never stores a zero time. It serializes as
+// "0001-01-01T00:00:00Z" and would schedule renewal in the past.
 func TestStoredMetadataNeverCarriesAZeroTimestamp(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 	cred := credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv")
@@ -664,7 +652,7 @@ func TestStoredMetadataNeverCarriesAZeroTimestamp(t *testing.T) {
 	if bytes.Contains(raw, []byte("0001-01-01")) {
 		t.Fatalf("meta.json carries a zero timestamp:\n%s", raw)
 	}
-	// Absent, not present-and-empty: a sign-in has no renewal at all.
+	// A sign-in has no renewal, so the field is omitted.
 	if bytes.Contains(raw, []byte("renew_after")) {
 		t.Fatalf("a credential that does not renew must omit renew_after:\n%s", raw)
 	}

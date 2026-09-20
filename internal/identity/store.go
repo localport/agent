@@ -1,9 +1,7 @@
-// Package identity holds the machine's own mTLS credential: how it is obtained,
-// where it lives on disk, and how it renews itself.
+// Package identity obtains, stores and renews the machine's mTLS credential.
 //
-// A machine spends a setup token once and keeps a private key that never leaves
-// it. From then on the CERTIFICATE is the credential for getting the next one,
-// so no long-lived secret stays on the box.
+// A machine redeems a setup token once. The private key stays on the machine,
+// and the current certificate authorizes each renewal.
 package identity
 
 import (
@@ -24,14 +22,12 @@ import (
 )
 
 const (
-	certFile = "cert.pem"
-	keyFile  = "key.pem"
 	metaFile = "meta.json"
 	lockFile = ".renew.lock"
 )
 
-// Source is how a credential was obtained. Written to meta.json, so the values
-// are a stored format: do not repurpose one.
+// Source is how a credential was obtained. Values are persisted in meta.json
+// and must not change meaning.
 type Source string
 
 const (
@@ -40,11 +36,9 @@ const (
 	SourceSSO   Source = "sso"   // `localport login`, short-lived, for a person
 )
 
-// Renewable reports whether a credential from this source may be reissued.
-//
-// An allowlist rather than a denylist, so a source this build has not seen is
-// treated as non-renewable. A person's sign-in never renews: re-authenticating
-// is the renewal, and the server refuses the request.
+// Renewable reports whether a credential from this source can be reissued.
+// Unknown sources are not renewable. A sign-in does not renew, the user signs
+// in again.
 func (s Source) Renewable() bool {
 	switch s {
 	case SourceToken, SourceOIDC:
@@ -64,40 +58,37 @@ func (s Source) Valid() bool {
 	}
 }
 
-// Meta is the record beside the key material.
-//
-// APIURL is stored rather than re-derived, so a renewal is never told which
-// control plane issued the credential. Source separates a human sign-in from a
-// machine setup token, and every renewal decision reads it.
+// Meta is the metadata stored next to the key material. APIURL records the
+// issuing control plane for renewal. Source distinguishes a sign-in from a
+// setup token and decides renewal.
 type Meta struct {
 	Identity string `json:"identity"`
 	Team     string `json:"team"`
-	// TeamName labels the team in `localport identity list`. Cosmetic, so
-	// validate() does not require it and renewal refreshes it; the team id from
-	// the certificate is the key. No personal name is stored anywhere here.
-	TeamName string    `json:"team_name,omitempty"`
-	Kind     Kind      `json:"kind"`
-	SpiffeID string    `json:"spiffe_id"`
-	Key      KeyRef    `json:"key"`
+	// TeamName is the display name in `localport identity list`. It is
+	// optional and refreshed on renewal. Team is the key.
+	TeamName string `json:"team_name,omitempty"`
+	Kind     Kind   `json:"kind"`
+	SpiffeID string `json:"spiffe_id"`
+	Key      KeyRef `json:"key"`
+
+	// Cert is the certificate file name next to Key.File. Both files are
+	// written before meta.json, which commits the pair.
+	Cert string `json:"cert"`
+
 	Source   Source    `json:"source"`
 	APIURL   string    `json:"api_url"`
 	Serial   string    `json:"serial"`
 	NotAfter time.Time `json:"not_after"`
 
-	// RenewAfter is absent when the credential does not renew, rather than a zero
-	// time, which serialises as `"0001-01-01T00:00:00Z"` and reads back as a
-	// value. Callers go through NextRenewal.
+	// RenewAfter is nil when the credential does not renew. A zero time would
+	// serialize as a real past date. Read it through NextRenewal.
 	RenewAfter *time.Time `json:"renew_after,omitempty"`
 
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// NextRenewal reports when this credential should be renewed, and whether it
-// renews at all. Comma-ok rather than a zero time, which is in the past and
-// would make a renewal loop fire immediately and keep firing.
-//
-// Both conditions are required: a source that does not renew has no deadline
-// whatever the file says.
+// NextRenewal returns the renewal time and whether the credential renews. The
+// result is false when RenewAfter is nil or the source does not renew.
 func (m Meta) NextRenewal() (time.Time, bool) {
 	if !m.Source.Renewable() || m.RenewAfter == nil {
 		return time.Time{}, false
@@ -105,8 +96,8 @@ func (m Meta) NextRenewal() (time.Time, bool) {
 	return *m.RenewAfter, true
 }
 
-// Material is one stored credential: the certificate chain we present, the key
-// that proves it is ours, and the metadata that drives renewal.
+// Material is one stored credential, the presented certificate chain, its
+// private key and its metadata.
 type Material struct {
 	CertPEM []byte // leaf first, then the issuing chain
 	Key     Key
@@ -156,9 +147,8 @@ func defaultRoot() (string, error) {
 
 func (s *Store) dir(ref Ref) string { return filepath.Join(s.Root, filepath.FromSlash(ref.dir())) }
 
-// Skipped is a credential directory List could not read. Carried out rather
-// than dropped: to a caller shown only the survivors, an unreadable record and
-// a missing one look the same. `identity list` prints these.
+// Skipped is a credential directory List could not read. `identity list`
+// prints these so they are not mistaken for missing credentials.
 type Skipped struct {
 	Path   string
 	Reason error
@@ -212,9 +202,8 @@ func (s *Store) Remove(ref Ref) error {
 	return nil
 }
 
-// Resolve picks the one credential a selector names. Ambiguity is an error
-// rather than a guess: the wrong identity surfaces as a refused handshake, far
-// from the choice that caused it.
+// Resolve returns the one credential a selector names. An ambiguous selector
+// is an error.
 func (s *Store) Resolve(sel Selector) (Ref, error) {
 	all, err := s.List()
 	if err != nil {
@@ -231,17 +220,17 @@ func (s *Store) Resolve(sel Selector) (Ref, error) {
 		return found[0], nil
 	case 0:
 		if len(all) == 0 {
-			return Ref{}, fmt.Errorf("no credential on this machine (run: localport login, or localport setup <TOKEN>)")
+			return Ref{}, errors.New("no credential on this machine (run: localport login, or localport setup <TOKEN>)")
 		}
 		return Ref{}, fmt.Errorf("no credential matches; this machine holds:\n%s", indentRefs(all))
 	default:
-		// The full form of each candidate, so the fix is a paste.
+		// List each candidate in full selector form.
 		return Ref{}, fmt.Errorf("several credentials match; narrow with --identity:\n%s", indentRefs(found))
 	}
 }
 
-// Load reads one credential. The key goes through the security package, which
-// validates the open descriptor rather than the path.
+// Load reads one credential. The key is read through the security package,
+// which checks the open descriptor.
 func (s *Store) Load(ref Ref) (*Material, error) {
 	dir := s.dir(ref)
 
@@ -253,20 +242,19 @@ func (s *Store) Load(ref Ref) (*Material, error) {
 	if err != nil {
 		return nil, fmt.Errorf("no usable credential for %s: %w", ref, err)
 	}
-	certPEM, err := os.ReadFile(filepath.Join(dir, certFile))
+	certPEM, err := os.ReadFile(filepath.Join(dir, meta.Cert))
 	if err != nil {
 		return nil, fmt.Errorf("read certificate: %w", err)
 	}
 	return &Material{CertPEM: certPEM, Key: key, Meta: meta}, nil
 }
 
-// Save writes a credential and returns where it landed. The destination and
-// Meta's identity fields both come from the certificate, so meta.json and the
-// path cannot disagree.
+// Save writes a credential and returns its Ref. The path and the identity
+// fields of Meta both come from the certificate.
 //
-// Each file is written atomically, so a concurrent reader never sees a partial
-// key. The key goes first: a certificate without its key is useless, a key
-// without its certificate merely unused.
+// The certificate and key are written first under serial-named files. Writing
+// meta.json commits them, so a crash cannot pair a new key with the old
+// certificate.
 func (s *Store) Save(m Material) (Ref, error) {
 	leaf, err := leafOf(m.CertPEM)
 	if err != nil {
@@ -279,9 +267,8 @@ func (s *Store) Save(m Material) (Ref, error) {
 	if !ref.valid() {
 		return Ref{}, fmt.Errorf("certificate yields an unusable credential ref (%+v)", ref)
 	}
-	// Taken from the certificate, never from what the caller passed: a record
-	// describing a different credential than the one beside it drives every later
-	// decision, from which principal is presented to when it expires.
+	// Identity fields come from the certificate and override the caller's
+	// values.
 	m.Meta.Team, m.Meta.Kind, m.Meta.Identity = ref.Team, ref.Kind, ref.Identity
 	m.Meta.SpiffeID = SpiffeURI(leaf)
 	m.Meta.Serial = leaf.SerialNumber.Text(16)
@@ -289,8 +276,18 @@ func (s *Store) Save(m Material) (Ref, error) {
 	m.Meta.Key = m.Key.Ref()
 	m.Meta.UpdatedAt = time.Now().UTC()
 
-	// Validated on the way out as well as in: readMeta refuses a record it cannot
-	// act on, so writing one would store a credential that never loads again.
+	pk, ok := m.Key.(persistentKey)
+	if !ok {
+		return Ref{}, errors.New("credential key cannot be written to disk")
+	}
+	// The serial is a path component. Text(16) is hex and always valid.
+	if !validPathComponent(m.Meta.Serial) {
+		return Ref{}, fmt.Errorf("certificate serial %q is not usable as a filename", m.Meta.Serial)
+	}
+	m.Meta.Cert = "cert-" + m.Meta.Serial + ".pem"
+	m.Meta.Key.File = "key-" + m.Meta.Serial + ".pem"
+
+	// Validate before writing, since readMeta refuses an invalid record.
 	if err := m.Meta.validate(); err != nil {
 		return Ref{}, fmt.Errorf("refusing to store an unusable credential record: %w", err)
 	}
@@ -306,38 +303,62 @@ func (s *Store) Save(m Material) (Ref, error) {
 		return Ref{}, fmt.Errorf("encode identity metadata: %w", err)
 	}
 
-	type storedFile struct {
-		name string
-		data []byte
+	keyPEM, err := pk.marshal()
+	if err != nil {
+		return Ref{}, err
 	}
-	var files []storedFile
-	// Only when there is material to write.
-	if pk, ok := m.Key.(persistentKey); ok {
-		keyPEM, err := pk.marshal()
-		if err != nil {
-			return Ref{}, err
-		}
-		files = append(files, storedFile{keyFile, keyPEM})
-	}
-	files = append(files,
-		storedFile{certFile, m.CertPEM},
-		storedFile{metaFile, append(metaRaw, '\n')},
-	)
 
-	for _, f := range files {
-		if err := security.WritePrivateFileAtomic(filepath.Join(dir, f.name), f.data); err != nil {
-			return Ref{}, err
+	write := func(name string, data []byte) error {
+		return security.WritePrivateFileAtomic(filepath.Join(dir, name), data)
+	}
+
+	// Unused until meta.json references them.
+	if err := write(m.Meta.Cert, m.CertPEM); err != nil {
+		return Ref{}, err
+	}
+	if err := write(m.Meta.Key.File, keyPEM); err != nil {
+		return Ref{}, err
+	}
+	if err := write(metaFile, append(metaRaw, '\n')); err != nil {
+		return Ref{}, err
+	}
+
+	s.sweep(dir, m.Meta.Cert, m.Meta.Key.File)
+	return ref, nil
+}
+
+// sweep removes serial-named files left by earlier saves. Errors are ignored
+// because leftover files are unused.
+func (s *Store) sweep(dir, keepCert, keepKey string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name == keepCert || name == keepKey {
+			continue
+		}
+		if strings.HasPrefix(name, "cert-") || strings.HasPrefix(name, "key-") {
+			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}
-	return ref, nil
+}
+
+// validPathComponent reports whether s is safe as a filename inside a
+// credential directory.
+func validPathComponent(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	return !strings.ContainsAny(s, `/\:`)
 }
 
 // Dir is where a Ref's files live, for messages that tell an operator what was
 // written and where.
 func (s *Store) Dir(ref Ref) string { return s.dir(ref) }
 
-// TLSCertificate builds the chain to present. The key is attached as a
-// crypto.Signer.
+// TLSCertificate returns the chain to present with the key as a crypto.Signer.
 func (m *Material) TLSCertificate() (*tls.Certificate, error) {
 	leaf, err := leafOf(m.CertPEM)
 	if err != nil {
@@ -354,7 +375,7 @@ func (m *Material) TLSCertificate() (*tls.Certificate, error) {
 		}
 	}
 	if len(cert.Certificate) == 0 {
-		return nil, fmt.Errorf("credential holds no certificate")
+		return nil, errors.New("credential holds no certificate")
 	}
 	// Check the key matches the leaf. A mismatch otherwise fails as an opaque
 	// bad_certificate alert.
@@ -387,28 +408,26 @@ func readMeta(path string) (Meta, error) {
 	return meta, nil
 }
 
-// validate refuses a record this build cannot act on.
-//
-// encoding/json leaves what it does not recognise at its zero value, so a
-// truncated meta.json parses cleanly and describes a credential that does not
-// exist. The enums are the sharp part: an unrecognised Source is treated as
-// non-renewable and an unrecognised Kind resolves through the wrong SPIFFE
-// namespace, and both surface later, at a handshake.
+// validate refuses incomplete or unknown metadata. encoding/json leaves
+// missing fields at zero, so a truncated meta.json still parses.
 func (m Meta) validate() error {
 	switch {
 	case m.Identity == "":
-		return fmt.Errorf("identity metadata names no identity")
+		return errors.New("identity metadata names no identity")
 	case m.Team == "":
-		return fmt.Errorf("identity metadata names no team")
+		return errors.New("identity metadata names no team")
 	case !m.Kind.Valid():
 		return fmt.Errorf("identity metadata has unknown kind %q", m.Kind)
 	case !m.Source.Valid():
 		return fmt.Errorf("identity metadata has unknown source %q", m.Source)
 	case m.NotAfter.IsZero():
-		return fmt.Errorf("identity metadata has no expiry")
+		return errors.New("identity metadata has no expiry")
 	case m.RenewAfter != nil && !m.Source.Renewable():
-		// The halves disagree, so acting on either would be a guess.
 		return fmt.Errorf("identity metadata for a %s credential carries a renewal deadline", m.Source)
+	case !validPathComponent(m.Cert):
+		return fmt.Errorf("identity metadata names an unusable certificate file %q", m.Cert)
+	case !validPathComponent(m.Key.File):
+		return fmt.Errorf("identity metadata names an unusable key file %q", m.Key.File)
 	}
 	return nil
 }

@@ -545,7 +545,7 @@ localport login
        ← 428 { "error": "authorization_pending" }   ... keep polling
        ← 200 { cert_pem, ca_chain_pem, identity, team_id, not_after }
 
-  ~/.localport/identity/<team>/user-<id>/{cert.pem,key.pem,meta.json}
+  ~/.localport/identity/<team>/user-<username>/{cert-<serial>.pem,key-<serial>.pem,meta.json}
 ```
 
 `hostname` and `agent_os` describe the machine, not the person. They are what
@@ -605,11 +605,17 @@ key that never leaves the machine, and stores the result under
 
 ```
 <team>/<kind>-<identity>/
-  cert.pem    leaf first, then the issuing chain, which is what the agent presents
-  key.pem     P-256 private key, generated locally, never transmitted
-  meta.json   identity, team, team_name, kind, spiffe_id, source, api_url,
-              serial, not_after, and renew_after only when the credential renews
+  cert-<serial>.pem   leaf first, then the issuing chain, which is what the agent presents
+  key-<serial>.pem    P-256 private key, generated locally, never transmitted
+  meta.json           identity, team, team_name, kind, spiffe_id, source, api_url,
+                      serial, not_after, the cert and key file names, and
+                      renew_after only when the credential renews
 ```
+
+A save writes the certificate and key under new serial-named files, then
+`meta.json`, which names them. Writing `meta.json` is the commit point, so a save
+interrupted before it leaves the previous credential loadable. Files from earlier
+saves are removed afterwards.
 
 `team_name` is the team's display name and is cosmetic. `localport identity list`
 prints it so a person holding credentials in two teams can tell them apart, and
@@ -618,10 +624,9 @@ and a record without it still loads. Requiring it would turn a missing display
 string into a missing credential. A renewal refreshes it but never blanks it, so
 a transient lookup failure on the server cannot erase a name already on disk.
 
-`source` is `token`, `oidc` or `sso`. Renewability is a property of the source
-and is decided by a positive allowlist: `token` and `oidc` renew, anything else
-does not, so a source this build has never heard of is not renewable rather than
-renewable by default. A renewal carries the source forward unchanged.
+`source` is `token`, `oidc` or `sso`. Only `token` and `oidc` renew, and any
+other value is treated as non-renewing. A renewal carries the source forward
+unchanged.
 
 `meta.json` is validated on read and on write, not merely parsed. A record naming
 an unknown kind or source, missing an expiry, or pairing a non-renewing source

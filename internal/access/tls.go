@@ -73,7 +73,7 @@ func loadPEM(path string) (tls.Certificate, error) {
 	}
 	cert, err := tls.X509KeyPair(data, data)
 	if err != nil {
-		// The identity store's cert.pem has no key. crypto/tls reports that as
+		// The identity store's certificate file has no key. crypto/tls reports that as
 		// a PEM block type error, so replace it with a specific message.
 		if bytes.Contains(data, []byte("BEGIN CERTIFICATE")) && !bytes.Contains(data, []byte("PRIVATE KEY")) {
 			return tls.Certificate{}, fmt.Errorf( //nolint:staticcheck // ST1005, multi-line message
