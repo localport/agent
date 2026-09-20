@@ -158,6 +158,11 @@ func assertLeafFresh(cert tls.Certificate) error {
 		}
 		leaf = parsed
 	}
+	if now := time.Now(); now.Before(leaf.NotBefore) {
+		// Usually a wrong clock. A device without RTC or NTP boots in the past.
+		return fmt.Errorf("client cert is not valid until %s, and this machine's clock reads %s",
+			leaf.NotBefore.Format(time.RFC3339), now.Format(time.RFC3339))
+	}
 	if time.Now().After(leaf.NotAfter) {
 		return fmt.Errorf("client cert expired at %s", leaf.NotAfter.Format(time.RFC3339))
 	}

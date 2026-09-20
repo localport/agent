@@ -312,3 +312,26 @@ func writePKCS12(t *testing.T, dir, name, password string) string {
 	}
 	return path
 }
+
+// A certificate whose validity starts in the future is refused with the local
+// clock in the message, since a wrong clock is the usual cause.
+func TestAssertLeafFreshRefusesANotYetValidCertificate(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(7),
+		Subject:      pkix.Name{CommonName: "gw-01"},
+		NotBefore:    time.Now().Add(time.Hour),
+		NotAfter:     time.Now().Add(48 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = assertLeafFresh(tls.Certificate{Certificate: [][]byte{der}})
+	if err == nil || !strings.Contains(err.Error(), "clock reads") {
+		t.Fatalf("want a not-yet-valid refusal naming the clock, got %v", err)
+	}
+}
