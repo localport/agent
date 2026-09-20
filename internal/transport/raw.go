@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
-	"net/netip"
 	"time"
 )
 
@@ -48,37 +47,26 @@ func (d *RawDialer) Dial(ctx context.Context, host, port string) (net.Conn, erro
 	return conn, nil
 }
 
-// sessionCache lets a reconnect, a redirect and the mux dial resume the TLS
-// session established by an earlier connection to the same edge, turning a full
-// handshake into a PSK exchange: one round trip instead of two, and no signature
-// for either side to compute.
-//
-// It is process-wide because that is the only way the second connection to an
-// edge can reuse the first one's session. crypto/tls keys entries by server
-// name, so sessions never cross edges.
-//
-// This does not enable 0-RTT. Go only offers early data over QUIC; on a TCP
-// connection the server rejects it outright, which is the behaviour we want:
-// early data is replayable, and a replayed request would be delivered to the
-// customer's service a second time.
+// sessionCache lets reconnects, redirects and mux dials resume an earlier TLS
+// session with the same edge. Resumption uses PSK, saving a round trip and the
+// signatures. The cache is process-wide and keyed by server name. Go does not
+// offer 0-RTT over TCP, so no request can be replayed.
 var sessionCache = tls.NewLRUClientSessionCache(64)
 
-// agentTLSConfig keeps the TLS posture identical across transports. SNI
-// is serverName when set (the caller derives the zone connect host for
-// redirect targets), else derived from host. Literal IPs leave SNI empty
-// (crypto/tls refuses IP-literal SNI).
+// agentTLSConfig returns the TLS config shared by all transports. ServerName is
+// serverName when set, otherwise the dial host.
+//
+// An IP literal is kept as ServerName so hostname verification stays on.
+// crypto/tls omits SNI for an IP (RFC 6066) and verifies the IP SANs.
 func agentTLSConfig(serverName, host, alpn string) *tls.Config {
-	cfg := &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		NextProtos:         []string{alpn},
-		ClientSessionCache: sessionCache,
-	}
 	name := serverName
 	if name == "" {
 		name = host
 	}
-	if _, err := netip.ParseAddr(name); err != nil {
-		cfg.ServerName = name
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		NextProtos:         []string{alpn},
+		ClientSessionCache: sessionCache,
+		ServerName:         name,
 	}
-	return cfg
 }

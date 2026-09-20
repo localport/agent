@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -58,7 +59,16 @@ func NewClient(baseURL string) (*Client, error) {
 	if u.Scheme != "https" {
 		return nil, fmt.Errorf("API URL must be https (got %q)", raw)
 	}
-	return &Client{BaseURL: raw, HTTP: &http.Client{Timeout: requestTimeout}}, nil
+	return &Client{BaseURL: raw, HTTP: newHTTPClient()}, nil
+}
+
+// newHTTPClient builds the control plane client with a TLS 1.3 minimum, since
+// requests carry the setup token and the renewal proof. It clones the default
+// transport to keep proxy settings, timeouts and pooling.
+func newHTTPClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
+	return &http.Client{Timeout: requestTimeout, Transport: tr}
 }
 
 // errorEnvelope is the control plane's error body: a support code, a short type

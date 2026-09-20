@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net/http"
@@ -253,5 +254,27 @@ func TestRetryDoesNotRetryARefusal(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("attempts = %d, want 1: a 4xx is terminal", attempts)
+	}
+}
+
+// The control plane client requires TLS 1.3 and keeps the default transport
+// proxy and pooling settings.
+func TestControlPlaneClientRequiresTLS13(t *testing.T) {
+	c, err := NewClient("https://api.localport.io")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, ok := c.HTTP.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport is %T, want *http.Transport", c.HTTP.Transport)
+	}
+	if tr.TLSClientConfig == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("TLSClientConfig = %+v, want MinVersion TLS 1.3", tr.TLSClientConfig)
+	}
+	if tr.Proxy == nil {
+		t.Error("Proxy was dropped: a proxied network could no longer reach the control plane")
+	}
+	if c.HTTP.Timeout != requestTimeout {
+		t.Errorf("Timeout = %v, want %v", c.HTTP.Timeout, requestTimeout)
 	}
 }

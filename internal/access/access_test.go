@@ -433,3 +433,27 @@ func TestStreamErrorExplainsEveryCertificateAlert(t *testing.T) {
 		t.Fatalf("unrecognised failure = %q", other)
 	}
 }
+
+// The TLS 1.3 minimum is enforced at the handshake.
+func TestConsumerRefusesATLS12Server(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.TLS = &tls.Config{MaxVersion: tls.VersionTLS12}
+	srv.StartTLS()
+	defer srv.Close()
+
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "https://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := BaseTLSConfig(net.JoinHostPort(host, port), "")
+	cfg.RootCAs = srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+
+	conn, err := tls.Dial("tcp", net.JoinHostPort(host, port), cfg)
+	if err == nil {
+		conn.Close()
+		t.Fatal("a TLS 1.2 server must be refused: the client certificate would go in the clear")
+	}
+	if !strings.Contains(err.Error(), "protocol version") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+}

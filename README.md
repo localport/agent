@@ -99,6 +99,7 @@ make build
 - **Multiplexing.** Each tunnel holds one control connection and one HTTP/2 connection carrying a stream per visitor. If the HTTP/2 connection is unavailable, the agent dials back once per visitor.
 - **Network changes.** The agent watches interfaces and detects wake from sleep. After either, it probes the edge and reconnects within seconds when the old connection is gone.
 - **Remote access.** `localport access` holds one mutual TLS HTTP/2 connection per device and opens a CONNECT stream per forward. The edge checks the certificate and grant before a stream reaches the device.
+- **TLS 1.3 everywhere.** Tunnel, consumer, and control-plane connections all require TLS 1.3. Private keys are generated on the machine and never leave it.
 
 ## Contributing
 

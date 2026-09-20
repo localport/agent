@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -39,8 +40,10 @@ func TestBuildTLSConfigBundle(t *testing.T) {
 	if cfg.RootCAs != nil {
 		t.Fatal("RootCAs must stay nil: the server is verified against system roots, not against the credential's own CA")
 	}
-	if cfg.MinVersion != 0x0303 { // tls.VersionTLS12
-		t.Fatalf("MinVersion = %#x, want TLS 1.2", cfg.MinVersion)
+	// TLS 1.3 encrypts the client Certificate message. Under 1.2 the SPIFFE
+	// identity is sent in cleartext.
+	if cfg.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("MinVersion = %#x, want TLS 1.3", cfg.MinVersion)
 	}
 }
 

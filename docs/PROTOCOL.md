@@ -1,7 +1,7 @@
 # Localport Wire Protocol
 
 Binary control protocol between the agent and an edge server. The same framed
-messages ride over one of two TLS 1.2+ carriers, both terminating on the edge
+messages ride over one of two TLS 1.3 carriers, both terminating on the edge
 HTTPS port (`:443`) and selected by ALPN after a single TLS handshake:
 
 - **`localport-raw/1`** carries the framed bytes directly inside the TLS stream.
@@ -513,6 +513,11 @@ chain expires, when a grant is narrowed, and when the certificate is revoked.
 The command re-dials on the next forward, and the new attempt is refused if the
 grant no longer covers it. An idle connection is pinged after 30 s and dropped
 if the ping goes unanswered for 15 s.
+
+**Every connection the agent makes requires TLS 1.3**, including both carriers,
+the consumer connection and the control-plane calls. TLS 1.3 encrypts the client
+Certificate message, which carries the consumer's SPIFFE identity. Under TLS 1.2
+it is sent in the clear. No flag or environment variable lowers the minimum.
 
 **Server verification uses the system trust store.** The edge presents its
 region zone wildcard certificate, publicly trusted and issued by Let's Encrypt,

@@ -92,7 +92,7 @@ func fetchGitHubActionsToken(ctx context.Context, audience string) (string, erro
 	req.Header.Set("Authorization", "Bearer "+requestToken)
 	req.Header.Set("Accept", "application/json; api-version=2.0")
 
-	resp, err := (&http.Client{Timeout: requestTimeout}).Do(req)
+	resp, err := newHTTPClient().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request GitHub Actions OIDC token: %w", err)
 	}

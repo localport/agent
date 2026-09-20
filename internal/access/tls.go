@@ -53,7 +53,7 @@ func BuildTLSConfig(pemPath, p12Path, p12Password, remote, serverNameOverride st
 // The tunnel CA belongs to the client chain and does not verify the server.
 func BaseTLSConfig(remote, serverNameOverride string) *tls.Config {
 	return &tls.Config{
-		MinVersion: tls.VersionTLS12,
+		MinVersion: tls.VersionTLS13,
 		ServerName: resolveServerName(remote, serverNameOverride),
 	}
 }
