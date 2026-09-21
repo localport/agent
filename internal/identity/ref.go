@@ -2,6 +2,7 @@ package identity
 
 import (
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -174,7 +175,7 @@ func RefFromCert(leaf *x509.Certificate) (Ref, error) {
 			return Ref{Team: team, Kind: KindDevice, Identity: parts[2]}, nil
 		}
 	}
-	return Ref{}, fmt.Errorf("certificate carries no Localport SPIFFE identity")
+	return Ref{}, errors.New("certificate carries no Localport SPIFFE identity")
 }
 
 // SpiffeURI returns the certificate's SPIFFE URI SAN, for display and for the

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -89,7 +90,7 @@ func chooseCredential(in io.Reader, out io.Writer, store *identity.Store, refs [
 			// EOF or a closed terminal. Abort rather than default to a principal
 			// nobody chose.
 			fmt.Fprintln(out)
-			return identity.Ref{}, fmt.Errorf("no credential chosen")
+			return identity.Ref{}, errors.New("no credential chosen")
 		}
 		n, convErr := strconv.Atoi(strings.TrimSpace(line))
 		if convErr != nil || n < 1 || n > len(refs) {

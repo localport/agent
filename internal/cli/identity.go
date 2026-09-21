@@ -22,7 +22,7 @@ const identityEnv = "LOCALPORT_IDENTITY"
 func runIdentity(args []string) error {
 	if len(args) == 0 {
 		usageIdentity()
-		return fmt.Errorf("identity: subcommand required")
+		return errors.New("identity: subcommand required")
 	}
 	switch args[0] {
 	case "list":
@@ -161,7 +161,7 @@ func runIdentityRemove(args []string) error {
 	}
 	if fs.NArg() != 1 {
 		usageIdentity()
-		return fmt.Errorf("identity remove: name exactly one credential")
+		return errors.New("identity remove: name exactly one credential")
 	}
 
 	store, err := identity.DefaultStore()

@@ -2,6 +2,7 @@ package identity
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -91,7 +92,7 @@ func (c *Credential) Certificate() (*tls.Certificate, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cert == nil {
-		return nil, fmt.Errorf("no client certificate loaded")
+		return nil, errors.New("no client certificate loaded")
 	}
 	return c.cert, nil
 }

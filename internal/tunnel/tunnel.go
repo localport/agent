@@ -1042,7 +1042,7 @@ func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
 		}
 	}
 	if dialer == nil {
-		closeEvt(0, 0, fmt.Errorf("data dial: no transport selected (control connection not established)"))
+		closeEvt(0, 0, errors.New("data dial: no transport selected (control connection not established)"))
 		return
 	}
 

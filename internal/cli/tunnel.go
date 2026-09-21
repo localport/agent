@@ -52,7 +52,7 @@ func runTunnel(version string, args []string) error {
 
 	if posProto != "" {
 		if *local != "" {
-			return fmt.Errorf("--local cannot be combined with positional protocol/address")
+			return errors.New("--local cannot be combined with positional protocol/address")
 		}
 		*proto = posProto
 		*local = posLocal
@@ -128,7 +128,7 @@ func buildTunnelConfig(path, flagToken, region, local, proto, name string) (*con
 		return nil, err
 	}
 	if local == "" {
-		return nil, fmt.Errorf("--local is required for token-based tunnel mode")
+		return nil, errors.New("--local is required for token-based tunnel mode")
 	}
 	return config.TunnelFromFlags(token, region, local, proto, name)
 }

@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -98,7 +99,7 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 		return nil, err
 	}
 	if start.DeviceCode == "" || start.UserCode == "" {
-		return nil, fmt.Errorf("control plane returned an incomplete sign-in request")
+		return nil, errors.New("control plane returned an incomplete sign-in request")
 	}
 
 	if onPrompt != nil {
@@ -138,7 +139,7 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 			if lastUnreachable != nil {
 				return nil, fmt.Errorf("could not reach the control plane while waiting for approval: %w", lastUnreachable)
 			}
-			return nil, fmt.Errorf("sign-in expired before it was approved; run `localport login` again")
+			return nil, errors.New("sign-in expired before it was approved; run `localport login` again")
 		}
 
 		var tok deviceTokenResponse
@@ -148,7 +149,7 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 		}, &tok)
 		if err == nil {
 			if tok.CertPEM == "" {
-				return nil, fmt.Errorf("control plane returned no certificate")
+				return nil, errors.New("control plane returned no certificate")
 			}
 			// No renew_after: a sign-in does not renew, and synthesizing one
 			// downstream would invent a deadline the control plane never issued.

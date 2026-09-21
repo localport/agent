@@ -52,7 +52,7 @@ func (c *Client) RedeemSetupToken(
 	ctx context.Context, token string, budget time.Duration, onWait RetryNotice,
 ) (*Material, error) {
 	if strings.TrimSpace(token) == "" {
-		return nil, fmt.Errorf("setup token required")
+		return nil, errors.New("setup token required")
 	}
 	kp, err := newKeyPair("")
 	if err != nil {
@@ -71,7 +71,7 @@ func (c *Client) RedeemSetupToken(
 	if resp.CertPEM == "" {
 		// Failing here beats writing an empty credential and finding out at the
 		// next handshake.
-		return nil, fmt.Errorf("control plane returned no certificate for the CSR")
+		return nil, errors.New("control plane returned no certificate for the CSR")
 	}
 
 	return c.assemble(kp.key, issuedMaterial{
@@ -131,7 +131,7 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 		return nil, err
 	}
 	if resp.CertPEM == "" {
-		return nil, fmt.Errorf("control plane returned no certificate")
+		return nil, errors.New("control plane returned no certificate")
 	}
 
 	// Source carried from the credential being replaced: a renewal does not change
@@ -227,7 +227,7 @@ func parseTimeOr(raw string, fallback time.Time) time.Time {
 func leafOf(certPEM []byte) (*x509.Certificate, error) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil || block.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("no certificate in PEM data")
+		return nil, errors.New("no certificate in PEM data")
 	}
 	leaf, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {

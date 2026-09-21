@@ -22,7 +22,7 @@ import (
 // protected PKCS#12 archive).
 func BuildTLSConfig(pemPath, p12Path, p12Password, remote, serverNameOverride string) (*tls.Config, error) {
 	if !exactlyOne(pemPath != "", p12Path != "") {
-		return nil, fmt.Errorf("provide exactly one credential source: --pem or --p12")
+		return nil, errors.New("provide exactly one credential source: --pem or --p12")
 	}
 
 	var (
@@ -147,7 +147,7 @@ func loadFromPKCS12(path, password string) (tls.Certificate, error) {
 
 func assertLeafFresh(cert tls.Certificate) error {
 	if len(cert.Certificate) == 0 {
-		return fmt.Errorf("certificate is empty")
+		return errors.New("certificate is empty")
 	}
 	// Both loaders set Leaf. Parse only for certificates built elsewhere.
 	leaf := cert.Leaf

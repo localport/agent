@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -111,7 +112,7 @@ func fetchGitHubActionsToken(ctx context.Context, audience string) (string, erro
 		Value string `json:"value"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil || payload.Value == "" {
-		return "", fmt.Errorf("GitHub Actions returned no token")
+		return "", errors.New("GitHub Actions returned no token")
 	}
 	return payload.Value, nil
 }
@@ -134,7 +135,7 @@ func (c *Client) ExchangeWorkloadToken(ctx context.Context, token string) (*Mate
 		return nil, err
 	}
 	if resp.CertPEM == "" {
-		return nil, fmt.Errorf("control plane returned no certificate for the CSR")
+		return nil, errors.New("control plane returned no certificate for the CSR")
 	}
 	return c.assemble(kp.key, issuedMaterial{
 		CertPEM:    resp.CertPEM,

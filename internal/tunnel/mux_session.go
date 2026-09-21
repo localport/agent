@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -175,7 +176,7 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // dial-back, which is the point of keeping both paths.
 func (t *Tunnel) dialAndBindMux(ctx context.Context, edgeAddr, sessionID string) (net.Conn, error) {
 	if sessionID == "" {
-		return nil, fmt.Errorf("mux bind: edge did not issue a session id")
+		return nil, errors.New("mux bind: edge did not issue a session id")
 	}
 
 	// Reuse the carrier the control connection already found through the
@@ -189,7 +190,7 @@ func (t *Tunnel) dialAndBindMux(ctx context.Context, edgeAddr, sessionID string)
 	dialer := t.dialer
 	t.mu.RUnlock()
 	if dialer == nil {
-		return nil, fmt.Errorf("mux dial: control connection has not selected a transport")
+		return nil, errors.New("mux dial: control connection has not selected a transport")
 	}
 
 	host, port := transport.SplitHostPort(edgeAddr)
