@@ -14,9 +14,8 @@ import (
 	"github.com/localport/agent/internal/ui"
 )
 
-// tunnelUI is what the tunnel command needs from its renderer: the
-// EventHandler contract plus banner / shutdown lifecycle hooks. This
-// keeps display and ui interchangeable behind one switch.
+// tunnelUI is the renderer interface of the tunnel command, EventHandler plus
+// banner and shutdown hooks. display and ui both implement it.
 type tunnelUI interface {
 	tunnel.EventHandler
 	Banner(version string, cfg *config.Config)
@@ -70,7 +69,7 @@ func runTunnel(version string, args []string) error {
 	if *noMux {
 		cfg.NoMux = true
 	}
-	// The ldflags value from main, sent on registration.
+	// Build version from ldflags, sent on registration.
 	cfg.AgentVersion = version
 	mode := ui.DetectMode(*noUI, os.Stderr)
 	cfg.NoInspect = inspectDisabled(mode, *noInspect, *logRequests)

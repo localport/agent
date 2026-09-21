@@ -43,9 +43,9 @@ const (
 	// dial-back, so a faulty edge cannot exhaust local file descriptors.
 	maxConcurrentDataConns = 512
 
-	// edgeFallbackAfter is how long a previously assigned edge address may
-	// keep failing before the agent returns to the configured connect host.
-	// Long enough to ride out an edge restart without losing the session.
+	// edgeFallbackAfter is how long an assigned edge address may fail before
+	// the agent returns to the configured connect host. It covers an edge
+	// restart.
 	edgeFallbackAfter = 90 * time.Second
 )
 
@@ -94,7 +94,7 @@ type Info struct {
 	TunnelID   string
 	TunnelName string
 	Region     string
-	RegionName string // edge-supplied display name; may be empty
+	RegionName string // display name from the edge, may be empty
 	EdgeAddr   string
 	PublicURL  string
 	URLs       []string
@@ -134,8 +134,8 @@ type DataConnInfo struct {
 	Port     uint16
 }
 
-// RequestInfo is one finished HTTP request for the live view. Metadata only: no
-// header or body content is captured.
+// RequestInfo is the metadata of one finished HTTP request. Headers and bodies
+// are not captured.
 type RequestInfo struct {
 	// Port is the device port of the request, 0 on a tunnel.
 	Port      uint16
@@ -181,27 +181,21 @@ type Options struct {
 	Host       string
 	ClientName string
 
-	// AgentVersion is reported on registration for the connection's audit
-	// record. Self-asserted and forensic only.
+	// AgentVersion is sent on registration for the audit record.
 	AgentVersion string
 
 	Handler EventHandler
 
-	// Transport tunes the agent's edge transport (raw vs ws probe order,
-	// dial timeout, WS path). The zero value uses Phase 1 secure defaults:
-	// TLS 1.3, full server-cert verification, no insecure fallback.
+	// Transport configures probe order, dial timeout and WebSocket path. The
+	// zero value uses TLS 1.3 with full server verification.
 	Transport transport.Options
 
-	// DisableMux keeps every inbound connection on the dial-back path instead of
-	// multiplexing them onto one connection. Multiplexing is the better default
-	// on nearly every network, but it puts all streams on a single TCP
-	// connection, so a lossy or aggressively shaped link can be better served by
-	// separate connections. The escape hatch exists because that call belongs to
-	// whoever is looking at the network, not to us.
+	// DisableMux serves every inbound connection over dial-back. Separate
+	// connections can perform better on lossy or shaped links, where one TCP
+	// connection stalls all streams.
 	DisableMux bool
 
-	// DisableInspect turns the HTTP request view off on http tunnels, for anyone
-	// who wants nothing but the byte pipe.
+	// DisableInspect turns off the HTTP request view on http tunnels.
 	DisableInspect bool
 }
 
@@ -218,29 +212,28 @@ type Tunnel struct {
 	edgeAddr string
 	info     Info
 
-	// sessionID is the session secret from the last RegisterAck, echoed on
-	// the next Register so a reconnect replaces the stale session in place.
+	// sessionID is the session secret from the last RegisterAck. The next
+	// Register sends it to replace the stale session.
 	sessionID string
 
 	terminalMu  sync.Mutex
 	terminalErr error
 
-	// dialer is the transport selected by the most recent Probe. Reused
-	// for data dial-backs within the same session and reset on reconnect
-	// so the next session re-probes.
+	// dialer is the transport chosen by the last Probe. Dial-backs reuse it
+	// and a reconnect resets it.
 	dialer transport.Dialer
 
 	acMu        sync.RWMutex
 	activeConns map[string]*activeConn
 
-	// recentReqs rings the newest requests for render; totalReqs is the lifetime
-	// count the ring cannot give once it wraps.
+	// recentReqs is a ring of the newest requests. totalReqs counts all
+	// requests.
 	reqMu      sync.Mutex
 	recentReqs []RequestInfo
 	totalReqs  atomic.Int64
 
-	// fastProbeAt (unix-nano) is when OnNetworkChange last armed a link
-	// probe. Zero when no probe is in flight.
+	// fastProbeAt is the Unix nanosecond time OnNetworkChange armed a link
+	// probe, or zero when none is pending.
 	fastProbeAt atomic.Int64
 
 	// ports is the device's open ports, nil on a tunnel.
@@ -252,9 +245,8 @@ type Tunnel struct {
 
 	shutdown     chan struct{}
 	disconnected chan struct{}
-	// retryNow cuts a reconnect backoff wait short. Signaled by
-	// OnNetworkChange while no session is connected: a fresh network makes
-	// the previous failures' backoff schedule meaningless.
+	// retryNow ends a reconnect backoff wait. OnNetworkChange signals it while
+	// disconnected.
 	retryNow chan struct{}
 
 	// dataSlots bounds concurrent inbound connections, one slot per
@@ -263,9 +255,8 @@ type Tunnel struct {
 	dataSlots chan struct{}
 }
 
-// activeConn is the internal record for one live edge↔local proxy. Byte
-// counters are written from the two io.Copy goroutines and read from the
-// UI snapshot path; atomics avoid lock contention on the hot path.
+// activeConn records one live connection between edge and local service. The
+// copy goroutines write the atomic byte counters and the UI reads them.
 type activeConn struct {
 	id        string
 	local     string
@@ -354,9 +345,9 @@ func (t *Tunnel) dialTarget(port uint16) (net.Conn, int, error) {
 	return conn, http.StatusOK, nil
 }
 
-// Run drives the connect/register/serve loop until Stop or ctx cancellation.
-// It returns nil on a clean stop and the registration error if the edge
-// refuses the tunnel non-retryably.
+// Run runs the connect, register and serve loop until Stop or ctx
+// cancellation. It returns nil on a clean stop, or the registration error when
+// the edge refuses the tunnel permanently.
 func (t *Tunnel) Run(ctx context.Context) error {
 	attempt := 0
 	var failingSince time.Time
@@ -382,8 +373,8 @@ func (t *Tunnel) Run(ctx context.Context) error {
 				return regErr
 			}
 
-			// An assigned edge address failing past the fallback window is
-			// presumed gone; return to the configured connect host.
+			// The assigned edge failed past the fallback window. Return to the
+			// configured connect host.
 			if failingSince.IsZero() {
 				failingSince = time.Now()
 			} else if time.Since(failingSince) > edgeFallbackAfter {
@@ -413,9 +404,7 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		t.setState(StateActive)
 		t.emitConnected()
 
-		// The multiplexed data connection is established alongside the session,
-		// not before it: the tunnel is already serving over dial-back by now, so
-		// a slow or refused bind costs nothing.
+		// Start the mux after registration. Dial-back serves until it binds.
 		stopMux := t.startMux(ctx)
 
 		t.runSession(ctx, sessionDone)
@@ -474,16 +463,14 @@ func (t *Tunnel) ActiveConnections() []ActiveConn {
 	return out
 }
 
-// OnNetworkChange is called when the host's network changed (interface or
-// address churn). It sends a probe heartbeat and arms netChangeProbeWindow:
-// any inbound frame after arming disarms the probe; no frame within the
-// window means the socket was orphaned by the change and the session
-// reconnects. A no-op when no session is connected.
+// OnNetworkChange handles a host interface or address change. It sends a probe
+// heartbeat and arms netChangeProbeWindow. Any inbound frame disarms it. With
+// no frame inside the window the session reconnects. When disconnected it ends
+// the reconnect backoff.
 func (t *Tunnel) OnNetworkChange() {
 	c := t.snapshotConn()
 	if c == nil {
-		// Not connected: the change may be the network COMING UP, so skip
-		// whatever remains of the reconnect backoff and retry now.
+		// Disconnected. Retry now in case the network came up.
 		select {
 		case t.retryNow <- struct{}{}:
 		default:
@@ -491,11 +478,10 @@ func (t *Tunnel) OnNetworkChange() {
 		return
 	}
 	t.fastProbeAt.Store(time.Now().UnixNano())
-	// Wake the reader so it adopts the probe window instead of its long idle
-	// deadline (armed above, so the re-evaluation sees the probe).
+	// Wake the reader so it switches to the probe deadline.
 	t.interruptReader()
-	// Async and best-effort: a wedged socket must not block the caller, and
-	// the write error alone is not the verdict; the missing ack is.
+	// Send asynchronously so a stuck socket cannot block the caller. A missing
+	// ack, not the write error, marks the link dead.
 	go func() { _ = c.SendHeartbeat() }()
 }
 
@@ -549,17 +535,16 @@ func (t *Tunnel) closeActiveConns() {
 	}
 }
 
-// connect dials the edge and exchanges Register / RegisterAck, following
-// up to maxRedirectHops redirects to another edge. attempt is the count of
-// consecutive failures so far; it widens the dial budget.
+// connect dials the edge and exchanges Register and RegisterAck, following up
+// to maxRedirectHops redirects. attempt counts consecutive failures and widens
+// the dial timeout.
 func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 	addr := t.edgeAddr
 	budget := dialBudget(t.opts.Transport.DialTimeout, attempt)
 
 	for range maxRedirectHops {
-		// SNI follows the zone of the address being dialed: redirected
-		// dials must present the target zone's connect host to be routed
-		// as agent traffic and match its certificate. Overrides win.
+		// SNI follows the zone of the dialed address. A redirect presents the
+		// target zone's connect host. An explicit override takes precedence.
 		topts := t.opts.Transport
 		if topts.ServerName == "" {
 			topts.ServerName = sniForAddr(t.opts.Edge, addr)
@@ -591,9 +576,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			ClientName: t.opts.ClientName,
 			Timestamp:  time.Now().Unix(),
 			Nonce:      nonce,
-			// GOOS/GOARCH rather than anything probed at runtime: it is a compile-time
-			// constant, it needs no plumbing, and "darwin/arm64" is what support
-			// actually asks for.
+			// GOOS/GOARCH of the build, for example "darwin/arm64".
 			AgentVersion:    t.opts.AgentVersion,
 			AgentOS:         runtime.GOOS + "/" + runtime.GOARCH,
 			ResumeSessionID: resumeID,
@@ -732,11 +715,10 @@ func (t *Tunnel) heartbeatLoop(sessionDone <-chan struct{}) {
 	}
 }
 
-// receiveLoop reads control frames. The reader parks in a blocking Recv with
-// the deadline set to the next dead-link verdict (idle expiry, or an armed
-// probe's window), so an idle session costs zero wake-ups. Socket errors and
-// inbound frames wake it immediately; interruptReader wakes it early to
-// re-evaluate (probe armed, session tearing down).
+// receiveLoop reads control frames. Recv blocks with a deadline at the next
+// dead link check, idle expiry or an armed probe window, so an idle session
+// has no wakeups. interruptReader wakes it early when a probe is armed or the
+// session ends.
 func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 	lastInbound := time.Now()
 	for {
@@ -748,8 +730,7 @@ func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 		default:
 		}
 
-		// start reading from a newly-attached connection that belongs to
-		// the next attempt.
+		// Stop before reading from a connection of the next attempt.
 		if t.closing.Load() {
 			return
 		}
@@ -764,10 +745,8 @@ func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 		if err != nil {
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() {
-				// Deadline fired: a dead-link verdict is due, or an
-				// interrupt asked for re-evaluation. An armed probe's
-				// window is measured from arming so a quiet-but-healthy
-				// session is never tripped by pre-probe silence.
+				// Deadline reached by expiry or interrupt. The probe window
+				// counts from arming, so silence before it is ignored.
 				if at := t.fastProbeAt.Load(); at != 0 {
 					armed := time.Unix(0, at)
 					if lastInbound.After(armed) {
@@ -791,8 +770,8 @@ func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 	}
 }
 
-// readDeadline is when the next dead-link verdict is due: idle expiry, or an
-// armed probe's window when that comes sooner.
+// readDeadline returns the next dead link check, idle expiry or the armed
+// probe window, whichever is earlier.
 func (t *Tunnel) readDeadline(lastInbound time.Time) time.Time {
 	deadline := lastInbound.Add(edgeIdleTimeout)
 	if at := t.fastProbeAt.Load(); at != 0 {
@@ -875,11 +854,9 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 			_ = c.SendHeartbeatAck(hb.Timestamp)
 		}
 
-	// SetActive tells a fanout-tunnel client it is now primary. The EDGE decides
-	// routing, so an agent has nothing to do with it; it is matched here so the
-	// frame is a recognised no-op rather than falling through as unknown.
+	// SetActive is a no-op. The edge handles fanout routing.
 	case proto.MsgHeartbeatAck, proto.MsgSetActive:
-		// nothing to do; edge liveness / dispatch hints
+		// Edge liveness and dispatch hints. No action.
 
 	case proto.MsgShutdown:
 		sd, _ := proto.ParseShutdown(body)
@@ -1133,8 +1110,8 @@ func (t *Tunnel) serveData(ac *activeConn, connID string, edge, local net.Conn, 
 	closeEvt(ac.bytesIn.Load(), ac.bytesOut.Load(), firstCopyError(inErr, outErr))
 }
 
-// halfCloseOrClose signals EOF to the peer: half-close when supported,
-// full close otherwise so the paired copy loop always unwinds.
+// halfCloseOrClose signals EOF to the peer. It half-closes when supported and
+// closes otherwise, so the paired copy loop returns.
 func halfCloseOrClose(c net.Conn) {
 	if cw, ok := c.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()
@@ -1404,10 +1381,9 @@ func dialBudget(configured time.Duration, attempt int) time.Duration {
 	return 2 * time.Second << attempt
 }
 
-// sniForAddr returns the SNI for a dial address: the configured edge host
-// as-is, or, for a redirect target, the target zone's connect host (the
-// target's first label swapped for the connect label). Falls back to the
-// original host when no zone can be derived.
+// sniForAddr returns the SNI for a dial address. The configured edge host is
+// used as is. A redirect target gets its zone connect host, the first label
+// replaced by the connect label. Without a zone it returns the host.
 func sniForAddr(originalEdge, addr string) string {
 	origHost, _ := transport.SplitHostPort(originalEdge)
 	addrHost, _ := transport.SplitHostPort(addr)
@@ -1442,6 +1418,7 @@ func newNonce() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
+// safeClose closes ch unless it is already closed. Callers must hold t.mu.
 func safeClose(ch chan struct{}) {
 	select {
 	case <-ch:

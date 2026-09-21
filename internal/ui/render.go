@@ -44,9 +44,9 @@ type snap struct {
 	palette    Palette
 }
 
-// buildRightCaps composes the two top-right capsules from the tunnels
-// snapshot. Single-tunnel: state word + per-tunnel uptime. Multi-tunnel:
-// connected/total count + agent uptime.
+// buildRightCaps builds the two top-right capsules. With one tunnel they show
+// its state and uptime. With several they show the connected count and agent
+// uptime.
 func buildRightCaps(tunnels []tState, agentUptime time.Duration) (status, uptime string) {
 	if len(tunnels) == 0 {
 		return "starting…", HumanDuration(agentUptime)
@@ -476,14 +476,11 @@ func connectingPhrase(ts tState, spin string, pal Palette) string {
 	return pal.Muted("· idle")
 }
 
-// renderConnTable formats one row per ActiveConn. Sorted by StartedAt
-// descending so the newest connection sits on top.
+// renderConnTable formats one row per ActiveConn, newest first. The remote
+// address omits the source port.
 //
 //	IP                           DUR     ↓ IN       ↑ OUT
 //	203.0.113.4                 3m12s    1.2 MB    430 KB
-//
-// The remote address is shown host-only. An operator watching the panel gets
-// nothing useful from the source port, so it is stripped for clarity.
 func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette) []string {
 	if capacity <= 0 || len(conns) == 0 {
 		return nil
@@ -529,8 +526,8 @@ func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette)
 	return rows
 }
 
-// renderRequestTable formats one row per HTTP request, newest at the bottom so
-// it reads like a log. Shown on http tunnels in place of the connection table.
+// renderRequestTable formats one row per HTTP request, newest last. http
+// tunnels show it in place of the connection table.
 //
 //	TIME      METHOD  PATH                    STATUS   DUR
 //	15:04:05  POST    /webhook/slack          200      142ms
@@ -554,7 +551,7 @@ func renderRequestTable(reqs []tunnel.RequestInfo, capacity, cols int, pal Palet
 	rows := make([]string, 0, capacity)
 	rows = append(rows, header)
 
-	// The ring is oldest-first; show the most recent that fit, newest last.
+	// The ring is oldest first. Show the newest rows that fit.
 	bodyCap := capacity - 1
 	start := 0
 	if len(reqs) > bodyCap {
@@ -568,8 +565,8 @@ func renderRequestTable(reqs []tunnel.RequestInfo, capacity, cols int, pal Palet
 			padLeftVisible(pal.Foreground(humanLatency(r.Duration)), durW)
 		rows = append(rows, row)
 	}
-	// Mark hidden older requests on the first body row. Skip when only the header
-	// fits (capacity 1), else rows[1] is out of range.
+	// Mark hidden older requests on the first body row, unless only the
+	// header fits.
 	if start > 0 && len(rows) > 1 {
 		rows[1] = pal.Muted(fmt.Sprintf("…%d earlier", start))
 	}
@@ -584,8 +581,8 @@ func padMethod(m string, w int) string {
 	return truncate(m, w)
 }
 
-// statusStyle colours a status code by class: 2xx primary, 3xx/4xx warning,
-// 5xx (and anything unexpected) destructive.
+// statusStyle colors a status code by class. 2xx is primary, 3xx and 4xx are
+// warning, and 5xx and other codes are destructive.
 func statusStyle(code int, pal Palette) StyleFn {
 	switch {
 	case code >= 200 && code < 300:
@@ -597,7 +594,7 @@ func statusStyle(code int, pal Palette) StyleFn {
 	}
 }
 
-// humanLatency shows sub-second timing (µs/ms) that humanDuration collapses to 0s.
+// humanLatency formats sub-second durations in µs or ms.
 func humanLatency(d time.Duration) string {
 	switch {
 	case d < time.Microsecond:

@@ -20,9 +20,7 @@ import (
 	"time"
 )
 
-// DefaultAPIURL is the control plane. `--api` and LOCALPORT_API_URL point the
-// agent elsewhere. The resolved value is stored in meta.json, so renewal is
-// never told again.
+// DefaultAPIURL is the control plane. `--api` and LOCALPORT_API_URL override it.
 const DefaultAPIURL = "https://api.localport.io"
 
 // APIURLEnv is the environment override for DefaultAPIURL.
@@ -32,9 +30,8 @@ const APIURLEnv = "LOCALPORT_API_URL"
 // and its chain are a few kilobytes, and the body is parsed in memory.
 const maxResponseBytes = 1 << 20
 
-// requestTimeout covers one issuance or renewal round trip. Long enough for a
-// slow link, short enough that a hung control plane cannot wedge the renewal
-// loop.
+// requestTimeout covers one issuance or renewal round trip. It allows for a
+// slow link and keeps a hung control plane from stalling the renewal loop.
 const requestTimeout = 60 * time.Second
 
 // Client talks to the control plane's public mTLS credential endpoints.
@@ -43,8 +40,8 @@ type Client struct {
 	HTTP    *http.Client
 }
 
-// NewClient normalises the base URL and refuses anything but https. A setup
-// token is a bearer secret and must never travel in the clear.
+// NewClient normalizes the base URL and requires https, since the setup token
+// is a bearer secret.
 func NewClient(baseURL string) (*Client, error) {
 	raw := strings.TrimSpace(baseURL)
 	if raw == "" {
@@ -71,8 +68,8 @@ func newHTTPClient() *http.Client {
 	return &http.Client{Timeout: requestTimeout, Transport: tr}
 }
 
-// errorEnvelope is the control plane's error body: a support code, a short type
-// label, and a message already made generic on the server side.
+// errorEnvelope is the control plane error body. It holds a support code, a
+// type label and a sanitized message.
 type errorEnvelope struct {
 	Code    string `json:"code"`
 	Error   string `json:"error"`
@@ -197,8 +194,8 @@ func retry(ctx context.Context, budget time.Duration, onWait RetryNotice, fn fun
 	}
 }
 
-// jitter returns a uniformly random duration in [0, d]. math/rand: this spreads
-// retries and is not a secret.
+// jitter returns a uniformly random duration in [0, d]. math/rand is
+// sufficient because the value is not secret.
 func jitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
@@ -236,9 +233,9 @@ func (c *Client) post(ctx context.Context, path, bearer string, body, out any) e
 	return c.postWithHeader(ctx, path, header, bearer, body, out)
 }
 
-// postWithHeader is the shared request path. Only the credential header differs:
-// `Authorization: Bearer <secret>` for a setup token, `X-Workload-Token` for a
-// platform-minted one.
+// postWithHeader sends a request with the given credential header,
+// `Authorization: Bearer <secret>` for a setup token or `X-Workload-Token` for
+// a platform token.
 func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue string, body, out any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -272,8 +269,7 @@ func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue
 		var env errorEnvelope
 		if json.Unmarshal(raw, &env) == nil {
 			apiErr.Code = env.Code
-			// `error` is the type label and is the only text present when a
-			// response carries no message.
+			// Fall back to the type label when the response has no message.
 			apiErr.Message = firstNonEmpty(env.Message, env.Error)
 		}
 		return apiErr
@@ -295,9 +291,8 @@ type keyPair struct {
 	csrPEM []byte
 }
 
-// newKeyPair generates P-256 and builds a CSR. The common name is for
-// readability only: the control plane takes the identity from the credential
-// presented, never from the request.
+// newKeyPair generates a P-256 key and a CSR. The common name is cosmetic. The
+// control plane takes the identity from the presented credential.
 func newKeyPair(commonName string) (*keyPair, error) {
 	key, err := generateKey(BackingFile)
 	if err != nil {

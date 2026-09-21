@@ -111,18 +111,18 @@ func TestSNIForAddr(t *testing.T) {
 	cases := []struct {
 		edge, addr, want string
 	}{
-		// No redirect: original connect host verbatim.
+		// No redirect, original connect host verbatim.
 		{"connect.us.localport.dev:443", "connect.us.localport.dev:443", "connect.us.localport.dev"},
-		// Same-region redirect: SNI stays the zone connect host.
+		// Same-region redirect, SNI stays the zone connect host.
 		{"connect.us.localport.dev:443", "e1.us.localport.dev:443", "connect.us.localport.dev"},
-		// Cross-region redirect: SNI follows the TARGET zone.
+		// Cross-region redirect, SNI follows the target zone.
 		{"connect.us.localport.dev:443", "e1.eu.localport.dev:443", "connect.eu.localport.dev"},
-		// Redirect to a zone-style host: idempotent derivation.
+		// Redirect to a zone-style host, idempotent derivation.
 		{"connect.us.localport.dev:443", "connect.ap.localport.dev:443", "connect.ap.localport.dev"},
-		// Dev / no zone to derive from: fall back to the original host.
+		// Dev with no zone to derive from, fall back to the original host.
 		{"localhost:4443", "localhost:4443", "localhost"},
 		{"localhost:4443", "otherhost:4443", "localhost"},
-		// Original edge dialed by IP: never synthesize an SNI from it.
+		// Original edge dialed by IP, no SNI derived.
 		{"203.0.113.5:443", "e1.eu.localport.dev:443", "203.0.113.5"},
 	}
 	for _, c := range cases {
@@ -137,8 +137,7 @@ func TestReceiveLoopIdleDisconnect(t *testing.T) {
 	edgeIdleTimeout = 300 * time.Millisecond
 	defer func() { edgeIdleTimeout = oldIdle }()
 
-	// A pipe that stays open but never delivers a frame simulates a link
-	// that died without an error: reads only ever time out.
+	// An open pipe that never delivers a frame simulates a dead link with no error.
 	a, b := net.Pipe()
 	defer a.Close()
 	defer b.Close()
@@ -191,9 +190,8 @@ func TestDialBudget(t *testing.T) {
 	}
 }
 
-// A network-change probe must kill an unresponsive session within
-// netChangeProbeWindow measured FROM ARMING, and must never trip a session
-// that was merely quiet before the probe or that answers it.
+// An unanswered network change probe ends the session netChangeProbeWindow
+// after arming. Earlier silence and answered probes do not.
 func TestNetworkChangeProbe(t *testing.T) {
 	oldIdle, oldWindow := edgeIdleTimeout, netChangeProbeWindow
 	edgeIdleTimeout = time.Hour // isolate the probe path
@@ -212,13 +210,13 @@ func TestNetworkChangeProbe(t *testing.T) {
 		return b
 	}
 
-	// Unanswered probe: dead ~window after ARMING, not sooner, even though
-	// the session was already quiet for longer than the window.
+	// Unanswered probe after a silence longer than the window. The session
+	// ends about one window after arming.
 	tn := New(Options{Local: "localhost:0"})
 	runLoop(tn)
 	time.Sleep(time.Second) // quiet longer than the window
 	tn.fastProbeAt.Store(time.Now().UnixNano())
-	tn.interruptReader() // as OnNetworkChange does: arm, then wake the reader
+	tn.interruptReader() // arm, then wake the reader, as OnNetworkChange does
 	select {
 	case <-tn.disconnected:
 		t.Fatal("probe tripped on pre-arm silence")
@@ -230,7 +228,7 @@ func TestNetworkChangeProbe(t *testing.T) {
 		t.Fatal("unanswered probe did not disconnect the session")
 	}
 
-	// Answered probe: an inbound frame after arming disarms it.
+	// Answered probe. An inbound frame after arming disarms it.
 	tn2 := New(Options{Local: "localhost:0"})
 	peer := runLoop(tn2)
 	tn2.fastProbeAt.Store(time.Now().UnixNano())

@@ -140,9 +140,8 @@ func (p *Plain) OnPortsUpdate(label string, ports []proto.DevicePort) {
 	p.line("ports", label, formatPorts(ports))
 }
 
-// OnHTTPRequest runs on the forwarding goroutine, so it must not block. Counts
-// update under a brief lock (accurate); the log line is queued and dropped, never
-// blocked, when the sink lags.
+// OnHTTPRequest runs on the forwarding goroutine and must not block. The log
+// line is queued and dropped when the queue is full.
 func (p *Plain) OnHTTPRequest(label string, r tunnel.RequestInfo) {
 	path := r.Path
 	if path == "" {

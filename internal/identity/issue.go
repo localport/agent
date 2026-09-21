@@ -43,11 +43,10 @@ type issuedMaterial struct {
 	TeamName string
 }
 
-// RedeemSetupToken spends a setup token once and returns the credential.
-//
-// The token is used for this call only and never written to disk; from here the
-// certificate renews itself. budget bounds how long an UNREACHABLE control plane
-// is waited out, and a refusal is never retried. onWait reports each wait.
+// RedeemSetupToken redeems a single-use setup token and returns the
+// credential. The token is not written to disk. budget bounds retries against
+// an unreachable control plane. Refusals are not retried. onWait reports each
+// wait.
 func (c *Client) RedeemSetupToken(
 	ctx context.Context, token string, budget time.Duration, onWait RetryNotice,
 ) (*Material, error) {
@@ -69,8 +68,7 @@ func (c *Client) RedeemSetupToken(
 		return nil, err
 	}
 	if resp.CertPEM == "" {
-		// Failing here beats writing an empty credential and finding out at the
-		// next handshake.
+		// Fail before writing an empty credential.
 		return nil, errors.New("control plane returned no certificate for the CSR")
 	}
 
@@ -87,13 +85,11 @@ func (c *Client) RedeemSetupToken(
 // failed, retry": the loop backs off on the second and must stop on the first.
 var ErrNotRenewable = errors.New("a sign-in credential does not renew; run `localport login` again")
 
-// Renew exchanges the credential we hold for a fresh one.
-//
-// No bearer token: possession of the current private key is the proof, so the
-// setup token need not be kept. The certificate being replaced stays valid, so
-// rollover overlaps.
+// Renew exchanges the stored credential for a new one. The current private
+// key proves possession, so no bearer token is needed. The old certificate
+// stays valid until it expires.
 func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
-	// Guarded here because every renewal path converges on this call.
+	// All renewal paths call Renew, so the check lives here.
 	if !cur.Meta.Source.Renewable() {
 		return nil, ErrNotRenewable
 	}
@@ -107,13 +103,12 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 		return nil, err
 	}
 
-	// Sign(oldKey, SHA256(csrDER || minuteBucket || serial)). The minute bucket
-	// bounds replay with no nonce store; the serial binds the signature to the one
-	// certificate it was made for.
+	// Proof is Sign(oldKey, SHA256(csrDER || minuteBucket || serial)). The
+	// minute bucket limits replay without a nonce store. The serial binds the
+	// proof to one certificate.
 	serial := leaf.SerialNumber.Text(16)
 
-	// Re-signed per attempt: a retry crossing a minute boundary must not replay a
-	// stale signature.
+	// Sign per attempt, since a retry can cross a minute boundary.
 	var resp renewResponse
 	if err := retry(ctx, DefaultRetryBudget, nil, func() error {
 		digest := renewalDigest(kp.csrDER, time.Now().Unix()/60, serial)
@@ -134,10 +129,8 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 		return nil, errors.New("control plane returned no certificate")
 	}
 
-	// Source carried from the credential being replaced: a renewal does not change
-	// how the identity was established. The team name is carried forward when the
-	// response omits it, because the server resolves it best-effort and a renewal
-	// may refresh the name but must never blank it.
+	// Keep the Source of the replaced credential. Keep the team name when the
+	// response omits it, since the server resolves it best effort.
 	teamName := resp.TeamName
 	if teamName == "" {
 		teamName = cur.Meta.TeamName

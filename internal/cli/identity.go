@@ -40,9 +40,8 @@ func runIdentity(args []string) error {
 	}
 }
 
-// runIdentityList prints every credential on this machine. The table goes to
-// STDOUT, unlike every other message in the agent: it is queryable output, not
-// progress commentary.
+// runIdentityList prints every stored credential. The table goes to stdout
+// because it is command output. Other agent messages go to stderr.
 func runIdentityList(args []string) error {
 	fs := flag.NewFlagSet("identity list", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -106,8 +105,8 @@ func runIdentityList(args []string) error {
 			}
 		}
 	}
-	// An unreadable directory and a missing one look the same to a reader shown
-	// only the survivors. Exit stays 0: this is information, not a failed request.
+	// Report unreadable directories so they are not mistaken for missing ones.
+	// The exit status stays 0.
 	for _, s := range skipped {
 		fmt.Fprintf(os.Stderr, "  skipped %s: %v\n", s.Path, s.Reason)
 	}
@@ -127,8 +126,7 @@ func runIdentityRenew(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Never interactive: a renewal runs from a timer as often as from a
-	// terminal, and a prompt there hangs the timer.
+	// Not interactive. Renewal also runs from timers, where a prompt hangs.
 	ref, err := resolveCredential(store, firstNonEmpty(*selector, os.Getenv(identityEnv)), false)
 	if err != nil {
 		return err
@@ -139,8 +137,7 @@ func runIdentityRenew(args []string) error {
 
 	material, err := (&identity.Renewer{Store: store, Ref: ref}).RenewOnce(ctx)
 	if errors.Is(err, identity.ErrRenewalInProgress) {
-		// Not a failure: another process is already renewing, and a second
-		// certificate would only be orphaned.
+		// Another process holds the renewal. Not a failure.
 		fmt.Fprintf(os.Stderr, "  %s is already being renewed by another process\n", ref)
 		return nil
 	}
@@ -230,7 +227,7 @@ var renewalLoops sync.Map
 // reported, so a config naming five targets says it once.
 var signInNotices sync.Map
 
-// noteSignInExpiry says when the sign-in ends and how to get it back.
+// noteSignInExpiry prints when the sign-in expires and how to renew it.
 func noteSignInExpiry(ref identity.Ref, meta identity.Meta) {
 	if _, seen := signInNotices.LoadOrStore(ref, true); seen {
 		return

@@ -16,11 +16,8 @@ import (
 // single-use credential on a provisioning run is exactly the wrong place.
 const setupTokenEnv = "LOCALPORT_SETUP_TOKEN"
 
-// `localport setup <TOKEN>` redeems a setup token and keeps the credential.
-//
-// This is the once-per-machine command. Everything after it is automatic: the
-// certificate renews itself, so there is no long-lived secret left on the box
-// and nothing to rotate by hand.
+// `localport setup <TOKEN>` redeems a single-use setup token and stores a
+// credential that renews itself. Run once per machine.
 func runSetup(args []string) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -30,8 +27,7 @@ func runSetup(args []string) error {
 		"how long to keep retrying while the control plane is unreachable (0 = one attempt)")
 	fs.Usage = usageSetup
 
-	// The token is accepted as a leading positional, because that is what the
-	// dashboard shows.
+	// The token is a leading positional, as the dashboard shows it.
 	positional := ""
 	rest := args
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -75,8 +71,8 @@ func runSetup(args []string) error {
 	}
 	material, err := client.RedeemSetupToken(ctx, secret, *wait, notice)
 	if err != nil {
-		// The token is single-use and the error may quote the request. Never let
-		// it reach a terminal or a CI log.
+		// The error may quote the request. Keep the token out of terminals and
+		// CI logs.
 		return security.SanitizeError(err, secret)
 	}
 	ref, err := store.Save(*material)

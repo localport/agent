@@ -13,21 +13,14 @@ import (
 	"github.com/localport/agent/internal/tunnel"
 )
 
-// TUI renders a single bordered frame: status header on top, live
-// connections panel underneath. Pure ANSI, no external deps.
+// TUI renders one bordered frame with a status header and a connections panel
+// below, using ANSI sequences only.
 //
-// Render policy:
-//   - Frame redraws on state-mutating events (push). There is no ticker
-//     because the header only changes shape on state transitions, so a
-//     poll loop would just burn CPU.
-//   - DECAWM (autowrap) is disabled during writes so a cell at the last
-//     column never bleeds into the next row.
+// Frames redraw on state events and on the animationLoop timer. Autowrap
+// (DECAWM) is off during writes so the last column does not wrap.
 //
-// Concurrency:
-//   - mu guards static tunnel state.
-//   - The connection registry lives inside each tunnel.Tunnel; the TUI
-//     pulls ActiveConnections() / Stats() at render time and never holds
-//     a reference between frames.
+// mu guards per-tunnel state. Live connections are read from each
+// tunnel.Tunnel at render time and not kept between frames.
 type TUI struct {
 	out     *os.File
 	palette Palette
@@ -53,9 +46,8 @@ type TUI struct {
 	started    bool
 }
 
-// tState mirrors the static-ish per-tunnel info populated from
-// EventHandler callbacks. Live byte counters and remote IPs come from
-// the tunnel's own connection registry at render time.
+// tState holds per-tunnel state from EventHandler callbacks. Live counters and
+// remote addresses are read from the tunnel at render time.
 type tState struct {
 	name        string
 	tunnelName  string
@@ -216,10 +208,8 @@ func (t *TUI) start() {
 	t.requestRender()
 }
 
-// animationLoop drives periodic redraws with one timer, at the cadence the
-// screen actually needs: spinner speed while any tunnel is transitioning,
-// once per second while connected (uptime and byte counters tick), and idle
-// no-op checks otherwise. Steady state is one redraw per second, not eight.
+// animationLoop redraws on one timer. It runs at spinner speed while a tunnel
+// is transitioning, once per second while connected and only checks otherwise.
 func (t *TUI) animationLoop() {
 	timer := time.NewTimer(spinnerInterval)
 	defer timer.Stop()
@@ -238,7 +228,7 @@ func (t *TUI) animationLoop() {
 		case paceSlow:
 			t.requestRender()
 		case paceIdle:
-			// nothing on screen changes; keep checking lazily
+			// Nothing changes on screen.
 		}
 		timer.Reset(next)
 	}
@@ -570,7 +560,8 @@ func (t *TUI) snapshot() snap {
 
 	status, uptime := buildRightCaps(tunnels, time.Since(t.startedAt))
 
-	// Bottom-right capsule shows the most recent error code while a tunnel is not active
+	// The bottom-right capsule shows the last error code while a tunnel is
+	// inactive.
 	errCode := ""
 	for _, ts := range tunnels {
 		if ts.lastCode != "" && ts.state != tunnel.StateActive {

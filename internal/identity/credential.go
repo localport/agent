@@ -68,8 +68,8 @@ func (c *Credential) Meta() Meta {
 	return c.meta
 }
 
-// Certificate returns the current client certificate, reloading it first if the
-// file changed since it was last read.
+// Certificate returns the client certificate, reloading it if the file
+// changed since the last read.
 func (c *Credential) Certificate() (*tls.Certificate, error) {
 	c.mu.Lock()
 	stale := c.staleLocked()
@@ -77,8 +77,8 @@ func (c *Credential) Certificate() (*tls.Certificate, error) {
 
 	if stale {
 		if err := c.reload(); err != nil {
-			// A failed reload keeps serving what we hold: a renewal caught
-			// mid-write is transient and must not drop a working credential.
+			// Keep the loaded certificate if a reload fails, for example
+			// during a renewal write.
 			c.mu.Lock()
 			cert := c.cert
 			c.mu.Unlock()

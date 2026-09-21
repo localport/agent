@@ -39,7 +39,7 @@ func echoService(t *testing.T) (dial func() (net.Conn, error), stop func()) {
 		}
 }
 
-// A stream must carry bytes to the local service and its reply back.
+// A stream carries bytes to the local service and back.
 func TestMuxServerPipesStreamToLocalService(t *testing.T) {
 	dial, stop := echoService(t)
 	defer stop()
@@ -60,8 +60,7 @@ func TestMuxServerPipesStreamToLocalService(t *testing.T) {
 	}
 }
 
-// An unreachable local service must be reported as a gateway failure rather
-// than a hung stream, so the visitor gets an error instead of a timeout.
+// An unreachable local service returns 502.
 func TestMuxServerReportsUnreachableLocalService(t *testing.T) {
 	srv := &muxServer{
 		dialTarget: tunnelTarget(func() (net.Conn, error) {
@@ -103,9 +102,7 @@ func (r *recordingTracker) Begin(remote string, _ connTarget, _ net.Conn) *activ
 
 func (r *recordingTracker) End(ac *activeConn, err error) { r.ended++ }
 
-// Byte counts feed the TUI and the usage view. They must be folded in as bytes
-// move, both per stream and into the tunnel totals, or a muxed tunnel reports
-// nothing until every stream has finished.
+// Stream and tunnel byte counters update while bytes move.
 func TestMuxServerCountsBytesPerStreamAndTotal(t *testing.T) {
 	dial, stop := echoService(t)
 	defer stop()
@@ -138,8 +135,7 @@ func TestMuxServerCountsBytesPerStreamAndTotal(t *testing.T) {
 	}
 }
 
-// Every stream must appear in the live view and leave it again, so a muxed
-// tunnel shows connections exactly as a dial-back one does.
+// Each stream enters and leaves the live view, as on dial-back.
 func TestMuxServerTracksStreamLifecycle(t *testing.T) {
 	dial, stop := echoService(t)
 	defer stop()

@@ -9,15 +9,10 @@ import (
 	"sync/atomic"
 )
 
-// muxServer answers the data streams an edge opens on the multiplexed
-// connection. Each stream stands in for one inbound visitor connection: the
-// request body carries what the visitor sent, the response body carries what
-// the local service replies.
-//
-// The stream is treated as opaque bytes, exactly as a dialed-back socket was.
-// That keeps one mechanism serving HTTP, TCP and TLS tunnels alike, keeps the
-// local service's bytes untouched on the way through, and keeps the agent from
-// having to understand any protocol it is carrying.
+// muxServer serves the streams the edge opens on the multiplexed connection.
+// Each stream is one visitor connection. The request body carries visitor
+// bytes and the response body carries local service bytes. Streams are opaque,
+// so HTTP, TCP and TLS tunnels share this path.
 type muxServer struct {
 	// dialTarget connects to the local target or returns the status to answer
 	// with. Tests replace it.
@@ -29,12 +24,10 @@ type muxServer struct {
 	// defaultProto is the tunnel protocol for streams that name none.
 	defaultProto string
 
-	// tracker publishes stream lifecycle into the tunnel's live connection view.
-	// Nil disables tracking, which is what the tests use.
+	// tracker reports streams to the live connection view. Nil disables it.
 	tracker muxTracker
 
-	// Tunnel-wide totals, updated as bytes move rather than at close so a
-	// long-lived stream is not invisible until it ends.
+	// Tunnel totals, updated as bytes move so long-lived streams are counted.
 	totalIn  *atomic.Int64
 	totalOut *atomic.Int64
 
@@ -43,9 +36,8 @@ type muxServer struct {
 	newInspector func(protocol string, port uint16) *httpInspector
 }
 
-// muxTracker mirrors what proxyData does for a dialed-back connection, so the
-// live view and its counters look identical whichever transport carried the
-// traffic.
+// muxTracker reports mux streams the same way proxyData reports dial-back
+// connections.
 type muxTracker interface {
 	// local is the dialed target. Closing it cuts the stream when its port
 	// closes.
@@ -87,10 +79,8 @@ func (s *muxServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer local.Close()
 
-	// Headers go out before a single byte of the request has been read. The edge
-	// blocks on them, so deferring them until the visitor finished talking would
-	// deadlock any exchange where the response precedes the request's end, which
-	// is most of them.
+	// Send headers before reading the request. The edge waits for them, and
+	// most protocols reply before the request stream ends.
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
@@ -102,8 +92,7 @@ func (s *muxServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	inCounters := s.counters(ac, true)
 	outCounters := s.counters(ac, false)
 
-	// http tunnels: the scanner reads a copy off the read side; forwarding is
-	// untouched.
+	// On http tunnels the scanner reads a copy of the traffic.
 	reqSrc, respSrc := io.Reader(r.Body), io.Reader(local)
 	if s.newInspector != nil {
 		if insp := s.newInspector(target.protocol, target.port); insp != nil {
@@ -128,8 +117,8 @@ func (s *muxServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// counters returns the atomics a copy in one direction should feed: the
-// per-stream counter when the stream is tracked, plus the tunnel total.
+// counters returns the byte counters for one direction, the tunnel total and
+// the stream counter when tracked.
 func (s *muxServer) counters(ac *activeConn, inbound bool) []*atomic.Int64 {
 	var out []*atomic.Int64
 	if ac != nil {

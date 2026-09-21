@@ -78,15 +78,10 @@ type RegisterPayload struct {
 	Nonce      string `json:"nonce"`
 	Subdomain  string `json:"subdomain,omitempty"`
 
-	// AgentVersion and AgentOS describe the BINARY, for the connection's audit
-	// record: "which build was this, on what platform". Both are SELF-ASSERTED
-	// and forensic only: nothing on the server gates on either, and an edge that
-	// does not read them simply sees them absent.
+	// AgentVersion and AgentOS identify the build and platform in the audit record.
+	// They are self-reported and not used for access decisions.
 	AgentVersion string `json:"agent_version,omitempty"`
 	AgentOS      string `json:"agent_os,omitempty"`
-
-	// A registering client asserts nothing that access depends on: a grant
-	// names devices directly (`*`, `gw-*`, `gw-01`).
 
 	// ResumeSessionID echoes the session_id from this tunnel's previous
 	// RegisterAck so the edge can replace the stale session on reconnect.
@@ -98,7 +93,7 @@ type RegisterAckPayload struct {
 	TunnelID   string    `json:"tunnel_id"`
 	TunnelName string    `json:"tunnel_name"`
 	Region     string    `json:"region"`
-	RegionName string    `json:"region_name,omitempty"` // display name; empty from older edges
+	RegionName string    `json:"region_name,omitempty"` // display name
 	PublicURL  string    `json:"public_url"`
 	URLs       []string  `json:"urls"`
 	Subdomain  string    `json:"subdomain"`
@@ -111,8 +106,8 @@ type RegisterAckPayload struct {
 	LimitType  LimitType `json:"limit_type,omitempty"`
 	MTLS       *MTLSInfo `json:"mtls,omitempty"`
 
-	// SessionID identifies this session; send it back as resume_session_id
-	// on the next Register to reclaim the slot immediately.
+	// SessionID identifies this session. Send it as resume_session_id on the
+	// next Register to reclaim the slot.
 	SessionID string `json:"session_id,omitempty"`
 
 	// Ports lists the device's open ports as set in the dashboard, with their
@@ -139,15 +134,9 @@ type PortsAckPayload struct {
 	Version uint64 `json:"version"`
 }
 
-// MTLSInfo describes the mutual-TLS posture of a tunnel. When Enabled is true,
-// consumers must present a client certificate the tunnel trusts.
-//
-// There is no CA fingerprint here. A tunnel trusts several certificate
-// authorities at once, ours and any the customer registered, so one fingerprint
-// would not name the one that matters. The field that used to be here was never
-// populated by the edge either, so the agent printed an empty value. Consumers
-// verify the SERVER against system roots; the CA they care about is the one in
-// their own bundle.
+// MTLSInfo describes the mutual TLS settings of a tunnel. When Enabled is true,
+// consumers must present a client certificate the tunnel trusts. It carries no
+// CA fingerprint because a tunnel trusts several CAs.
 type MTLSInfo struct {
 	Enabled bool `json:"enabled"`
 }
@@ -197,12 +186,9 @@ type RedirectPayload struct {
 	Reason   string `json:"reason"`
 }
 
-// MuxBindPayload binds a multiplexed data connection to a session that is
-// already registered on the control connection.
-//
-// It carries the same replay protection as a registration because it is dialed
-// and authenticated independently: the token proves which tunnel, the session id
-// names which live client the streams belong to, and neither alone is accepted.
+// MuxBindPayload binds a multiplexed data connection to a session registered on
+// the control connection. It is authenticated separately and has the same replay
+// protection as Register. The edge requires both the token and the session id.
 type MuxBindPayload struct {
 	Token     string `json:"token"`
 	SessionID string `json:"session_id"`

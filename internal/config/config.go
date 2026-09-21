@@ -268,9 +268,9 @@ func validRegion(region string) error {
 		"digits and internal dashes", region)
 }
 
-// ParseLocal splits a `local` value into (protocol, addr). A scheme in
-// the URL wins over fallbackProto. A bare port ("18789") is rewritten
-// to "localhost:18789". Empty input passes through.
+// ParseLocal splits an upstream value into protocol and address. A scheme
+// overrides fallbackProto. A bare port "18789" becomes "localhost:18789".
+// Empty input is returned unchanged.
 func ParseLocal(local, fallbackProto string) (protocol, addr string) {
 	local = strings.TrimSpace(local)
 	if local == "" {
@@ -302,12 +302,8 @@ func normalizeLocalAddr(addr string) string {
 // Register with a redirect.
 const defaultRegion = "eu"
 
-// ResolveEdge maps a region name to its agent-facing edge address.
-// Regions use the "connect." subdomain so the dial host doubles as the
-// TLS SNI the edge expects. TLS is mandatory on every region.
-//
-// An unknown region is passed through rather than refused, so a region added
-// after this binary shipped still resolves.
+// ResolveEdge maps a region to its edge address. The "connect." label makes
+// the dial host usable as the TLS SNI. Unknown regions are passed through.
 func ResolveEdge(region string) string {
 	if region == "" {
 		region = defaultRegion

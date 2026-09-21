@@ -9,10 +9,8 @@ import (
 	"unicode/utf8"
 )
 
-// inspect feeds request then response bytes through a fresh inspector and
-// returns what it emitted. Feeding is synchronous, so results are ready on
-// return. Requests are fed before responses, mirroring reality: a response
-// cannot exist before its request.
+// inspect feeds request bytes, then response bytes, through a new inspector
+// and returns what it emitted. Feeding is synchronous.
 func inspect(reqBytes, respBytes string) []RequestInfo {
 	var got []RequestInfo
 	in := newHTTPInspector(func(r RequestInfo) { got = append(got, r) })
@@ -135,9 +133,8 @@ func TestInspectorDropsQueryString(t *testing.T) {
 	}
 }
 
-// TestScanReaderForwardStaysExact is the safety property: whatever the scanner
-// is fed, the copy through the wrapper delivers the bytes unchanged. The data
-// here is not valid HTTP, so the scanner gives up; the forward must not care.
+// TestScanReaderForwardStaysExact checks that forwarded bytes are unchanged
+// when the scanner gives up on invalid HTTP.
 func TestScanReaderForwardStaysExact(t *testing.T) {
 	in := newHTTPInspector(func(RequestInfo) {})
 	data := make([]byte, 200<<10)

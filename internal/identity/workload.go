@@ -21,35 +21,28 @@ import (
 // that needed it.
 
 const (
-	// AudienceEnv carries the OIDC audience, shown in the dashboard when the
-	// setup token is created.
-	//
-	// Required, never derived: the platform stamps it into the token, so it must
-	// be known before one is requested. It identifies a binding and grants
-	// nothing, so it is not handled as a secret.
+	// AudienceEnv holds the required OIDC audience shown in the dashboard when
+	// the setup token is created. It is not a secret.
 	AudienceEnv = "LOCALPORT_OIDC_AUDIENCE"
 
-	// TokenEnv supplies the platform token directly, for platforms that expose
-	// it as an environment variable rather than through an API: GitLab
-	// `id_tokens:`, Buildkite, a projected Kubernetes service-account token.
-	// Read before any detection, so it also overrides it.
+	// TokenEnv supplies the platform token directly, for example GitLab
+	// id_tokens, Buildkite or a projected Kubernetes service account token.
+	// It overrides platform detection.
 	TokenEnv = "LOCALPORT_OIDC_TOKEN"
 
-	// GitHub Actions sets both in any job declaring `permissions: id-token:
-	// write`. Their presence is the detection.
+	// GitHub Actions sets both in jobs with the id-token write permission.
 	githubTokenURLEnv     = "ACTIONS_ID_TOKEN_REQUEST_URL"
 	githubRequestTokenEnv = "ACTIONS_ID_TOKEN_REQUEST_TOKEN"
 )
 
-// FetchWorkloadToken obtains an OIDC token for the given audience from whatever
-// CI platform this process is running on.
+// FetchWorkloadToken obtains an OIDC token for audience from the current CI
+// platform.
 func FetchWorkloadToken(ctx context.Context, audience string) (string, error) {
 	if strings.TrimSpace(audience) == "" {
 		return "", fmt.Errorf("an OIDC audience is required (set --audience or %s)", AudienceEnv)
 	}
 
-	// Explicit value wins over detection, so an unrecognised platform needs only
-	// a way to pass the token it already holds.
+	// An explicit token overrides detection and supports any platform.
 	if token := strings.TrimSpace(os.Getenv(TokenEnv)); token != "" {
 		return token, nil
 	}
@@ -62,9 +55,8 @@ func FetchWorkloadToken(ctx context.Context, audience string) (string, error) {
 		TokenEnv)
 }
 
-// fetchGitHubActionsToken calls the runner's local token service. The request
-// token is a per-job credential the runner injects; it is never stored or
-// logged.
+// fetchGitHubActionsToken calls the runner token service. The per-job request
+// token is not stored or logged.
 func fetchGitHubActionsToken(ctx context.Context, audience string) (string, error) {
 	rawURL := os.Getenv(githubTokenURLEnv)
 	requestToken := os.Getenv(githubRequestTokenEnv)
@@ -104,7 +96,7 @@ func fetchGitHubActionsToken(ctx context.Context, audience string) (string, erro
 		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		// The response can echo the request token. Never surface it.
+		// The response can echo the request token. Do not include it.
 		return "", fmt.Errorf("GitHub Actions OIDC token request failed with status %d", resp.StatusCode)
 	}
 
@@ -117,8 +109,8 @@ func fetchGitHubActionsToken(ctx context.Context, audience string) (string, erro
 	return payload.Value, nil
 }
 
-// ExchangeWorkloadToken swaps a platform token for a short-lived certificate.
-// The result is returned and never written to disk.
+// ExchangeWorkloadToken exchanges a platform token for a short-lived
+// certificate. Nothing is written to disk.
 func (c *Client) ExchangeWorkloadToken(ctx context.Context, token string) (*Material, error) {
 	kp, err := newKeyPair("")
 	if err != nil {

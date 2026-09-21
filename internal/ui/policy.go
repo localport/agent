@@ -35,9 +35,8 @@ func PolicyHint(lt proto.LimitType) string {
 	return ""
 }
 
-// FirstEndpoint picks the most useful public address out of what the edge
-// reported. URLs win, then PublicURL, then a synthesized host:port pair
-// for raw TCP/TLS tunnels where the edge only returned a port.
+// FirstEndpoint returns the public address to display. It prefers URLs, then
+// PublicURL, then host:port for TCP and TLS tunnels that only report a port.
 func FirstEndpoint(urls []string, publicURL, edgeAddr string, port uint16) string {
 	if len(urls) > 0 {
 		return urls[0]
