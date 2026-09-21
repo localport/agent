@@ -7,8 +7,11 @@
 <p align="center"><strong>Your localhost, on the internet.</strong></p>
 
 <p align="center">
-  <a href="https://goreportcard.com/report/github.com/localport/agent"><img src="https://goreportcard.com/badge/github.com/localport/agent" alt="Go Report Card" /></a>
+  <a href="https://github.com/localport/agent/actions/workflows/ci.yml"><img src="https://github.com/localport/agent/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
+  <a href="https://github.com/localport/agent/actions/workflows/codeql.yml"><img src="https://github.com/localport/agent/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL" /></a>
   <a href="https://github.com/localport/agent/releases"><img src="https://img.shields.io/github/v/release/localport/agent?color=2eb67d" alt="Latest release" /></a>
+  <a href="https://github.com/localport/agent/blob/main/go.mod"><img src="https://img.shields.io/github/go-mod/go-version/localport/agent?color=2eb67d" alt="Go version" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/localport/agent?color=2eb67d" alt="License" /></a>
   <a href="https://localport.io/docs"><img src="https://img.shields.io/badge/docs-localport.io-2eb67d" alt="Documentation" /></a>
 </p>
 
