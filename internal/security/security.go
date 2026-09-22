@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync/atomic"
 )
 
 // ResolveToken returns a token from the flag value, the environment variable or
@@ -29,7 +28,6 @@ func ResolveToken(flagValue, envName string) (string, error) {
 // takes precedence over the file.
 func ResolveOptionalToken(flagValue, envName string) (string, error) {
 	if v := strings.TrimSpace(flagValue); v != "" {
-		warnTokenOnCommandLine(envName)
 		return v, nil
 	}
 	if envName == "" {
@@ -94,32 +92,4 @@ func SanitizeDisplay(s string) string {
 		}
 		return r
 	}, s)
-}
-
-// warnedCommandLineToken limits the notice to one per process.
-var warnedCommandLineToken atomic.Bool
-
-// warnTokenOnCommandLine warns once that a token on the command line is visible
-// to all local accounts through `ps`, `/proc/<pid>/cmdline` and shell history.
-func warnTokenOnCommandLine(envName string) {
-	if envName == "" || warnedCommandLineToken.Swap(true) {
-		return
-	}
-	fmt.Fprintf(os.Stderr,
-		"  warning: the token was passed on the command line, where every local account can read it.\n"+
-			"           Use %s_FILE, or %s, instead.\n", envName, envName)
-}
-
-// warnedCommandLineSecret limits the notice to one per process.
-var warnedCommandLineSecret atomic.Bool
-
-// WarnSecretOnCommandLine warns once that a secret flag is visible to all local
-// accounts and names the supported alternatives.
-func WarnSecretOnCommandLine(flag, alternatives string) {
-	if warnedCommandLineSecret.Swap(true) {
-		return
-	}
-	fmt.Fprintf(os.Stderr,
-		"  warning: %s was passed on the command line, where every local account can read it.\n"+
-			"           Use %s instead.\n", flag, alternatives)
 }

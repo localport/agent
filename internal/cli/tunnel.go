@@ -77,6 +77,7 @@ func runTunnel(version string, args []string) error {
 	a := agent.New(cfg)
 	renderer := pickRenderer(mode, a)
 	renderer.Banner(version, cfg)
+	warnTokenFlag(renderer, *configPath == "" && strings.TrimSpace(*token) != "")
 
 	ctx, stop := signalContext(func() {
 		renderer.Shutdown()
@@ -106,6 +107,18 @@ func inspectDisabled(mode ui.Mode, noInspect, logRequests bool) bool {
 		return false
 	default:
 		return mode == ui.ModePlain
+	}
+}
+
+// tokenFlagWarning names the exposure of -t/--token and the alternatives.
+const tokenFlagWarning = "--token is readable by other local accounts in the process list. " +
+	"Set LOCALPORT_TOKEN_FILE or LOCALPORT_TOKEN instead."
+
+// warnTokenFlag logs tokenFlagWarning in plain mode when the token came from
+// -t/--token. The TUI shows no startup warnings.
+func warnTokenFlag(renderer tunnelUI, fromFlag bool) {
+	if p, ok := renderer.(*ui.Plain); ok && fromFlag {
+		p.Warn(tokenFlagWarning)
 	}
 }
 

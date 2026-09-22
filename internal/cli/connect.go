@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/localport/agent/internal/agent"
 	"github.com/localport/agent/internal/config"
@@ -53,6 +54,7 @@ func runConnect(version string, args []string) error {
 	a := agent.New(cfg)
 	renderer := pickRenderer(mode, a)
 	renderer.Banner(version, cfg)
+	warnTokenFlag(renderer, *configPath == "" && strings.TrimSpace(*token) != "")
 	defer renderer.Shutdown()
 
 	// Stop ends all sessions at once. The renderer shuts down first to

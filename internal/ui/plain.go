@@ -64,6 +64,9 @@ func NewPlain() *Plain {
 	}
 }
 
+// Warn logs a startup warning.
+func (p *Plain) Warn(msg string) { p.line("warning", "", msg) }
+
 func (p *Plain) Banner(version string, cfg *config.Config) {
 	p.line("startup", "", "localport "+version)
 	for _, t := range cfg.Tunnels {

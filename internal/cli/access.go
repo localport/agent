@@ -424,7 +424,6 @@ const minPasswordLength = 12
 func resolveP12Password(inline, filePath, envName string) (string, error) {
 	switch {
 	case inline != "":
-		security.WarnSecretOnCommandLine("--p12-pass", "--p12-pass-env or --p12-pass-file")
 		return noteWeakPassword(inline), nil
 	case filePath != "":
 		// Owner-only and no symlink, as for the archive. This file unlocks the
