@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "[smoke] build"
-go build ./cmd/localport
+go build -o /dev/null ./cmd/localport
 
 echo "[smoke] help / version"
 go run ./cmd/localport --help >/dev/null
