@@ -43,6 +43,9 @@ type Session struct {
 	mu        sync.Mutex
 	transport *http2.Transport
 	conn      *http2.ClientConn
+	// tlsConn is the connection under conn. It keeps the first read error,
+	// which http2 replaces with a generic one.
+	tlsConn *readErrConn
 }
 
 // Open returns a byte stream to one port on the device.
@@ -66,8 +69,12 @@ func (s *Session) Open(ctx context.Context, port uint16) (net.Conn, error) {
 	resp, err := conn.RoundTrip(req)
 	if err != nil {
 		_ = pw.Close()
-		s.drop(conn)
-		return nil, err
+		// Under TLS 1.3 a refused client certificate arrives here, on the
+		// first read after the handshake.
+		if cause := s.drop(conn); cause != nil {
+			err = cause
+		}
+		return nil, streamError(s.Device, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		_ = pw.Close()
@@ -130,22 +137,53 @@ func (s *Session) clientConn(ctx context.Context) (*http2.ClientConn, error) {
 		_ = raw.Close()
 		return nil, handshakeError(s.Device, err)
 	}
-	conn, err := s.transport.NewClientConn(tlsConn)
+	tracked := &readErrConn{Conn: tlsConn}
+	conn, err := s.transport.NewClientConn(tracked)
 	if err != nil {
 		_ = tlsConn.Close()
 		return nil, err
 	}
 	s.conn = conn
+	s.tlsConn = tracked
 	return conn, nil
 }
 
-// drop discards a failed connection so the next forward dials a new one.
-func (s *Session) drop(conn *http2.ClientConn) {
+// drop discards a failed connection so the next forward dials a new one. It
+// returns the connection's first read error, if any.
+func (s *Session) drop(conn *http2.ClientConn) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conn == conn {
-		s.conn = nil
+	if s.conn != conn {
+		return nil
 	}
+	s.conn = nil
+	return s.tlsConn.err()
+}
+
+// readErrConn records the first read error of the TLS connection, such as the
+// alert for a refused client certificate.
+type readErrConn struct {
+	*tls.Conn
+	mu      sync.Mutex
+	readErr error
+}
+
+func (c *readErrConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if err != nil {
+		c.mu.Lock()
+		if c.readErr == nil {
+			c.readErr = err
+		}
+		c.mu.Unlock()
+	}
+	return n, err
+}
+
+func (c *readErrConn) err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.readErr
 }
 
 // streamConn is a net.Conn view of one CONNECT stream.

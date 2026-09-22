@@ -3,6 +3,7 @@ package access
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
 	"net"
@@ -455,5 +456,68 @@ func TestConsumerRefusesATLS12Server(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "protocol version") {
 		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+}
+
+// An edge that refuses the client certificate is reported with the device name
+// and the next step. Under TLS 1.3 the handshake succeeds on the client and the
+// alert arrives on the first request.
+func TestRefusedClientCertificateIsReported(t *testing.T) {
+	device := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	device.EnableHTTP2 = true
+	// Requires a client certificate and trusts no CA, so every one is refused.
+	device.TLS = &tls.Config{
+		ClientAuth: tls.RequireAndVerifyClientCert,
+		ClientCAs:  x509.NewCertPool(),
+		MinVersion: tls.VersionTLS13,
+	}
+	device.StartTLS()
+	defer device.Close()
+
+	cfg, err := BuildTLSConfig(writePEMBundle(t, t.TempDir(), "client.pem"), "", "", "gw-01.eu.localport.dev:443", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.InsecureSkipVerify = true //nolint:gosec // test server
+
+	reported := make(chan error, 1)
+	p := &Proxy{
+		Session: &Session{
+			Device:    "gw-01.eu.localport.dev",
+			Addr:      device.Listener.Addr().String(),
+			TLSConfig: cfg,
+		},
+		Forwards: []Forward{{LocalAddr: "127.0.0.1:0", RemotePort: 22}},
+		OnError: func(err error) {
+			select {
+			case reported <- err:
+			default:
+			}
+		},
+	}
+	bound := make(chan string, 1)
+	p.OnListen = func(_ Forward, addr string) { bound <- addr }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = p.Run(ctx) }()
+
+	client, err := net.Dial("tcp", <-bound)
+	if err != nil {
+		t.Fatalf("dial forward: %v", err)
+	}
+	defer client.Close()
+
+	select {
+	case err := <-reported:
+		for _, want := range []string{"gw-01.eu.localport.dev", "refused this certificate", "localport identity list"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("the refusal must mention %q, got %q", want, err)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a refused client certificate produced no error")
 	}
 }
