@@ -13,21 +13,14 @@ import (
 	"github.com/localport/agent/internal/tunnel"
 )
 
-// TUI renders a single bordered frame: status header on top, live
-// connections panel underneath. Pure ANSI, no external deps.
+// TUI renders one bordered frame with a status header and a connections panel
+// below, using ANSI sequences only.
 //
-// Render policy:
-//   - Frame redraws on state-mutating events (push). There is no ticker
-//     because the header only changes shape on state transitions, so a
-//     poll loop would just burn CPU.
-//   - DECAWM (autowrap) is disabled during writes so a cell at the last
-//     column never bleeds into the next row.
+// Frames redraw on state events and on the animationLoop timer. Autowrap
+// (DECAWM) is off during writes so the last column does not wrap.
 //
-// Concurrency:
-//   - mu guards static tunnel state.
-//   - The connection registry lives inside each tunnel.Tunnel; the TUI
-//     pulls ActiveConnections() / Stats() at render time and never holds
-//     a reference between frames.
+// mu guards per-tunnel state. Live connections are read from each
+// tunnel.Tunnel at render time and not kept between frames.
 type TUI struct {
 	out     *os.File
 	palette Palette
@@ -53,9 +46,8 @@ type TUI struct {
 	started    bool
 }
 
-// tState mirrors the static-ish per-tunnel info populated from
-// EventHandler callbacks. Live byte counters and remote IPs come from
-// the tunnel's own connection registry at render time.
+// tState holds per-tunnel state from EventHandler callbacks. Live counters and
+// remote addresses are read from the tunnel at render time.
 type tState struct {
 	name        string
 	tunnelName  string
@@ -74,7 +66,44 @@ type tState struct {
 	lastCode    string
 	mtls        bool
 	connected   bool
+
+	// device marks a fleet device. ports are the open ports and local is the
+	// target host.
+	device bool
+	ports  []proto.DevicePort
+
+	// events is a device's log of connection and request rows, newest last.
+	// openConns keeps each open connection's port and consumer for its close
+	// row.
+	events    []devEvent
+	openConns map[string]devEvent
 }
+
+type devEventKind int
+
+const (
+	devConnOpen devEventKind = iota
+	devConnClose
+	devRequest
+)
+
+// devEvent is one row of a device's connection log.
+type devEvent struct {
+	at       time.Time
+	kind     devEventKind
+	port     uint16
+	remote   string
+	consumer string
+	method   string
+	path     string
+	status   int
+	dur      time.Duration
+	bytes    int64
+	err      string
+}
+
+// maxDeviceEvents bounds the log's memory.
+const maxDeviceEvents = 200
 
 const (
 	minCols = 24
@@ -113,25 +142,32 @@ func (t *TUI) SetTunnelProvider(p func() []*tunnel.Tunnel) {
 func (t *TUI) Banner(version string, cfg *config.Config) {
 	t.mu.Lock()
 	t.version = version
-	for _, s := range cfg.Specs {
+	add := func(name, protocol, local string, device bool) {
+		if name == "" {
+			name = "default"
+		}
+		if _, ok := t.tunnels[name]; !ok {
+			t.order = append(t.order, name)
+		}
+		t.tunnels[name] = &tState{
+			name:   name,
+			proto:  protocol,
+			local:  local,
+			device: device,
+			state:  tunnel.StateIdle,
+		}
+	}
+	for _, spec := range cfg.Tunnels {
 		if t.edge == "" {
-			t.edge = s.Edge
+			t.edge = spec.Edge
 		}
-		for _, ep := range s.Endpoints {
-			name := ep.Name
-			if name == "" {
-				name = "default"
-			}
-			if _, ok := t.tunnels[name]; !ok {
-				t.order = append(t.order, name)
-			}
-			t.tunnels[name] = &tState{
-				name:  name,
-				proto: ep.Protocol,
-				local: ep.Local,
-				state: tunnel.StateIdle,
-			}
+		add(spec.Name, spec.Protocol, spec.Local, false)
+	}
+	for _, device := range cfg.Devices {
+		if t.edge == "" {
+			t.edge = device.Edge
 		}
+		add(device.Name, "", device.Host, true)
 	}
 	t.cols, t.rows = TermSize(t.out)
 	t.mu.Unlock()
@@ -150,15 +186,21 @@ func (t *TUI) start() {
 
 	fmt.Fprint(t.out, AltScreenOn+CursorHide+ClearScreen)
 
+	// Set the teardown hooks under the lock. Shutdown reads them from the
+	// signal goroutine.
 	if IsTTY(os.Stdin) {
 		if restore, err := enterRaw(os.Stdin); err == nil {
+			t.mu.Lock()
 			t.rawRestore = restore
+			t.mu.Unlock()
 			go t.drainStdin()
 		}
 	}
 
 	resizeCh, stop := notifyResize()
+	t.mu.Lock()
 	t.resizeStop = stop
+	t.mu.Unlock()
 	go t.renderLoop()
 	go t.resizeLoop(resizeCh)
 	go t.animationLoop()
@@ -166,10 +208,8 @@ func (t *TUI) start() {
 	t.requestRender()
 }
 
-// animationLoop drives periodic redraws with one timer, at the cadence the
-// screen actually needs: spinner speed while any tunnel is transitioning,
-// once per second while connected (uptime and byte counters tick), and idle
-// no-op checks otherwise. Steady state is one redraw per second, not eight.
+// animationLoop redraws on one timer. It runs at spinner speed while a tunnel
+// is transitioning, once per second while connected and only checks otherwise.
 func (t *TUI) animationLoop() {
 	timer := time.NewTimer(spinnerInterval)
 	defer timer.Stop()
@@ -188,7 +228,7 @@ func (t *TUI) animationLoop() {
 		case paceSlow:
 			t.requestRender()
 		case paceIdle:
-			// nothing on screen changes; keep checking lazily
+			// Nothing changes on screen.
 		}
 		timer.Reset(next)
 	}
@@ -234,11 +274,16 @@ func (t *TUI) drainStdin() {
 func (t *TUI) Shutdown() {
 	t.stopOnce.Do(func() {
 		close(t.stopCh)
-		if t.resizeStop != nil {
-			t.resizeStop()
+		// Read under the lock and call outside it, since both hooks block on
+		// syscalls.
+		t.mu.Lock()
+		resizeStop, rawRestore := t.resizeStop, t.rawRestore
+		t.mu.Unlock()
+		if resizeStop != nil {
+			resizeStop()
 		}
-		if t.rawRestore != nil {
-			t.rawRestore()
+		if rawRestore != nil {
+			rawRestore()
 		}
 		fmt.Fprint(t.out, wrapOn+CursorShow+AltScreenOff)
 	})
@@ -312,6 +357,10 @@ func (t *TUI) OnConnected(label string, info tunnel.Info) {
 		if info.MTLS != nil {
 			ts.mtls = info.MTLS.Enabled
 		}
+		if info.Device {
+			ts.device = true
+			ts.ports = info.Ports
+		}
 	}
 	if info.EdgeAddr != "" {
 		t.edge = info.EdgeAddr
@@ -324,6 +373,9 @@ func (t *TUI) OnDisconnected(label string, _ error) {
 	t.mu.Lock()
 	if ts := t.ensure(label); ts != nil {
 		ts.connected = false
+		// The session's connections are gone. Drop entries without a close
+		// event.
+		clear(ts.openConns)
 	}
 	t.mu.Unlock()
 	t.requestRender()
@@ -341,11 +393,89 @@ func (t *TUI) OnError(label string, err error) {
 	t.requestRender()
 }
 
-// These only ask for a redraw; the bottom panel reads live data from the tunnel
-// at render time, so the callbacks carry no state.
-func (t *TUI) OnDataConn(_, _, _, _ string)                                        { t.requestRender() }
-func (t *TUI) OnDataClose(_, _, _, _ string, _, _ int64, _ time.Duration, _ error) { t.requestRender() }
-func (t *TUI) OnHTTPRequest(_ string, _ tunnel.RequestInfo)                        { t.requestRender() }
+// OnDataConn records device connections in the log so closed ones stay
+// visible. Tunnels read live connections at render time.
+func (t *TUI) OnDataConn(label string, info tunnel.DataConnInfo) {
+	t.mu.Lock()
+	if ts := t.ensure(label); ts != nil && ts.device {
+		ev := devEvent{
+			at:       time.Now(),
+			kind:     devConnOpen,
+			port:     info.Port,
+			remote:   info.Remote,
+			consumer: info.Consumer,
+		}
+		if ts.openConns == nil {
+			ts.openConns = make(map[string]devEvent)
+		}
+		ts.openConns[info.ConnID] = ev
+		ts.appendEvent(ev)
+	}
+	t.mu.Unlock()
+	t.requestRender()
+}
+
+// OnPortsUpdate replaces a device's port list in the view.
+func (t *TUI) OnPortsUpdate(label string, ports []proto.DevicePort) {
+	t.mu.Lock()
+	if st, ok := t.tunnels[label]; ok {
+		st.ports = ports
+		st.device = true
+	}
+	t.mu.Unlock()
+	t.requestRender()
+}
+
+func (t *TUI) OnDataClose(label, connID, _, remote string, bytesIn, bytesOut int64, dur time.Duration, err error) {
+	t.mu.Lock()
+	if ts := t.ensure(label); ts != nil && ts.device {
+		ev := devEvent{
+			at:     time.Now(),
+			kind:   devConnClose,
+			remote: remote,
+			dur:    dur,
+			bytes:  bytesIn + bytesOut,
+		}
+		// Take port and consumer from the open row.
+		if opened, ok := ts.openConns[connID]; ok {
+			ev.port, ev.consumer = opened.port, opened.consumer
+			delete(ts.openConns, connID)
+		}
+		if err != nil {
+			ev.err = err.Error()
+		}
+		ts.appendEvent(ev)
+	}
+	t.mu.Unlock()
+	t.requestRender()
+}
+
+func (t *TUI) OnHTTPRequest(label string, r tunnel.RequestInfo) {
+	t.mu.Lock()
+	if ts := t.ensure(label); ts != nil && ts.device {
+		ts.appendEvent(devEvent{
+			at:     r.StartedAt,
+			kind:   devRequest,
+			port:   r.Port,
+			method: r.Method,
+			path:   r.Path,
+			status: r.Status,
+			dur:    r.Duration,
+		})
+	}
+	t.mu.Unlock()
+	t.requestRender()
+}
+
+// appendEvent adds a row to the ring, newest last. Callers hold t.mu.
+func (ts *tState) appendEvent(ev devEvent) {
+	if len(ts.events) == maxDeviceEvents {
+		copy(ts.events, ts.events[1:])
+		ts.events[len(ts.events)-1] = ev
+		return
+	}
+	ts.events = append(ts.events, ev)
+}
 
 func (t *TUI) OnRedirect(_, _, to string) {
 	t.mu.Lock()
@@ -399,7 +529,9 @@ func (t *TUI) snapshot() snap {
 		if ts == nil {
 			continue
 		}
-		tunnels = append(tunnels, *ts)
+		copied := *ts
+		copied.events = append([]devEvent(nil), ts.events...)
+		tunnels = append(tunnels, copied)
 	}
 
 	conns := make(map[string][]tunnel.ActiveConn, len(tunnels))
@@ -428,7 +560,8 @@ func (t *TUI) snapshot() snap {
 
 	status, uptime := buildRightCaps(tunnels, time.Since(t.startedAt))
 
-	// Bottom-right capsule shows the most recent error code while a tunnel is not active
+	// The bottom-right capsule shows the last error code while a tunnel is
+	// inactive.
 	errCode := ""
 	for _, ts := range tunnels {
 		if ts.lastCode != "" && ts.state != tunnel.StateActive {

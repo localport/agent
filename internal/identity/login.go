@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -75,17 +76,16 @@ func trimHostname(name string) string {
 	return name
 }
 
-// Login runs the whole flow: start, show the code, poll, return the credential.
-// onPrompt fires once, as a callback rather than a return value, because the
-// code must be on screen while this function is still blocked on the poll.
+// Login runs the device flow and returns the credential. onPrompt is called
+// once with the user code, before polling starts.
 func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Material, error) {
 	kp, err := newKeyPair("")
 	if err != nil {
 		return nil, err
 	}
 
-	// The CSR goes up at START and the server pins its hash, so the human approves
-	// one key and only that key can collect.
+	// The CSR is sent at start and the server pins its hash, so only the
+	// approved key can collect the certificate.
 	var start deviceStartResponse
 	if err := retry(ctx, DefaultRetryBudget, nil, func() error {
 		start = deviceStartResponse{}
@@ -98,7 +98,7 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 		return nil, err
 	}
 	if start.DeviceCode == "" || start.UserCode == "" {
-		return nil, fmt.Errorf("control plane returned an incomplete sign-in request")
+		return nil, errors.New("control plane returned an incomplete sign-in request")
 	}
 
 	if onPrompt != nil {
@@ -111,8 +111,8 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 
 	interval := time.Duration(start.Interval) * time.Second
 	if interval < time.Second {
-		// The server sets the cadence. This floor stops a zero or missing field
-		// turning the poll into a busy loop.
+		// The server sets the interval. The floor prevents a busy loop on a
+		// zero or missing value.
 		interval = 5 * time.Second
 	}
 	deadline := time.Now().Add(time.Duration(start.ExpiresIn) * time.Second)
@@ -123,8 +123,8 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// Remembered so an expiry caused by an unreachable control plane is
-	// reported as that, not as an unapproved sign-in.
+	// Recorded so an expiry after transport errors is reported as
+	// unreachable, not as unapproved.
 	var lastUnreachable error
 
 	for {
@@ -138,7 +138,7 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 			if lastUnreachable != nil {
 				return nil, fmt.Errorf("could not reach the control plane while waiting for approval: %w", lastUnreachable)
 			}
-			return nil, fmt.Errorf("sign-in expired before it was approved; run `localport login` again")
+			return nil, errors.New("sign-in expired before it was approved; run `localport login` again")
 		}
 
 		var tok deviceTokenResponse
@@ -148,10 +148,9 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 		}, &tok)
 		if err == nil {
 			if tok.CertPEM == "" {
-				return nil, fmt.Errorf("control plane returned no certificate")
+				return nil, errors.New("control plane returned no certificate")
 			}
-			// No renew_after: a sign-in does not renew, and synthesizing one
-			// downstream would invent a deadline the control plane never issued.
+			// No renew_after. A sign-in does not renew.
 			return c.assemble(kp.key, issuedMaterial{
 				CertPEM:  tok.CertPEM,
 				ChainPEM: tok.CAChainPEM,
@@ -160,8 +159,7 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 			})
 		}
 
-		// Branched on the code the SERVER sent, not the status: a proxy answering
-		// 428 for its own reasons must not make the agent poll forever.
+		// Branch on the server error code. A proxy can also return 428.
 		switch code := errorCode(err); {
 		case code == codeSlowDown:
 			lastUnreachable = nil
@@ -169,13 +167,11 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 			ticker.Reset(interval)
 		case code == codeAuthorizationPending:
 			lastUnreachable = nil
-			// Keep waiting.
 		case isRetryable(err):
-			// Unreachable, not refused. The code stays valid for its window, so
-			// keep polling rather than ending a sign-in already approved.
+			// Retryable failure. The code stays valid, so keep polling.
 			lastUnreachable = err
 		default:
-			// A real refusal: unknown, denied, consumed or expired. Terminal.
+			// Refused as unknown, denied, consumed or expired.
 			return nil, err
 		}
 	}

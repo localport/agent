@@ -2,15 +2,16 @@ package identity
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
 
-// A 4xx that is not 429 must never be retried: it is a refusal, and repeating
-// it only spends request quota.
+// A 4xx other than 429 is a refusal and is not retried.
 func TestRetryClassification(t *testing.T) {
 	cases := []struct {
 		name string
@@ -29,8 +30,9 @@ func TestRetryClassification(t *testing.T) {
 		{"403 is terminal", &APIError{Status: http.StatusForbidden}, false},
 		{"404 is terminal", &APIError{Status: http.StatusNotFound}, false},
 		{"409 is terminal", &APIError{Status: http.StatusConflict}, false},
-		{"context cancelled is not retryable", context.Canceled, false},
-		{"deadline exceeded is not retryable", context.DeadlineExceeded, false},
+		// Context errors are omitted. http.Client.Timeout also reports
+		// DeadlineExceeded, and retry decides to stop from ctx. See
+		// TestRetryStopsWhenTheCallerCancels.
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -41,7 +43,7 @@ func TestRetryClassification(t *testing.T) {
 	}
 }
 
-// Wrapping must not change the verdict: every call site wraps with context.
+// Wrapped errors classify the same as unwrapped ones.
 func TestRetryClassificationSeesThroughWrapping(t *testing.T) {
 	wrapped := errors.Join(errors.New("while renewing"), &APIError{Status: http.StatusForbidden})
 	if isRetryable(wrapped) {
@@ -173,5 +175,106 @@ func TestRetryAfterIsClampedToTheBudget(t *testing.T) {
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("the agent waited on an out-of-budget Retry-After")
+	}
+}
+
+// A client timeout is retried. http.Client.Timeout matches
+// context.DeadlineExceeded, so retry must not stop on the error alone.
+func TestRetryKeepsTryingWhenTheControlPlaneHangs(t *testing.T) {
+	// Released before srv.Close(), which waits on outstanding handlers.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	c := &Client{BaseURL: srv.URL, HTTP: &http.Client{Timeout: 100 * time.Millisecond}}
+
+	// The second attempt is refused, which ends the loop. The budget is wide
+	// to absorb full jitter.
+	attempts := 0
+	err := retry(context.Background(), time.Minute, nil, func() error {
+		attempts++
+		if attempts > 1 {
+			return &APIError{Path: "/v1/mtls/certs", Status: http.StatusForbidden}
+		}
+		return c.post(context.Background(), "/v1/mtls/certs", "tok", map[string]string{}, nil)
+	})
+	if err == nil {
+		t.Fatal("want the refusal that ended the loop")
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2: the request timeout must be retried", attempts)
+	}
+}
+
+// retry stops when the caller cancels.
+func TestRetryStopsWhenTheCallerCancels(t *testing.T) {
+	// Released before srv.Close(), which waits on outstanding handlers.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	c := &Client{BaseURL: srv.URL, HTTP: &http.Client{Timeout: 100 * time.Millisecond}}
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
+	err := retry(ctx, 5*time.Second, nil, func() error {
+		attempts++
+		cancel()
+		return c.post(ctx, "/v1/mtls/certs", "tok", map[string]string{}, nil)
+	})
+	if err == nil {
+		t.Fatal("want the attempt's error")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+// A refused credential is not retried.
+func TestRetryDoesNotRetryARefusal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"code":"TK003","message":"token is invalid"}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL, HTTP: &http.Client{Timeout: time.Second}}
+	attempts := 0
+	err := retry(context.Background(), 5*time.Second, nil, func() error {
+		attempts++
+		return c.post(context.Background(), "/v1/mtls/certs", "tok", map[string]string{}, nil)
+	})
+	if err == nil {
+		t.Fatal("want the refusal returned")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1: a 4xx is terminal", attempts)
+	}
+}
+
+// The control plane client requires TLS 1.3 and keeps the default transport
+// proxy and pooling settings.
+func TestControlPlaneClientRequiresTLS13(t *testing.T) {
+	c, err := NewClient("https://api.localport.io")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, ok := c.HTTP.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport is %T, want *http.Transport", c.HTTP.Transport)
+	}
+	if tr.TLSClientConfig == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("TLSClientConfig = %+v, want MinVersion TLS 1.3", tr.TLSClientConfig)
+	}
+	if tr.Proxy == nil {
+		t.Error("Proxy was dropped: a proxied network could no longer reach the control plane")
+	}
+	if c.HTTP.Timeout != requestTimeout {
+		t.Errorf("Timeout = %v, want %v", c.HTTP.Timeout, requestTimeout)
 	}
 }

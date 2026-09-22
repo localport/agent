@@ -2,7 +2,6 @@ package access
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -12,82 +11,158 @@ import (
 	"syscall"
 )
 
-// Proxy accepts local TCP connections and forwards each one to a locked tunnel
-// over mTLS. Every accepted connection gets its own TLS connection to Remote.
-type Proxy struct {
-	Remote    string
+// Forward is one local listener mapped to one port on the device.
+type Forward struct {
+	// LocalAddr is the local host:port. An empty port lets the OS assign one,
+	// printed once bound.
 	LocalAddr string
-	TLSConfig *tls.Config
-
-	OnConn  func(local, remote string)
-	OnError func(err error)
+	// RemotePort is the device port each accepted connection is forwarded to.
+	RemotePort uint16
 }
 
-func (p *Proxy) Run(ctx context.Context) error {
-	ln, err := net.Listen("tcp", p.LocalAddr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", p.LocalAddr, err)
-	}
-	defer ln.Close()
+// Proxy serves a set of forwards over one session.
+type Proxy struct {
+	Session  *Session
+	Forwards []Forward
 
-	go func() {
-		<-ctx.Done()
-		ln.Close()
+	// OnListen reports the bound address of each forward, including
+	// OS-assigned ports.
+	OnListen func(f Forward, addr string)
+	OnConn   func(local string, port uint16)
+	OnError  func(err error)
+}
+
+// Run binds every forward and serves until ctx ends.
+func (p *Proxy) Run(ctx context.Context) error {
+	var (
+		wg        sync.WaitGroup
+		listeners []net.Listener
+	)
+	defer func() {
+		for _, ln := range listeners {
+			_ = ln.Close()
+		}
 	}()
 
+	for _, f := range p.Forwards {
+		ln, err := net.Listen("tcp", f.LocalAddr)
+		if err != nil {
+			return fmt.Errorf("listen %s: %w", f.LocalAddr, err)
+		}
+		listeners = append(listeners, ln)
+		if p.OnListen != nil {
+			p.OnListen(f, ln.Addr().String())
+		}
+
+		wg.Add(1)
+		go func(ln net.Listener, f Forward) {
+			defer wg.Done()
+			p.serve(ctx, ln, f, &wg)
+		}(ln, f)
+	}
+
+	<-ctx.Done()
+	for _, ln := range listeners {
+		_ = ln.Close()
+	}
+	wg.Wait()
+	return nil
+}
+
+// serve accepts on one listener. Connections are tracked so Run returns only
+// after all forwards finish.
+func (p *Proxy) serve(ctx context.Context, ln net.Listener, f Forward, wg *sync.WaitGroup) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil
+				return
 			}
 			if p.OnError != nil {
 				p.OnError(fmt.Errorf("accept: %w", err))
 			}
 			continue
 		}
-		go p.handle(conn)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.handle(ctx, conn, f)
+		}()
 	}
 }
 
-func (p *Proxy) handle(local net.Conn) {
+func (p *Proxy) handle(ctx context.Context, local net.Conn, f Forward) {
 	defer local.Close()
 
-	remote, err := tls.Dial("tcp", p.Remote, p.TLSConfig)
+	stream, err := p.Session.Open(ctx, f.RemotePort)
 	if err != nil {
 		if p.OnError != nil {
-			p.OnError(friendlyDialError(p.Remote, err))
+			p.OnError(err)
 		}
 		return
 	}
-	defer remote.Close()
+	defer stream.Close()
+
+	// On cancel, close both sides to unblock pending reads.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = local.Close()
+			_ = stream.Close()
+		case <-done:
+		}
+	}()
 
 	if p.OnConn != nil {
-		p.OnConn(local.RemoteAddr().String(), p.Remote)
+		p.OnConn(local.RemoteAddr().String(), f.RemotePort)
 	}
 
-	// Only the remote direction's error is reported: under TLS 1.3 the client
-	// certificate goes after the server's Finished, so a rejection arrives on the
-	// first read rather than at Dial. The local side ending is not a failure.
-	//
-	// wg.Done is deferred by these closures, not by halfCopy, so the write to
-	// remoteErr happens before Wait returns.
+	// Report only the remote direction's error. Under TLS 1.3 the server
+	// rejects the client certificate after Finished, so the alert arrives on
+	// the first read and dial succeeds.
 	var wg sync.WaitGroup
 	var remoteErr error
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		remoteErr = halfCopy(local, remote)
-	}()
-	go func() {
-		defer wg.Done()
-		_ = halfCopy(remote, local)
-	}()
+	wg.Go(func() { remoteErr = halfCopy(local, stream) })
+	wg.Go(func() { _ = halfCopy(stream, local) })
 	wg.Wait()
 
 	if remoteErr != nil && p.OnError != nil {
-		p.OnError(friendlyStreamError(p.Remote, remoteErr))
+		p.OnError(streamError(p.Session.Device, remoteErr))
 	}
+}
+
+// ServeStdio forwards stdin and stdout to a device port, for
+// `ssh -o ProxyCommand`.
+func (p *Proxy) ServeStdio(ctx context.Context, in io.Reader, out io.Writer, port uint16) error {
+	stream, err := p.Session.Open(ctx, port)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+
+	var wg sync.WaitGroup
+	var remoteErr error
+	wg.Go(func() {
+		_, err := io.Copy(out, stream)
+		if !isNormalClose(err) {
+			remoteErr = err
+		}
+	})
+	wg.Go(func() {
+		_, _ = io.Copy(stream, in)
+		// Half-close only when the stream supports it, as in halfCopy.
+		if cw, ok := stream.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+	})
+	wg.Wait()
+
+	if remoteErr != nil {
+		return streamError(p.Session.Device, remoteErr)
+	}
+	return nil
 }
 
 // halfCopy copies until EOF and reports anything that was not an ordinary close.
@@ -102,50 +177,51 @@ func halfCopy(dst, src net.Conn) error {
 	return err
 }
 
-// isNormalClose reports whether err is an ordinary end of stream.
+// isNormalClose reports whether err is an ordinary end of stream. Keep in sync
+// with tunnel.ignoreClosed.
 func isNormalClose(err error) bool {
 	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 		return true
 	}
-	// A peer going away mid-copy is a normal disconnect on some platforms.
+	// Some platforms report a peer disconnect mid-copy as a reset.
 	return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
 }
 
-// friendlyStreamError turns a mid-stream failure into something actionable.
-// The TLS alert says only that the certificate was not accepted, so the message
-// names what the holder can check.
-func friendlyStreamError(remote string, err error) error {
+// streamError maps a mid-stream TLS alert to an actionable error.
+//
+// Matching is by message text. A post-handshake alert arrives as a net.OpError
+// wrapping the unexported crypto/tls alert type, and tls.AlertError exists only
+// during the handshake. The strings come from crypto/tls alertText.
+func streamError(device string, err error) error {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "tls: bad certificate"),
 		strings.Contains(msg, "tls: unknown certificate"),
 		strings.Contains(msg, "tls: certificate required"),
 		strings.Contains(msg, "tls: unknown certificate authority"):
-		return fmt.Errorf(
-			"%s refused the certificate presented for this connection.\n"+
-				"  Check in the dashboard that this identity has been given access to the device you are reaching,\n"+
-				"  and that its certificate is still valid and has not been revoked.\n"+
-				"  `localport identity list` shows what this machine holds: %w", remote, err)
+		return fmt.Errorf("%s refused this certificate: check that the identity has access to the device, and run `localport identity list`: %w", device, err)
+	case strings.Contains(msg, "tls: revoked certificate"):
+		return fmt.Errorf("%s reports this certificate as revoked: it cannot be renewed, so obtain a new one with `localport setup <TOKEN>` or `localport login`: %w", device, err)
+	case strings.Contains(msg, "tls: access denied"):
+		return fmt.Errorf("%s denied this identity: its access to the device was withdrawn or narrowed, check the grants in the dashboard: %w", device, err)
 	case strings.Contains(msg, "tls: certificate expired"),
 		strings.Contains(msg, "tls: expired certificate"):
-		return fmt.Errorf(
-			"%s rejected the certificate as expired. Run `localport login` again for a sign-in,\n"+
-				"  or `localport identity renew` for a machine credential: %w", remote, err)
+		return fmt.Errorf("%s rejected the certificate as expired: run `localport login` again, or `localport identity renew`: %w", device, err)
 	default:
-		return fmt.Errorf("connection to %s ended: %w", remote, err)
+		return fmt.Errorf("connection to %s ended: %w", device, err)
 	}
 }
 
-// friendlyDialError translates common TLS handshake failures into actionable
-// messages, keeping the original as the cause.
-func friendlyDialError(remote string, err error) error {
+// dialError reports an unreachable device.
+func dialError(device string, err error) error {
+	return fmt.Errorf("cannot reach %s: device offline or unknown address: %w", device, err)
+}
+
+// handshakeError reports a refusal during the handshake.
+func handshakeError(device string, err error) error {
 	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "first record does not look like a TLS handshake"):
-		return fmt.Errorf("dial %s: remote is not speaking TLS on this port; verify the endpoint is mTLS-enabled: %w", remote, err)
-	case strings.Contains(msg, "remote error: tls: unrecognized name"):
-		return fmt.Errorf("dial %s: remote rejected SNI; try --server-name: %w", remote, err)
-	default:
-		return fmt.Errorf("dial %s: %w", remote, err)
+	if strings.Contains(msg, "first record does not look like a TLS handshake") {
+		return fmt.Errorf("%s is not answering with TLS on this port: %w", device, err)
 	}
+	return fmt.Errorf("cannot reach %s: device offline or unknown address: %w", device, err)
 }

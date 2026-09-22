@@ -8,14 +8,10 @@ import (
 	"github.com/localport/agent/internal/identity"
 )
 
-// `localport login` signs a PERSON in and returns a short-lived certificate.
-//
-// The machine counterpart is `localport setup`, which spends one token and then
-// renews itself. There is no renewal loop here. Re-running the command is how a
-// person gets a fresh certificate.
-//
-// Nothing needs to reach the machine beforehand, which is what makes this work
-// over SSH where a browser redirect to localhost does not.
+// `localport login` signs a person in with the device flow and stores a
+// short-lived certificate. It does not renew. Running it again issues a new
+// certificate. The device flow needs no localhost callback, so it works over
+// SSH.
 func runLogin(args []string) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -34,16 +30,13 @@ func runLogin(args []string) error {
 		return err
 	}
 
-	ctx, cancel := signalCtx()
+	ctx, cancel := signalContext(nil)
 	defer cancel()
 
 	material, err := client.Login(ctx, func(p identity.LoginPrompt) {
-		// stderr, so the command stays pipeable and the code still shows.
-		//
-		// The prefilled link leads because it is one click. The bare address and
-		// the code follow for when the browser is on another device. The code
-		// stays visible so it can be checked against the approval screen, which
-		// is the step that catches somebody else's sign-in.
+		// Printed to stderr so stdout stays pipeable. The prefilled link comes
+		// first. The bare address and code serve a browser on another device,
+		// and the code lets the user match the approval screen.
 		if p.VerificationURIComplete != "" {
 			fmt.Fprintf(os.Stderr, "\n  Open %s\n", p.VerificationURIComplete)
 			fmt.Fprintf(os.Stderr, "  or go to %s and enter  %s\n\n", p.VerificationURI, p.UserCode)
@@ -63,10 +56,10 @@ func runLogin(args []string) error {
 
 	fmt.Fprintf(os.Stderr, "\n  signed in\n")
 	printCredential(store, ref, material.Meta)
-	// There is no renewal loop and the expiry is hours away, so say it here
-	// rather than let it surface as a failed connection overnight.
+	// The certificate expires in hours and does not renew. Print the expiry.
 	fmt.Fprintf(os.Stderr, "  renews     never; run `localport login` again when it expires\n")
-	fmt.Fprintf(os.Stderr, "\n  next: localport access https://<device>-<fleet>.<region>.localport.dev -p 3001\n")
+	fmt.Fprintf(os.Stderr, "\n  next: localport access <device>-<fleet>.<region>.localport.dev -L 5020:502\n")
+	fmt.Fprintf(os.Stderr, "        one -L per port, <local>:<device>. The device's open ports are in the dashboard.\n")
 	return nil
 }
 

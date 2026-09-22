@@ -16,11 +16,14 @@ import (
 // goroutine, no buffer past one message's headers. A scanner fault is recovered;
 // forwarding never waits on it. tcp/tls/mtls are opaque and not inspected.
 
-// Beyond these caps the stream is not shaped like we expect, so the scanner stops
-// on that connection rather than grow unbounded.
+// The scanner stops on a connection that exceeds these limits.
 const (
 	maxHeaderBytes = 16 << 10
 	maxLineBytes   = 256 // one chunk-size or trailer line
+
+	// Limits on the request line fields stored in a pendingRequest.
+	maxMethodRunes = 16
+	maxPathRunes   = 512
 )
 
 // maxPending caps requests awaiting a response. Ordered, non-pipelined traffic
@@ -106,8 +109,8 @@ func (in *httpInspector) feedResponse(b []byte) {
 		if !ok {
 			return bodyPlan{mode: bodyDead}
 		}
-		// 1xx (other than 101) is interim: no request is answered and there is
-		// no body. Wait for the final response.
+		// 1xx other than 101 is interim and has no body. Wait for the final
+		// response.
 		if status >= 100 && status < 200 && status != 101 {
 			return bodyPlan{mode: bodyNone}
 		}
@@ -123,7 +126,6 @@ func (in *httpInspector) feedResponse(b []byte) {
 
 		if have {
 			// emit runs on the forwarding goroutine, so its sink must not block.
-			// The TUI's is a coalescing, non-blocking signal.
 			in.emit(RequestInfo{
 				Method:    pr.method,
 				Path:      pr.path,
@@ -153,14 +155,21 @@ type bodyPlan struct {
 	remain int64 // for bodyLen
 }
 
-// dirScanner walks one direction of a connection: header block, then body skip,
-// repeating for each message. It keeps only the current header block in memory.
+// dirScanner scans one direction of a connection. For each message it reads
+// the header block and skips the body. Only the current header block is kept.
 type dirScanner struct {
 	hdr    []byte
-	mode   bodyMode // bodyNone means "in the header phase"
+	mode   bodyMode // bodyNone during the header phase
 	remain int64
 	chunk  chunkSkipper
 	dead   bool
+}
+
+// die stops scanning this direction and releases the header buffer.
+func (d *dirScanner) die() {
+	d.dead = true
+	d.hdr = nil
+	d.chunk = chunkSkipper{}
 }
 
 func (d *dirScanner) feed(data []byte, onHeaders func(hdr []byte) bodyPlan) {
@@ -171,15 +180,19 @@ func (d *dirScanner) feed(data []byte, onHeaders func(hdr []byte) bodyPlan) {
 			data = data[consumed:]
 			if !complete {
 				if len(d.hdr) > maxHeaderBytes {
-					d.dead = true
+					d.die()
 				}
 				return
 			}
 			plan := onHeaders(d.hdr)
+			// Reuse the buffer for the next message unless it grew too large.
 			d.hdr = d.hdr[:0]
+			if cap(d.hdr) > maxHeaderBytes {
+				d.hdr = nil
+			}
 			switch plan.mode {
 			case bodyDead:
-				d.dead = true
+				d.die()
 				return
 			case bodyLen:
 				if plan.remain > 0 {
@@ -204,7 +217,7 @@ func (d *dirScanner) feed(data []byte, onHeaders func(hdr []byte) bodyPlan) {
 			used, done := d.chunk.consume(data)
 			data = data[used:]
 			if d.chunk.dead {
-				d.dead = true
+				d.die()
 				return
 			}
 			if done {
@@ -268,7 +281,7 @@ func responseBodyPlan(hdr []byte, status int, haveReq bool, method string) bodyP
 }
 
 // parseRequestLine reads "METHOD target HTTP/x.y" from the head of hdr. The
-// target's query string is dropped so a token in a query never reaches the view.
+// query string is dropped because it can hold tokens.
 func parseRequestLine(hdr []byte) (method, path string, ok bool) {
 	line := firstLine(hdr)
 	sp1 := bytes.IndexByte(line, ' ')
@@ -287,7 +300,26 @@ func parseRequestLine(hdr []byte) (method, path string, ok bool) {
 	if q := bytes.IndexByte(target, '?'); q >= 0 {
 		target = target[:q]
 	}
-	return string(line[:sp1]), string(target), true
+	// Visitor-controlled values. They are capped because up to maxPending
+	// requests per connection hold them until the response. The renderer
+	// truncates them further.
+	return truncateRunes(sanitizeDisplay(string(line[:sp1])), maxMethodRunes),
+		truncateRunes(sanitizeDisplay(string(target)), maxPathRunes), true
+}
+
+// truncateRunes clips s to at most n runes.
+func truncateRunes(s string, n int) string {
+	if len(s) <= n { // byte length bounds rune count
+		return s
+	}
+	count := 0
+	for i := range s {
+		if count == n {
+			return s[:i]
+		}
+		count++
+	}
+	return s
 }
 
 func parseStatusLine(hdr []byte) (status int, ok bool) {

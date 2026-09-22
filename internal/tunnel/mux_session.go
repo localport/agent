@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/localport/agent/internal/proto"
@@ -15,40 +17,28 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// Flow control for the multiplexed connection.
+// HTTP/2 flow control windows for data the edge sends. The x/net/http2 server
+// default of 1 MiB per connection throttles concurrent uploads.
 //
-// These are the windows the edge may fill when sending us a visitor's request
-// body. The library default is 1 MiB per connection shared by every stream,
-// which throttles concurrent uploads badly once a handful of transfers overlap.
-// That default has been observed elsewhere to cut a single transfer to a
-// fraction of its unmuxed speed. Raising the connection window and giving each
-// stream a real share of it keeps a muxed transfer indistinguishable from a
-// dialed one.
+// 4 MiB per stream matches the x/net http2.Transport default. 16 MiB per
+// connection matches the grpc-go BDP estimator cap. Windows are limits, and
+// memory is used only while the local service reads slower than the edge
+// sends.
 const (
 	muxUploadBufferPerConnection = 16 << 20
 	muxUploadBufferPerStream     = 4 << 20
 
-	// Concurrency ceiling for streams the edge may have open at once. Generous
-	// for a tunnel, and bounded so a misbehaving edge cannot exhaust local file
-	// descriptors through the local service.
-	muxMaxConcurrentStreams = 512
-
-	// Bind exchange bound. A silent edge must not hold the connection.
+	// Timeout for the bind exchange.
 	muxBindTimeout = 10 * time.Second
 
-	// muxIdleTimeout closes a connection the edge has stopped using. It is
-	// longer than the edge's keepalive interval so a healthy idle tunnel is
-	// never torn down by it.
+	// muxIdleTimeout closes a connection the edge stopped using. It exceeds
+	// the edge keepalive interval.
 	muxIdleTimeout = 5 * time.Minute
 )
 
-// startMux brings up the multiplexed data connection for the current session
-// and returns a function that tears it down.
-//
-// It runs in the background because the tunnel is already serving over
-// dial-back by the time it is called: a slow bind delays nothing, and a refused
-// one costs nothing. That is what makes multiplexing an optimisation rather
-// than a dependency.
+// startMux starts the multiplexed data connection for the current session in
+// the background and returns a function that stops it. The tunnel serves over
+// dial-back meanwhile.
 func (t *Tunnel) startMux(ctx context.Context) func() {
 	if t.opts.DisableMux {
 		return func() {}
@@ -72,22 +62,13 @@ func (t *Tunnel) startMux(ctx context.Context) func() {
 	}
 }
 
-// runMux keeps a multiplexed connection up for as long as the session lasts.
-//
-// The first bind gets ONE attempt. A bind that fails usually means the network
-// or the edge will not have it, and retrying would be a slower path to the
-// dial-back the tunnel is already using.
-//
-// A connection that bound successfully and then DROPPED is a different case: it
-// worked a moment ago, so the cause is a blip, an idle middlebox, or an edge
-// socket going away. Without re-establishing, one dropped connection would cost
-// the session its multiplexing for however many hours it runs.
+// runMux keeps a multiplexed connection up for the session. The first bind is
+// attempted once, and on failure the tunnel stays on dial-back. A connection
+// that bound and then dropped is retried.
 func (t *Tunnel) runMux(ctx context.Context, addr, session string) {
 	conn, err := t.dialAndBindMux(ctx, addr, session)
 	if err != nil {
-		// Debug, not an error event: the tunnel serves either way, and
-		// surfacing this to the user would be alarming without being
-		// actionable. Same channel the transport probe reports on.
+		// Debug level. The tunnel still serves over dial-back.
 		slog.Default().Debug("multiplexed transport unavailable, using dial-back",
 			slog.String("tunnel", t.opts.Label),
 			slog.Any("error", err))
@@ -114,7 +95,7 @@ func (t *Tunnel) runMux(ctx context.Context, addr, session string) {
 				slog.Any("error", err))
 			return
 		}
-		attempt = -1 // reset the backoff once a bind succeeds
+		attempt = -1 // reset backoff after a successful bind
 	}
 }
 
@@ -169,31 +150,21 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// dialAndBindMux establishes the multiplexed data connection for a registered
-// session.
-//
-// The connection is separate from the control connection and is authenticated
-// on its own: the token proves which tunnel, the session id from the RegisterAck
-// names which live client these streams belong to. Failure at any step is
-// returned to the caller and is NOT fatal: the tunnel keeps working on
-// dial-back, which is the point of keeping both paths.
+// dialAndBindMux opens and binds the multiplexed data connection for a
+// registered session. It authenticates with the token and the RegisterAck
+// session id. Errors are not fatal to the tunnel.
 func (t *Tunnel) dialAndBindMux(ctx context.Context, edgeAddr, sessionID string) (net.Conn, error) {
 	if sessionID == "" {
-		return nil, fmt.Errorf("mux bind: edge did not issue a session id")
+		return nil, errors.New("mux bind: edge did not issue a session id")
 	}
 
-	// Reuse the carrier the control connection already found through the
-	// firewall. A second Dial on the cached dialer gives a fresh connection over
-	// the same transport (raw TLS, or WebSocket through an inspecting proxy), so
-	// the mux works on exactly the networks the tunnel works on. That is the
-	// whole reason it reuses the carrier instead of dialing its own, and it is why
-	// the mux carries no ALPN of its own: the
-	// MuxBind frame below is what tells the edge this connection is a mux.
+	// Dial with the transport the control connection uses, raw TLS or
+	// WebSocket. The MuxBind frame identifies the connection to the edge.
 	t.mu.RLock()
 	dialer := t.dialer
 	t.mu.RUnlock()
 	if dialer == nil {
-		return nil, fmt.Errorf("mux dial: control connection has not selected a transport")
+		return nil, errors.New("mux dial: control connection has not selected a transport")
 	}
 
 	host, port := transport.SplitHostPort(edgeAddr)
@@ -252,25 +223,24 @@ func (t *Tunnel) dialAndBindMux(ctx context.Context, edgeAddr, sessionID string)
 	return conn, nil
 }
 
-// serveMux carries streams until the connection drops.
+// serveMux serves streams until the connection drops.
 func (t *Tunnel) serveMux(conn net.Conn) {
 	server := &http2.Server{
-		MaxConcurrentStreams:         muxMaxConcurrentStreams,
+		MaxConcurrentStreams:         maxConcurrentDataConns,
 		MaxUploadBufferPerConnection: muxUploadBufferPerConnection,
 		MaxUploadBufferPerStream:     muxUploadBufferPerStream,
-		// The edge pings an idle connection; answering is automatic. This bounds
-		// how long a half-open connection survives on our side.
+		// Close a half-open connection. The edge pings idle connections.
 		IdleTimeout: muxIdleTimeout,
 	}
 
 	handler := &muxServer{
-		dialLocal: func() (net.Conn, error) {
-			return net.DialTimeout("tcp", t.opts.Local, dialTimeout)
-		},
+		dialTarget:   t.dialTarget,
+		device:       t.IsDevice(),
 		tracker:      t,
 		totalIn:      &t.totalBytesIn,
 		totalOut:     &t.totalBytesOut,
-		newInspector: t.newRequestInspector,
+		newInspector: t.newInspectorFor,
+		defaultProto: t.opts.Protocol,
 	}
 
 	// ServeConn blocks for the life of the connection.
@@ -288,27 +258,39 @@ func newStreamID() string {
 	return "mux-" + hex.EncodeToString(b[:])
 }
 
-// Begin registers a stream in the same connection view proxyData feeds, so the
-// live list and its counters are identical whichever transport carried the
-// traffic. Without this a muxed tunnel would show no connections at all.
-func (t *Tunnel) Begin(remote string) *activeConn {
+// Begin adds a stream to the live connection view used by proxyData. Closing
+// localConn ends both copies, which is how a closed port cuts a mux stream.
+func (t *Tunnel) Begin(remote string, target connTarget, localConn net.Conn) *activeConn {
+	local := t.opts.Local
+	if t.IsDevice() {
+		local = net.JoinHostPort(t.opts.Host, strconv.Itoa(int(target.port)))
+	}
 	ac := &activeConn{
 		id:        newStreamID(),
-		local:     t.opts.Local,
+		local:     local,
+		localConn: localConn,
 		remote:    remote,
+		port:      target.port,
+		consumer:  target.consumer,
 		startedAt: time.Now(),
 	}
 	t.addActiveConn(ac)
 	t.totalConns.Add(1)
 
 	if h := t.opts.Handler; h != nil {
-		h.OnDataConn(t.opts.Label, ac.id, t.opts.Local, remote)
+		h.OnDataConn(t.opts.Label, DataConnInfo{
+			ConnID:   ac.id,
+			Target:   local,
+			Remote:   remote,
+			Consumer: target.consumer,
+			Port:     target.port,
+		})
 	}
 	return ac
 }
 
-// End removes a finished stream from the live view. Byte counts were folded in
-// as they moved, so nothing is added here.
+// End removes a finished stream from the live view. Bytes were counted during
+// the copy. The caller filters err through firstCopyError.
 func (t *Tunnel) End(ac *activeConn, err error) {
 	if ac == nil {
 		return
@@ -316,7 +298,7 @@ func (t *Tunnel) End(ac *activeConn, err error) {
 	t.removeActiveConn(ac.id)
 
 	if h := t.opts.Handler; h != nil {
-		h.OnDataClose(t.opts.Label, ac.id, t.opts.Local, ac.remote,
-			ac.bytesIn.Load(), ac.bytesOut.Load(), time.Since(ac.startedAt), ignoreClosed(err))
+		h.OnDataClose(t.opts.Label, ac.id, ac.local, ac.remote,
+			ac.bytesIn.Load(), ac.bytesOut.Load(), time.Since(ac.startedAt), err)
 	}
 }

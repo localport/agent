@@ -3,265 +3,225 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestLoadSingleSpec(t *testing.T) {
-	t.Setenv("LP_TOKEN", "tok_test123")
+func writeConfig(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "localport.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
 
-	cfg := mustLoad(t, `
+func TestLoadReadsTunnelsAndDevices(t *testing.T) {
+	t.Setenv("FLEET_TOKEN", "fleet-token")
+	path := writeConfig(t, `
 version: 1
-spec:
-  token: ${env.LP_TOKEN}
-  region: eu
-  endpoints:
-    - name: web
-      proto: http
-      url: localhost:3000
-    - name: db
-      proto: tcp
-      url: localhost:5432
+tunnels:
+  - name: api
+    token: tunnel-token
+    upstream: http://localhost:8080
+  - name: db
+    token: tunnel-token
+    upstream: tcp://localhost:5432
+fleets:
+  - token: ${FLEET_TOKEN}
+    devices:
+      - name: hub
+      - name: plc-01
+        host: 192.168.1.100
 `)
 
-	if got, want := len(cfg.Specs), 1; got != want {
-		t.Fatalf("specs = %d, want %d", got, want)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
 	}
-	s := cfg.Specs[0]
-	if s.Token != "tok_test123" {
-		t.Errorf("token = %q, want tok_test123", s.Token)
+	if len(cfg.Tunnels) != 2 || len(cfg.Devices) != 2 {
+		t.Fatalf("got %d tunnels and %d devices", len(cfg.Tunnels), len(cfg.Devices))
 	}
-	if s.Edge != "connect.eu.localport.dev:443" {
-		t.Errorf("edge = %q", s.Edge)
+	if cfg.Tunnels[0].Protocol != "http" || cfg.Tunnels[0].Local != "localhost:8080" {
+		t.Fatalf("tunnel 1 = %+v", cfg.Tunnels[0])
 	}
-	if s.Region != "eu" {
-		t.Errorf("region = %q, want eu", s.Region)
+	if cfg.Tunnels[1].Protocol != "tcp" {
+		t.Fatalf("tunnel 2 protocol = %q", cfg.Tunnels[1].Protocol)
 	}
-	if got, want := len(s.Endpoints), 2; got != want {
-		t.Fatalf("endpoints = %d, want %d", got, want)
+	// A device with no host serves this machine.
+	if cfg.Devices[0].Host != DefaultDeviceHost {
+		t.Fatalf("device 1 host = %q", cfg.Devices[0].Host)
 	}
-	if s.Endpoints[0].Name != "web" || s.Endpoints[0].Protocol != "http" {
-		t.Errorf("endpoint[0] = %+v", s.Endpoints[0])
+	if cfg.Devices[1].Host != "192.168.1.100" || cfg.Devices[1].Token != "fleet-token" {
+		t.Fatalf("device 2 = %+v", cfg.Devices[1])
 	}
-	if s.Endpoints[1].Local != "localhost:5432" {
-		t.Errorf("endpoint[1].Local = %q", s.Endpoints[1].Local)
+	if cfg.Total() != 4 {
+		t.Fatalf("total = %d", cfg.Total())
 	}
 }
 
-func TestLoadMultipleSpecs(t *testing.T) {
-	t.Setenv("LP_TOKEN_1", "tok_eu")
-	t.Setenv("LP_TOKEN_2", "tok_us")
-
-	cfg := mustLoad(t, `
-version: 1
-specs:
-  - token: ${env.LP_TOKEN_1}
-    region: eu
-    endpoints:
-      - name: server1
-        proto: http
-        url: localhost:4000
-  - token: ${env.LP_TOKEN_2}
-    region: us
-    endpoints:
-      - name: server2
-        proto: tcp
-        url: localhost:3400
-`)
-
-	if len(cfg.Specs) != 2 {
-		t.Fatalf("specs = %d, want 2", len(cfg.Specs))
-	}
-	if cfg.Specs[0].Edge != "connect.eu.localport.dev:443" {
-		t.Errorf("specs[0].Edge = %q", cfg.Specs[0].Edge)
-	}
-	if cfg.Specs[1].Edge != "connect.us.localport.dev:443" {
-		t.Errorf("specs[1].Edge = %q", cfg.Specs[1].Edge)
-	}
-	if cfg.TotalEndpoints() != 2 {
-		t.Errorf("TotalEndpoints = %d, want 2", cfg.TotalEndpoints())
-	}
-}
-
-func TestLoadValidationErrors(t *testing.T) {
+func TestLoadRefusesBadFiles(t *testing.T) {
 	cases := []struct {
 		name string
-		yaml string
+		body string
 	}{
-		{"missing env var", `
-version: 1
-spec:
-  token: ${env.NONEXISTENT_VAR_12345}
-  endpoints:
-    - {name: web, proto: http, url: localhost:3000}
-`},
-		{"both spec and specs", `
-version: 1
-spec:
-  token: tok
-  endpoints: [{name: a, proto: http, url: localhost:3000}]
-specs:
-  - token: tok
-    endpoints: [{name: b, proto: http, url: localhost:4000}]
-`},
-		{"missing token", `
-version: 1
-spec:
-  endpoints: [{name: web, proto: http, url: localhost:3000}]
-`},
-		{"missing endpoint url", `
-version: 1
-spec:
-  token: tok
-  endpoints: [{name: web, proto: http}]
-`},
-		{"missing endpoint name", `
-version: 1
-spec:
-  token: tok
-  endpoints: [{proto: http, url: localhost:3000}]
-`},
-		{"invalid protocol", `
-version: 1
-spec:
-  token: tok
-  endpoints: [{name: web, proto: grpc, url: localhost:3000}]
-`},
-		{"empty endpoints", `
-version: 1
-spec:
-  token: tok
-  endpoints: []
-`},
-		{"no spec", `
-version: 1
-`},
-		{"unsupported version", `
-version: 2
-spec:
-  token: tok
-  endpoints: [{name: web, proto: http, url: localhost:3000}]
-`},
+		{"version 2", "version: 2\ntunnels: []\n"},
+		{"nothing to run", "version: 1\n"},
+		{"tunnel without upstream", "version: 1\ntunnels:\n  - name: api\n    token: t\n"},
+		{"fleet without devices", "version: 1\nfleets:\n  - token: t\n    devices: []\n"},
+		{"duplicate device", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n      - name: GW\n"},
+		{"host with port", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        host: 10.0.0.2:502\n"},
+		{"host with scheme", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        host: tcp://10.0.0.2\n"},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := loadString(t, tc.yaml); err == nil {
-				t.Fatalf("expected error, got nil")
+			if _, err := Load(writeConfig(t, tc.body)); err == nil {
+				t.Fatal("want the file refused")
 			}
 		})
 	}
 }
 
-func TestResolveEdge(t *testing.T) {
+// A bare IPv6 device host is not parsed as host:port.
+func TestDeviceHostAcceptsIPv6(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        host: fd00::1\n"))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Devices[0].Host != "fd00::1" {
+		t.Fatalf("host = %q", cfg.Devices[0].Host)
+	}
+}
+
+func TestInterpolate(t *testing.T) {
+	t.Setenv("SET", "value")
+	t.Setenv("EMPTY", "")
+
 	cases := []struct {
-		region string
-		addr   string
+		name    string
+		in      string
+		want    string
+		wantErr bool
 	}{
-		// No region means the default landing zone, not a distinct hostname.
-		{"", "connect.eu.localport.dev:443"},
-		{"eu", "connect.eu.localport.dev:443"},
-		{"us", "connect.us.localport.dev:443"},
-		{"ap", "connect.ap.localport.dev:443"},
-		{"unknown", "connect.unknown.localport.dev:443"},
+		{name: "plain", in: "${SET}", want: "value"},
+		{name: "unset", in: "${MISSING}", wantErr: true},
+		{name: "empty counts as unset", in: "${EMPTY}", wantErr: true},
+		{name: "default used", in: "${MISSING:-fallback}", want: "fallback"},
+		{name: "default ignored", in: "${SET:-fallback}", want: "value"},
+		{name: "empty takes the default", in: "${EMPTY:-fallback}", want: "fallback"},
+		{name: "message", in: "${MISSING:?set this first}", wantErr: true},
+		{name: "message satisfied", in: "${SET:?set this first}", want: "value"},
+		{name: "literal dollar", in: "$$SET", want: "$SET"},
+		{name: "bare dollar", in: "cost $5", want: "cost $5"},
+		{name: "unterminated", in: "${SET", wantErr: true},
 	}
 	for _, tc := range cases {
-		if got := ResolveEdge(tc.region); got != tc.addr {
-			t.Errorf("ResolveEdge(%q) = %q, want %q", tc.region, got, tc.addr)
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := interpolate(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want an error, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("interpolate: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The error names the unset variable.
+func TestInterpolateMessageNamesTheVariable(t *testing.T) {
+	_, _, err := interpolate("${FLEET_TOKEN:?set FLEET_TOKEN}")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if got := err.Error(); got != "FLEET_TOKEN: set FLEET_TOKEN" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestParseLocal(t *testing.T) {
+	cases := []struct{ in, fallback, wantProto, wantAddr string }{
+		{"3000", "", "http", "localhost:3000"},
+		{"localhost:3000", "", "http", "localhost:3000"},
+		{"tcp://localhost:5432", "", "tcp", "localhost:5432"},
+		{"tls://10.0.0.1:8883", "http", "tls", "10.0.0.1:8883"},
+		{"https://localhost:8443", "", "http", "localhost:8443"},
+	}
+	for _, tc := range cases {
+		proto, addr := ParseLocal(tc.in, tc.fallback)
+		if proto != tc.wantProto || addr != tc.wantAddr {
+			t.Fatalf("ParseLocal(%q) = (%q, %q), want (%q, %q)", tc.in, proto, addr, tc.wantProto, tc.wantAddr)
 		}
 	}
 }
 
-func TestNormProto(t *testing.T) {
-	cases := map[string]string{
-		"":      "http",
-		"http":  "http",
-		"HTTP":  "http",
-		"https": "http",
-		"tcp":   "tcp",
-		"tls":   "tls",
-		"TLS":   "tls",
-	}
-	for in, want := range cases {
-		if got := NormProto(in); got != want {
-			t.Errorf("NormProto(%q) = %q, want %q", in, got, want)
+// A parse error must not quote a substituted secret, whole or shortened. The
+// parser quotes a value that fails to decode and shortens one over ten
+// characters to its first seven.
+func TestLoadRedactsResolvedSecretsFromParseErrors(t *testing.T) {
+	t.Setenv("LOCALPORT_TOKEN", "tok_supersecretvalue")
+	t.Setenv("LOCALPORT_SHORT", "hunter2")
+
+	for _, body := range []string{
+		"version: ${LOCALPORT_TOKEN}\n",
+		"version: ${LOCALPORT_SHORT}\n",
+	} {
+		path := filepath.Join(t.TempDir(), "localport.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		_, err := Load(path)
+		if err == nil {
+			t.Fatalf("want %q refused", body)
+		}
+		for _, secret := range []string{"tok_sup", "hunter2"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("the error carries %q: %v", secret, err)
+			}
 		}
 	}
 }
 
-func TestFromFlags(t *testing.T) {
-	cfg := FromFlags("tok_flag", "eu", "localhost:8080", "tcp", "myapp")
-	s := cfg.Specs[0]
-	if s.Token != "tok_flag" || s.Edge != "connect.eu.localport.dev:443" {
-		t.Errorf("spec = %+v", s)
+// Unknown keys are errors. A mistyped `host` would default to localhost.
+func TestLoadRejectsUnknownFields(t *testing.T) {
+	cases := []struct {
+		name, yaml, want string
+	}{
+		{
+			name: "device host typo",
+			yaml: "version: 1\nfleets:\n  - token: tok\n    devices:\n      - name: plc-01\n        hosts: 192.168.1.100\n",
+			want: "hosts",
+		},
+		{
+			name: "tunnel upstream typo",
+			yaml: "version: 1\ntunnels:\n  - name: web\n    token: tok\n    upsteam: http://localhost:3000\n",
+			want: "upsteam",
+		},
+		{
+			name: "top level typo",
+			yaml: "version: 1\ntunnel:\n  - name: web\n",
+			want: "tunnel",
+		},
 	}
-	if s.Endpoints[0].Name != "myapp" || s.Endpoints[0].Protocol != "tcp" {
-		t.Errorf("endpoint = %+v", s.Endpoints[0])
-	}
-}
-
-func TestFromFlagsDefaults(t *testing.T) {
-	cfg := FromFlags("tok", "", "localhost:8080", "http", "")
-	s := cfg.Specs[0]
-	if s.Endpoints[0].Name != "default" {
-		t.Errorf("name = %q, want default", s.Endpoints[0].Name)
-	}
-	if s.Edge != "connect.eu.localport.dev:443" {
-		t.Errorf("edge = %q", s.Edge)
-	}
-}
-
-func TestLoadRegionFallback(t *testing.T) {
-	cfg := mustLoad(t, `
-version: 1
-spec:
-  token: tok
-  endpoints: [{name: web, proto: http, url: localhost:3000}]
-`)
-	if cfg.Specs[0].Edge != "connect.eu.localport.dev:443" {
-		t.Errorf("edge = %q, want the default landing region", cfg.Specs[0].Edge)
-	}
-}
-
-func TestTotalEndpoints(t *testing.T) {
-	cfg := &Config{Specs: []Spec{
-		{Endpoints: []Endpoint{{}, {}}},
-		{Endpoints: []Endpoint{{}}},
-	}}
-	if got := cfg.TotalEndpoints(); got != 3 {
-		t.Errorf("TotalEndpoints = %d, want 3", got)
-	}
-}
-
-func mustLoad(t *testing.T, yaml string) *Config {
-	t.Helper()
-	cfg, err := loadString(t, yaml)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	return cfg
-}
-
-func loadString(t *testing.T, yaml string) (*Config, error) {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
-		t.Fatalf("write temp config: %v", err)
-	}
-	return Load(path)
-}
-
-// The default landing region must be one that resolves. A default naming a
-// region we do not serve fails every run that omits --region.
-func TestDefaultRegionIsAServedRegion(t *testing.T) {
-	host, ok := regionHosts[defaultRegion]
-	if !ok {
-		t.Fatalf("defaultRegion %q is not in regionHosts", defaultRegion)
-	}
-	want := "connect." + host + ":" + edgePort
-	if got := ResolveEdge(""); got != want {
-		t.Errorf("ResolveEdge(\"\") = %q, want %q", got, want)
-	}
-	if got := ResolveEdge(defaultRegion); got != want {
-		t.Errorf("ResolveEdge(%q) = %q, want %q", defaultRegion, got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "localport.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("expected the unknown field to be refused")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error should name %q, got %q", tc.want, err)
+			}
+		})
 	}
 }

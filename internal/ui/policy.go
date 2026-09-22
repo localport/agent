@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/localport/agent/internal/proto"
@@ -26,15 +27,16 @@ func PolicyHint(lt proto.LimitType) string {
 		return "tunnel limit reached. Remove a tunnel, or upgrade your plan"
 	case proto.LimitNoPlan:
 		return "team has no active plan. Subscribe or start a free trial from the dashboard"
+	case proto.LimitPaymentDuePaused:
+		return "payment is overdue. Update the payment method from the dashboard, then start the agent again"
 	case proto.LimitBlocked:
 		return "team account is blocked. Contact support"
 	}
 	return ""
 }
 
-// FirstEndpoint picks the most useful public address out of what the edge
-// reported. URLs win, then PublicURL, then a synthesized host:port pair
-// for raw TCP/TLS tunnels where the edge only returned a port.
+// FirstEndpoint returns the public address to display. It prefers URLs, then
+// PublicURL, then host:port for TCP and TLS tunnels that only report a port.
 func FirstEndpoint(urls []string, publicURL, edgeAddr string, port uint16) string {
 	if len(urls) > 0 {
 		return urls[0]
@@ -52,33 +54,11 @@ func FirstEndpoint(urls []string, publicURL, edgeAddr string, port uint16) strin
 	if host == "" {
 		return ""
 	}
-	return host + ":" + itoa(int(port))
+	return host + ":" + strconv.Itoa(int(port))
 }
 
-// itoa is a tiny strconv.Itoa replacement used by both PolicyHint and HumanBytes
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
-}
-
-// HumanBytes renders a byte count as a short string ("1.2KB", "8.4MB").
+// HumanBytes renders a byte count such as "1.2KB" or "8.4MB". One decimal at
+// every scale keeps TUI column widths stable.
 func HumanBytes(n int64) string {
 	const (
 		kb = 1024
@@ -87,21 +67,12 @@ func HumanBytes(n int64) string {
 	)
 	switch {
 	case n < kb:
-		return itoa(int(n)) + "B"
+		return strconv.FormatInt(n, 10) + "B"
 	case n < mb:
-		return formatFloat1(float64(n)/kb) + "KB"
+		return strconv.FormatFloat(float64(n)/kb, 'f', 1, 64) + "KB"
 	case n < gb:
-		return formatFloat1(float64(n)/mb) + "MB"
+		return strconv.FormatFloat(float64(n)/mb, 'f', 1, 64) + "MB"
 	default:
-		return formatFloat1(float64(n)/gb) + "GB"
+		return strconv.FormatFloat(float64(n)/gb, 'f', 1, 64) + "GB"
 	}
-}
-
-func formatFloat1(f float64) string {
-	whole := int64(f)
-	frac := int64((f - float64(whole)) * 10)
-	if frac == 0 {
-		return itoa(int(whole))
-	}
-	return itoa(int(whole)) + "." + string(byte('0'+frac))
 }

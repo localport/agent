@@ -6,30 +6,18 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
-type winsize struct {
-	Row    uint16
-	Col    uint16
-	Xpixel uint16
-	Ypixel uint16
-}
-
-// TermSize returns the terminal's columns and rows, falling back to 80x24
-// when the ioctl can't be made (e.g. piped output, or f is not a tty).
+// TermSize returns the terminal columns and rows, or 80x24 when f is not a
+// terminal.
 func TermSize(f *os.File) (cols, rows int) {
 	if f == nil {
 		return 80, 24
 	}
-	var ws winsize
-	_, _, errno := syscall.Syscall(
-		syscall.SYS_IOCTL,
-		f.Fd(),
-		uintptr(syscall.TIOCGWINSZ),
-		uintptr(unsafe.Pointer(&ws)),
-	)
-	if errno != 0 || ws.Col == 0 {
+	ws, err := unix.IoctlGetWinsize(int(f.Fd()), unix.TIOCGWINSZ)
+	if err != nil || ws.Col == 0 {
 		return 80, 24
 	}
 	return int(ws.Col), int(ws.Row)

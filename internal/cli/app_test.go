@@ -29,25 +29,33 @@ func TestAppAccessRefusesAudienceWithCredentialFile(t *testing.T) {
 	for _, flag := range []string{"--pem", "--p12"} {
 		err := app.Run([]string{
 			"access", "https://gateway-warehouse.eu.localport.dev",
-			flag, "creds.pem", "--audience", "lpa_test", "-p", "0",
+			flag, "creds.pem", "--audience", "lpa_test", "-L", "0:22",
 		})
-		if err == nil {
-			t.Fatalf("access with --audience and %s must error", flag)
+		if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+			t.Fatalf("access with --audience and %s must be refused, got %v", flag, err)
 		}
 	}
 }
 
-// The old verb must NAME the new one. Checking only that the call errors would
-// pass even with the router case deleted, because the flat tunnel fallthrough
-// errors too. So this asserts the MESSAGE.
-func TestAppOldConnectVerbNamesItsReplacement(t *testing.T) {
+// The flat tunnel fallthrough also errors, so the test checks the message
+// names the new verb.
+func TestAppOldTunnelVerbNamesItsReplacement(t *testing.T) {
 	app := New("1.2.3", "abc123", "2026-04-13")
-	err := app.Run([]string{"connect", "https://gateway-warehouse.eu.localport.dev", "-p", "3001"})
+	err := app.Run([]string{"tunnel", "--config", "localport.yaml"})
 	if err == nil {
 		t.Fatal("the retired verb must error")
 	}
-	if !strings.Contains(err.Error(), "localport access") {
+	if !strings.Contains(err.Error(), "localport connect") {
 		t.Fatalf("the error must name the new verb, got: %v", err)
+	}
+}
+
+// `connect` without a token fails on the missing token.
+func TestAppConnectNeedsAToken(t *testing.T) {
+	t.Setenv("LOCALPORT_TOKEN", "")
+	app := New("1.2.3", "abc123", "2026-04-13")
+	if err := app.Run([]string{"connect"}); err == nil {
+		t.Fatal("connect without a token must error")
 	}
 }
 

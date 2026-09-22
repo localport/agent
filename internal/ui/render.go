@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/tunnel"
 )
 
@@ -42,28 +44,28 @@ type snap struct {
 	palette    Palette
 }
 
-// buildRightCaps composes the two top-right capsules from the tunnels
-// snapshot. Single-tunnel: state word + per-tunnel uptime. Multi-tunnel:
-// connected/total count + agent uptime.
+// buildRightCaps builds the two top-right capsules. With one tunnel they show
+// its state and uptime. With several they show the connected count and agent
+// uptime.
 func buildRightCaps(tunnels []tState, agentUptime time.Duration) (status, uptime string) {
 	if len(tunnels) == 0 {
-		return "starting…", humanDuration(agentUptime)
+		return "starting…", HumanDuration(agentUptime)
 	}
 	if len(tunnels) == 1 {
 		ts := tunnels[0]
 		switch {
 		case ts.connected && ts.state == tunnel.StateActive:
-			return "Connected", humanDuration(time.Since(ts.connectedAt))
+			return "Connected", HumanDuration(time.Since(ts.connectedAt))
 		case ts.state == tunnel.StateConnecting:
-			return "Connecting…", humanDuration(agentUptime)
+			return "Connecting…", HumanDuration(agentUptime)
 		case ts.state == tunnel.StateRegistering:
-			return "Registering…", humanDuration(agentUptime)
+			return "Registering…", HumanDuration(agentUptime)
 		case ts.state == tunnel.StateReconnecting:
-			return "Reconnecting…", humanDuration(agentUptime)
+			return "Reconnecting…", HumanDuration(agentUptime)
 		case ts.state == tunnel.StateStopped:
-			return "Stopped", humanDuration(agentUptime)
+			return "Stopped", HumanDuration(agentUptime)
 		}
-		return "Idle", humanDuration(agentUptime)
+		return "Idle", HumanDuration(agentUptime)
 	}
 	connected := 0
 	for _, ts := range tunnels {
@@ -71,7 +73,7 @@ func buildRightCaps(tunnels []tState, agentUptime time.Duration) (status, uptime
 			connected++
 		}
 	}
-	return fmt.Sprintf("%d/%d connected", connected, len(tunnels)), humanDuration(agentUptime)
+	return fmt.Sprintf("%d/%d connected", connected, len(tunnels)), HumanDuration(agentUptime)
 }
 
 // buildFrame returns exactly s.rows formatted lines. Line N renders at row N+1.
@@ -142,6 +144,10 @@ func headerSingle(s snap, ts tState) []string {
 	lines := make([]string, 0, 12)
 	lines = append(lines, "") // top padding inside the box
 
+	if ts.device {
+		return append(lines, deviceHeader(s, ts, row, labelW)...)
+	}
+
 	tname := ts.tunnelName
 	if tname == "" {
 		tname = ts.name
@@ -185,7 +191,7 @@ func headerSingle(s snap, ts tState) []string {
 		pal.ForegroundDim("   ↑ ") + pal.Foreground(HumanBytes(st.BytesOut))
 	lines = append(lines,
 		pal.ForegroundDim(padRight("Bandwidth", labelW))+bandwidth,
-		row("Connections", fmt.Sprintf("%d", st.ConnectionsServed)),
+		row("Connections", strconv.FormatInt(st.ConnectionsServed, 10)),
 	)
 
 	if ts.lastErr != "" && ts.state != tunnel.StateActive {
@@ -200,6 +206,60 @@ func headerSingle(s snap, ts tState) []string {
 	}
 	lines = append(lines, "") // bottom padding before the divider
 	return lines
+}
+
+// deviceHeader renders the header of a fleet device, its target host and its
+// ports.
+func deviceHeader(s snap, ts tState, row func(label, value string) string, labelW int) []string {
+	pal := s.palette
+	lines := make([]string, 0, 10)
+
+	lines = append(lines, row("Device", ts.name))
+	if ts.tunnelName != "" {
+		lines = append(lines, row("Fleet", ts.tunnelName))
+	}
+	if ts.region != "" {
+		name := ts.regionName
+		if name == "" {
+			name = regionName(ts.region)
+		}
+		lines = append(lines, row("Region", name))
+	}
+	if addr := FirstEndpoint(ts.urls, ts.url, "", 0); addr != "" {
+		lines = append(lines,
+			pal.ForegroundDim(padRight("Address", labelW))+pal.Primary(addr))
+	}
+	if ts.local != "" {
+		lines = append(lines, row("Serving", ts.local))
+	}
+
+	portsLine := pal.ForegroundDim(padRight("Ports", labelW))
+	if len(ts.ports) == 0 {
+		portsLine += pal.Warning(formatPorts(nil))
+	} else {
+		portsLine += pal.Foreground(formatPorts(ts.ports))
+	}
+	lines = append(lines, portsLine)
+
+	st := s.stats[ts.name]
+	lines = append(lines,
+		pal.ForegroundDim(padRight("Bandwidth", labelW))+
+			pal.ForegroundDim("\u2193 ")+pal.Foreground(HumanBytes(st.BytesIn))+
+			pal.ForegroundDim("   \u2191 ")+pal.Foreground(HumanBytes(st.BytesOut)),
+		row("Connections", strconv.FormatInt(st.ConnectionsServed, 10)),
+	)
+
+	if ts.lastErr != "" && ts.state != tunnel.StateActive {
+		inner := max(s.cols-4, 20)
+		for i, line := range wrapPlain("\u2715 "+ts.lastErr, inner) {
+			if i == 0 {
+				lines = append(lines, pal.Destructive(line))
+			} else {
+				lines = append(lines, pal.DestructiveDim(line))
+			}
+		}
+	}
+	return append(lines, "")
 }
 
 // buildLocalURL composes the local-side address as a scheme://host:port
@@ -225,7 +285,9 @@ func padRight(s string, w int) string {
 func headerMulti(s snap) []string {
 	pal := s.palette
 	header := pal.ForegroundDim("edge ") + pal.Foreground(s.edge)
-	lines := []string{header, ""}
+	// Header, blank line, column titles, one row per tunnel.
+	lines := make([]string, 0, 3+len(s.tunnels))
+	lines = append(lines, header, "")
 
 	const stateW = 14
 	nameW := 4
@@ -280,6 +342,9 @@ func statePill(ts tState, pal Palette) string {
 }
 
 func protoTarget(ts *tState) string {
+	if ts.device {
+		return formatPorts(ts.ports)
+	}
 	switch {
 	case ts.port > 0 && ts.subdomain != "":
 		return fmt.Sprintf("%s :%d (%s)", ts.proto, ts.port, ts.subdomain)
@@ -347,22 +412,28 @@ func renderConnections(s snap, capacity int) []string {
 	return lines
 }
 
-// panelDivider labels the bottom panel: requests for a single http tunnel, live
-// connections otherwise.
+// panelDivider labels the bottom panel as connections for a single device,
+// requests for a single http tunnel and live connections otherwise.
 func panelDivider(s snap) (label, count string) {
+	if len(s.tunnels) == 1 && s.tunnels[0].device {
+		return "connections", strconv.FormatInt(s.stats[s.tunnels[0].name].ConnectionsServed, 10)
+	}
 	if len(s.tunnels) == 1 && httpProto(s.tunnels[0].proto) {
-		return "requests", fmt.Sprintf("%d", s.stats[s.tunnels[0].name].RequestsServed)
+		return "requests", strconv.FormatInt(s.stats[s.tunnels[0].name].RequestsServed, 10)
 	}
 	total := 0
 	for _, list := range s.conns {
 		total += len(list)
 	}
-	return "live connections", fmt.Sprintf("%d", total)
+	return "live connections", strconv.Itoa(total)
 }
 
 func httpProto(proto string) bool { return proto == "http" || proto == "https" }
 
 func bottomCount(ts tState, s snap) int {
+	if ts.device {
+		return len(ts.events)
+	}
 	if httpProto(ts.proto) {
 		return len(s.reqs[ts.name])
 	}
@@ -370,13 +441,21 @@ func bottomCount(ts tState, s snap) int {
 }
 
 func bottomEmptyMsg(ts tState, pal Palette) string {
-	if httpProto(ts.proto) {
+	switch {
+	case ts.device && len(ts.ports) == 0:
+		return pal.Muted("no ports open: edit this device in the dashboard")
+	case ts.device:
+		return pal.Muted("no connections yet")
+	case httpProto(ts.proto):
 		return pal.Muted("no requests yet")
 	}
 	return pal.Muted("no live connections")
 }
 
 func bottomRows(ts tState, s snap, capacity, cols int, pal Palette) []string {
+	if ts.device {
+		return renderDeviceLog(ts, capacity, cols, pal)
+	}
 	if httpProto(ts.proto) {
 		return renderRequestTable(s.reqs[ts.name], capacity, cols, pal)
 	}
@@ -397,14 +476,11 @@ func connectingPhrase(ts tState, spin string, pal Palette) string {
 	return pal.Muted("· idle")
 }
 
-// renderConnTable formats one row per ActiveConn. Sorted by StartedAt
-// descending so the newest connection sits on top.
+// renderConnTable formats one row per ActiveConn, newest first. The remote
+// address omits the source port.
 //
 //	IP                           DUR     ↓ IN       ↑ OUT
 //	203.0.113.4                 3m12s    1.2 MB    430 KB
-//
-// The remote address is shown host-only. An operator watching the panel gets
-// nothing useful from the source port, so it is stripped for clarity.
 func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette) []string {
 	if capacity <= 0 || len(conns) == 0 {
 		return nil
@@ -439,7 +515,7 @@ func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette)
 			remote = host
 		}
 		row := padVisible(pal.Foreground(truncate(remote, remoteW)), remoteW) + gapStr +
-			padVisible(pal.Foreground(humanDuration(now.Sub(c.StartedAt))), durW) + gapStr +
+			padVisible(pal.Foreground(HumanDuration(now.Sub(c.StartedAt))), durW) + gapStr +
 			padLeftVisible(pal.Primary(HumanBytes(c.BytesIn)), byteW) + gapStr +
 			padLeftVisible(pal.Primary(HumanBytes(c.BytesOut)), byteW)
 		rows = append(rows, row)
@@ -450,8 +526,8 @@ func renderConnTable(conns []tunnel.ActiveConn, capacity, cols int, pal Palette)
 	return rows
 }
 
-// renderRequestTable formats one row per HTTP request, newest at the bottom so
-// it reads like a log. Shown on http tunnels in place of the connection table.
+// renderRequestTable formats one row per HTTP request, newest last. http
+// tunnels show it in place of the connection table.
 //
 //	TIME      METHOD  PATH                    STATUS   DUR
 //	15:04:05  POST    /webhook/slack          200      142ms
@@ -475,7 +551,7 @@ func renderRequestTable(reqs []tunnel.RequestInfo, capacity, cols int, pal Palet
 	rows := make([]string, 0, capacity)
 	rows = append(rows, header)
 
-	// The ring is oldest-first; show the most recent that fit, newest last.
+	// The ring is oldest first. Show the newest rows that fit.
 	bodyCap := capacity - 1
 	start := 0
 	if len(reqs) > bodyCap {
@@ -485,12 +561,12 @@ func renderRequestTable(reqs []tunnel.RequestInfo, capacity, cols int, pal Palet
 		row := padVisible(pal.Muted(r.StartedAt.Format("15:04:05")), timeW) + gapStr +
 			padVisible(pal.Foreground(padMethod(r.Method, methodW)), methodW) + gapStr +
 			padVisible(pal.Foreground(truncate(r.Path, pathW)), pathW) + gapStr +
-			padVisible(statusStyle(r.Status, pal)(fmt.Sprintf("%d", r.Status)), statusW) + gapStr +
+			padVisible(statusStyle(r.Status, pal)(strconv.Itoa(r.Status)), statusW) + gapStr +
 			padLeftVisible(pal.Foreground(humanLatency(r.Duration)), durW)
 		rows = append(rows, row)
 	}
-	// Mark hidden older requests on the first body row. Skip when only the header
-	// fits (capacity 1), else rows[1] is out of range.
+	// Mark hidden older requests on the first body row, unless only the
+	// header fits.
 	if start > 0 && len(rows) > 1 {
 		rows[1] = pal.Muted(fmt.Sprintf("…%d earlier", start))
 	}
@@ -505,8 +581,8 @@ func padMethod(m string, w int) string {
 	return truncate(m, w)
 }
 
-// statusStyle colours a status code by class: 2xx primary, 3xx/4xx warning,
-// 5xx (and anything unexpected) destructive.
+// statusStyle colors a status code by class. 2xx is primary, 3xx and 4xx are
+// warning, and 5xx and other codes are destructive.
 func statusStyle(code int, pal Palette) StyleFn {
 	switch {
 	case code >= 200 && code < 300:
@@ -518,7 +594,7 @@ func statusStyle(code int, pal Palette) StyleFn {
 	}
 }
 
-// humanLatency shows sub-second timing (µs/ms) that humanDuration collapses to 0s.
+// humanLatency formats sub-second durations in µs or ms.
 func humanLatency(d time.Duration) string {
 	switch {
 	case d < time.Microsecond:
@@ -614,18 +690,8 @@ func boxBottom(cols int, code string, pal Palette) string {
 		pal.ForegroundDim(code) + pal.Border(" ]─┘")
 }
 
-// sanitizeForDisplay strips terminal control characters (C0 incl. ESC, DEL, and C1)
-func sanitizeForDisplay(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		if r == 0x7f || r < 0x20 || (r >= 0x80 && r <= 0x9f) {
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
+// sanitizeForDisplay strips terminal control characters from an external value.
+func sanitizeForDisplay(s string) string { return security.SanitizeDisplay(s) }
 
 // boxDivider renders:  ├─[ live connections ]──────[ N ]─┤
 func boxDivider(label, right string, cols int, pal Palette) string {
@@ -782,9 +848,8 @@ func padVisible(s string, w int) string {
 	return s + strings.Repeat(" ", w-rl)
 }
 
-// humanDuration prints durations the way ops people read them: 3s, 1m12s,
-// 1h04m. Sub-second rounds to seconds for stability between frames.
-func humanDuration(d time.Duration) string {
+// HumanDuration formats durations as 3s, 1m12s or 1h04m, rounded to seconds.
+func HumanDuration(d time.Duration) string {
 	if d < time.Second {
 		return "0s"
 	}
@@ -800,4 +865,119 @@ func humanDuration(d time.Duration) string {
 	h := int(d.Hours())
 	m := int(d.Minutes()) - h*60
 	return fmt.Sprintf("%dh%02dm", h, m)
+}
+
+// renderDeviceLog renders the bottom panel of a fleet device, oldest first.
+// Connection open and close rows and HTTP request rows share one log to keep
+// their order.
+//
+//	TIME      PORT      EVENT                      STATUS   DUR    BYTES
+//	15:04:05  tcp 502   open  203.0.113.4 gw-ci                        -
+//	15:04:06  http 80   GET /health                 200     3ms   1.2 KB
+//	15:04:12  tcp 502   close 203.0.113.4 gw-ci             7s    1.4 MB
+func renderDeviceLog(ts tState, capacity, cols int, pal Palette) []string {
+	if capacity <= 0 || len(ts.events) == 0 {
+		return nil
+	}
+	protocols := make(map[uint16]string, len(ts.ports))
+	for _, p := range ts.ports {
+		protocols[p.Port] = p.Protocol
+	}
+
+	innerW := max(cols-4, 20)
+	const timeW, portW, statusW, durW, byteW, gap = 8, 9, 6, 7, 9, 2
+	eventW := max(innerW-timeW-portW-statusW-durW-byteW-gap*5, 12)
+	gapStr := strings.Repeat(" ", gap)
+
+	header := padVisible(pal.Muted("TIME"), timeW) + gapStr +
+		padVisible(pal.Muted("PORT"), portW) + gapStr +
+		padVisible(pal.Muted("EVENT"), eventW) + gapStr +
+		padVisible(pal.Muted("STATUS"), statusW) + gapStr +
+		padLeftVisible(pal.Muted("DUR"), durW) + gapStr +
+		padLeftVisible(pal.Muted("BYTES"), byteW)
+
+	rows := make([]string, 0, capacity)
+	rows = append(rows, header)
+
+	bodyCap := capacity - 1
+	start := 0
+	if len(ts.events) > bodyCap {
+		start = len(ts.events) - bodyCap
+	}
+	for _, ev := range ts.events[start:] {
+		rows = append(rows, deviceLogRow(ev, protocols, pal, eventW,
+			timeW, portW, statusW, durW, byteW, gapStr))
+	}
+	if start > 0 && len(rows) > 1 {
+		rows[1] = pal.Muted(fmt.Sprintf("…%d earlier", start))
+	}
+	return rows
+}
+
+func deviceLogRow(
+	ev devEvent, protocols map[uint16]string, pal Palette, eventW int,
+	timeW, portW, statusW, durW, byteW int, gapStr string,
+) string {
+	port := "-"
+	if ev.port > 0 {
+		port = strconv.FormatUint(uint64(ev.port), 10)
+		if proto, ok := protocols[ev.port]; ok {
+			port = proto + " " + port
+		}
+	}
+
+	event, status := pal.Foreground(truncate(deviceEventText(ev), eventW)), ""
+	switch {
+	case ev.err != "":
+		event = pal.Destructive(truncate(deviceEventText(ev), eventW))
+	case ev.kind == devRequest:
+		status = statusStyle(ev.status, pal)(strconv.Itoa(ev.status))
+	}
+
+	// Requests show latency, connections show duration.
+	dur, bytes := "", ""
+	switch ev.kind {
+	case devRequest:
+		dur = humanLatency(ev.dur)
+	case devConnClose:
+		dur = HumanDuration(ev.dur)
+		bytes = HumanBytes(ev.bytes)
+	}
+
+	return padVisible(pal.Muted(ev.at.Format("15:04:05")), timeW) + gapStr +
+		padVisible(pal.ForegroundMid(truncate(port, portW)), portW) + gapStr +
+		padVisible(event, eventW) + gapStr +
+		padVisible(status, statusW) + gapStr +
+		padLeftVisible(pal.Foreground(dur), durW) + gapStr +
+		padLeftVisible(pal.Primary(bytes), byteW)
+}
+
+// deviceEventText returns the EVENT column, the consumer or the request.
+func deviceEventText(ev devEvent) string {
+	if ev.kind == devRequest {
+		path := ev.path
+		if path == "" {
+			path = "-"
+		}
+		return padMethod(ev.method, 7) + " " + path
+	}
+
+	verb := "open "
+	if ev.kind == devConnClose {
+		verb = "close"
+	}
+	remote := ev.remote
+	if remote == "" {
+		remote = "-"
+	} else if host, _, err := net.SplitHostPort(remote); err == nil && host != "" {
+		remote = host
+	}
+	text := verb + " " + remote
+	if ev.consumer != "" {
+		text += " " + ev.consumer
+	}
+	if ev.err != "" {
+		text += ": " + ev.err
+	}
+	return text
 }

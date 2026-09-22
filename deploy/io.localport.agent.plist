@@ -2,20 +2,47 @@
 <!--
   Localport agent as a launchd daemon.
 
-    sudo install -d -m 0700 /Library/Application\ Support/localport
+  A service account first, so the daemon does not run as root. The UID is the
+  next free one below 500, which is where macOS keeps hidden system accounts:
+
+    ID=$(( $(dscl . -list /Users UniqueID | awk '$2 < 500 {print $2}' | sort -n | tail -1) + 1 ))
+    sudo dscl . -create /Groups/_localport PrimaryGroupID "$ID"
+    sudo dscl . -create /Users/_localport UniqueID "$ID"
+    sudo dscl . -create /Users/_localport PrimaryGroupID "$ID"
+    sudo dscl . -create /Users/_localport RealName "Localport agent"
+    sudo dscl . -create /Users/_localport UserShell /usr/bin/false
+    sudo dscl . -create /Users/_localport NFSHomeDirectory /var/empty
+    sudo dscl . -create /Users/_localport IsHidden 1
+
+  Then the daemon, its state and its log, all owned by that account:
+
+    sudo install -d -m 0700 -o _localport -g _localport /Library/Application\ Support/localport
+    printf '%s' 'tok_...' | sudo tee /Library/Application\ Support/localport/token >/dev/null
+    sudo chown _localport:_localport /Library/Application\ Support/localport/token
+    sudo chmod 0600 /Library/Application\ Support/localport/token
+    sudo touch /var/log/localport.log
+    sudo chown _localport:_localport /var/log/localport.log
     sudo cp io.localport.agent.plist /Library/LaunchDaemons/
     sudo chown root:wheel /Library/LaunchDaemons/io.localport.agent.plist
     sudo chmod 0644 /Library/LaunchDaemons/io.localport.agent.plist
     sudo launchctl load -w /Library/LaunchDaemons/io.localport.agent.plist
 
-  launchd has no LoadCredential= equivalent, so the token goes in a root-owned
-  0600 file that only this daemon reads. Do not put it in ProgramArguments,
-  where `ps` shows it to every local account.
+  launchd has no LoadCredential= equivalent, so the token goes in a file only
+  this account can read. Do not put it in ProgramArguments, where `ps` shows it
+  to every local account.
+
+  launchd has no sandboxing keys, so running as the account in UserName is
+  the daemon's only boundary.
 -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
   <string>io.localport.agent</string>
+
+  <key>UserName</key>
+  <string>_localport</string>
+  <key>GroupName</key>
+  <string>_localport</string>
 
   <key>ProgramArguments</key>
   <array>

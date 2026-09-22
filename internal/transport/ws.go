@@ -53,6 +53,7 @@ func (d *WSDialer) Dial(ctx context.Context, host, port string) (net.Conn, error
 	if err != nil {
 		return nil, fmt.Errorf("ws dial %s: %w", url, err)
 	}
-	// Binary frames preserve the protocol bytes unchanged.
+	// Binary frames carry the protocol bytes unchanged. The context passed here
+	// bounds the connection lifetime, so it cannot be the dial context.
 	return websocket.NetConn(context.Background(), c, websocket.MessageBinary), nil
 }

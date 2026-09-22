@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/localport/agent/internal/cli"
+	"github.com/localport/agent/internal/security"
 )
 
 // Populated via -ldflags at build time.
@@ -15,6 +16,10 @@ var (
 )
 
 func main() {
+	// Called before any token is read. The process holds bearer credentials
+	// for its lifetime, and a core dump or same-user debugger exposes them.
+	security.HardenProcess()
+
 	app := cli.New(version, commit, date)
 	if err := app.Run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

@@ -5,7 +5,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"strings"
@@ -15,23 +17,20 @@ import (
 	pkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
-// BuildTLSConfig assembles a mutual-TLS client config from one of two
-// credential sources: a single PEM file holding cert+key+CA chain, or a
-// PKCS#12 archive guarded by a password. Exactly one of bundlePath or
-// p12Path must be supplied.
-func BuildTLSConfig(bundlePath, p12Path, p12Password, remote, serverNameOverride string) (*tls.Config, error) {
-	if !exactlyOne(bundlePath != "", p12Path != "") {
-		// Names the flags, not the parameters: the reader of this message is
-		// holding a command line.
-		return nil, fmt.Errorf("provide exactly one credential source: --pem or --p12")
+// BuildTLSConfig builds a mutual TLS client config from exactly one of
+// pemPath (cert, key and CA chain in one file) or p12Path (a password
+// protected PKCS#12 archive).
+func BuildTLSConfig(pemPath, p12Path, p12Password, remote, serverNameOverride string) (*tls.Config, error) {
+	if !exactlyOne(pemPath != "", p12Path != "") {
+		return nil, errors.New("provide exactly one credential source: --pem or --p12")
 	}
 
 	var (
 		cert tls.Certificate
 		err  error
 	)
-	if bundlePath != "" {
-		cert, err = loadFromPEMBundle(bundlePath)
+	if pemPath != "" {
+		cert, err = loadPEM(pemPath)
 	} else {
 		cert, err = loadFromPKCS12(p12Path, p12Password)
 	}
@@ -47,59 +46,49 @@ func BuildTLSConfig(bundlePath, p12Path, p12Password, remote, serverNameOverride
 	return cfg, nil
 }
 
-// BaseTLSConfig builds everything a consumer connection needs EXCEPT the client
-// credential, which the caller attaches.
+// BaseTLSConfig returns the TLS config for a consumer connection without a
+// client certificate. The caller attaches the credential.
 //
-// RootCAs stays nil, so the SERVER is verified against the system trust store.
-// The gateway presents a publicly trusted certificate, not one signed by the
-// tunnel CA, so pinning that CA here would reject every connection. The tunnel
-// CA goes the other way: it is part of the chain we PRESENT.
-// The server is always verified. There is no flag, no config field and no
-// host that turns it off: this is the connection that presents a client
-// certificate, so a downgraded handshake hands that credential to whatever
-// answered.
+// RootCAs is nil because the edge presents a publicly trusted certificate.
+// The tunnel CA belongs to the client chain and does not verify the server.
 func BaseTLSConfig(remote, serverNameOverride string) *tls.Config {
 	return &tls.Config{
-		MinVersion: tls.VersionTLS12,
+		MinVersion: tls.VersionTLS13,
 		ServerName: resolveServerName(remote, serverNameOverride),
 	}
 }
 
-// loadFromPEMBundle expects one file holding the client cert, its private key
-// and at least one CA certificate, leaf first.
+// loadPEM reads one file holding the client cert, its private key and at
+// least one CA certificate, leaf first.
 //
-// The CA certificates are not collected into a trust pool: the server is verified
-// against system roots. They are counted, because a bundle with no chain is
-// broken and catching it here beats a handshake alert from the far side.
-func loadFromPEMBundle(path string) (tls.Certificate, error) {
-	// Carries a private key, so it is read owner-only: validated on the open
-	// descriptor, symlinks refused.
+// The CA certificates form the presented chain and are not used for server
+// verification. A file without a chain is rejected here, before the edge
+// fails the handshake.
+func loadPEM(path string) (tls.Certificate, error) {
+	// The file holds a private key. It must be owner-only, is checked on the
+	// open descriptor and must not be a symlink.
 	data, err := security.ReadPrivateFile(path)
 	if err != nil {
-		return tls.Certificate{}, classify("read pem bundle", err)
+		return tls.Certificate{}, classify("read pem file", err)
 	}
 	cert, err := tls.X509KeyPair(data, data)
 	if err != nil {
-		// --pem pointed at the store's `cert.pem` has no key, and crypto/tls
-		// answers that with a sentence about PEM block types. Name the mistake
-		// rather than relay it.
+		// The identity store's certificate file has no key. crypto/tls reports that as
+		// a PEM block type error, so replace it with a specific message.
 		if bytes.Contains(data, []byte("BEGIN CERTIFICATE")) && !bytes.Contains(data, []byte("PRIVATE KEY")) {
-			// A multi-line, multi-sentence message on purpose, so ST1005's
-			// single-clause rule does not apply.
-			return tls.Certificate{}, fmt.Errorf( //nolint:staticcheck // ST1005
+			return tls.Certificate{}, fmt.Errorf( //nolint:staticcheck // ST1005, multi-line message
 				"%s holds certificates but no private key.\n"+
 					"  --pem wants ONE file containing the leaf, its chain and the key.\n"+
 					"  If this came from the identity store, drop --pem entirely: "+
 					"`localport access` presents a stored credential on its own.", path)
 		}
-		return tls.Certificate{}, classify("parse pem bundle", err)
+		return tls.Certificate{}, classify("parse pem file", err)
 	}
 	leaf, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("parse leaf: %w", err)
 	}
-	// Kept on the certificate so crypto/tls does not re-parse the leaf on every
-	// handshake. A long-lived access session opens many.
+	// Set Leaf so crypto/tls does not parse it on each handshake.
 	cert.Leaf = leaf
 
 	cas := 0
@@ -113,28 +102,25 @@ func loadFromPEMBundle(path string) (tls.Certificate, error) {
 		if block.Type != "CERTIFICATE" {
 			continue
 		}
-		// Compared by DER, not by serial: a serial is unique only within its own
-		// CA (RFC 5280 4.1.2.2).
+		// Compare DER. A serial is unique only within its CA (RFC 5280 4.1.2.2).
 		if bytes.Equal(block.Bytes, cert.Certificate[0]) {
 			continue
 		}
 		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-			return tls.Certificate{}, fmt.Errorf("parse cert in bundle: %w", err)
+			return tls.Certificate{}, fmt.Errorf("parse certificate in %s: %w", path, err)
 		}
 		cas++
 	}
 	if cas == 0 {
-		return tls.Certificate{}, fmt.Errorf("pem bundle %s does not contain any CA certificates", path)
+		return tls.Certificate{}, fmt.Errorf("pem file %s does not contain any CA certificates", path)
 	}
 	return cert, nil
 }
 
-// loadFromPKCS12 unpacks a .p12/.pfx archive into the client cert and its chain.
-// PKCS#12 always ships a chain, so an empty one is a config error.
+// loadFromPKCS12 unpacks a .p12/.pfx archive into the client cert and its
+// chain. An empty chain is a config error.
 func loadFromPKCS12(path, password string) (tls.Certificate, error) {
-	// Owner-only, like the PEM bundle. A password on an archive is not a reason to
-	// let every local account read a private key: exported passwords are routinely
-	// weak or shared.
+	// Owner-only, as for PEM. Archive passwords are often weak or shared.
 	raw, err := security.ReadPrivateFile(path)
 	if err != nil {
 		return tls.Certificate{}, classify("read pkcs12", err)
@@ -151,8 +137,8 @@ func loadFromPKCS12(path, password string) (tls.Certificate, error) {
 		Leaf:        leaf,
 		Certificate: [][]byte{leaf.Raw},
 	}
-	// Appended to the chain we PRESENT. Not added to a trust pool: the server is
-	// verified against system roots.
+	// CA certificates extend the presented chain. The server is verified
+	// against system roots.
 	for _, ca := range chain {
 		cert.Certificate = append(cert.Certificate, ca.Raw)
 	}
@@ -161,10 +147,9 @@ func loadFromPKCS12(path, password string) (tls.Certificate, error) {
 
 func assertLeafFresh(cert tls.Certificate) error {
 	if len(cert.Certificate) == 0 {
-		return fmt.Errorf("certificate is empty")
+		return errors.New("certificate is empty")
 	}
-	// Both loaders set Leaf, so this parses only for a certificate built
-	// elsewhere.
+	// Both loaders set Leaf. Parse only for certificates built elsewhere.
 	leaf := cert.Leaf
 	if leaf == nil {
 		parsed, err := x509.ParseCertificate(cert.Certificate[0])
@@ -172,6 +157,11 @@ func assertLeafFresh(cert tls.Certificate) error {
 			return fmt.Errorf("parse leaf: %w", err)
 		}
 		leaf = parsed
+	}
+	if now := time.Now(); now.Before(leaf.NotBefore) {
+		// Usually a wrong clock. A device without RTC or NTP boots in the past.
+		return fmt.Errorf("client cert is not valid until %s, and this machine's clock reads %s",
+			leaf.NotBefore.Format(time.RFC3339), now.Format(time.RFC3339))
 	}
 	if time.Now().After(leaf.NotAfter) {
 		return fmt.Errorf("client cert expired at %s", leaf.NotAfter.Format(time.RFC3339))
@@ -182,22 +172,22 @@ func assertLeafFresh(cert tls.Certificate) error {
 	return nil
 }
 
+// classify names the two failures an operator can act on.
 func classify(prefix string, err error) error {
 	switch {
-	case os.IsNotExist(err):
+	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("%s: file not found: %w", prefix, err)
-	case os.IsPermission(err):
+	case errors.Is(err, fs.ErrPermission):
 		return fmt.Errorf("%s: permission denied: %w", prefix, err)
 	}
 	return fmt.Errorf("%s: %w", prefix, err)
 }
 
-// resolveServerName picks the name the server certificate is verified against.
+// resolveServerName returns the name used to verify the server certificate.
 //
-// An IP literal is returned AS the ServerName rather than blanked: crypto/tls
-// refuses to handshake on an empty ServerName, and the literal is also correct,
-// since crypto/tls omits SNI for an IP (RFC 6066) and VerifyHostname then
-// matches the IP SANs.
+// An IP literal is kept as ServerName. crypto/tls refuses an empty
+// ServerName, omits SNI for an IP (RFC 6066) and verifies it against the IP
+// SANs.
 func resolveServerName(remote, override string) string {
 	if override != "" {
 		return override

@@ -22,18 +22,16 @@ type swatch struct {
 }
 
 var (
-	// Dark surface:
+	// Dark surface.
 	colForeground    = swatch{rgb{0xeb, 0xe6, 0xd4}, 230, "\x1b[97m", "--foreground"}
 	colForegroundMid = swatch{rgb{0xc8, 0xc0, 0xad}, 187, "\x1b[37m", "--foreground-mid"}
 	colForegroundDim = swatch{rgb{0xad, 0x9f, 0x80}, 144, "\x1b[37m", "--foreground-dim"}
 	colMuted         = swatch{rgb{0x6e, 0x67, 0x59}, 244, "\x1b[2;37m", "--muted-foreground"}
-	// Border uses a brighter chrome value than --border so the frame
-	// stays visible against the warm-dark surface without dominating.
-	// Sits between --muted-foreground and --foreground-dim.
+	// Border is brighter than --border so the frame stays visible, between
+	// --muted-foreground and --foreground-dim.
 	colBorder         = swatch{rgb{0x80, 0x77, 0x65}, 242, "\x1b[37m", "--chrome"}
 	colPrimary        = swatch{rgb{0x5f, 0xb8, 0x6a}, 78, "\x1b[1;32m", "--primary"}
 	colPrimaryMid     = swatch{rgb{0x3a, 0x7a, 0x44}, 65, "\x1b[32m", "--primary-mid"}
-	colPrimaryLine    = swatch{rgb{0x29, 0x4e, 0x30}, 22, "\x1b[2;32m", "--primary-line"}
 	colWarning        = swatch{rgb{0xd5, 0xa4, 0x4b}, 179, "\x1b[33m", "--warning"}
 	colDestructive    = swatch{rgb{0xd3, 0x50, 0x2d}, 167, "\x1b[31m", "--destructive"}
 	colDestructiveDim = swatch{rgb{0x6a, 0x28, 0x16}, 88, "\x1b[2;31m", "--destructive-line"}
@@ -74,11 +72,11 @@ func DetectColorMode() ColorMode {
 	return Color16
 }
 
-// reset and modifiers (kept here so callers don't reach into term.go).
+// Reset and bold. Unexported so every color sequence goes through Palette,
+// which applies NO_COLOR and the color depth.
 const (
 	sgrReset = "\x1b[0m"
 	sgrBold  = "\x1b[1m"
-	sgrDim   = "\x1b[2m"
 )
 
 // fg returns the SGR prefix that paints subsequent text in the swatch's
@@ -110,16 +108,12 @@ type Palette struct {
 	Primary        StyleFn
 	PrimaryBold    StyleFn
 	PrimaryMid     StyleFn
-	PrimaryLine    StyleFn
 	Warning        StyleFn
 	Destructive    StyleFn
 	DestructiveDim StyleFn
-	Bold           StyleFn
-	Dim            StyleFn
 }
 
-// NewPalette binds every swatch to the given mode. It is cheap enough to build
-// once at startup and reuse.
+// NewPalette binds every swatch to mode.
 func NewPalette(m ColorMode) Palette {
 	bind := func(s swatch) StyleFn {
 		if m == ColorOff {
@@ -131,17 +125,6 @@ func NewPalette(m ColorMode) Palette {
 				return text
 			}
 			return prefix + text + sgrReset
-		}
-	}
-	modifier := func(seq string) StyleFn {
-		if m == ColorOff {
-			return identity
-		}
-		return func(text string) string {
-			if text == "" {
-				return text
-			}
-			return seq + text + sgrReset
 		}
 	}
 	primaryBold := identity
@@ -163,12 +146,9 @@ func NewPalette(m ColorMode) Palette {
 		Primary:        bind(colPrimary),
 		PrimaryBold:    primaryBold,
 		PrimaryMid:     bind(colPrimaryMid),
-		PrimaryLine:    bind(colPrimaryLine),
 		Warning:        bind(colWarning),
 		Destructive:    bind(colDestructive),
 		DestructiveDim: bind(colDestructiveDim),
-		Bold:           modifier(sgrBold),
-		Dim:            modifier(sgrDim),
 	}
 }
 

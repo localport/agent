@@ -20,14 +20,12 @@ func ResolveToken(flagValue, envName string) (string, error) {
 	return token, nil
 }
 
-// ResolveOptionalToken is like ResolveToken but returns an empty token instead
-// of an error when no source is set.
+// ResolveOptionalToken is like ResolveToken but returns an empty token when no
+// source is set.
 //
-// The `<NAME>_FILE` form keeps the secret out of the process environment, where
-// /proc/<pid>/environ exposes it to root and to anything running as the same
-// user. It is what systemd's LoadCredential= writes and what the services'
-// docker secrets use. Precedence matches theirs, so an explicit value still
-// wins over the file.
+// The `<NAME>_FILE` form keeps the secret out of /proc/<pid>/environ and
+// works with systemd LoadCredential= and Docker secrets. An explicit value
+// takes precedence over the file.
 func ResolveOptionalToken(flagValue, envName string) (string, error) {
 	if v := strings.TrimSpace(flagValue); v != "" {
 		return v, nil
@@ -42,8 +40,7 @@ func ResolveOptionalToken(flagValue, envName string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
-	// A token is a bearer secret, so the file holding it is read under the same
-	// owner-only rules as a private key.
+	// Token files follow the owner-only rules for private keys.
 	data, err := ReadPrivateFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read %s_FILE: %w", envName, err)
@@ -72,4 +69,27 @@ func SanitizeError(err error, secrets ...string) error {
 		return nil
 	}
 	return errors.New(RedactString(err.Error(), secrets...))
+}
+
+// SanitizeDisplay strips characters that a terminal or log viewer could
+// interpret, such as escape sequences for title changes, hidden text or OSC 52
+// clipboard writes. Call it where an untrusted value enters the agent.
+//
+// It removes C0 including ESC, DEL, C1, and the bidi and zero-width formatting
+// characters of CVE-2021-42574. The bidi set is explicit because Unicode Cf
+// also contains marks used in Arabic.
+func SanitizeDisplay(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+			return -1
+		case r >= 0x200b && r <= 0x200f, // ZWSP, ZWNJ, ZWJ, LRM, RLM
+			r >= 0x202a && r <= 0x202e, // LRE, RLE, PDF, LRO, RLO
+			r >= 0x2060 && r <= 0x2064, // word joiner, invisible operators
+			r >= 0x2066 && r <= 0x2069, // LRI, RLI, FSI, PDI
+			r == 0xfeff:                // ZWNBSP
+			return -1
+		}
+		return r
+	}, s)
 }

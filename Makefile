@@ -9,7 +9,7 @@ LDFLAGS = -s -w \
 
 GO_BUILD = go build -trimpath -ldflags "$(LDFLAGS)"
 
-.PHONY: build build-all release clean test lint fmt vet notices notices-check
+.PHONY: build build-all release clean test vet-all smoke lint fmt vet notices notices-check
 
 build:
 	$(GO_BUILD) -o bin/localport ./cmd/localport
@@ -45,6 +45,17 @@ clean:
 
 test:
 	go test -race ./...
+
+# `go vet` compiles test files for each platform, which a cross build skips.
+vet-all:
+	@for pair in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64; do \
+		echo "vet $$pair"; \
+		GOOS=$${pair%/*} GOARCH=$${pair#*/} go vet ./... || exit 1; \
+	done
+
+# Builds and runs the binary, so it is not part of `test`.
+smoke:
+	./scripts/smoke.sh
 
 lint:
 	golangci-lint run ./...

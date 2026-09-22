@@ -1,18 +1,15 @@
-// Package transport encapsulates how the agent reaches its edge server.
+// Package transport connects the agent to its edge server.
 //
-// Two carriers, both terminating on the edge HTTPS port and demultiplexed
-// there by SNI + ALPN:
+// Both carriers end on the edge HTTPS port, which routes them by SNI and ALPN.
 //
-//   - "raw" runs the wire protocol bytes directly inside a TLS stream. It has
-//     the lowest overhead and works through dumb firewalls.
-//   - "ws" carries the same bytes inside binary WebSocket frames, which gets
-//     them through DPI and HTTPS-inspecting MITM proxies.
+//   - "raw" sends the wire protocol directly over TLS with the lowest
+//     overhead.
+//   - "ws" sends the same bytes in binary WebSocket frames, which pass DPI
+//     and TLS-inspecting proxies.
 //
-// The data plane multiplexes over one HTTP/2 connection to avoid a dial-back
-// per inbound visitor connection. It is NOT a third transport: it reuses
-// whichever of the two above the control connection already established (so it
-// survives the same firewalls), and is distinguished by its first frame
-// (MuxBind), not by an ALPN of its own. See internal/tunnel/mux_session.go.
+// The data plane multiplexes over one HTTP/2 connection on the same carrier
+// as the control connection. The edge identifies it by its first frame,
+// MuxBind. See internal/tunnel/mux_session.go.
 package transport
 
 import (
@@ -67,15 +64,13 @@ func SplitHostPort(addr string) (host, port string) {
 	return strings.TrimSuffix(addr, ":"), DefaultPort
 }
 
-// Options collects user-facing knobs for the default dialer set. We keep it
-// deliberately small. There is no insecure-skip-verify and no root-CA override,
-// so nobody can weaken the TLS posture through config.
+// Options configures the default dialers. It has no option to skip
+// verification or override root CAs.
 type Options struct {
 	DialTimeout time.Duration
 	WSPath      string
 
-	// ServerName sets the TLS SNI and verification name independently of
-	// the dial host: dials to a per-edge hostname present the zone's
-	// connect host instead. Empty derives the name from the dial host.
+	// ServerName overrides the TLS SNI and verification name. A dial to a
+	// per-edge host uses the zone connect host. Empty uses the dial host.
 	ServerName string
 }

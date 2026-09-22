@@ -5,58 +5,55 @@ package netmon
 import (
 	"context"
 	"log/slog"
-	"syscall"
+	"os"
+
+	"golang.org/x/sys/unix"
 )
 
-// rtnetlink multicast group masks (from uapi/linux/rtnetlink.h). Stable kernel
-// ABI values, defined locally because the stdlib syscall package does not
-// export them (they live in golang.org/x/sys/unix, which we avoid adding for
-// three constants). Subscribing to these makes the kernel multicast interface
-// up/down and IPv4/IPv6 address add/delete events to our socket.
-const (
-	rtmgrpLink        = 0x1   // RTMGRP_LINK
-	rtmgrpIPv4IfAddr  = 0x10  // RTMGRP_IPV4_IFADDR
-	rtmgrpIPv6IfAddr  = 0x100 // RTMGRP_IPV6_IFADDR
-	rtnetlinkAllAddrs = rtmgrpLink | rtmgrpIPv4IfAddr | rtmgrpIPv6IfAddr
-)
+// rtnetlink multicast groups for link state and IPv4/IPv6 address changes.
+const rtnetlinkAllAddrs = unix.RTMGRP_LINK | unix.RTMGRP_IPV4_IFADDR | unix.RTMGRP_IPV6_IFADDR
 
-// netlinkSource listens on an AF_NETLINK route socket. The kernel multicasts
-// link and IPv4/IPv6 address changes to the subscribed groups; a blocking
-// recvmsg parks the goroutine at zero CPU until one arrives. Present on every
-// Linux kernel (NETLINK_ROUTE is core), so this covers servers and embedded
-// edge devices alike.
+// netlinkSource reads link and address changes from an AF_NETLINK route
+// socket. The read blocks with no CPU cost until a message arrives.
 type netlinkSource struct {
-	fd int
+	f *os.File
 }
 
 func newSource(logger *slog.Logger) source {
-	fd, err := syscall.Socket(
-		syscall.AF_NETLINK,
-		syscall.SOCK_RAW|syscall.SOCK_CLOEXEC,
-		syscall.NETLINK_ROUTE,
+	fd, err := unix.Socket(
+		unix.AF_NETLINK,
+		unix.SOCK_RAW|unix.SOCK_CLOEXEC,
+		unix.NETLINK_ROUTE,
 	)
 	if err != nil {
 		logger.Debug("netlink socket failed; using address poll", slog.Any("error", err))
 		return nil
 	}
-	addr := &syscall.SockaddrNetlink{
-		Family: syscall.AF_NETLINK,
+	addr := &unix.SockaddrNetlink{
+		Family: unix.AF_NETLINK,
 		Groups: rtnetlinkAllAddrs,
 	}
-	if err := syscall.Bind(fd, addr); err != nil {
-		syscall.Close(fd)
+	if err := unix.Bind(fd, addr); err != nil {
+		unix.Close(fd)
 		logger.Debug("netlink bind failed; using address poll", slog.Any("error", err))
 		return nil
 	}
-	return &netlinkSource{fd: fd}
+	// Wrap the non-blocking descriptor in an os.File so the runtime poller owns
+	// it. Close then interrupts a pending read, which close(2) on a raw
+	// descriptor does not guarantee.
+	if err := unix.SetNonblock(fd, true); err != nil {
+		unix.Close(fd)
+		logger.Debug("netlink nonblock failed; using address poll", slog.Any("error", err))
+		return nil
+	}
+	return &netlinkSource{f: os.NewFile(uintptr(fd), "netlink")}
 }
 
 func (s *netlinkSource) watch(ctx context.Context, wake chan<- struct{}) {
 	buf := make([]byte, 8192)
 	for {
-		// Blocks until the kernel multicasts a link/address change (or the fd
-		// is closed on shutdown, which returns an error and ends the loop).
-		n, err := syscall.Read(s.fd, buf)
+		// Blocks until a change arrives or Close interrupts it.
+		n, err := s.f.Read(buf)
 		if err != nil {
 			return
 		}
@@ -66,8 +63,7 @@ func (s *netlinkSource) watch(ctx context.Context, wake chan<- struct{}) {
 		if ctx.Err() != nil {
 			return
 		}
-		// Any route message is a candidate change; the portable address diff
-		// decides whether it is real, so no parsing is needed here.
+		// The monitor's address diff filters out irrelevant messages.
 		select {
 		case wake <- struct{}{}:
 		default:
@@ -75,4 +71,4 @@ func (s *netlinkSource) watch(ctx context.Context, wake chan<- struct{}) {
 	}
 }
 
-func (s *netlinkSource) Close() error { return syscall.Close(s.fd) }
+func (s *netlinkSource) Close() error { return s.f.Close() }

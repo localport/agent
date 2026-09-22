@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -19,9 +20,7 @@ import (
 	"time"
 )
 
-// DefaultAPIURL is the control plane. `--api` and LOCALPORT_API_URL point the
-// agent elsewhere. The resolved value is stored in meta.json, so renewal is
-// never told again.
+// DefaultAPIURL is the control plane. `--api` and LOCALPORT_API_URL override it.
 const DefaultAPIURL = "https://api.localport.io"
 
 // APIURLEnv is the environment override for DefaultAPIURL.
@@ -31,9 +30,8 @@ const APIURLEnv = "LOCALPORT_API_URL"
 // and its chain are a few kilobytes, and the body is parsed in memory.
 const maxResponseBytes = 1 << 20
 
-// requestTimeout covers one issuance or renewal round trip. Long enough for a
-// slow link, short enough that a hung control plane cannot wedge the renewal
-// loop.
+// requestTimeout covers one issuance or renewal round trip. It allows for a
+// slow link and keeps a hung control plane from stalling the renewal loop.
 const requestTimeout = 60 * time.Second
 
 // Client talks to the control plane's public mTLS credential endpoints.
@@ -42,8 +40,8 @@ type Client struct {
 	HTTP    *http.Client
 }
 
-// NewClient normalises the base URL and refuses anything but https. A setup
-// token is a bearer secret and must never travel in the clear.
+// NewClient normalizes the base URL and requires https, since the setup token
+// is a bearer secret.
 func NewClient(baseURL string) (*Client, error) {
 	raw := strings.TrimSpace(baseURL)
 	if raw == "" {
@@ -58,11 +56,20 @@ func NewClient(baseURL string) (*Client, error) {
 	if u.Scheme != "https" {
 		return nil, fmt.Errorf("API URL must be https (got %q)", raw)
 	}
-	return &Client{BaseURL: raw, HTTP: &http.Client{Timeout: requestTimeout}}, nil
+	return &Client{BaseURL: raw, HTTP: newHTTPClient()}, nil
 }
 
-// errorEnvelope is the control plane's error body: a support code, a short type
-// label, and a message already made generic on the server side.
+// newHTTPClient builds the control plane client with a TLS 1.3 minimum, since
+// requests carry the setup token and the renewal proof. It clones the default
+// transport to keep proxy settings, timeouts and pooling.
+func newHTTPClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
+	return &http.Client{Timeout: requestTimeout, Transport: tr}
+}
+
+// errorEnvelope is the control plane error body. It holds a support code, a
+// type label and a sanitized message.
 type errorEnvelope struct {
 	Code    string `json:"code"`
 	Error   string `json:"error"`
@@ -110,8 +117,11 @@ func (e *APIError) RetryAfter() (time.Duration, bool) {
 	return e.retryAfter, e.retryAfter > 0
 }
 
-// isRetryable reports whether waiting could change the answer. Transport
-// failures, 5xx and 429 are retried; every other 4xx is a refusal.
+// isRetryable reports whether a retry could succeed. Transport failures, 5xx
+// and 429 are retryable. Other 4xx responses are refusals.
+//
+// Cancellation is checked by retry on ctx. http.Client.Timeout also matches
+// context.DeadlineExceeded, so the error cannot tell the two apart.
 func isRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -120,9 +130,9 @@ func isRetryable(err error) bool {
 	if errors.As(err, &apiErr) {
 		return apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= 500
 	}
-	// No status at all: dial, DNS, TLS, timeout, reset, EOF mid-body.
-	// Cancellation is not retried; the caller asked us to stop.
-	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+	// No status means a transport failure such as DNS, dial, TLS, timeout,
+	// reset or truncated body.
+	return true
 }
 
 const (
@@ -138,22 +148,28 @@ const (
 // RetryNotice reports one wait before the next attempt. Optional.
 type RetryNotice func(attempt int, wait time.Duration, err error)
 
-// retry runs fn until it succeeds, hits a terminal error, or spends the budget.
-// Waits carry full jitter so agents recovering from one outage do not retry in
-// lockstep. A zero budget makes exactly one attempt.
+// retry runs fn until it succeeds, returns a terminal error or exhausts the
+// budget. Waits use full jitter to spread retries across agents. A zero budget
+// makes one attempt.
 func retry(ctx context.Context, budget time.Duration, onWait RetryNotice, fn func() error) error {
 	deadline := time.Now().Add(budget)
 	delay := retryBaseDelay
 
 	for attempt := 1; ; attempt++ {
 		err := fn()
-		if err == nil || !isRetryable(err) {
+		if err == nil {
+			return nil
+		}
+		// Check ctx. See isRetryable.
+		if ctx.Err() != nil {
+			return err
+		}
+		if !isRetryable(err) {
 			return err
 		}
 
 		wait := jitter(delay)
-		// Retry-After wins, clamped below to the remaining budget so a bad
-		// value cannot park the agent.
+		// Retry-After takes precedence, capped at the remaining budget.
 		var apiErr *APIError
 		if errors.As(err, &apiErr) {
 			if asked, ok := apiErr.RetryAfter(); ok {
@@ -178,8 +194,8 @@ func retry(ctx context.Context, budget time.Duration, onWait RetryNotice, fn fun
 	}
 }
 
-// jitter returns a uniformly random duration in [0, d]. math/rand: this spreads
-// retries and is not a secret.
+// jitter returns a uniformly random duration in [0, d]. math/rand is
+// sufficient because the value is not secret.
 func jitter(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
@@ -217,9 +233,9 @@ func (c *Client) post(ctx context.Context, path, bearer string, body, out any) e
 	return c.postWithHeader(ctx, path, header, bearer, body, out)
 }
 
-// postWithHeader is the shared request path. Only the credential header differs:
-// `Authorization: Bearer <secret>` for a setup token, `X-Workload-Token` for a
-// platform-minted one.
+// postWithHeader sends a request with the given credential header,
+// `Authorization: Bearer <secret>` for a setup token or `X-Workload-Token` for
+// a platform token.
 func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue string, body, out any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -253,8 +269,7 @@ func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue
 		var env errorEnvelope
 		if json.Unmarshal(raw, &env) == nil {
 			apiErr.Code = env.Code
-			// `error` is the type label and is the only text present when a
-			// response carries no message.
+			// Fall back to the type label when the response has no message.
 			apiErr.Message = firstNonEmpty(env.Message, env.Error)
 		}
 		return apiErr
@@ -276,9 +291,8 @@ type keyPair struct {
 	csrPEM []byte
 }
 
-// newKeyPair generates P-256 and builds a CSR. The common name is for
-// readability only: the control plane takes the identity from the credential
-// presented, never from the request.
+// newKeyPair generates a P-256 key and a CSR. The common name is cosmetic. The
+// control plane takes the identity from the presented credential.
 func newKeyPair(commonName string) (*keyPair, error) {
 	key, err := generateKey(BackingFile)
 	if err != nil {

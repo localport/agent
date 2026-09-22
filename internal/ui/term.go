@@ -5,28 +5,14 @@ import (
 	"os"
 )
 
-// ANSI control sequences. Hand-rolled to avoid pulling a TUI dependency.
+// ANSI screen control sequences. Color sequences are in color.go.
 const (
-	AltScreenOn   = "\x1b[?1049h"
-	AltScreenOff  = "\x1b[?1049l"
-	CursorHide    = "\x1b[?25l"
-	CursorShow    = "\x1b[?25h"
-	ClearScreen   = "\x1b[2J"
-	ClearLine     = "\x1b[2K"
-	SaveCursor    = "\x1b7"
-	RestoreCursor = "\x1b8"
-
-	SGRReset = "\x1b[0m"
-	SGRBold  = "\x1b[1m"
-	SGRDim   = "\x1b[2m"
-
-	FgRed     = "\x1b[31m"
-	FgGreen   = "\x1b[32m"
-	FgYellow  = "\x1b[33m"
-	FgBlue    = "\x1b[34m"
-	FgMagenta = "\x1b[35m"
-	FgCyan    = "\x1b[36m"
-	FgWhite   = "\x1b[37m"
+	AltScreenOn  = "\x1b[?1049h"
+	AltScreenOff = "\x1b[?1049l"
+	CursorHide   = "\x1b[?25l"
+	CursorShow   = "\x1b[?25h"
+	ClearScreen  = "\x1b[2J"
+	ClearLine    = "\x1b[2K"
 )
 
 func MoveTo(row, col int) string { return fmt.Sprintf("\x1b[%d;%dH", row, col) }

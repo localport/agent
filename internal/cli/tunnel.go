@@ -1,14 +1,11 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/localport/agent/internal/agent"
 	"github.com/localport/agent/internal/config"
@@ -17,9 +14,8 @@ import (
 	"github.com/localport/agent/internal/ui"
 )
 
-// tunnelUI is what the tunnel command needs from its renderer: the
-// EventHandler contract plus banner / shutdown lifecycle hooks. This
-// keeps display and ui interchangeable behind one switch.
+// tunnelUI is the renderer interface of the tunnel command, EventHandler plus
+// banner and shutdown hooks. display and ui both implement it.
 type tunnelUI interface {
 	tunnel.EventHandler
 	Banner(version string, cfg *config.Config)
@@ -55,7 +51,7 @@ func runTunnel(version string, args []string) error {
 
 	if posProto != "" {
 		if *local != "" {
-			return fmt.Errorf("--local cannot be combined with positional protocol/address")
+			return errors.New("--local cannot be combined with positional protocol/address")
 		}
 		*proto = posProto
 		*local = posLocal
@@ -73,46 +69,57 @@ func runTunnel(version string, args []string) error {
 	if *noMux {
 		cfg.NoMux = true
 	}
-	// The ldflags value from main, sent on registration.
+	// Build version from ldflags, sent on registration.
 	cfg.AgentVersion = version
-	// No TUI means no consumer for the request view, so headless skips parsing by
-	// default. --log-requests opts back in; --no-inspect forces off and wins.
 	mode := ui.DetectMode(*noUI, os.Stderr)
-	switch {
-	case *noInspect:
-		cfg.NoInspect = true
-	case *logRequests:
-		cfg.NoInspect = false
-	default:
-		cfg.NoInspect = mode == ui.ModePlain
-	}
+	cfg.NoInspect = inspectDisabled(mode, *noInspect, *logRequests)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	a := agent.New(cfg, nil) // handler attached below so renderer can poll a.Tunnels()
+	a := agent.New(cfg)
 	renderer := pickRenderer(mode, a)
-	a.SetHandler(renderer)
 	renderer.Banner(version, cfg)
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sig
+	warnTokenFlag(renderer, *configPath == "" && strings.TrimSpace(*token) != "")
+
+	ctx, stop := signalContext(func() {
 		renderer.Shutdown()
 		a.Stop()
-		cancel()
-	}()
+	})
+	defer stop()
 
-	err = a.Run(ctx)
+	err = a.Run(ctx, renderer)
 	renderer.Shutdown()
-	// One final line for a terminal error, with the opaque debug code
-	// appended so support can decode it (the message itself stays the
-	// public, sanitized one).
+	// Print one line for a fatal error. The sanitized message is followed by
+	// the opaque debug code for support.
 	var regErr *tunnel.RegistrationError
 	if errors.As(err, &regErr) && regErr.Code != "" {
 		return fmt.Errorf("%s [%s]", regErr.Error(), regErr.Code)
 	}
 	return err
+}
+
+// inspectDisabled reports whether the HTTP request view is off. --no-inspect
+// turns it off. Otherwise it is on in the TUI, and in plain mode only with
+// --log-requests. Used by connect and the flat tunnel form.
+func inspectDisabled(mode ui.Mode, noInspect, logRequests bool) bool {
+	switch {
+	case noInspect:
+		return true
+	case logRequests:
+		return false
+	default:
+		return mode == ui.ModePlain
+	}
+}
+
+// tokenFlagWarning names the exposure of -t/--token and the alternatives.
+const tokenFlagWarning = "--token is readable by other local accounts in the process list. " +
+	"Set LOCALPORT_TOKEN_FILE or LOCALPORT_TOKEN instead."
+
+// warnTokenFlag logs tokenFlagWarning in plain mode when the token came from
+// -t/--token. The TUI shows no startup warnings.
+func warnTokenFlag(renderer tunnelUI, fromFlag bool) {
+	if p, ok := renderer.(*ui.Plain); ok && fromFlag {
+		p.Warn(tokenFlagWarning)
+	}
 }
 
 func pickRenderer(mode ui.Mode, a *agent.Agent) tunnelUI {
@@ -133,17 +140,17 @@ func buildTunnelConfig(path, flagToken, region, local, proto, name string) (*con
 		return nil, err
 	}
 	if local == "" {
-		return nil, fmt.Errorf("--local is required for token-based tunnel mode")
+		return nil, errors.New("--local is required for token-based tunnel mode")
 	}
-	return config.FromFlags(token, region, local, proto, name), nil
+	return config.TunnelFromFlags(token, region, local, proto, name)
 }
 
 func usageTunnel(fs *flag.FlagSet) {
-	fmt.Fprint(os.Stderr, `Usage: localport tunnel [flags]
-       localport <proto> <port|host:port> [flags]
+	fmt.Fprint(os.Stderr, `Usage: localport <proto> <port|host:port> [flags]
+       localport --token <token> --local <address> [flags]
 
   Config file:
-    localport tunnel --config localport.yaml
+    localport connect --config localport.yaml
 
   Single endpoint, scheme in --local sets the protocol:
     localport --token <token> --local tcp://localhost:18789

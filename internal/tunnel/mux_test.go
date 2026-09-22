@@ -39,12 +39,12 @@ func echoService(t *testing.T) (dial func() (net.Conn, error), stop func()) {
 		}
 }
 
-// A stream must carry bytes to the local service and its reply back.
+// A stream carries bytes to the local service and back.
 func TestMuxServerPipesStreamToLocalService(t *testing.T) {
 	dial, stop := echoService(t)
 	defer stop()
 
-	srv := &muxServer{dialLocal: dial}
+	srv := &muxServer{dialTarget: tunnelTarget(dial)}
 
 	payload := "the quick brown fox"
 	req := httptest.NewRequest(http.MethodPost, "/v1/stream", bytes.NewReader([]byte(payload)))
@@ -60,13 +60,12 @@ func TestMuxServerPipesStreamToLocalService(t *testing.T) {
 	}
 }
 
-// An unreachable local service must be reported as a gateway failure rather
-// than a hung stream, so the visitor gets an error instead of a timeout.
+// An unreachable local service returns 502.
 func TestMuxServerReportsUnreachableLocalService(t *testing.T) {
 	srv := &muxServer{
-		dialLocal: func() (net.Conn, error) {
+		dialTarget: tunnelTarget(func() (net.Conn, error) {
 			return nil, net.ErrClosed
-		},
+		}),
 	}
 
 	rec := httptest.NewRecorder()
@@ -77,6 +76,17 @@ func TestMuxServerReportsUnreachableLocalService(t *testing.T) {
 	}
 }
 
+// tunnelTarget adapts a plain dialer to the dialTarget signature.
+func tunnelTarget(dial func() (net.Conn, error)) func(uint16) (net.Conn, int, error) {
+	return func(uint16) (net.Conn, int, error) {
+		conn, err := dial()
+		if err != nil {
+			return nil, http.StatusBadGateway, err
+		}
+		return conn, http.StatusOK, nil
+	}
+}
+
 // recordingTracker stands in for the tunnel's live connection view.
 type recordingTracker struct {
 	began  []string
@@ -84,7 +94,7 @@ type recordingTracker struct {
 	stream *activeConn
 }
 
-func (r *recordingTracker) Begin(remote string) *activeConn {
+func (r *recordingTracker) Begin(remote string, _ connTarget, _ net.Conn) *activeConn {
 	r.began = append(r.began, remote)
 	r.stream = &activeConn{id: "test-stream", remote: remote, startedAt: time.Now()}
 	return r.stream
@@ -92,9 +102,7 @@ func (r *recordingTracker) Begin(remote string) *activeConn {
 
 func (r *recordingTracker) End(ac *activeConn, err error) { r.ended++ }
 
-// Byte counts feed the TUI and the usage view. They must be folded in as bytes
-// move, both per stream and into the tunnel totals, or a muxed tunnel reports
-// nothing until every stream has finished.
+// Stream and tunnel byte counters update while bytes move.
 func TestMuxServerCountsBytesPerStreamAndTotal(t *testing.T) {
 	dial, stop := echoService(t)
 	defer stop()
@@ -102,10 +110,10 @@ func TestMuxServerCountsBytesPerStreamAndTotal(t *testing.T) {
 	tracker := &recordingTracker{}
 	var totalIn, totalOut atomic.Int64
 	srv := &muxServer{
-		dialLocal: dial,
-		tracker:   tracker,
-		totalIn:   &totalIn,
-		totalOut:  &totalOut,
+		dialTarget: tunnelTarget(dial),
+		tracker:    tracker,
+		totalIn:    &totalIn,
+		totalOut:   &totalOut,
 	}
 
 	payload := bytes.Repeat([]byte("x"), 4096)
@@ -127,14 +135,13 @@ func TestMuxServerCountsBytesPerStreamAndTotal(t *testing.T) {
 	}
 }
 
-// Every stream must appear in the live view and leave it again, so a muxed
-// tunnel shows connections exactly as a dial-back one does.
+// Each stream enters and leaves the live view, as on dial-back.
 func TestMuxServerTracksStreamLifecycle(t *testing.T) {
 	dial, stop := echoService(t)
 	defer stop()
 
 	tracker := &recordingTracker{}
-	srv := &muxServer{dialLocal: dial, tracker: tracker}
+	srv := &muxServer{dialTarget: tunnelTarget(dial), tracker: tracker}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/stream", nil)
 	req.Header.Set(headerVisitorAddr, "203.0.113.7:54321")

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/security"
+	"github.com/localport/agent/internal/ui"
 )
 
 // identityEnv selects a credential when a machine holds several.
@@ -20,7 +22,7 @@ const identityEnv = "LOCALPORT_IDENTITY"
 func runIdentity(args []string) error {
 	if len(args) == 0 {
 		usageIdentity()
-		return fmt.Errorf("identity: subcommand required")
+		return errors.New("identity: subcommand required")
 	}
 	switch args[0] {
 	case "list":
@@ -38,9 +40,8 @@ func runIdentity(args []string) error {
 	}
 }
 
-// runIdentityList prints every credential on this machine. The table goes to
-// STDOUT, unlike every other message in the agent: it is queryable output, not
-// progress commentary.
+// runIdentityList prints every stored credential. The table goes to stdout
+// because it is command output. Other agent messages go to stderr.
 func runIdentityList(args []string) error {
 	fs := flag.NewFlagSet("identity list", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -82,8 +83,11 @@ func runIdentityList(args []string) error {
 		if due, ok := m.Meta.NextRenewal(); ok {
 			renews = humanUntil(now, due)
 		}
+		// Identity and team name come from the certificate and control plane.
+		// Strip terminal escape sequences.
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			ref.Identity, ref.Kind.Label(), m.Meta.DisplayTeam(),
+			security.SanitizeDisplay(ref.Identity), ref.Kind.Label(),
+			security.SanitizeDisplay(m.Meta.DisplayTeam()),
 			m.Meta.Source, humanUntil(now, m.Meta.NotAfter), renews)
 	}
 	if err := w.Flush(); err != nil {
@@ -101,8 +105,8 @@ func runIdentityList(args []string) error {
 			}
 		}
 	}
-	// An unreadable directory and a missing one look the same to a reader shown
-	// only the survivors. Exit stays 0: this is information, not a failed request.
+	// Report unreadable directories so they are not mistaken for missing ones.
+	// The exit status stays 0.
 	for _, s := range skipped {
 		fmt.Fprintf(os.Stderr, "  skipped %s: %v\n", s.Path, s.Reason)
 	}
@@ -122,20 +126,18 @@ func runIdentityRenew(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Never interactive: a renewal runs from a timer as often as from a
-	// terminal, and a prompt there hangs the timer.
+	// Not interactive. Renewal also runs from timers, where a prompt hangs.
 	ref, err := resolveCredential(store, firstNonEmpty(*selector, os.Getenv(identityEnv)), false)
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := signalCtx()
+	ctx, cancel := signalContext(nil)
 	defer cancel()
 
 	material, err := (&identity.Renewer{Store: store, Ref: ref}).RenewOnce(ctx)
 	if errors.Is(err, identity.ErrRenewalInProgress) {
-		// Not a failure: another process is already renewing, and a second
-		// certificate would only be orphaned.
+		// Another process holds the renewal. Not a failure.
 		fmt.Fprintf(os.Stderr, "  %s is already being renewed by another process\n", ref)
 		return nil
 	}
@@ -156,7 +158,7 @@ func runIdentityRemove(args []string) error {
 	}
 	if fs.NArg() != 1 {
 		usageIdentity()
-		return fmt.Errorf("identity remove: name exactly one credential")
+		return errors.New("identity remove: name exactly one credential")
 	}
 
 	store, err := identity.DefaultStore()
@@ -181,26 +183,27 @@ func runIdentityRemove(args []string) error {
 	return nil
 }
 
-// printCredential reports what a credential is and where it landed.
+// printCredential reports a credential and its path. Identity and team name
+// are stripped of terminal escape sequences.
 func printCredential(store *identity.Store, ref identity.Ref, meta identity.Meta) {
-	fmt.Fprintf(os.Stderr, "  identity   %s\n", meta.SpiffeID)
+	fmt.Fprintf(os.Stderr, "  identity   %s\n", security.SanitizeDisplay(meta.SpiffeID))
 	team := ref.Team
 	if meta.TeamName != "" {
-		team = fmt.Sprintf("%s (%s)", meta.TeamName, ref.Team)
+		team = fmt.Sprintf("%s (%s)", security.SanitizeDisplay(meta.TeamName), ref.Team)
 	}
 	fmt.Fprintf(os.Stderr, "  team       %s\n", team)
 	fmt.Fprintf(os.Stderr, "  stored in  %s\n", store.Dir(ref))
 	fmt.Fprintf(os.Stderr, "  expires    %s\n", meta.NotAfter.Format(time.RFC3339))
 }
 
-// humanUntil renders a deadline relative to now. "overdue" rather than a
-// negative duration, which reads as arithmetic instead of a state to act on.
+// humanUntil renders a deadline relative to now, or "overdue" once passed.
 func humanUntil(now, t time.Time) string {
 	if t.IsZero() {
 		return "unknown"
 	}
-	if d := time.Until(t); d > 0 {
-		return "in " + d.Round(time.Minute).String()
+	// now comes from the caller so all rows of a listing agree.
+	if d := t.Sub(now); d > 0 {
+		return "in " + ui.HumanDuration(d)
 	}
 	return "overdue"
 }
@@ -224,12 +227,12 @@ var renewalLoops sync.Map
 // reported, so a config naming five targets says it once.
 var signInNotices sync.Map
 
-// noteSignInExpiry says when the sign-in ends and how to get it back.
+// noteSignInExpiry prints when the sign-in expires and how to renew it.
 func noteSignInExpiry(ref identity.Ref, meta identity.Meta) {
 	if _, seen := signInNotices.LoadOrStore(ref, true); seen {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "  signed in as %s\n", meta.SpiffeID)
+	fmt.Fprintf(os.Stderr, "  signed in as %s\n", security.SanitizeDisplay(meta.SpiffeID))
 	fmt.Fprintf(os.Stderr, "  sign-in expires %s (%s)\n",
 		meta.NotAfter.Format(time.RFC3339), humanUntil(time.Now(), meta.NotAfter))
 	fmt.Fprintf(os.Stderr, "  it does not renew; run `localport login` again to sign back in\n")

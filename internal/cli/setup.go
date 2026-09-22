@@ -16,11 +16,8 @@ import (
 // single-use credential on a provisioning run is exactly the wrong place.
 const setupTokenEnv = "LOCALPORT_SETUP_TOKEN"
 
-// `localport setup <TOKEN>` redeems a setup token and keeps the credential.
-//
-// This is the once-per-machine command. Everything after it is automatic: the
-// certificate renews itself, so there is no long-lived secret left on the box
-// and nothing to rotate by hand.
+// `localport setup <TOKEN>` redeems a single-use setup token and stores a
+// credential that renews itself. Run once per machine.
 func runSetup(args []string) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -30,8 +27,7 @@ func runSetup(args []string) error {
 		"how long to keep retrying while the control plane is unreachable (0 = one attempt)")
 	fs.Usage = usageSetup
 
-	// The token is accepted as a leading positional, because that is what the
-	// dashboard shows.
+	// The token is a leading positional, as the dashboard shows it.
 	positional := ""
 	rest := args
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -66,7 +62,7 @@ func runSetup(args []string) error {
 		return err
 	}
 
-	ctx, cancel := signalCtx()
+	ctx, cancel := signalContext(nil)
 	defer cancel()
 
 	notice := func(attempt int, in time.Duration, err error) {
@@ -75,8 +71,8 @@ func runSetup(args []string) error {
 	}
 	material, err := client.RedeemSetupToken(ctx, secret, *wait, notice)
 	if err != nil {
-		// The token is single-use and the error may quote the request. Never let
-		// it reach a terminal or a CI log.
+		// The error may quote the request. Keep the token out of terminals and
+		// CI logs.
 		return security.SanitizeError(err, secret)
 	}
 	ref, err := store.Save(*material)
@@ -89,7 +85,8 @@ func runSetup(args []string) error {
 	if due, renews := material.Meta.NextRenewal(); renews {
 		fmt.Fprintf(os.Stderr, "  renews     %s\n", due.Format(time.RFC3339))
 	}
-	fmt.Fprintf(os.Stderr, "\n  next: localport access https://<device>-<fleet>.<region>.localport.dev -p 3001\n")
+	fmt.Fprintf(os.Stderr, "\n  next: localport access <device>-<fleet>.<region>.localport.dev -L 5020:502\n")
+	fmt.Fprintf(os.Stderr, "        one -L per port, <local>:<device>. The device's open ports are in the dashboard.\n")
 	return nil
 }
 
@@ -105,7 +102,7 @@ func usageSetup() {
   no certificate file to copy around.
 
     localport setup lps_...
-    localport access https://gateway-warehouse.eu.localport.dev -p 3001
+    localport access gateway-warehouse.eu.localport.dev -L 5020:502
 
   The token is single-use. Prefer the environment over an argument, which is
   visible in shell history and to "ps":

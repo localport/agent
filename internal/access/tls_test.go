@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -21,54 +22,45 @@ import (
 
 func TestBuildTLSConfigBundle(t *testing.T) {
 	dir := t.TempDir()
-	bundle := writePEMBundle(t, dir, "client.pem")
+	pemFile := writePEMBundle(t, dir, "client.pem")
 
-	cfg, err := BuildTLSConfig(bundle, "", "", "db.tunnel.localport.dev:5432", "")
+	cfg, err := BuildTLSConfig(pemFile, "", "", "db-acme.eu.localport.dev:5432", "")
 	if err != nil {
 		t.Fatalf("BuildTLSConfig: %v", err)
 	}
-	if cfg.ServerName != "db.tunnel.localport.dev" {
+	if cfg.ServerName != "db-acme.eu.localport.dev" {
 		t.Fatalf("ServerName = %q", cfg.ServerName)
 	}
 	if len(cfg.Certificates) != 1 {
 		t.Fatalf("Certificates = %d", len(cfg.Certificates))
 	}
-	// RootCAs stays NIL: the SERVER is verified against the system trust store.
-	//
-	// The edge presents the region zone wildcard, publicly trusted and issued by
-	// Let's Encrypt, as its mTLS server identity. It is not signed by the tunnel
-	// CA and never could be for a customer-registered CA, since we hold no key to
-	// sign one with. Pinning the bundle's CA here would reject every connection
-	// with "certificate signed by unknown authority". The bundle's chain is used
-	// in the other direction only: it is what we PRESENT.
+	// RootCAs is nil so the server is verified against the system trust store.
+	// The edge presents a publicly trusted region wildcard that the tunnel CA
+	// does not sign. The PEM chain is only presented to the server.
 	if cfg.RootCAs != nil {
 		t.Fatal("RootCAs must stay nil: the server is verified against system roots, not against the credential's own CA")
 	}
-	if cfg.MinVersion != 0x0303 { // tls.VersionTLS12
-		t.Fatalf("MinVersion = %#x, want TLS 1.2", cfg.MinVersion)
+	// TLS 1.3 encrypts the client Certificate message. Under 1.2 the SPIFFE
+	// identity is sent in cleartext.
+	if cfg.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("MinVersion = %#x, want TLS 1.3", cfg.MinVersion)
 	}
 }
 
 func TestBuildTLSConfigRejectsAmbiguousMode(t *testing.T) {
 	if _, err := BuildTLSConfig("a", "b", "", "host:1", ""); err == nil {
-		t.Fatal("expected error when both bundle and p12 are set")
+		t.Fatal("expected error when both --pem and --p12 are set")
 	}
 	if _, err := BuildTLSConfig("", "", "", "host:1", ""); err == nil {
-		t.Fatal("expected error when neither bundle nor p12 is set")
+		t.Fatal("expected error when neither --pem nor --p12 is set")
 	}
 }
 
-// An IP remote keeps the literal as its ServerName.
-//
-// Returning "" made crypto/tls refuse to handshake at all, with "either
-// ServerName or InsecureSkipVerify must be specified", so
-// `--remote 203.0.113.5:443` failed with a message naming neither the address
-// nor the certificate. The literal is also the CORRECT value: crypto/tls omits
-// SNI for an IP (RFC 6066 forbids it there) and VerifyHostname then matches the
-// IP SANs, which is the check that should run.
+// An IP remote keeps the literal as its ServerName. crypto/tls refuses an
+// empty ServerName, omits SNI for an IP (RFC 6066) and verifies the IP SANs.
 func TestResolveServerName(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"db.tunnel.localport.dev:5432", "db.tunnel.localport.dev"},
+		{"db-acme.eu.localport.dev:5432", "db-acme.eu.localport.dev"},
 		{"127.0.0.1:5432", "127.0.0.1"},
 		{"[::1]:5432", "::1"},
 		{"203.0.113.5:443", "203.0.113.5"},
@@ -84,26 +76,25 @@ func TestResolveServerName(t *testing.T) {
 	}
 }
 
-// The credential file carries a private key, so it is read through the
-// owner-only path: `perm&0o077 != 0` is refused. Browsers write downloads 0644,
-// hence the `chmod 600` in the setup instructions.
+// The PEM file holds a private key, so any group or other permission bit is
+// refused. Browsers save downloads as 0644, which the setup docs fix with
+// `chmod 600`.
 func TestBuildTLSConfigRejectsLoosePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("permission bits not enforced on Windows")
 	}
 	dir := t.TempDir()
-	bundle := writePEMBundle(t, dir, "client.pem")
-	if err := os.Chmod(bundle, 0o644); err != nil {
+	pemFile := writePEMBundle(t, dir, "client.pem")
+	if err := os.Chmod(pemFile, 0o644); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	if _, err := BuildTLSConfig(bundle, "", "", "host:1", ""); err == nil {
+	if _, err := BuildTLSConfig(pemFile, "", "", "host:1", ""); err == nil {
 		t.Fatal("expected loose-permission rejection")
 	}
 }
 
-// A .p12 goes through the same owner-only path as the PEM bundle. A password on
-// an exported archive is not a reason to relax that: they are routinely weak or
-// shared.
+// A .p12 file must be owner-only, as for PEM, since archive passwords are often
+// weak or shared.
 func TestPKCS12IsReadThroughThePrivateFilePath(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("permission bits not enforced on Windows")
@@ -119,15 +110,14 @@ func TestPKCS12IsReadThroughThePrivateFilePath(t *testing.T) {
 		t.Fatalf("chmod: %v", err)
 	}
 	if _, err := BuildTLSConfig("", archive, "hunter2", "host:1", ""); err == nil {
-		t.Fatal("a world-readable .p12 must be refused, exactly like a loose PEM bundle")
+		t.Fatal("a world-readable .p12 must be refused, exactly like a loose PEM file")
 	}
 }
 
-// No remote turns server verification off, loopback included. This is the
-// connection that presents a client certificate, and agent/ is public.
+// Server verification stays on for every remote, loopback included.
 func TestBaseTLSConfigAlwaysVerifiesTheServer(t *testing.T) {
 	remotes := []string{
-		"db.tunnel.localport.dev:5432",
+		"db-acme.eu.localport.dev:5432",
 		"127.0.0.1:8080",
 		"[::1]:8080",
 		"localhost:8080",
@@ -144,9 +134,8 @@ func TestBaseTLSConfigAlwaysVerifiesTheServer(t *testing.T) {
 	}
 }
 
-// Pointing --pem at the `cert.pem` inside the identity store is the common
-// mistake. crypto/tls answers with a sentence about PEM block types that says
-// nothing about what to do, so the error names the mistake instead.
+// --pem pointing at the identity store's cert.pem gets a specific error in
+// place of the crypto/tls PEM block type message.
 func TestPEMBundleWithoutAKeyNamesTheMistake(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cert.pem")
@@ -158,32 +147,27 @@ func TestPEMBundleWithoutAKeyNamesTheMistake(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	_, err := loadFromPEMBundle(path)
+	_, err := loadPEM(path)
 	if err == nil {
-		t.Fatal("a bundle with no private key must be refused")
+		t.Fatal("a PEM file with no private key must be refused")
 	}
 	if !strings.Contains(err.Error(), "--pem") {
 		t.Fatalf("the error must name the mistake and the way out, got: %v", err)
 	}
 }
 
-// A CA sharing the leaf's serial must not make the bundle look CA-less.
-//
-// The chain was counted by "every certificate whose serial differs from the
-// leaf's", but a serial is unique only within the CA that assigned it
-// (RFC 5280 4.1.2.2). Two independent PKIs both numbering from 1 is ordinary,
-// so a legitimate CA was skipped and the bundle refused for carrying none.
+// A CA with the same serial as the leaf still counts as a chain certificate.
+// Serials are unique only within their CA (RFC 5280 4.1.2.2).
 func TestPEMBundleWithCASharingTheLeafSerialIsAccepted(t *testing.T) {
 	const shared = 4242
 	dir := t.TempDir()
-	bundle := writePEMBundleWithSerials(t, dir, "client.pem", shared, shared)
+	pemFile := writePEMBundleWithSerials(t, dir, "client.pem", shared, shared)
 
-	cert, err := loadFromPEMBundle(bundle)
+	cert, err := loadPEM(pemFile)
 	if err != nil {
-		t.Fatalf("a bundle whose CA shares the leaf's serial must load: %v", err)
+		t.Fatalf("a PEM file whose CA shares the leaf's serial must load: %v", err)
 	}
-	// Parsed once and kept, so crypto/tls does not re-parse the leaf on every
-	// handshake.
+	// Leaf is set so crypto/tls does not parse it on each handshake.
 	if cert.Leaf == nil {
 		t.Fatal("Leaf must be set on the loaded certificate")
 	}
@@ -210,8 +194,8 @@ func TestPEMBundleWithoutACARefuses(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	if _, err := loadFromPEMBundle(path); err == nil {
-		t.Fatal("a bundle with no chain to present must be refused here, not at the far side's handshake")
+	if _, err := loadPEM(path); err == nil {
+		t.Fatal("a PEM file with no chain to present must be refused here, not at the far side's handshake")
 	}
 }
 
@@ -327,4 +311,27 @@ func writePKCS12(t *testing.T, dir, name, password string) string {
 		t.Fatalf("write: %v", err)
 	}
 	return path
+}
+
+// A certificate whose validity starts in the future is refused with the local
+// clock in the message, since a wrong clock is the usual cause.
+func TestAssertLeafFreshRefusesANotYetValidCertificate(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(7),
+		Subject:      pkix.Name{CommonName: "gw-01"},
+		NotBefore:    time.Now().Add(time.Hour),
+		NotAfter:     time.Now().Add(48 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = assertLeafFresh(tls.Certificate{Certificate: [][]byte{der}})
+	if err == nil || !strings.Contains(err.Error(), "clock reads") {
+		t.Fatalf("want a not-yet-valid refusal naming the clock, got %v", err)
+	}
 }

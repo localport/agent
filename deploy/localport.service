@@ -42,6 +42,10 @@ ExecStart=/usr/local/bin/localport http 8080
 Restart=always
 RestartSec=5
 
+; A core dump would contain the token the agent keeps in memory. The agent also
+; marks itself non-dumpable at startup.
+LimitCORE=0
+
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -51,6 +55,30 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
+
+; The agent only opens outbound connections and needs no capabilities.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+; Hide other processes' /proc entries, including their command lines.
+ProtectProc=invisible
+ProcSubset=pid
+
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictRealtime=true
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+; Make every file the agent creates owner-only, not just its credentials.
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

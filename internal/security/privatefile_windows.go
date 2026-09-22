@@ -12,18 +12,13 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Windows mode bits are synthesised by the Go runtime from the read-only
-// attribute, so they report nothing about who may read a file. Access is
-// carried by the DACL, which is set when the file is created rather than
-// afterwards. Creating first and tightening second leaves a window in which the
-// key still carries whatever it inherited from its parent. That matters most
-// under %PROGRAMDATA%, which standard users can write to and whose
-// subdirectories inherit that right.
+// On Windows the Go runtime derives mode bits from the read-only attribute, so
+// they do not describe access. Access is controlled by the DACL, which is set
+// at creation. Setting it afterwards would leave the key with inherited access
+// for a moment, which matters under the user-writable %PROGRAMDATA%.
 //
-// The owner, LocalSystem and Administrators are the permitted trustees.
-// Administrators stay because they may take ownership of any object regardless,
-// so excluding them would deny nothing while breaking every service
-// deployment. This is the set Win32 OpenSSH enforces on its own key files.
+// Permitted trustees are the owner, LocalSystem and Administrators, the same
+// set Win32 OpenSSH enforces. Administrators can take ownership of any object.
 
 // openNoFollow opens path without traversing a junction or symlink.
 func openNoFollow(path string) (*os.File, error) {
@@ -31,18 +26,9 @@ func openNoFollow(path string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	// FILE_SHARE_DELETE is REQUIRED, not incidental.
-	//
-	// Windows refuses to rename or delete a file that another handle has open
-	// without it, and `WritePrivateFileAtomic` installs a renewed credential by
-	// renaming over exactly this path. With FILE_SHARE_READ alone, a reader that
-	// happened to hold the certificate open, the renewal loop re-reading it, a
-	// second `localport access`, made the rename fail with "Access is denied"
-	// and the renewal silently retried until the certificate expired.
-	//
-	// It is not a weakening: sharing DELETE lets someone who ALREADY has the
-	// access rights replace the file, and the DACL is what decides who that is.
-	// This is the same semantics Unix gives for free.
+	// FILE_SHARE_DELETE lets WritePrivateFileAtomic rename over this path
+	// while it is open. Without it the rename fails with "Access is denied".
+	// Replacing the file still requires the rights the DACL grants.
 	h, err := windows.CreateFile(p,
 		windows.GENERIC_READ,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE,
@@ -124,11 +110,9 @@ func verifyPrivate(f *os.File, path string) error {
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
 		return fmt.Errorf("%s is a directory, not a regular file", path)
 	}
-	// The Unix side refuses anything that is not a regular file; this is the
-	// Windows half of that rule. A named pipe or a device supplied as `--pem`
-	// (`\\.\pipe\...`) opens and reads perfectly well, and carries no DACL of its
-	// own to check, so a path that is not a file on disk is refused on shape
-	// rather than trusted because the access check happened to pass.
+	// Refuse anything that is not a regular disk file, as on Unix. A named
+	// pipe or device such as `\\.\pipe\...` opens and reads but has no DACL to
+	// check.
 	if ft, err := windows.GetFileType(h); err == nil && ft != windows.FILE_TYPE_DISK {
 		return fmt.Errorf("%s is not a regular file", path)
 	}
@@ -151,10 +135,8 @@ func verifyPrivate(f *os.File, path string) error {
 		return fmt.Errorf("%s has no DACL, which grants full access to everyone", path)
 	}
 
-	// The owner must be us, SYSTEM or Administrators. This is the Windows half of
-	// the Unix `st.Uid != euid` check: reading a key from a file somebody else
-	// owns is trusting whoever placed it there, which is the thing this file
-	// exists to prevent.
+	// The owner must be this account, SYSTEM or Administrators, matching the
+	// Unix `st.Uid != euid` check.
 	if err := assertOwnerIsTrusted(owner, path); err != nil {
 		return err
 	}
@@ -168,10 +150,8 @@ func verifyPrivate(f *os.File, path string) error {
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
 			return fmt.Errorf("read ACE %d of %s: %w", i, path, err)
 		}
-		// DENY takes nothing away that matters here, and the audit/alarm types
-		// grant nothing. Every other type CAN grant access and is refused rather
-		// than skipped, so an unrecognised object-allow ACE cannot read as
-		// "no findings".
+		// Deny, audit and alarm ACEs grant nothing. Any other type may grant
+		// access and is refused, including unrecognized ones.
 		switch ace.Header.AceType {
 		case windows.ACCESS_DENIED_ACE_TYPE, systemAuditACEType, systemAlarmACEType:
 			continue
@@ -214,6 +194,10 @@ func assertOwnerIsTrusted(owner *windows.SID, path string) error {
 	return nil
 }
 
+// setPrivateDACL applies the protected DACL to an existing directory through
+// an open handle, so the path cannot be swapped between check and use.
+// FILE_FLAG_OPEN_REPARSE_POINT opens a junction itself, so a planted junction
+// cannot redirect the DACL to another directory.
 func setPrivateDACL(path string) error {
 	sd, err := privateSecurityDescriptor()
 	if err != nil {
@@ -223,7 +207,24 @@ func setPrivateDACL(path string) error {
 	if err != nil {
 		return fmt.Errorf("read DACL for %s: %w", path, err)
 	}
-	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return fmt.Errorf("secure %s: %w", path, err)
+	}
+	h, err := windows.CreateFile(p,
+		windows.WRITE_DAC|windows.READ_CONTROL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer windows.CloseHandle(h)
+
+	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		nil, nil, dacl, nil); err != nil {
 		return fmt.Errorf("secure %s: %w", path, err)
@@ -266,9 +267,8 @@ func currentUserSID() (*windows.SID, error) {
 	return user.User.Sid, nil
 }
 
-// allowedTrustees is who may own or reach a private key: this account, SYSTEM,
-// and Administrators. The set is derived from who WE are, and the file's owner
-// is then tested against it.
+// allowedTrustees returns the SIDs that may own or access a private key, this
+// account, SYSTEM and Administrators.
 func allowedTrustees() ([]*windows.SID, error) {
 	user, err := currentUserSID()
 	if err != nil {
@@ -297,29 +297,16 @@ func sidIn(sid *windows.SID, set []*windows.SID) bool {
 	return false
 }
 
-// isRedirect reports whether a directory entry points somewhere other than where
-// it appears to.
+// isRedirect reports whether a directory entry is a reparse point such as a
+// symlink or junction.
 //
-// It tests FILE_ATTRIBUTE_REPARSE_POINT rather than os.ModeSymlink, and the
-// difference is the whole point. Go sets ModeSymlink only for
-// IO_REPARSE_TAG_SYMLINK; a DIRECTORY JUNCTION (IO_REPARSE_TAG_MOUNT_POINT)
-// falls through to ModeIrregular (os/types_windows.go, Mode). Go 1.22 and
-// earlier DID report a junction as a symlink, so a check written against
-// ModeSymlink silently stopped catching them on a toolchain upgrade.
-//
-// A junction is also the cheaper primitive: creating a symlink needs
-// SeCreateSymbolicLinkPrivilege (administrator, or Developer Mode), while
-// creating a junction needs only write access to the directory. That is exactly
-// the %PROGRAMDATA% case this file's header warns about, a machine-wide
-// credential root a standard user can write to.
-//
-// The attribute is the authoritative answer and the mode bit is a derivation of
-// it, so this is correct whatever a future Go release decides to report.
+// It tests FILE_ATTRIBUTE_REPARSE_POINT because Go sets os.ModeSymlink only
+// for IO_REPARSE_TAG_SYMLINK and reports a junction as ModeIrregular. Creating
+// a junction needs only write access to the parent directory.
 func isRedirect(info os.FileInfo) bool {
 	if d, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {
 		return d.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0
 	}
-	// No attribute data means we cannot tell. Refuse rather than assume, the same
-	// rule verifyPrivate applies to an ACE type it does not recognise.
+	// Without attribute data, treat the entry as a redirect.
 	return true
 }

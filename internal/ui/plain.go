@@ -64,23 +64,26 @@ func NewPlain() *Plain {
 	}
 }
 
+// Warn logs a startup warning.
+func (p *Plain) Warn(msg string) { p.line("warning", "", msg) }
+
 func (p *Plain) Banner(version string, cfg *config.Config) {
 	p.line("startup", "", "localport "+version)
-	for _, s := range cfg.Specs {
-		region := s.Region
-		if region == "" {
-			region = "auto"
-		}
-		p.line("startup", "", fmt.Sprintf("region=%s edge=%s", region, s.Edge))
-		for _, ep := range s.Endpoints {
-			p.line("startup", ep.Name, fmt.Sprintf("proto=%s local=%s", ep.Protocol, ep.Local))
-		}
+	for _, t := range cfg.Tunnels {
+		p.line("startup", t.Name, fmt.Sprintf("proto=%s local=%s", t.Protocol, t.Local))
+	}
+	for _, d := range cfg.Devices {
+		p.line("startup", d.Name, "device host="+d.Host)
 	}
 }
 
+// Shutdown is idempotent. Callers invoke it from the signal handler, after Run
+// and in a defer.
 func (p *Plain) Shutdown() {
-	p.stopOnce.Do(func() { close(p.stop) })
-	p.line("shutdown", "", "stopping")
+	p.stopOnce.Do(func() {
+		close(p.stop)
+		p.line("shutdown", "", "stopping")
+	})
 }
 
 func (p *Plain) OnStateChange(label string, _ tunnel.State, to tunnel.State) {
@@ -113,6 +116,11 @@ func (p *Plain) OnConnected(label string, info tunnel.Info) {
 			sub, port, info.Mode, info.Protocol,
 		))
 	}
+	if info.Device {
+		// Log the initial ports from the ack. OnPortsUpdate fires only on a
+		// change.
+		p.line("ports", label, formatPorts(info.Ports))
+	}
 	if info.MTLS != nil && info.MTLS.Enabled {
 		p.line("mtls", label, "enabled")
 	}
@@ -130,9 +138,13 @@ func (p *Plain) OnError(label string, err error) {
 	p.line("error", label, withCode(err.Error(), errorCode(err)))
 }
 
-// OnHTTPRequest runs on the forwarding goroutine, so it must not block. Counts
-// update under a brief lock (accurate); the log line is queued and dropped, never
-// blocked, when the sink lags.
+// OnPortsUpdate logs the device's new port list.
+func (p *Plain) OnPortsUpdate(label string, ports []proto.DevicePort) {
+	p.line("ports", label, formatPorts(ports))
+}
+
+// OnHTTPRequest runs on the forwarding goroutine and must not block. The log
+// line is queued and dropped when the queue is full.
 func (p *Plain) OnHTTPRequest(label string, r tunnel.RequestInfo) {
 	path := r.Path
 	if path == "" {
@@ -181,12 +193,19 @@ func (p *Plain) ensureReqLogDrain() {
 	})
 }
 
-func (p *Plain) OnDataConn(label, connID, local, remote string) {
-	from := remote
+func (p *Plain) OnDataConn(label string, info tunnel.DataConnInfo) {
+	from := info.Remote
 	if from == "" {
 		from = "-"
 	}
-	p.line("conn.open", label, fmt.Sprintf("id=%s from=%s -> %s", shortID(connID), from, local))
+	line := fmt.Sprintf("id=%s ip=%s -> %s", shortID(info.ConnID), from, info.Target)
+	if info.Port != 0 {
+		line += fmt.Sprintf(" port=%d", info.Port)
+	}
+	if info.Consumer != "" {
+		line += " identity=" + info.Consumer
+	}
+	p.line("conn.open", label, line)
 
 	p.mu.Lock()
 	s := p.statsFor(label)
@@ -337,7 +356,10 @@ func (p *Plain) line(event, label, msg string) {
 	fmt.Fprintf(p.out, "%s %s %s\n", ts, event, msg)
 }
 
+// shortID trims and sanitizes a connection ID for display. The parsers keep it
+// verbatim because it is echoed to the edge.
 func shortID(id string) string {
+	id = sanitizeForDisplay(id)
 	if len(id) > 8 {
 		return id[:8]
 	}
