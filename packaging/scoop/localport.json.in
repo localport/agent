@@ -1,0 +1,24 @@
+{
+    "version": "@VERSION@",
+    "description": "Put any local service online over secure HTTP, TCP, TLS, and mTLS tunnels",
+    "homepage": "https://localport.io",
+    "license": "Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/localport/agent/releases/download/v@VERSION@/localport-windows-amd64.exe#/localport.exe",
+            "hash": "@SHA256_WINDOWS_AMD64@"
+        }
+    },
+    "bin": "localport.exe",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/localport/agent/releases/download/v$version/localport-windows-amd64.exe#/localport.exe"
+            }
+        },
+        "hash": {
+            "url": "$baseurl/checksums.txt"
+        }
+    }
+}

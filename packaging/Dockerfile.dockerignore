@@ -1,0 +1,6 @@
+# Build context is dist/.
+*
+!localport-linux-*
+!LICENSE
+!NOTICE
+!THIRD_PARTY_NOTICES

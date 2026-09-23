@@ -1,0 +1,42 @@
+class Localport < Formula
+  desc "Put any local service online over secure HTTP, TCP, TLS, and mTLS tunnels"
+  homepage "https://localport.io"
+  version "@VERSION@"
+  license "Apache-2.0"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/localport/agent/releases/download/v#{version}/localport-darwin-arm64"
+      sha256 "@SHA256_DARWIN_ARM64@"
+    end
+    on_intel do
+      url "https://github.com/localport/agent/releases/download/v#{version}/localport-darwin-amd64"
+      sha256 "@SHA256_DARWIN_AMD64@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/localport/agent/releases/download/v#{version}/localport-linux-arm64"
+      sha256 "@SHA256_LINUX_ARM64@"
+    end
+    on_intel do
+      url "https://github.com/localport/agent/releases/download/v#{version}/localport-linux-amd64"
+      sha256 "@SHA256_LINUX_AMD64@"
+    end
+  end
+
+  def install
+    # Homebrew downloads the single binary named after the URL; rename to `localport`.
+    bin.install Dir["localport-*"].first => "localport"
+  end
+
+  livecheck do
+    url :stable
+    strategy :github_latest
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/localport --version")
+  end
+end

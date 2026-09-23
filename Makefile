@@ -21,7 +21,7 @@ PLATFORMS = linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64 windows/
 
 DIST = dist
 
-.PHONY: build build-all dist packages repo repo-apk clean test vet-all smoke lint fmt vet notices notices-check
+.PHONY: build build-all dist release-sign release-dryrun packages repo repo-apk clean test vet-all smoke lint fmt vet notices notices-check
 
 build:
 	$(GO_BUILD) -o bin/localport ./cmd/localport
@@ -40,6 +40,16 @@ dist: notices-check build-all
 	mkdir -p $(DIST)
 	cp bin/localport-* LICENSE NOTICE THIRD_PARTY_NOTICES $(DIST)/
 	./scripts/release/checksums.sh $(DIST)
+
+# Verifies and signs a draft release. Maintainer only; see RELEASING.md.
+release-sign:
+	@[ -n "$(TAG)" ] || { echo "usage: make release-sign TAG=vX.Y.Z"; exit 1; }
+	./scripts/release/sign.sh "$(TAG)"
+
+# Full release pipeline with throwaway keys, including install tests.
+# Publishes nothing.
+release-dryrun:
+	./scripts/release/dryrun.sh
 
 # Signed Linux packages. Environment: see scripts/release/packages.sh.
 packages:
