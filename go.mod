@@ -2,6 +2,8 @@ module github.com/localport/agent
 
 go 1.25.0
 
+toolchain go1.27.1
+
 require (
 	github.com/coder/websocket v1.8.15
 	go.yaml.in/yaml/v4 v4.0.0-rc.4

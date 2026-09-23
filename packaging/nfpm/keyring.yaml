@@ -1,0 +1,45 @@
+# localport-archive-keyring (deb, rpm): repository signing keys for apt and dnf.
+# Variables are set by scripts/release/packages.sh.
+
+name: localport-archive-keyring
+arch: all
+platform: linux
+version: ${KEYRING_VERSION}
+# YYYY.MM.DD, not semver.
+version_schema: none
+release: 1
+section: misc
+priority: optional
+maintainer: Localport <support@localport.io>
+vendor: Localport
+homepage: https://localport.io
+license: Apache-2.0
+description: |-
+  OpenPGP keys for the Localport package repositories
+  The keys apt and dnf use to verify packages from pkg.localport.io.
+
+contents:
+  - src: ${KEYS_DIR}/localport-archive-keyring.gpg
+    dst: /usr/share/keyrings/localport-archive-keyring.gpg
+    packager: deb
+    expand: true
+    file_info:
+      mode: 0644
+  - src: packaging/deb/copyright
+    dst: /usr/share/doc/localport-archive-keyring/copyright
+    packager: deb
+    file_info:
+      mode: 0644
+
+  - src: ${KEYS_DIR}/RPM-GPG-KEY-localport
+    dst: /etc/pki/rpm-gpg/RPM-GPG-KEY-localport
+    packager: rpm
+    expand: true
+    file_info:
+      mode: 0644
+
+rpm:
+  summary: OpenPGP keys for the Localport package repositories
+  packager: Localport <support@localport.io>
+  signature:
+    key_file: ${RPM_KEY_FILE}
