@@ -61,7 +61,7 @@ func TestDeviceFromFlagsRefusesANameThatIsNotALabel(t *testing.T) {
 		"", "GW-01", "gw 01", "gw.01", "-gw", "gw-", "gw/01",
 		strings.Repeat("a", MaxDeviceNameLength+1),
 	} {
-		if _, err := DeviceFromFlags("tok", "eu", name, ""); err == nil {
+		if _, err := DeviceFromFlags("tok", "eu", name, "", ""); err == nil {
 			t.Errorf("accepted device name %q", name)
 		}
 	}
@@ -69,19 +69,35 @@ func TestDeviceFromFlagsRefusesANameThatIsNotALabel(t *testing.T) {
 
 func TestDeviceFromFlagsRefusesAHostCarryingSchemeOrPort(t *testing.T) {
 	for _, host := range []string{"tcp://192.168.1.10", "http://box", "192.168.1.10:502"} {
-		if _, err := DeviceFromFlags("tok", "eu", "gw-01", host); err == nil {
+		if _, err := DeviceFromFlags("tok", "eu", "gw-01", host, ""); err == nil {
 			t.Errorf("accepted host %q", host)
 		}
 	}
 }
 
 func TestDeviceFromFlagsDefaultsTheHost(t *testing.T) {
-	cfg, err := DeviceFromFlags("tok", "eu", "gw-01", "")
+	cfg, err := DeviceFromFlags("tok", "eu", "gw-01", "", "")
 	if err != nil {
 		t.Fatalf("device: %v", err)
 	}
 	if cfg.Devices[0].Host != DefaultDeviceHost {
 		t.Fatalf("host = %q, want %q", cfg.Devices[0].Host, DefaultDeviceHost)
+	}
+}
+
+func TestDeviceFromFlagsParsesAllowPorts(t *testing.T) {
+	cfg, err := DeviceFromFlags("tok", "eu", "gw-01", "", "8000-8100,502")
+	if err != nil {
+		t.Fatalf("device: %v", err)
+	}
+	if got := cfg.Devices[0].AllowPorts.String(); got != "502,8000-8100" {
+		t.Errorf("allow ports = %q", got)
+	}
+	if cfg, _ := DeviceFromFlags("tok", "eu", "gw-01", "", ""); cfg.Devices[0].AllowPorts != nil {
+		t.Error("no --allow-ports must mean no ceiling")
+	}
+	if _, err := DeviceFromFlags("tok", "eu", "gw-01", "", "0,70000"); err == nil {
+		t.Error("accepted out-of-range ports")
 	}
 }
 

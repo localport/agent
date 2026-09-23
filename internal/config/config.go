@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/security"
 
 	"go.yaml.in/yaml/v4"
@@ -51,12 +52,13 @@ type TunnelSpec struct {
 
 // DeviceSpec is one device on a fleet. Host is the address traffic is sent to
 // and may name another machine on the local network. Ports come from the
-// dashboard.
+// dashboard. AllowPorts, when set, limits which of them the agent serves.
 type DeviceSpec struct {
-	Name  string
-	Token string
-	Host  string
-	Edge  string
+	Name       string
+	Token      string
+	Host       string
+	Edge       string
+	AllowPorts ports.Ceiling
 }
 
 // DefaultDeviceHost is the device host when none is configured.
@@ -83,8 +85,9 @@ type fleetFile struct {
 }
 
 type deviceFile struct {
-	Name string `yaml:"name"`
-	Host string `yaml:"host,omitempty"`
+	Name       string   `yaml:"name"`
+	Host       string   `yaml:"host,omitempty"`
+	AllowPorts []string `yaml:"allow_ports,omitempty"`
 }
 
 // Load reads the YAML at path, substitutes environment references and returns
@@ -172,7 +175,7 @@ func TunnelFromFlags(token, region, local, proto, name string) (*Config, error) 
 }
 
 // DeviceFromFlags builds a one-device config from CLI arguments.
-func DeviceFromFlags(token, region, name, host string) (*Config, error) {
+func DeviceFromFlags(token, region, name, host, allowPorts string) (*Config, error) {
 	if err := validRegion(region); err != nil {
 		return nil, err
 	}
@@ -185,12 +188,17 @@ func DeviceFromFlags(token, region, name, host string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	allowed, err := ports.ParseFlag(allowPorts)
+	if err != nil {
+		return nil, fmt.Errorf("--allow-ports: %w", err)
+	}
 
 	return &Config{Devices: []DeviceSpec{{
-		Name:  name,
-		Token: token,
-		Host:  host,
-		Edge:  ResolveEdge(region),
+		Name:       name,
+		Token:      token,
+		Host:       host,
+		Edge:       ResolveEdge(region),
+		AllowPorts: allowed,
 	}}}, nil
 }
 
@@ -399,7 +407,11 @@ func buildFleet(idx int, f fleetFile) ([]DeviceSpec, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, DeviceSpec{Name: d.Name, Token: f.Token, Host: host, Edge: ResolveEdge("")})
+		allowed, err := ports.Parse(d.AllowPorts)
+		if err != nil {
+			return nil, fmt.Errorf("device %q: allow_ports: %w", d.Name, err)
+		}
+		out = append(out, DeviceSpec{Name: d.Name, Token: f.Token, Host: host, Edge: ResolveEdge(""), AllowPorts: allowed})
 	}
 	return out, nil
 }

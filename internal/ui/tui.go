@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/proto"
 	"github.com/localport/agent/internal/tunnel"
 )
@@ -71,6 +72,8 @@ type tState struct {
 	// target host.
 	device bool
 	ports  []proto.DevicePort
+	// allowed is the device's --allow-ports, nil for none.
+	allowed ports.Ceiling
 
 	// events is a device's log of connection and request rows, newest last.
 	// openConns keeps each open connection's port and consumer for its close
@@ -142,7 +145,7 @@ func (t *TUI) SetTunnelProvider(p func() []*tunnel.Tunnel) {
 func (t *TUI) Banner(version string, cfg *config.Config) {
 	t.mu.Lock()
 	t.version = version
-	add := func(name, protocol, local string, device bool) {
+	add := func(name, protocol, local string, device bool, allowed ports.Ceiling) {
 		if name == "" {
 			name = "default"
 		}
@@ -150,24 +153,25 @@ func (t *TUI) Banner(version string, cfg *config.Config) {
 			t.order = append(t.order, name)
 		}
 		t.tunnels[name] = &tState{
-			name:   name,
-			proto:  protocol,
-			local:  local,
-			device: device,
-			state:  tunnel.StateIdle,
+			name:    name,
+			proto:   protocol,
+			local:   local,
+			device:  device,
+			allowed: allowed,
+			state:   tunnel.StateIdle,
 		}
 	}
 	for _, spec := range cfg.Tunnels {
 		if t.edge == "" {
 			t.edge = spec.Edge
 		}
-		add(spec.Name, spec.Protocol, spec.Local, false)
+		add(spec.Name, spec.Protocol, spec.Local, false, nil)
 	}
 	for _, device := range cfg.Devices {
 		if t.edge == "" {
 			t.edge = device.Edge
 		}
-		add(device.Name, "", device.Host, true)
+		add(device.Name, "", device.Host, true, device.AllowPorts)
 	}
 	t.cols, t.rows = TermSize(t.out)
 	t.mu.Unlock()
@@ -416,10 +420,10 @@ func (t *TUI) OnDataConn(label string, info tunnel.DataConnInfo) {
 }
 
 // OnPortsUpdate replaces a device's port list in the view.
-func (t *TUI) OnPortsUpdate(label string, ports []proto.DevicePort) {
+func (t *TUI) OnPortsUpdate(label string, open []proto.DevicePort) {
 	t.mu.Lock()
 	if st, ok := t.tunnels[label]; ok {
-		st.ports = ports
+		st.ports = open
 		st.device = true
 	}
 	t.mu.Unlock()

@@ -70,7 +70,8 @@ identical on either carrier.
   "subdomain": "optional",
   "agent_version": "1.4.2",
   "agent_os": "darwin/arm64",
-  "resume_session_id": "optional"
+  "resume_session_id": "optional",
+  "allowed_ports": [{ "from": 502, "to": 502 }, { "from": 8000, "to": 8100 }]
 }
 ```
 
@@ -78,6 +79,11 @@ identical on either carrier.
 one local service and names its `protocol` (`http`, `tcp`, `tls`). A **device**
 joins a fleet, sends no protocol, and serves the ports the dashboard opens on it.
 Sending the wrong kind for the token is refused with `PR009`.
+
+`allowed_ports` is a device's optional port ceiling (`--allow-ports`): up to 64
+inclusive ranges of ports 1 to 65535. Absent means no ceiling. The edge refuses a
+stream to an open port outside it and logs `blocked_by_device`; the agent
+refuses it as well. A tunnel that sends `allowed_ports` is refused.
 
 A registering client asserts nothing that access depends on. `client_name`
 (the `--name` flag) is the device's name and its address. Whether it may be
@@ -171,6 +177,9 @@ its live streams are closed at both ends. The edge closes them, and the agent
 closes the local sockets it holds for that port when it applies the update. An
 added port is accepted by the edge only after this acknowledgement, since
 control frames and data streams travel on different connections.
+
+A port the dashboard opens outside the device's `allowed_ports` stays in the
+list and is refused: the dashboard shows it as blocked by the device.
 
 `protocol` is `tcp` (opaque bytes) or `http` (requests are parsed for this
 agent's own request view and for the status counters in the access log).

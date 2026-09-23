@@ -73,9 +73,11 @@ type RegisterPayload struct {
 	Kind       string `json:"kind,omitempty"` // tunnel or device
 	Protocol   string `json:"protocol"`       // http, tcp or tls for a tunnel, empty for a device
 	ClientName string `json:"client_name"`
-	Timestamp  int64  `json:"timestamp"`
-	Nonce      string `json:"nonce"`
-	Subdomain  string `json:"subdomain,omitempty"`
+	// AllowedPorts is a device's port ceiling, omitted when none is set.
+	AllowedPorts []PortRange `json:"allowed_ports,omitempty"`
+	Timestamp    int64       `json:"timestamp"`
+	Nonce        string      `json:"nonce"`
+	Subdomain    string      `json:"subdomain,omitempty"`
 
 	// AgentVersion and AgentOS identify the build and platform in the audit record.
 	// They are self-reported and not used for access decisions.
@@ -113,6 +115,12 @@ type RegisterAckPayload struct {
 	// version.
 	PortsVersion uint64       `json:"ports_version,omitempty"`
 	Ports        []DevicePort `json:"ports,omitempty"`
+}
+
+// PortRange is an inclusive range of ports.
+type PortRange struct {
+	From uint16 `json:"from"`
+	To   uint16 `json:"to"`
 }
 
 // DevicePort is one open port on a device.

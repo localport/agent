@@ -72,6 +72,8 @@ func TestLoadRefusesBadFiles(t *testing.T) {
 		{"duplicate device", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n      - name: GW\n"},
 		{"host with port", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        host: 10.0.0.2:502\n"},
 		{"host with scheme", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        host: tcp://10.0.0.2\n"},
+		{"allow_ports out of range", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        allow_ports: [70000]\n"},
+		{"allow_ports reversed range", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        allow_ports: [\"100-90\"]\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,6 +92,20 @@ func TestDeviceHostAcceptsIPv6(t *testing.T) {
 	}
 	if cfg.Devices[0].Host != "fd00::1" {
 		t.Fatalf("host = %q", cfg.Devices[0].Host)
+	}
+}
+
+// allow_ports takes bare ports and quoted ranges in one list.
+func TestDeviceAllowPortsFromYAML(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        allow_ports: [502, 80, \"8000-8100\"]\n      - name: open\n"))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.Devices[0].AllowPorts.String(); got != "80,502,8000-8100" {
+		t.Errorf("allow_ports = %q", got)
+	}
+	if cfg.Devices[1].AllowPorts != nil {
+		t.Error("a device without allow_ports must have no ceiling")
 	}
 }
 
