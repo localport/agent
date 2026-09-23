@@ -521,3 +521,21 @@ func TestRefusedClientCertificateIsReported(t *testing.T) {
 		t.Fatal("a refused client certificate produced no error")
 	}
 }
+
+// A failed request waits for the connection's read error, which can arrive
+// after the write that failed.
+func TestFirstReadErrorWaitsForTheReader(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	conn := newReadErrConn(tls.Client(client, &tls.Config{InsecureSkipVerify: true})) //nolint:gosec // no handshake completes
+
+	go func() { _, _ = conn.Read(make([]byte, 1)) }()
+	time.AfterFunc(100*time.Millisecond, func() { _ = server.Close() })
+
+	if err := conn.firstReadError(5 * time.Second); err == nil {
+		t.Fatal("want the read error that arrived after the call")
+	}
+	if err := (*readErrConn)(nil).firstReadError(time.Millisecond); err != nil {
+		t.Fatalf("a replaced connection has no read error, got %v", err)
+	}
+}

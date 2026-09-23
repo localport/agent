@@ -71,8 +71,11 @@ func (s *Session) Open(ctx context.Context, port uint16) (net.Conn, error) {
 		_ = pw.Close()
 		// Under TLS 1.3 a refused client certificate arrives here, on the
 		// first read after the handshake.
-		if cause := s.drop(conn); cause != nil {
-			err = cause
+		tlsConn := s.drop(conn)
+		if ctx.Err() == nil {
+			if cause := tlsConn.firstReadError(readErrorWait); cause != nil {
+				err = cause
+			}
 		}
 		return nil, streamError(s.Device, err)
 	}
@@ -137,7 +140,7 @@ func (s *Session) clientConn(ctx context.Context) (*http2.ClientConn, error) {
 		_ = raw.Close()
 		return nil, handshakeError(s.Device, err)
 	}
-	tracked := &readErrConn{Conn: tlsConn}
+	tracked := newReadErrConn(tlsConn)
 	conn, err := s.transport.NewClientConn(tracked)
 	if err != nil {
 		_ = tlsConn.Close()
@@ -149,41 +152,60 @@ func (s *Session) clientConn(ctx context.Context) (*http2.ClientConn, error) {
 }
 
 // drop discards a failed connection so the next forward dials a new one. It
-// returns the connection's first read error, if any.
-func (s *Session) drop(conn *http2.ClientConn) error {
+// returns the connection's TLS layer, or nil when conn was already replaced.
+func (s *Session) drop(conn *http2.ClientConn) *readErrConn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conn != conn {
 		return nil
 	}
 	s.conn = nil
-	return s.tlsConn.err()
+	return s.tlsConn
 }
+
+// readErrorWait bounds how long a failed request waits for the connection's
+// read error. A request can fail on a write, such as a broken pipe, before
+// the reader has received the alert that explains it.
+const readErrorWait = time.Second
 
 // readErrConn records the first read error of the TLS connection, such as the
 // alert for a refused client certificate.
 type readErrConn struct {
 	*tls.Conn
-	mu      sync.Mutex
+	once    sync.Once
+	failed  chan struct{}
 	readErr error
+}
+
+func newReadErrConn(c *tls.Conn) *readErrConn {
+	return &readErrConn{Conn: c, failed: make(chan struct{})}
 }
 
 func (c *readErrConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if err != nil {
-		c.mu.Lock()
-		if c.readErr == nil {
+		c.once.Do(func() {
 			c.readErr = err
-		}
-		c.mu.Unlock()
+			close(c.failed)
+		})
 	}
 	return n, err
 }
 
-func (c *readErrConn) err() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.readErr
+// firstReadError returns the first read error, waiting up to d for one. It
+// returns nil on a nil receiver or when no read fails in time.
+func (c *readErrConn) firstReadError(d time.Duration) error {
+	if c == nil {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-c.failed:
+		return c.readErr
+	case <-timer.C:
+		return nil
+	}
 }
 
 // streamConn is a net.Conn view of one CONNECT stream.
