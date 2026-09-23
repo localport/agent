@@ -202,9 +202,8 @@ type Options struct {
 type Tunnel struct {
 	opts Options
 
-	state    atomic.Int32
-	closing  atomic.Bool
-	clientID string
+	state   atomic.Int32
+	closing atomic.Bool
 
 	mu       sync.RWMutex
 	conn     *proto.Conn
@@ -288,7 +287,6 @@ func New(opts Options) *Tunnel {
 	t := &Tunnel{
 		opts:         opts,
 		edgeAddr:     opts.Edge,
-		clientID:     newClientID(),
 		activeConns:  make(map[string]*activeConn),
 		shutdown:     make(chan struct{}),
 		disconnected: make(chan struct{}),
@@ -572,7 +570,6 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			Token:      t.opts.Token,
 			Kind:       t.opts.Kind,
 			Protocol:   t.opts.Protocol,
-			ClientID:   t.clientID,
 			ClientName: t.opts.ClientName,
 			Timestamp:  time.Now().Unix(),
 			Nonce:      nonce,
@@ -1402,12 +1399,6 @@ func sniForAddr(originalEdge, addr string) string {
 		return origHost
 	}
 	return connectLabel + "." + zone
-}
-
-func newClientID() string {
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	return "agent-" + hex.EncodeToString(b[:])
 }
 
 func newNonce() (string, error) {

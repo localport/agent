@@ -183,7 +183,6 @@ func (t *Tunnel) dialAndBindMux(ctx context.Context, edgeAddr, sessionID string)
 	bind := &proto.MuxBindPayload{
 		Token:     t.opts.Token,
 		SessionID: sessionID,
-		ClientID:  t.clientID,
 		Timestamp: time.Now().Unix(),
 		Nonce:     nonce,
 	}

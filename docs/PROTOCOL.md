@@ -64,7 +64,6 @@ identical on either carrier.
   "token": "tok_xxx",
   "kind": "tunnel",
   "protocol": "http",
-  "client_id": "agent-a1b2c3d4e5f6",
   "client_name": "hostname",
   "timestamp": 1711357200,
   "nonce": "hex32",
@@ -83,6 +82,9 @@ Sending the wrong kind for the token is refused with `PR009`.
 A registering client asserts nothing that access depends on. `client_name`
 (the `--name` flag) is the device's name and its address. Whether it may be
 reached is decided server-side.
+
+The agent sends no client id. The edge mints one per session and returns it in
+`RegisterAck.client_id`.
 
 `agent_version` and `agent_os` describe the binary, not the client. They are
 stored with the connection's server-side record for support. Both are
@@ -122,12 +124,18 @@ never replace without a resume match.
   "mtls": {
     "enabled": true
   },
-  "session_id": "hex32"
+  "session_id": "hex32",
+  "client_id": "cl_<32 hex>"
 }
 ```
 
 `region_name` is the server-supplied display name for the region; when empty
 the agent falls back to a built-in mapping, then the uppercased slug.
+
+`client_id` is the id the edge minted for this session. It is the id the
+dashboard and the edge's logs show. A reconnect that resumes (see below) keeps
+it; any other registration gets a new one. It is not a secret and grants
+nothing.
 
 `session_id` is an edge-minted secret for this session; present it as
 `resume_session_id` on the next `Register` for this tunnel to reclaim the
@@ -273,7 +281,6 @@ derives the SNI from the target's zone (see [Redirect](#redirect) below).
 {
   "token": "<tunnel token>",
   "session_id": "<session_id from RegisterAck>",
-  "client_id": "<same client id as Register>",
   "timestamp": 1735689600,
   "nonce": "<32 hex chars>"
 }

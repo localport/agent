@@ -72,7 +72,6 @@ type RegisterPayload struct {
 	Token      string `json:"token"`
 	Kind       string `json:"kind,omitempty"` // tunnel or device
 	Protocol   string `json:"protocol"`       // http, tcp or tls for a tunnel, empty for a device
-	ClientID   string `json:"client_id"`
 	ClientName string `json:"client_name"`
 	Timestamp  int64  `json:"timestamp"`
 	Nonce      string `json:"nonce"`
@@ -192,7 +191,6 @@ type RedirectPayload struct {
 type MuxBindPayload struct {
 	Token     string `json:"token"`
 	SessionID string `json:"session_id"`
-	ClientID  string `json:"client_id"`
 	Timestamp int64  `json:"timestamp"`
 	Nonce     string `json:"nonce"`
 }

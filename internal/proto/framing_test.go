@@ -80,7 +80,7 @@ func TestSendEmitsOneWritePerFrame(t *testing.T) {
 	cc := &countingConn{}
 	c := NewConn(cc)
 
-	if err := c.Send(MsgRegister, &RegisterPayload{Token: "tok", ClientID: "agent-1"}); err != nil {
+	if err := c.Send(MsgRegister, &RegisterPayload{Token: "tok", ClientName: "agent-1"}); err != nil {
 		t.Fatal(err)
 	}
 	if cc.writes != 1 {
