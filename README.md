@@ -33,7 +33,7 @@ Accounts and tunnels are managed at [localport.io](https://localport.io).
 - **CI with no secret.** In a pipeline the agent exchanges the platform's workload identity (GitHub Actions out of the box) for a short-lived certificate held in memory. Nothing is stored in the repository, the CI secret store, or on the runner.
 - **Access control.** IP allow lists and password protection on public tunnels. Fleets are reached by client certificate.
 - **Data privacy.** Traffic is never inspected, logged, or used for training, and each tunnel is pinned to a chosen region.
-- **Cross-platform.** Prebuilt binaries for macOS, Linux, and Windows.
+- **Cross-platform.** Signed releases for macOS, Linux (including 32-bit ARM), and Windows, as binaries, apt/dnf/apk packages, and a container image.
 
 ## Installation
 
@@ -50,7 +50,14 @@ curl -fsSL https://localport.io/install.sh | sh
 irm https://localport.io/install.ps1 | iex
 ```
 
-For manual installation, download a binary from the [releases page](https://github.com/localport/agent/releases). Platform-specific instructions are in the [installation guide](https://localport.io/docs/installation).
+```sh
+# Container image (linux/amd64, linux/arm64, linux/arm/v7)
+docker run --rm ghcr.io/localport/agent:latest version
+```
+
+On Debian, Ubuntu, RHEL, Rocky Linux, Fedora and Alpine, the install script sets up the signed package repository at `pkg.localport.io`, so upgrades come through `apt`, `dnf` or `apk`. Manual repository setup, direct downloads from the [releases page](https://github.com/localport/agent/releases), and platform-specific notes are in the [installation guide](https://localport.io/docs/installation).
+
+Every release is signed and carries SLSA build provenance and an SBOM. [SECURITY.md](SECURITY.md) shows how to verify one, and [RELEASING.md](RELEASING.md) describes how releases are built and signed.
 
 ## Usage
 
@@ -62,6 +69,9 @@ localport http 3000 -t <token>
 
 # Join a fleet as a device (its ports are set in the dashboard)
 localport connect -t <token> --name plc-01 --host 192.168.1.100
+
+# Serve only these ports, even if the dashboard opens others
+localport connect -t <token> --name plc-01 --allow-ports 502,8000-8100
 
 # Reach that device's ports
 localport access plc-01-factory.ap.localport.dev -L 5020:502 -L 8080:80
@@ -88,7 +98,7 @@ make build
 ./bin/localport version
 ```
 
-`make build-all` cross-compiles binaries for macOS, Linux, and Windows into `bin/`.
+`make build-all` cross-compiles every release platform into `bin/`.
 
 ## Documentation
 
@@ -110,7 +120,7 @@ Issues and pull requests are welcome. For non-trivial changes, open an issue to 
 
 ## Security
 
-Report security vulnerabilities privately through [localport.io/contact](https://localport.io/contact). Do not open public issues for security reports.
+Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md). Do not open public issues for security reports.
 
 ## License
 
