@@ -430,12 +430,12 @@ func (c *chunkSkipper) consume(data []byte) (used int, done bool) {
 				c.phase = chunkData
 			}
 		case chunkData:
-			take := int64(len(data) - used)
-			if c.remain < take {
-				take = c.remain
+			avail := data[used:]
+			if int64(len(avail)) > c.remain {
+				avail = avail[:c.remain]
 			}
-			c.remain -= take
-			used += int(take)
+			c.remain -= int64(len(avail))
+			used += len(avail)
 			if c.remain == 0 {
 				c.phase = chunkDataEnd
 			}
