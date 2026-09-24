@@ -133,9 +133,6 @@ func (p *Plain) OnConnected(label string, info tunnel.Info) {
 		// change.
 		p.line("ports", label, formatPorts(info.Ports, p.allowedFor(label)))
 	}
-	if info.MTLS != nil && info.MTLS.Enabled {
-		p.line("mtls", label, "enabled")
-	}
 }
 
 func (p *Plain) OnDisconnected(label string, err error) {

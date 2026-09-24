@@ -127,9 +127,6 @@ never replace without a resume match.
   "error_code": "",
   "retryable": null,
   "limit_type": "",
-  "mtls": {
-    "enabled": true
-  },
   "session_id": "hex32",
   "client_id": "cl_<32 hex>"
 }
@@ -148,12 +145,6 @@ nothing.
 slot immediately on reconnect. A session replaced this way receives a
 non-retryable `Shutdown` with code `TU012`, so two agents sharing one token
 cannot kick each other in a loop (the replaced one stops).
-
-The `mtls` field is optional. When present with `enabled: true`, inbound
-connections must present a client certificate from one of the authorities the
-tunnel trusts. It reports nothing else. Which authorities those are, and what any
-certificate may reach, are decided server-side. Consumers verify the server
-against system roots.
 
 ### PortsUpdate (13) / PortsAck (14)
 
@@ -407,7 +398,7 @@ the message says what to do.
 resume id and collides with its own stale session until the edge clears it. Two
 devices that share a name keep failing with the same message.
 
-Certificate / mTLS failures on a consumer connection surface at the TLS
+Certificate failures on a consumer connection surface at the TLS
 handshake layer, not as control-plane frames. A consumer either presents an
 acceptable client certificate or the connection is refused.
 

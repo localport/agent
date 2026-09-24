@@ -65,7 +65,6 @@ type tState struct {
 	connectedAt time.Time
 	lastErr     string
 	lastCode    string
-	mtls        bool
 	connected   bool
 
 	// device marks a fleet device. ports are the open ports and local is the
@@ -358,9 +357,6 @@ func (t *TUI) OnConnected(label string, info tunnel.Info) {
 		ts.mode = info.Mode
 		ts.lastErr = ""
 		ts.lastCode = ""
-		if info.MTLS != nil {
-			ts.mtls = info.MTLS.Enabled
-		}
 		if info.Device {
 			ts.device = true
 			ts.ports = info.Ports

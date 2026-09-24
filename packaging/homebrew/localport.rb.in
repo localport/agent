@@ -1,5 +1,5 @@
 class Localport < Formula
-  desc "Put any local service online over secure HTTP, TCP, TLS, and mTLS tunnels"
+  desc "Secure HTTP, TCP and TLS tunnels, and remote access to fleet devices"
   homepage "https://localport.io"
   version "@VERSION@"
   license "Apache-2.0"

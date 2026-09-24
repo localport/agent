@@ -181,9 +181,6 @@ func headerSingle(s snap, ts tState) []string {
 
 	local := buildLocalURL(ts.proto, ts.local)
 	localLine := pal.ForegroundDim(padRight("Local", labelW)) + pal.Foreground(local)
-	if ts.mtls {
-		localLine += "   " + pal.Primary("mTLS")
-	}
 	lines = append(lines, localLine)
 
 	st := s.stats[ts.name]

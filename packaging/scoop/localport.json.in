@@ -1,6 +1,6 @@
 {
     "version": "@VERSION@",
-    "description": "Put any local service online over secure HTTP, TCP, TLS, and mTLS tunnels",
+    "description": "Secure HTTP, TCP and TLS tunnels, and remote access to fleet devices",
     "homepage": "https://localport.io",
     "license": "Apache-2.0",
     "architecture": {

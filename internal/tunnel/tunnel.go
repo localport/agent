@@ -103,7 +103,6 @@ type Info struct {
 	Port       uint16
 	Mode       string
 	Protocol   string
-	MTLS       *proto.MTLSInfo
 	// Device marks a fleet device. Ports lists the ports it serves.
 	Device bool
 	Ports  []proto.DevicePort
@@ -630,7 +629,6 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 				Port:       ack.Port,
 				Mode:       ack.Mode,
 				Protocol:   ack.Protocol,
-				MTLS:       ack.MTLS,
 			}
 			t.mu.Unlock()
 			return nil

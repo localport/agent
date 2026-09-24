@@ -10,7 +10,7 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
-// AccessConfig lists the mTLS devices the access subcommand forwards locally.
+// AccessConfig lists the fleet devices the access subcommand forwards locally.
 type AccessConfig struct {
 	// Version is required. A file written for a newer schema fails on this
 	// field instead of on an unknown one.

@@ -93,8 +93,8 @@ func runSetup(args []string) error {
 func usageSetup() {
 	fmt.Fprint(os.Stderr, `Usage: localport setup <TOKEN> [--wait <duration>] [--api <url>]
 
-  Redeem a setup token and keep the credential this machine will present to
-  reach locked (mTLS) tunnels.
+  Redeem a setup token and keep the credential this machine presents to reach
+  fleet devices with localport access.
 
   An operator creates a setup token in the dashboard and gives you one string.
   This machine spends it once, keeps a private key that never leaves it, and

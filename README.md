@@ -15,7 +15,7 @@
   <a href="https://localport.io/docs"><img src="https://img.shields.io/badge/docs-localport.io-2eb67d" alt="Documentation" /></a>
 </p>
 
-Localport exposes local services to the internet over secure tunnels and gives remote access to devices by identity. It supports HTTP, TCP, TLS, and mutual TLS, and operates through NAT, CGNAT, and corporate firewalls without port forwarding, router configuration, or a public IP.
+Localport exposes local services to the internet over secure tunnels and gives remote access to devices by identity. It supports HTTP, TCP, and TLS tunnels, reaches fleet devices over mutual TLS, and operates through NAT, CGNAT, and corporate firewalls without port forwarding, router configuration, or a public IP.
 
 This repository contains the Localport agent, the client process that runs on the host machine and maintains tunnel connections to the Localport network. The agent is the only component that runs in your environment, and it is released as open source under the Apache License 2.0. The remainder of the platform, including the edge network, control plane, and dashboard, is operated by Localport as a managed service.
 

@@ -105,7 +105,6 @@ type RegisterAckPayload struct {
 	ErrorCode  string    `json:"error_code,omitempty"`
 	Retryable  *bool     `json:"retryable,omitempty"`
 	LimitType  LimitType `json:"limit_type,omitempty"`
-	MTLS       *MTLSInfo `json:"mtls,omitempty"`
 
 	// SessionID identifies this session. Send it as resume_session_id on the
 	// next Register to reclaim the slot.
@@ -139,13 +138,6 @@ type PortsUpdatePayload struct {
 // PortsAckPayload reports the port version the device serves.
 type PortsAckPayload struct {
 	Version uint64 `json:"version"`
-}
-
-// MTLSInfo describes the mutual TLS settings of a tunnel. When Enabled is true,
-// consumers must present a client certificate the tunnel trusts. It carries no
-// CA fingerprint because a tunnel trusts several CAs.
-type MTLSInfo struct {
-	Enabled bool `json:"enabled"`
 }
 
 type NewConnectionPayload struct {
