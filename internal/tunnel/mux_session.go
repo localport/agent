@@ -100,7 +100,7 @@ func (t *Tunnel) runMux(ctx context.Context, addr, session string) {
 
 // serveConnUntilClosed serves the connection and guarantees it is closed on the
 // way out, including when the session is torn down while it sits idle. Closing
-// is what unblocks ServeConn, so teardown runs through the connection rather
+// is what ends serveMux, so teardown runs through the connection rather
 // than through the server.
 func (t *Tunnel) serveConnUntilClosed(ctx context.Context, conn net.Conn) {
 	stopped := make(chan struct{})
@@ -253,8 +253,12 @@ func (t *Tunnel) serveMux(conn net.Conn) {
 		},
 	}
 	// Serve returns once the listener is exhausted. The connection is served
-	// on its own goroutine until it closes.
-	_ = server.Serve(&muxListener{conn: plainConn{conn}})
+	// on its own goroutine until it closes. Any other error means it was
+	// never accepted.
+	if err := server.Serve(&muxListener{conn: plainConn{conn}}); !errors.Is(err, errMuxListenerDone) {
+		_ = conn.Close()
+		return
+	}
 	<-closed
 }
 
