@@ -521,3 +521,122 @@ func TestRefusedClientCertificateIsReported(t *testing.T) {
 		t.Fatal("a refused client certificate produced no error")
 	}
 }
+
+// A failed request waits for the connection's read error, which can arrive
+// after the write that failed.
+func TestFirstReadErrorWaitsForTheReader(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	conn := newReadErrConn(tls.Client(client, &tls.Config{InsecureSkipVerify: true})) //nolint:gosec // no handshake completes
+
+	go func() { _, _ = conn.Read(make([]byte, 1)) }()
+	time.AfterFunc(100*time.Millisecond, func() { _ = server.Close() })
+
+	if err := conn.firstReadError(5 * time.Second); err == nil {
+		t.Fatal("want the read error that arrived after the call")
+	}
+	if err := (*readErrConn)(nil).firstReadError(time.Millisecond); err != nil {
+		t.Fatalf("a replaced connection has no read error, got %v", err)
+	}
+}
+
+// echoDevice stands in for the edge: an HTTP/2 server that answers CONNECT and
+// echoes the stream.
+func echoDevice(t *testing.T, http2 bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		rc := http.NewResponseController(w)
+		_ = rc.Flush()
+		buf := make([]byte, 1024)
+		for {
+			n, err := r.Body.Read(buf)
+			if n > 0 {
+				_, _ = w.Write(buf[:n])
+				_ = rc.Flush()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}))
+	srv.EnableHTTP2 = http2
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func echoSession(t *testing.T, srv *httptest.Server) *Session {
+	t.Helper()
+	cfg, err := BuildTLSConfig(writePEMBundle(t, t.TempDir(), "client.pem"), "", "", "gw-01.eu.localport.dev:443", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.InsecureSkipVerify = true //nolint:gosec // test server
+	s := &Session{Device: "gw-01.eu.localport.dev", TLSConfig: cfg}
+	if srv != nil {
+		s.Addr = srv.Listener.Addr().String()
+	}
+	return s
+}
+
+// A forward is a CONNECT stream on the session's HTTP/2 connection.
+func TestSessionOpensAConnectStream(t *testing.T) {
+	s := echoSession(t, echoDevice(t, true))
+	defer s.Close()
+
+	conn, err := s.Open(context.Background(), 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 4)
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "ping" {
+		t.Fatalf("echoed %q, want %q", got, "ping")
+	}
+}
+
+// A server that ignores ALPN is refused rather than spoken to over HTTP/1.
+func TestSessionRefusesAServerWithoutHTTP2(t *testing.T) {
+	cert := echoDevice(t, false).TLS.Certificates
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: cert})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_ = c.(*tls.Conn).Handshake()
+				_, _ = io.Copy(io.Discard, c)
+			}()
+		}
+	}()
+
+	s := echoSession(t, nil)
+	s.Addr = ln.Addr().String()
+	defer s.Close()
+
+	_, err = s.Open(context.Background(), 22)
+	if err == nil {
+		t.Fatal("a server without HTTP/2 must be refused")
+	}
+	if !strings.Contains(err.Error(), "did not accept HTTP/2") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+}

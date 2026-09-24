@@ -3,13 +3,18 @@ package tunnel
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 // echoService accepts one connection and echoes it back, standing in for the
@@ -185,5 +190,180 @@ func TestSleepCtxReturnsEarlyWhenCancelled(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("sleepCtx waited %v on a cancelled context", elapsed)
+	}
+}
+
+// muxClient speaks HTTP/2 with prior knowledge over conn, as the edge does.
+func muxClient(t *testing.T, conn net.Conn) *http.ClientConn {
+	t.Helper()
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
+	tr := &http.Transport{
+		Protocols: &protocols,
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return conn, nil
+		},
+	}
+	cc, err := tr.NewClientConn(context.Background(), "http", "mux.invalid:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cc
+}
+
+// tlsCarrier stands in for the control carrier's *tls.Conn, whose ALPN is the
+// agent control protocol rather than h2.
+type tlsCarrier struct{ net.Conn }
+
+func (tlsCarrier) ConnectionState() tls.ConnectionState {
+	return tls.ConnectionState{HandshakeComplete: true, NegotiatedProtocol: "localport-agent"}
+}
+
+// serveMux speaks HTTP/2 with prior knowledge over either carrier and returns
+// when the connection closes.
+func TestServeMuxServesStreamsOverTheCarrier(t *testing.T) {
+	for name, wrap := range map[string]func(net.Conn) net.Conn{
+		"plain": func(c net.Conn) net.Conn { return c },
+		"tls":   func(c net.Conn) net.Conn { return tlsCarrier{c} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dial, stop := echoService(t)
+			defer stop()
+			local, err := dial()
+			if err != nil {
+				t.Fatal(err)
+			}
+			addr := local.RemoteAddr().String()
+			local.Close()
+
+			tn := New(Options{Local: addr})
+			client, server := net.Pipe()
+			done := make(chan struct{})
+			go func() {
+				tn.serveMux(wrap(server))
+				close(done)
+			}()
+
+			cc := muxClient(t, client)
+			req, err := http.NewRequest(http.MethodPost, "http://mux.invalid/v1/stream", strings.NewReader("hello"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := cc.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make([]byte, 5)
+			if _, err := io.ReadFull(resp.Body, got); err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if string(got) != "hello" {
+				t.Fatalf("echoed %q, want %q", got, "hello")
+			}
+
+			cc.Close()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("serveMux did not return after the connection closed")
+			}
+		})
+	}
+}
+
+// The server advertises the mux stream limit and flow control windows.
+func TestServeMuxAdvertisesStreamLimitAndWindows(t *testing.T) {
+	tn := New(Options{Local: "127.0.0.1:1"})
+	client, server := net.Pipe()
+	defer client.Close()
+	go tn.serveMux(server)
+
+	go func() {
+		if _, err := io.WriteString(client, http2.ClientPreface); err != nil {
+			return
+		}
+		_ = http2.NewFramer(client, nil).WriteSettings()
+	}()
+
+	fr := http2.NewFramer(nil, client)
+	var settings, window bool
+	deadline := time.Now().Add(5 * time.Second)
+	_ = client.SetReadDeadline(deadline)
+	for !settings || !window {
+		f, err := fr.ReadFrame()
+		if err != nil {
+			t.Fatalf("read frame: %v", err)
+		}
+		switch f := f.(type) {
+		case *http2.SettingsFrame:
+			if f.IsAck() {
+				continue
+			}
+			settings = true
+			if v, ok := f.Value(http2.SettingMaxConcurrentStreams); !ok || v != maxConcurrentDataConns {
+				t.Errorf("MAX_CONCURRENT_STREAMS = %d, want %d", v, maxConcurrentDataConns)
+			}
+			if v, ok := f.Value(http2.SettingInitialWindowSize); !ok || v != muxUploadBufferPerStream {
+				t.Errorf("INITIAL_WINDOW_SIZE = %d, want %d", v, muxUploadBufferPerStream)
+			}
+		case *http2.WindowUpdateFrame:
+			if f.StreamID != 0 {
+				continue
+			}
+			window = true
+			if want := uint32(muxUploadBufferPerConnection - 65535); f.Increment != want {
+				t.Errorf("connection WINDOW_UPDATE = %d, want %d", f.Increment, want)
+			}
+		}
+	}
+}
+
+// A stream the edge resets with CANCEL reaches the handler as a stdlib
+// StreamError, which ignoreClosed treats as a normal close.
+func TestIgnoreClosedDropsAStreamCancelledByTheEdge(t *testing.T) {
+	readErr := make(chan error, 1)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = http.NewResponseController(w).Flush()
+		_, err := io.Copy(io.Discard, r.Body)
+		readErr <- err
+	})
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
+	client, server := net.Pipe()
+	srv := &http.Server{Handler: handler, Protocols: &protocols}
+	go func() { _ = srv.Serve(&muxListener{conn: server}) }()
+	defer srv.Close()
+
+	cc := muxClient(t, client)
+	defer cc.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	body, bodyW := io.Pipe()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://mux.invalid/v1/stream", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := cc.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bodyW.Write([]byte("partial")); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	resp.Body.Close()
+
+	select {
+	case err := <-readErr:
+		var streamErr http2.StreamError
+		if !errors.As(err, &streamErr) || streamErr.Code != http2.ErrCodeCancel {
+			t.Fatalf("handler read error = %v, want a CANCEL StreamError", err)
+		}
+		if got := ignoreClosed(err); got != nil {
+			t.Fatalf("ignoreClosed(%v) = %v, want nil", err, got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never saw the reset")
 	}
 }

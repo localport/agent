@@ -72,11 +72,12 @@ type RegisterPayload struct {
 	Token      string `json:"token"`
 	Kind       string `json:"kind,omitempty"` // tunnel or device
 	Protocol   string `json:"protocol"`       // http, tcp or tls for a tunnel, empty for a device
-	ClientID   string `json:"client_id"`
 	ClientName string `json:"client_name"`
-	Timestamp  int64  `json:"timestamp"`
-	Nonce      string `json:"nonce"`
-	Subdomain  string `json:"subdomain,omitempty"`
+	// AllowedPorts is a device's port ceiling, omitted when none is set.
+	AllowedPorts []PortRange `json:"allowed_ports,omitempty"`
+	Timestamp    int64       `json:"timestamp"`
+	Nonce        string      `json:"nonce"`
+	Subdomain    string      `json:"subdomain,omitempty"`
 
 	// AgentVersion and AgentOS identify the build and platform in the audit record.
 	// They are self-reported and not used for access decisions.
@@ -104,7 +105,6 @@ type RegisterAckPayload struct {
 	ErrorCode  string    `json:"error_code,omitempty"`
 	Retryable  *bool     `json:"retryable,omitempty"`
 	LimitType  LimitType `json:"limit_type,omitempty"`
-	MTLS       *MTLSInfo `json:"mtls,omitempty"`
 
 	// SessionID identifies this session. Send it as resume_session_id on the
 	// next Register to reclaim the slot.
@@ -114,6 +114,12 @@ type RegisterAckPayload struct {
 	// version.
 	PortsVersion uint64       `json:"ports_version,omitempty"`
 	Ports        []DevicePort `json:"ports,omitempty"`
+}
+
+// PortRange is an inclusive range of ports.
+type PortRange struct {
+	From uint16 `json:"from"`
+	To   uint16 `json:"to"`
 }
 
 // DevicePort is one open port on a device.
@@ -132,13 +138,6 @@ type PortsUpdatePayload struct {
 // PortsAckPayload reports the port version the device serves.
 type PortsAckPayload struct {
 	Version uint64 `json:"version"`
-}
-
-// MTLSInfo describes the mutual TLS settings of a tunnel. When Enabled is true,
-// consumers must present a client certificate the tunnel trusts. It carries no
-// CA fingerprint because a tunnel trusts several CAs.
-type MTLSInfo struct {
-	Enabled bool `json:"enabled"`
 }
 
 type NewConnectionPayload struct {
@@ -192,7 +191,6 @@ type RedirectPayload struct {
 type MuxBindPayload struct {
 	Token     string `json:"token"`
 	SessionID string `json:"session_id"`
-	ClientID  string `json:"client_id"`
 	Timestamp int64  `json:"timestamp"`
 	Nonce     string `json:"nonce"`
 }

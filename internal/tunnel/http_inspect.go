@@ -14,7 +14,7 @@ import (
 // method, path and status are read off a copy inline as they forward. Bodies are
 // skipped by their framing (Content-Length or chunked), never stored. No
 // goroutine, no buffer past one message's headers. A scanner fault is recovered;
-// forwarding never waits on it. tcp/tls/mtls are opaque and not inspected.
+// forwarding never waits on it. tcp and tls are opaque and not inspected.
 
 // The scanner stops on a connection that exceeds these limits.
 const (
@@ -430,12 +430,12 @@ func (c *chunkSkipper) consume(data []byte) (used int, done bool) {
 				c.phase = chunkData
 			}
 		case chunkData:
-			take := int64(len(data) - used)
-			if c.remain < take {
-				take = c.remain
+			avail := data[used:]
+			if int64(len(avail)) > c.remain {
+				avail = avail[:c.remain]
 			}
-			c.remain -= take
-			used += int(take)
+			c.remain -= int64(len(avail))
+			used += len(avail)
 			if c.remain == 0 {
 				c.phase = chunkDataEnd
 			}

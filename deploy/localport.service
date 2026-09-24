@@ -6,12 +6,6 @@
 ;   sudo chmod 0600 /etc/localport/token
 ;   sudo cp localport.service /etc/systemd/system/
 ;   sudo systemctl enable --now localport
-;
-; For a locked (mTLS) tunnel, run setup as the service user so it can read the
-; credential it will present:
-;
-;   sudo -u localport LOCALPORT_HOME=/var/lib/localport \
-;       localport setup lps_...
 
 [Unit]
 Description=Localport tunnel
@@ -37,7 +31,8 @@ Environment=LOCALPORT_HOME=/var/lib/localport
 LoadCredential=token:/etc/localport/token
 Environment=LOCALPORT_TOKEN_FILE=%d/token
 
-ExecStart=/usr/local/bin/localport http 8080
+; Found in /usr/bin (package) or /usr/local/bin (install script).
+ExecStart=localport http 8080
 
 Restart=always
 RestartSec=5

@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/proto"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/transport"
@@ -102,7 +103,6 @@ type Info struct {
 	Port       uint16
 	Mode       string
 	Protocol   string
-	MTLS       *proto.MTLSInfo
 	// Device marks a fleet device. Ports lists the ports it serves.
 	Device bool
 	Ports  []proto.DevicePort
@@ -180,6 +180,8 @@ type Options struct {
 	// Host is the device target, resolved on each dial.
 	Host       string
 	ClientName string
+	// AllowPorts limits the ports a device dials. Nil allows all.
+	AllowPorts ports.Ceiling
 
 	// AgentVersion is sent on registration for the audit record.
 	AgentVersion string
@@ -202,9 +204,8 @@ type Options struct {
 type Tunnel struct {
 	opts Options
 
-	state    atomic.Int32
-	closing  atomic.Bool
-	clientID string
+	state   atomic.Int32
+	closing atomic.Bool
 
 	mu       sync.RWMutex
 	conn     *proto.Conn
@@ -288,7 +289,6 @@ func New(opts Options) *Tunnel {
 	t := &Tunnel{
 		opts:         opts,
 		edgeAddr:     opts.Edge,
-		clientID:     newClientID(),
 		activeConns:  make(map[string]*activeConn),
 		shutdown:     make(chan struct{}),
 		disconnected: make(chan struct{}),
@@ -336,6 +336,9 @@ func (t *Tunnel) dialTarget(port uint16) (net.Conn, int, error) {
 	}
 	if _, open := t.ports.Protocol(port); !open {
 		return nil, http.StatusForbidden, fmt.Errorf("port %d is not open on this device", port)
+	}
+	if !t.opts.AllowPorts.Allows(port) {
+		return nil, http.StatusForbidden, fmt.Errorf("port %d is outside this device's --allow-ports", port)
 	}
 	addr := net.JoinHostPort(t.opts.Host, strconv.Itoa(int(port)))
 	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
@@ -569,13 +572,13 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 		resumeID := t.sessionID
 		t.mu.RUnlock()
 		reg := &proto.RegisterPayload{
-			Token:      t.opts.Token,
-			Kind:       t.opts.Kind,
-			Protocol:   t.opts.Protocol,
-			ClientID:   t.clientID,
-			ClientName: t.opts.ClientName,
-			Timestamp:  time.Now().Unix(),
-			Nonce:      nonce,
+			Token:        t.opts.Token,
+			Kind:         t.opts.Kind,
+			Protocol:     t.opts.Protocol,
+			ClientName:   t.opts.ClientName,
+			AllowedPorts: wirePortRanges(t.opts.AllowPorts),
+			Timestamp:    time.Now().Unix(),
+			Nonce:        nonce,
 			// GOOS/GOARCH of the build, for example "darwin/arm64".
 			AgentVersion:    t.opts.AgentVersion,
 			AgentOS:         runtime.GOOS + "/" + runtime.GOARCH,
@@ -626,7 +629,6 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 				Port:       ack.Port,
 				Mode:       ack.Mode,
 				Protocol:   ack.Protocol,
-				MTLS:       ack.MTLS,
 			}
 			t.mu.Unlock()
 			return nil
@@ -1404,12 +1406,6 @@ func sniForAddr(originalEdge, addr string) string {
 	return connectLabel + "." + zone
 }
 
-func newClientID() string {
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	return "agent-" + hex.EncodeToString(b[:])
-}
-
 func newNonce() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -1425,4 +1421,16 @@ func safeClose(ch chan struct{}) {
 	default:
 		close(ch)
 	}
+}
+
+// wirePortRanges converts a ceiling for the Register payload.
+func wirePortRanges(c ports.Ceiling) []proto.PortRange {
+	if len(c) == 0 {
+		return nil
+	}
+	out := make([]proto.PortRange, len(c))
+	for i, r := range c {
+		out[i] = proto.PortRange{From: r.From, To: r.To}
+	}
+	return out
 }

@@ -26,6 +26,7 @@ func runConnect(version string, args []string) error {
 		region      = fs.String("region", "", "edge region: eu, us, ap")
 		name        = fs.String("name", "", "device name (default: this machine's hostname)")
 		host        = fs.String("host", "", "where this device sends traffic (default: localhost)")
+		allowPorts  = fs.String("allow-ports", "", "serve only these ports, e.g. 502,80,8000-8100 (default: all ports opened in the dashboard)")
 		noUI        = fs.Bool("noui", false, "disable the live view and emit plain logs (auto-enabled when stdout is not a TTY)")
 		noMux       = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them")
 		noInspect   = fs.Bool("no-inspect", false, "do not inspect HTTP requests")
@@ -38,7 +39,7 @@ func runConnect(version string, args []string) error {
 		return err
 	}
 
-	cfg, err := buildConnectConfig(*configPath, *token, *region, *name, *host)
+	cfg, err := buildConnectConfig(*configPath, *token, *region, *name, *host, *allowPorts)
 	if err != nil {
 		fs.Usage()
 		return err
@@ -75,7 +76,7 @@ func runConnect(version string, args []string) error {
 	return runErr
 }
 
-func buildConnectConfig(path, flagToken, region, name, host string) (*config.Config, error) {
+func buildConnectConfig(path, flagToken, region, name, host, allowPorts string) (*config.Config, error) {
 	if path != "" {
 		return config.Load(path)
 	}
@@ -90,7 +91,7 @@ func buildConnectConfig(path, flagToken, region, name, host string) (*config.Con
 	if name == "" {
 		return nil, errors.New("--name is required, because this machine reports no usable hostname")
 	}
-	return config.DeviceFromFlags(token, region, name, host)
+	return config.DeviceFromFlags(token, region, name, host, allowPorts)
 }
 
 func usageConnect(fs *flag.FlagSet) {
@@ -107,6 +108,9 @@ func usageConnect(fs *flag.FlagSet) {
 
   One device, serving another machine on this network:
     localport connect -t <token> --name plc-01 --host 192.168.1.100
+
+  One device that serves only the listed ports:
+    localport connect -t <token> --allow-ports 502,80,8000-8100
 
   Every tunnel and device in a file:
     localport connect --config localport.yaml

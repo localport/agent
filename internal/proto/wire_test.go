@@ -43,7 +43,7 @@ func TestFrameRoundTripPreservesTypeAndPayload(t *testing.T) {
 			name: "register",
 			mt:   MsgRegister,
 			payload: &RegisterPayload{
-				Token: "tok", Protocol: "tcp", ClientID: "c1", ClientName: "laptop",
+				Token: "tok", Protocol: "tcp", ClientName: "laptop",
 				Timestamp: 1700000000, Nonce: "n", AgentVersion: "v1", AgentOS: "linux/amd64",
 			},
 			check: func(t *testing.T, b []byte) {
@@ -51,6 +51,9 @@ func TestFrameRoundTripPreservesTypeAndPayload(t *testing.T) {
 				mustJSON(t, b, &p)
 				if p.Token != "tok" || p.Protocol != "tcp" || p.ClientName != "laptop" {
 					t.Fatalf("register payload = %+v", p)
+				}
+				if strings.Contains(string(b), `"client_id"`) {
+					t.Fatalf("register carries client_id: %s", b)
 				}
 				if p.AgentOS != "linux/amd64" || p.Nonce != "n" {
 					t.Fatalf("register metadata lost: %+v", p)
@@ -72,12 +75,15 @@ func TestFrameRoundTripPreservesTypeAndPayload(t *testing.T) {
 		{
 			name:    "mux bind",
 			mt:      MsgMuxBind,
-			payload: &MuxBindPayload{Token: "tok", SessionID: "s1", ClientID: "c1", Timestamp: 7, Nonce: "n"},
+			payload: &MuxBindPayload{Token: "tok", SessionID: "s1", Timestamp: 7, Nonce: "n"},
 			check: func(t *testing.T, b []byte) {
 				var p MuxBindPayload
 				mustJSON(t, b, &p)
-				if p.SessionID != "s1" || p.ClientID != "c1" || p.Timestamp != 7 {
+				if p.SessionID != "s1" || p.Timestamp != 7 {
 					t.Fatalf("mux bind payload = %+v", p)
+				}
+				if strings.Contains(string(b), `"client_id"`) {
+					t.Fatalf("mux bind carries client_id: %s", b)
 				}
 			},
 		},

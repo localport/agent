@@ -99,6 +99,7 @@ func (a *Agent) Run(ctx context.Context, handler tunnel.EventHandler) error {
 			Edge:       device.Edge,
 			Host:       device.Host,
 			ClientName: device.Name,
+			AllowPorts: device.AllowPorts,
 		})
 	}
 	wg.Wait()

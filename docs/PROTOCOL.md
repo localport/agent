@@ -64,14 +64,14 @@ identical on either carrier.
   "token": "tok_xxx",
   "kind": "tunnel",
   "protocol": "http",
-  "client_id": "agent-a1b2c3d4e5f6",
   "client_name": "hostname",
   "timestamp": 1711357200,
   "nonce": "hex32",
   "subdomain": "optional",
   "agent_version": "1.4.2",
   "agent_os": "darwin/arm64",
-  "resume_session_id": "optional"
+  "resume_session_id": "optional",
+  "allowed_ports": [{ "from": 502, "to": 502 }, { "from": 8000, "to": 8100 }]
 }
 ```
 
@@ -80,9 +80,17 @@ one local service and names its `protocol` (`http`, `tcp`, `tls`). A **device**
 joins a fleet, sends no protocol, and serves the ports the dashboard opens on it.
 Sending the wrong kind for the token is refused with `PR009`.
 
+`allowed_ports` is a device's optional port ceiling (`--allow-ports`): up to 64
+inclusive ranges of ports 1 to 65535. Absent means no ceiling. The edge refuses a
+stream to an open port outside it and logs `blocked_by_device`; the agent
+refuses it as well. A tunnel that sends `allowed_ports` is refused.
+
 A registering client asserts nothing that access depends on. `client_name`
 (the `--name` flag) is the device's name and its address. Whether it may be
 reached is decided server-side.
+
+The agent sends no client id. The edge mints one per session and returns it in
+`RegisterAck.client_id`.
 
 `agent_version` and `agent_os` describe the binary, not the client. They are
 stored with the connection's server-side record for support. Both are
@@ -119,27 +127,24 @@ never replace without a resume match.
   "error_code": "",
   "retryable": null,
   "limit_type": "",
-  "mtls": {
-    "enabled": true
-  },
-  "session_id": "hex32"
+  "session_id": "hex32",
+  "client_id": "cl_<32 hex>"
 }
 ```
 
 `region_name` is the server-supplied display name for the region; when empty
 the agent falls back to a built-in mapping, then the uppercased slug.
 
+`client_id` is the id the edge minted for this session. It is the id the
+dashboard and the edge's logs show. A reconnect that resumes (see below) keeps
+it; any other registration gets a new one. It is not a secret and grants
+nothing.
+
 `session_id` is an edge-minted secret for this session; present it as
 `resume_session_id` on the next `Register` for this tunnel to reclaim the
 slot immediately on reconnect. A session replaced this way receives a
 non-retryable `Shutdown` with code `TU012`, so two agents sharing one token
 cannot kick each other in a loop (the replaced one stops).
-
-The `mtls` field is optional. When present with `enabled: true`, inbound
-connections must present a client certificate from one of the authorities the
-tunnel trusts. It reports nothing else. Which authorities those are, and what any
-certificate may reach, are decided server-side. Consumers verify the server
-against system roots.
 
 ### PortsUpdate (13) / PortsAck (14)
 
@@ -163,6 +168,9 @@ its live streams are closed at both ends. The edge closes them, and the agent
 closes the local sockets it holds for that port when it applies the update. An
 added port is accepted by the edge only after this acknowledgement, since
 control frames and data streams travel on different connections.
+
+A port the dashboard opens outside the device's `allowed_ports` stays in the
+list and is refused: the dashboard shows it as blocked by the device.
 
 `protocol` is `tcp` (opaque bytes) or `http` (requests are parsed for this
 agent's own request view and for the status counters in the access log).
@@ -273,7 +281,6 @@ derives the SNI from the target's zone (see [Redirect](#redirect) below).
 {
   "token": "<tunnel token>",
   "session_id": "<session_id from RegisterAck>",
-  "client_id": "<same client id as Register>",
   "timestamp": 1735689600,
   "nonce": "<32 hex chars>"
 }
@@ -391,7 +398,7 @@ the message says what to do.
 resume id and collides with its own stale session until the edge clears it. Two
 devices that share a name keep failing with the same message.
 
-Certificate / mTLS failures on a consumer connection surface at the TLS
+Certificate failures on a consumer connection surface at the TLS
 handshake layer, not as control-plane frames. A consumer either presents an
 acceptable client certificate or the connection is refused.
 

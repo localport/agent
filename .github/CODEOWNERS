@@ -1,0 +1,6 @@
+# Release pipeline, signing keys and workflows.
+/.github/          @localport/maintainers
+/packaging/        @localport/maintainers
+/release/          @localport/maintainers
+/scripts/release/  @localport/maintainers
+/Makefile          @localport/maintainers

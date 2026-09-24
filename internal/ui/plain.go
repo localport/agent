@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/proto"
 	"github.com/localport/agent/internal/tunnel"
 )
@@ -23,6 +24,9 @@ type Plain struct {
 
 	mu    sync.Mutex
 	stats map[string]*plainStats
+
+	// allowed is each device's --allow-ports, set once by Banner.
+	allowed map[string]ports.Ceiling
 
 	// Usage ticker lifecycle. The goroutine is started lazily on the
 	// first data event so single-shot invocations don't spawn it.
@@ -57,10 +61,11 @@ var _ tunnel.EventHandler = (*Plain)(nil)
 
 func NewPlain() *Plain {
 	return &Plain{
-		out:    os.Stderr,
-		stats:  make(map[string]*plainStats),
-		stop:   make(chan struct{}),
-		reqLog: make(chan reqLogLine, 1024),
+		out:     os.Stderr,
+		stats:   make(map[string]*plainStats),
+		allowed: make(map[string]ports.Ceiling),
+		stop:    make(chan struct{}),
+		reqLog:  make(chan reqLogLine, 1024),
 	}
 }
 
@@ -73,7 +78,14 @@ func (p *Plain) Banner(version string, cfg *config.Config) {
 		p.line("startup", t.Name, fmt.Sprintf("proto=%s local=%s", t.Protocol, t.Local))
 	}
 	for _, d := range cfg.Devices {
-		p.line("startup", d.Name, "device host="+d.Host)
+		msg := "device host=" + d.Host
+		if d.AllowPorts != nil {
+			msg += " allow_ports=" + d.AllowPorts.String()
+			p.mu.Lock()
+			p.allowed[d.Name] = d.AllowPorts
+			p.mu.Unlock()
+		}
+		p.line("startup", d.Name, msg)
 	}
 }
 
@@ -119,10 +131,7 @@ func (p *Plain) OnConnected(label string, info tunnel.Info) {
 	if info.Device {
 		// Log the initial ports from the ack. OnPortsUpdate fires only on a
 		// change.
-		p.line("ports", label, formatPorts(info.Ports))
-	}
-	if info.MTLS != nil && info.MTLS.Enabled {
-		p.line("mtls", label, "enabled")
+		p.line("ports", label, formatPorts(info.Ports, p.allowedFor(label)))
 	}
 }
 
@@ -139,8 +148,14 @@ func (p *Plain) OnError(label string, err error) {
 }
 
 // OnPortsUpdate logs the device's new port list.
-func (p *Plain) OnPortsUpdate(label string, ports []proto.DevicePort) {
-	p.line("ports", label, formatPorts(ports))
+func (p *Plain) OnPortsUpdate(label string, open []proto.DevicePort) {
+	p.line("ports", label, formatPorts(open, p.allowedFor(label)))
+}
+
+func (p *Plain) allowedFor(label string) ports.Ceiling {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.allowed[label]
 }
 
 // OnHTTPRequest runs on the forwarding goroutine and must not block. The log

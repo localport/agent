@@ -181,9 +181,6 @@ func headerSingle(s snap, ts tState) []string {
 
 	local := buildLocalURL(ts.proto, ts.local)
 	localLine := pal.ForegroundDim(padRight("Local", labelW)) + pal.Foreground(local)
-	if ts.mtls {
-		localLine += "   " + pal.Primary("mTLS")
-	}
 	lines = append(lines, localLine)
 
 	st := s.stats[ts.name]
@@ -235,9 +232,9 @@ func deviceHeader(s snap, ts tState, row func(label, value string) string, label
 
 	portsLine := pal.ForegroundDim(padRight("Ports", labelW))
 	if len(ts.ports) == 0 {
-		portsLine += pal.Warning(formatPorts(nil))
+		portsLine += pal.Warning(formatPorts(nil, nil))
 	} else {
-		portsLine += pal.Foreground(formatPorts(ts.ports))
+		portsLine += pal.Foreground(formatPorts(ts.ports, ts.allowed))
 	}
 	lines = append(lines, portsLine)
 
@@ -343,7 +340,7 @@ func statePill(ts tState, pal Palette) string {
 
 func protoTarget(ts *tState) string {
 	if ts.device {
-		return formatPorts(ts.ports)
+		return formatPorts(ts.ports, ts.allowed)
 	}
 	switch {
 	case ts.port > 0 && ts.subdomain != "":

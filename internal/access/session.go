@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
-	"golang.org/x/net/http2"
 )
 
 // connectTimeout bounds one dial and TLS handshake, so an unreachable device
@@ -41,11 +39,13 @@ type Session struct {
 	TLSConfig *tls.Config
 
 	mu        sync.Mutex
-	transport *http2.Transport
-	conn      *http2.ClientConn
+	transport *http.Transport
+	conn      *http.ClientConn
 	// tlsConn is the connection under conn. It keeps the first read error,
-	// which http2 replaces with a generic one.
+	// which the HTTP/2 client replaces with a generic one.
 	tlsConn *readErrConn
+	// dialed is the connection the last dial returned. Guarded by mu.
+	dialed *readErrConn
 }
 
 // Open returns a byte stream to one port on the device.
@@ -71,8 +71,11 @@ func (s *Session) Open(ctx context.Context, port uint16) (net.Conn, error) {
 		_ = pw.Close()
 		// Under TLS 1.3 a refused client certificate arrives here, on the
 		// first read after the handshake.
-		if cause := s.drop(conn); cause != nil {
-			err = cause
+		tlsConn := s.drop(conn)
+		if ctx.Err() == nil {
+			if cause := tlsConn.firstReadError(readErrorWait); cause != nil {
+				err = cause
+			}
 		}
 		return nil, streamError(s.Device, err)
 	}
@@ -95,95 +98,134 @@ func (s *Session) Close() {
 }
 
 // clientConn returns the live connection, dialing one when there is none.
-func (s *Session) clientConn(ctx context.Context) (*http2.ClientConn, error) {
+func (s *Session) clientConn(ctx context.Context) (*http.ClientConn, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.conn != nil && s.conn.State().Closed {
+	if s.conn != nil && s.conn.Err() != nil {
 		s.conn = nil
 	}
 	if s.conn != nil {
 		return s.conn, nil
 	}
 
-	if s.transport == nil {
-		// Pings detect a connection lost to a network switch before the next
-		// forward uses it.
-		s.transport = &http2.Transport{
-			ReadIdleTimeout: h2ReadIdleTimeout,
-			PingTimeout:     h2PingTimeout,
-		}
-	}
 	if s.TLSConfig == nil {
 		return nil, errors.New("no certificate to present")
 	}
-	cfg := s.TLSConfig.Clone()
-	// The edge refuses a CONNECT whose authority differs from the SNI.
-	cfg.ServerName = s.Device
-	cfg.NextProtos = []string{"h2"}
+	if s.transport == nil {
+		var protocols http.Protocols
+		protocols.SetHTTP2(true)
+		s.transport = &http.Transport{
+			Protocols:      &protocols,
+			DialTLSContext: s.dialTLS,
+			// Pings detect a connection lost to a network switch before the
+			// next forward uses it.
+			HTTP2: &http.HTTP2Config{
+				SendPingTimeout: h2ReadIdleTimeout,
+				PingTimeout:     h2PingTimeout,
+			},
+		}
+	}
 
 	// ctx lives as long as the process. The dial holds s.mu, so it needs its
 	// own bound.
 	dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 
+	s.dialed = nil
+	conn, err := s.transport.NewClientConn(dialCtx, "https", s.Addr)
+	if err != nil {
+		if s.dialed != nil {
+			_ = s.dialed.Close()
+		}
+		return nil, err
+	}
+	s.conn = conn
+	s.tlsConn = s.dialed
+	return conn, nil
+}
+
+// dialTLS connects to the edge and completes the handshake. It runs inside
+// NewClientConn, with s.mu held.
+func (s *Session) dialTLS(ctx context.Context, network, addr string) (net.Conn, error) {
+	cfg := s.TLSConfig.Clone()
+	// The edge refuses a CONNECT whose authority differs from the SNI.
+	cfg.ServerName = s.Device
+	cfg.NextProtos = []string{"h2"}
+
 	dialer := &net.Dialer{}
-	raw, err := dialer.DialContext(dialCtx, "tcp", s.Addr)
+	raw, err := dialer.DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, dialError(s.Device, err)
 	}
 	tlsConn := tls.Client(raw, cfg)
-	if err := tlsConn.HandshakeContext(dialCtx); err != nil {
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		_ = raw.Close()
 		return nil, handshakeError(s.Device, err)
 	}
-	tracked := &readErrConn{Conn: tlsConn}
-	conn, err := s.transport.NewClientConn(tracked)
-	if err != nil {
+	if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
 		_ = tlsConn.Close()
-		return nil, err
+		return nil, fmt.Errorf("%s is not answering as a Localport edge: it did not accept HTTP/2", s.Device)
 	}
-	s.conn = conn
-	s.tlsConn = tracked
-	return conn, nil
+	s.dialed = newReadErrConn(tlsConn)
+	return s.dialed, nil
 }
 
 // drop discards a failed connection so the next forward dials a new one. It
-// returns the connection's first read error, if any.
-func (s *Session) drop(conn *http2.ClientConn) error {
+// returns the connection's TLS layer, or nil when conn was already replaced.
+func (s *Session) drop(conn *http.ClientConn) *readErrConn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conn != conn {
 		return nil
 	}
 	s.conn = nil
-	return s.tlsConn.err()
+	return s.tlsConn
 }
+
+// readErrorWait bounds how long a failed request waits for the connection's
+// read error. A request can fail on a write, such as a broken pipe, before
+// the reader has received the alert that explains it.
+const readErrorWait = time.Second
 
 // readErrConn records the first read error of the TLS connection, such as the
 // alert for a refused client certificate.
 type readErrConn struct {
 	*tls.Conn
-	mu      sync.Mutex
+	once    sync.Once
+	failed  chan struct{}
 	readErr error
+}
+
+func newReadErrConn(c *tls.Conn) *readErrConn {
+	return &readErrConn{Conn: c, failed: make(chan struct{})}
 }
 
 func (c *readErrConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if err != nil {
-		c.mu.Lock()
-		if c.readErr == nil {
+		c.once.Do(func() {
 			c.readErr = err
-		}
-		c.mu.Unlock()
+			close(c.failed)
+		})
 	}
 	return n, err
 }
 
-func (c *readErrConn) err() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.readErr
+// firstReadError returns the first read error, waiting up to d for one. It
+// returns nil on a nil receiver or when no read fails in time.
+func (c *readErrConn) firstReadError(d time.Duration) error {
+	if c == nil {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-c.failed:
+		return c.readErr
+	case <-timer.C:
+		return nil
+	}
 }
 
 // streamConn is a net.Conn view of one CONNECT stream.

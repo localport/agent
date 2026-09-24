@@ -1,0 +1,89 @@
+# localport package (deb, rpm, apk).
+# Variables are set by scripts/release/packages.sh.
+
+name: localport
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${PKG_VERSION}
+release: 1
+section: net
+priority: optional
+maintainer: Localport <support@localport.io>
+vendor: Localport
+homepage: https://localport.io
+license: Apache-2.0
+description: |-
+  Localport agent: secure tunnels and remote access
+  Publishes services over secure HTTP, TCP and TLS tunnels, and gives
+  identity-based remote access to devices in a Localport fleet.
+
+contents:
+  - src: ${BINARY}
+    dst: /usr/bin/localport
+    expand: true
+    file_info:
+      mode: 0755
+
+  - src: packaging/deb/copyright
+    dst: /usr/share/doc/localport/copyright
+    packager: deb
+    file_info:
+      mode: 0644
+  - src: NOTICE
+    dst: /usr/share/doc/localport/NOTICE
+    packager: deb
+    file_info:
+      mode: 0644
+  - src: THIRD_PARTY_NOTICES
+    dst: /usr/share/doc/localport/THIRD_PARTY_NOTICES
+    packager: deb
+    file_info:
+      mode: 0644
+
+  - src: LICENSE
+    dst: /usr/share/licenses/localport/LICENSE
+    packager: rpm
+    file_info:
+      mode: 0644
+  - src: NOTICE
+    dst: /usr/share/licenses/localport/NOTICE
+    packager: rpm
+    file_info:
+      mode: 0644
+  - src: THIRD_PARTY_NOTICES
+    dst: /usr/share/licenses/localport/THIRD_PARTY_NOTICES
+    packager: rpm
+    file_info:
+      mode: 0644
+
+  - src: LICENSE
+    dst: /usr/share/licenses/localport/LICENSE
+    packager: apk
+    file_info:
+      mode: 0644
+  - src: NOTICE
+    dst: /usr/share/licenses/localport/NOTICE
+    packager: apk
+    file_info:
+      mode: 0644
+  - src: THIRD_PARTY_NOTICES
+    dst: /usr/share/licenses/localport/THIRD_PARTY_NOTICES
+    packager: apk
+    file_info:
+      mode: 0644
+
+rpm:
+  summary: Localport agent for secure tunnels and remote access
+  packager: Localport <support@localport.io>
+  compression: zstd
+  signature:
+    key_file: ${RPM_KEY_FILE}
+
+deb:
+  compression: xz
+
+# nfpm does not expand variables in key_name. packages.sh fills it in.
+apk:
+  signature:
+    key_file: ${APK_KEY_FILE}
+    key_name: "@APK_KEY_NAME@"

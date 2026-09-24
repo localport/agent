@@ -4,7 +4,7 @@
 
 <h1 align="center">Localport</h1>
 
-<p align="center"><strong>Your localhost, on the internet.</strong></p>
+<p align="center"><strong>Secure tunnels and remote access by identity.</strong></p>
 
 <p align="center">
   <a href="https://github.com/localport/agent/actions/workflows/ci.yml"><img src="https://github.com/localport/agent/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
@@ -15,7 +15,9 @@
   <a href="https://localport.io/docs"><img src="https://img.shields.io/badge/docs-localport.io-2eb67d" alt="Documentation" /></a>
 </p>
 
-Localport exposes local services to the internet over secure tunnels and gives remote access to devices by identity. It supports HTTP, TCP, TLS, and mutual TLS, and operates through NAT, CGNAT, and corporate firewalls without port forwarding, router configuration, or a public IP.
+Localport publishes services over secure tunnels and gives identity-based remote access to devices. Tunnels serve HTTP, TCP, and TLS at a public address, with automatic HTTPS for HTTP tunnels and access checks such as IP allow lists, passwords, and webhook signature verification. Fleet devices have no public address and are reached by client certificate over mutual TLS. Both work through NAT, CGNAT, and corporate firewalls without port forwarding, router configuration, or a public IP.
+
+An HTTP tunnel can also switch to fanout delivery, which gives a whole team one permanent URL. Each request, such as a webhook, reaches every teammate's agent, and one designated client returns the response.
 
 This repository contains the Localport agent, the client process that runs on the host machine and maintains tunnel connections to the Localport network. The agent is the only component that runs in your environment, and it is released as open source under the Apache License 2.0. The remainder of the platform, including the edge network, control plane, and dashboard, is operated by Localport as a managed service.
 
@@ -26,14 +28,14 @@ Accounts and tunnels are managed at [localport.io](https://localport.io).
 - **Protocols.** HTTP, TCP, and TLS tunnels with automatic, browser-trusted HTTPS.
 - **Reserved addresses.** Static subdomains and ports persist across sessions, keeping public links and webhook URLs stable.
 - **Remote access.** A fleet is a group of devices sharing one token. Each device receives its own address, remains reachable by name behind CGNAT or cellular networks, and serves the ports opened on it in the dashboard. A fleet has no public endpoint. Consumers reach a device with `localport access <device> -L <local>:<remote>` over one mutual TLS connection, presenting a client certificate.
-- **Fanout tunnels.** One inbound HTTP request is delivered to every connected client, with a designated client returning the response.
+- **Fanout tunnels.** One permanent URL for the whole team. Each inbound HTTP request is delivered to every connected client and a designated client returns the response, so every developer receives the same webhooks without registering an endpoint of their own.
 - **Scoped access.** Each certificate names a stable identity. What an identity may reach is managed server-side and can be changed without reissuing certificates, and narrowing a grant or revoking a certificate closes live connections. Bring your own certificate authority if you prefer, since only its public chain is stored.
 - **Self-renewing credentials.** `localport setup <TOKEN>` redeems a single-use token, generates its private key locally, and renews itself from then on. No certificate file to copy around and no long-lived secret on the machine.
 - **Sign in as yourself.** `localport login` prints a short code, you approve it in the dashboard in any browser, and a short-lived certificate lands on this machine. It works over SSH into a jump box. A sign-in lasts hours and does not renew; run `localport login` again. Removing the person from the team ends their access.
 - **CI with no secret.** In a pipeline the agent exchanges the platform's workload identity (GitHub Actions out of the box) for a short-lived certificate held in memory. Nothing is stored in the repository, the CI secret store, or on the runner.
-- **Access control.** IP allow lists and password protection on public tunnels. Fleets are reached by client certificate.
+- **Access control.** IP allow lists on every tunnel. HTTP tunnels can also require a password, required request headers, or a verified webhook signature (GitHub, Stripe, Shopify, Slack, or HMAC-SHA256), checked on every request. Fleets are reached by client certificate.
 - **Data privacy.** Traffic is never inspected, logged, or used for training, and each tunnel is pinned to a chosen region.
-- **Cross-platform.** Prebuilt binaries for macOS, Linux, and Windows.
+- **Cross-platform.** Signed releases for macOS 13 or later, Linux with kernel 3.2 or later (including 32-bit ARM), and Windows 10 or later, as binaries, apt/dnf/apk packages, and a container image.
 
 ## Installation
 
@@ -50,7 +52,14 @@ curl -fsSL https://localport.io/install.sh | sh
 irm https://localport.io/install.ps1 | iex
 ```
 
-For manual installation, download a binary from the [releases page](https://github.com/localport/agent/releases). Platform-specific instructions are in the [installation guide](https://localport.io/docs/installation).
+```sh
+# Container image (linux/amd64, linux/arm64, linux/arm/v7)
+docker run --rm ghcr.io/localport/agent:latest version
+```
+
+On Debian, Ubuntu, RHEL, Rocky Linux, Amazon Linux, Fedora and Alpine, the install script sets up the signed package repository at `pkg.localport.io`, so upgrades come through `apt`, `dnf` or `apk`. Manual repository setup, direct downloads from the [releases page](https://github.com/localport/agent/releases), and platform-specific notes are in the [installation guide](https://localport.io/docs/installation).
+
+Every release is signed and carries SLSA build provenance and an SBOM. [SECURITY.md](SECURITY.md) shows how to verify one, and [RELEASING.md](RELEASING.md) describes how releases are built and signed.
 
 ## Usage
 
@@ -62,6 +71,9 @@ localport http 3000 -t <token>
 
 # Join a fleet as a device (its ports are set in the dashboard)
 localport connect -t <token> --name plc-01 --host 192.168.1.100
+
+# Serve only these ports, even if the dashboard opens others
+localport connect -t <token> --name plc-01 --allow-ports 502,8000-8100
 
 # Reach that device's ports
 localport access plc-01-factory.ap.localport.dev -L 5020:502 -L 8080:80
@@ -79,7 +91,7 @@ Complete command, flag, configuration, and protocol documentation is maintained 
 
 ## Build from source
 
-Requires Go 1.25 or newer.
+Requires Go 1.27 or newer.
 
 ```sh
 git clone https://github.com/localport/agent.git
@@ -88,7 +100,7 @@ make build
 ./bin/localport version
 ```
 
-`make build-all` cross-compiles binaries for macOS, Linux, and Windows into `bin/`.
+`make build-all` cross-compiles every release platform into `bin/`.
 
 ## Documentation
 
@@ -110,7 +122,7 @@ Issues and pull requests are welcome. For non-trivial changes, open an issue to 
 
 ## Security
 
-Report security vulnerabilities privately through [localport.io/contact](https://localport.io/contact). Do not open public issues for security reports.
+Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md). Do not open public issues for security reports.
 
 ## License
 
