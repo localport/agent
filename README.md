@@ -89,7 +89,7 @@ Complete command, flag, configuration, and protocol documentation is maintained 
 
 ## Build from source
 
-Requires Go 1.25 or newer.
+Requires Go 1.26 or newer.
 
 ```sh
 git clone https://github.com/localport/agent.git
