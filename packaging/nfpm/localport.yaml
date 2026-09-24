@@ -13,9 +13,9 @@ vendor: Localport
 homepage: https://localport.io
 license: Apache-2.0
 description: |-
-  Localport agent: tunnels and remote access
-  Exposes local services to the internet over HTTP, TCP and TLS tunnels, and
-  gives certificate-based remote access to devices in a Localport fleet.
+  Localport agent: secure tunnels and remote access
+  Publishes services over secure HTTP, TCP and TLS tunnels, and gives
+  identity-based remote access to devices in a Localport fleet.
 
 contents:
   - src: ${BINARY}
@@ -73,7 +73,7 @@ contents:
       mode: 0644
 
 rpm:
-  summary: Localport agent for tunnels and remote access
+  summary: Localport agent for secure tunnels and remote access
   packager: Localport <support@localport.io>
   compression: zstd
   signature:

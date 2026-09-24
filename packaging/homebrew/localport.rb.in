@@ -1,5 +1,5 @@
 class Localport < Formula
-  desc "Secure HTTP, TCP and TLS tunnels, and remote access to fleet devices"
+  desc "Secure tunnels and identity-based remote access to devices"
   homepage "https://localport.io"
   version "@VERSION@"
   license "Apache-2.0"

@@ -1,6 +1,6 @@
 {
     "version": "@VERSION@",
-    "description": "Secure HTTP, TCP and TLS tunnels, and remote access to fleet devices",
+    "description": "Secure tunnels and identity-based remote access to devices",
     "homepage": "https://localport.io",
     "license": "Apache-2.0",
     "architecture": {

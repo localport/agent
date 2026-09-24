@@ -15,7 +15,7 @@ ARG REVISION
 ARG CREATED
 
 LABEL org.opencontainers.image.title="localport" \
-      org.opencontainers.image.description="Localport agent: tunnels and remote access" \
+      org.opencontainers.image.description="Localport agent: secure tunnels and remote access" \
       org.opencontainers.image.url="https://localport.io" \
       org.opencontainers.image.documentation="https://localport.io/docs" \
       org.opencontainers.image.source="https://github.com/localport/agent" \
