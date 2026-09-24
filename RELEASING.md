@@ -69,16 +69,21 @@ scripts.
    `checksums.txt.sig` before anything else, then:
    - builds and signs the packages, merges them into the published repository,
      rebuilds and signs the indexes;
-   - installs from the new repository on Debian, Ubuntu, Rocky Linux, Fedora
-     and Alpine, and stops if any install fails;
+   - installs from the new repository on Debian, Ubuntu, Rocky Linux, Amazon
+     Linux, Fedora and Alpine, and stops if any install fails;
    - publishes the repository, then the image, then the GitHub release;
-   - opens pull requests on `localport/homebrew-tap`, `localport/scoop-bucket`
-     and, once `WINGET_IDENTIFIER` is set, `microsoft/winget-pkgs`.
+   - opens pull requests on `localport/homebrew-tap` and
+     `localport/scoop-bucket`.
+
+   The **winget** job then opens the `microsoft/winget-pkgs` pull request with
+   [Komac](https://github.com/russellbanks/Komac), once the repository
+   variable `WINGET_IDENTIFIER` is set. It runs in the `winget` environment,
+   which holds only `WINGET_TOKEN`, and its `GITHUB_TOKEN` has no permissions.
 
 5. Merge the Homebrew and Scoop pull requests once their checks pass.
 
-A failed publish job can be re-run. Afterwards, check `microsoft/winget-pkgs`
-for a duplicate pull request.
+A failed publish or winget job can be re-run. Komac skips a version that
+already has an open pull request.
 
 `make release-dryrun` runs steps 2 and 4 locally with throwaway keys and
 publishes nothing. The **Packaging** workflow runs it on every change to the
@@ -126,5 +131,9 @@ as documented.
 
 - Actions are pinned by commit SHA and updated by Dependabot, as are Go
   modules and the image's base.
-- The Debian and Alpine images in the `Makefile` (`DEBIAN_IMAGE`,
-  `ALPINE_IMAGE`) are pinned by digest and updated by hand.
+- Dependabot proposes a version update 7 days after its release. Security
+  updates are not delayed.
+- Updated by hand: the Debian and Alpine images in the `Makefile`
+  (`DEBIAN_IMAGE`, `ALPINE_IMAGE`, pinned by digest), the distributions in
+  `scripts/release/repo-test.sh`, the cosign version in `release.yml`, and
+  Komac (`KOMAC_VERSION`, `KOMAC_SHA256` in `release.yml`).

@@ -39,7 +39,7 @@ gh attestation verify localport-linux-amd64 --repo localport/agent \
   --signer-workflow localport/agent/.github/workflows/release.yml
 ```
 
-To check the container image:
+To check the container image (cosign 3.1.3 or later):
 
 ```sh
 cosign verify ghcr.io/localport/agent:<version> \
