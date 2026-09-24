@@ -1,26 +1,14 @@
 name: Packaging
 
 # Release dry run with throwaway keys: packages, signed repositories and
-# install tests.
+# install tests. Every check here is required on main. The dry run runs on a
+# pull request only when it changes release files, and a skipped job counts
+# as passed.
 
 on:
   push:
     branches: [main]
-    paths:
-      - ".github/workflows/packaging.yml"
-      - ".github/workflows/release.yml"
-      - "Makefile"
-      - "go.mod"
-      - "packaging/**"
-      - "scripts/release/**"
   pull_request:
-    paths:
-      - ".github/workflows/packaging.yml"
-      - ".github/workflows/release.yml"
-      - "Makefile"
-      - "go.mod"
-      - "packaging/**"
-      - "scripts/release/**"
 
 permissions:
   contents: read
@@ -30,8 +18,39 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Detect release changes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      release: ${{ steps.detect.outputs.release }}
+    steps:
+      - name: Detect
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$PR" ]; then
+            echo "release=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files="$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename')"
+          # The files API lists at most 3000 files, so a larger change runs.
+          if [ "$(wc -l <<<"$files")" -ge 3000 ] ||
+            grep -qE '^(\.github/workflows/(packaging|release)\.yml|Makefile|go\.mod|packaging/.+|scripts/release/.+)$' <<<"$files"; then
+            echo "release=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "release=false" >>"$GITHUB_OUTPUT"
+          fi
+
   dryrun:
     name: Release dry run
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 40
     steps:
