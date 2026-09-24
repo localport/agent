@@ -33,7 +33,7 @@ Accounts and tunnels are managed at [localport.io](https://localport.io).
 - **CI with no secret.** In a pipeline the agent exchanges the platform's workload identity (GitHub Actions out of the box) for a short-lived certificate held in memory. Nothing is stored in the repository, the CI secret store, or on the runner.
 - **Access control.** IP allow lists and password protection on public tunnels. Fleets are reached by client certificate.
 - **Data privacy.** Traffic is never inspected, logged, or used for training, and each tunnel is pinned to a chosen region.
-- **Cross-platform.** Signed releases for macOS, Linux (including 32-bit ARM), and Windows, as binaries, apt/dnf/apk packages, and a container image.
+- **Cross-platform.** Signed releases for macOS 13 or later, Linux with kernel 3.2 or later (including 32-bit ARM), and Windows 10 or later, as binaries, apt/dnf/apk packages, and a container image.
 
 ## Installation
 
@@ -89,7 +89,7 @@ Complete command, flag, configuration, and protocol documentation is maintained 
 
 ## Build from source
 
-Requires Go 1.26 or newer.
+Requires Go 1.27 or newer.
 
 ```sh
 git clone https://github.com/localport/agent.git

@@ -27,7 +27,7 @@ jobs:
         include:
           # Minimum version from go.mod, as stated in the README.
           - os: ubuntu-latest
-            go: "1.26"
+            go: "1.27"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:

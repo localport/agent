@@ -8,22 +8,21 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/localport/agent/internal/proto"
 	"github.com/localport/agent/internal/transport"
-
-	"golang.org/x/net/http2"
 )
 
-// HTTP/2 flow control windows for data the edge sends. The x/net/http2 server
+// HTTP/2 flow control windows for data the edge sends. The net/http server
 // default of 1 MiB per connection throttles concurrent uploads.
 //
-// 4 MiB per stream matches the x/net http2.Transport default. 16 MiB per
-// connection matches the grpc-go BDP estimator cap. Windows are limits, and
-// memory is used only while the local service reads slower than the edge
-// sends.
+// 4 MiB per stream matches the net/http client default. 16 MiB per connection
+// matches the grpc-go BDP estimator cap. Windows are limits, and memory is used
+// only while the local service reads slower than the edge sends.
 const (
 	muxUploadBufferPerConnection = 16 << 20
 	muxUploadBufferPerStream     = 4 << 20
@@ -224,14 +223,6 @@ func (t *Tunnel) dialAndBindMux(ctx context.Context, edgeAddr, sessionID string)
 
 // serveMux serves streams until the connection drops.
 func (t *Tunnel) serveMux(conn net.Conn) {
-	server := &http2.Server{
-		MaxConcurrentStreams:         maxConcurrentDataConns,
-		MaxUploadBufferPerConnection: muxUploadBufferPerConnection,
-		MaxUploadBufferPerStream:     muxUploadBufferPerStream,
-		// Close a half-open connection. The edge pings idle connections.
-		IdleTimeout: muxIdleTimeout,
-	}
-
 	handler := &muxServer{
 		dialTarget:   t.dialTarget,
 		device:       t.IsDevice(),
@@ -242,9 +233,55 @@ func (t *Tunnel) serveMux(conn net.Conn) {
 		defaultProto: t.opts.Protocol,
 	}
 
-	// ServeConn blocks for the life of the connection.
-	server.ServeConn(conn, &http2.ServeConnOpts{Handler: handler})
+	closed := make(chan struct{})
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
+	server := &http.Server{
+		Handler:   handler,
+		Protocols: &protocols,
+		HTTP2: &http.HTTP2Config{
+			MaxConcurrentStreams:          maxConcurrentDataConns,
+			MaxReceiveBufferPerConnection: muxUploadBufferPerConnection,
+			MaxReceiveBufferPerStream:     muxUploadBufferPerStream,
+		},
+		// Close a half-open connection. The edge pings idle connections.
+		IdleTimeout: muxIdleTimeout,
+		ConnState: func(_ net.Conn, state http.ConnState) {
+			if state == http.StateClosed {
+				close(closed)
+			}
+		},
+	}
+	// Serve returns once the listener is exhausted. The connection is served
+	// on its own goroutine until it closes.
+	_ = server.Serve(&muxListener{conn: plainConn{conn}})
+	<-closed
 }
+
+// plainConn hides the TLS state of the control carrier. The mux speaks HTTP/2
+// with prior knowledge inside it, and net/http would otherwise route the
+// connection by the carrier's ALPN.
+type plainConn struct{ net.Conn }
+
+// muxListener hands one connection to http.Server.
+type muxListener struct {
+	conn net.Conn
+	once sync.Once
+}
+
+var errMuxListenerDone = errors.New("mux listener: connection already served")
+
+func (l *muxListener) Accept() (net.Conn, error) {
+	var conn net.Conn
+	l.once.Do(func() { conn = l.conn })
+	if conn == nil {
+		return nil, errMuxListenerDone
+	}
+	return conn, nil
+}
+
+func (l *muxListener) Close() error   { return nil }
+func (l *muxListener) Addr() net.Addr { return l.conn.LocalAddr() }
 
 // newStreamID labels a stream in the live connection view. The dial-back path
 // takes its id from the edge's NewConnection frame; a stream has no such frame,
