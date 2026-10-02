@@ -244,8 +244,7 @@ agent takes no action.
 | -------------------- | ------------------------------------------------ | --------- |
 | `""`                 | Unspecified; fall back to the `code` field       | depends   |
 | `bandwidth`          | Team hit its monthly bandwidth cap               | no        |
-| `client_connections` | Too many concurrent clients across the team      | no        |
-| `tunnel_count`       | Team hit its max tunnel count                    | no        |
+| `client_connections` | A fanout tunnel reached its plan's client limit         | yes at registration, no when a session is closed for it |
 | `no_plan`            | Team has no active paid or trialing subscription | no        |
 | `payment_due_paused` | Team holds a plan, payment is overdue, and its grace window has elapsed | no |
 | `blocked`            | Access blocked for this tunnel or team           | no        |
@@ -381,15 +380,21 @@ Public message families an agent may surface:
 | Plan limit                | plan limit reached, upgrade to continue        | no        |
 | Payment overdue           | payment is overdue, update your payment method | no        |
 | Resource limit            | resource limit reached                         | no        |
-| Client limit              | client connection limit reached                | no        |
-| Tunnel limit              | tunnel limit reached                           | no        |
+| Client limit              | this tunnel has reached the number of clients its plan allows | no |
 | Tunnel terminated/deleted | tunnel terminated by an administrator          | no        |
 | Session replaced          | replaced by a newer session for this tunnel    | no        |
 | Unknown fleet device      | this device is not on the fleet: create it ... | no        |
-| Fleet device limit        | this fleet has reached its device limit        | no        |
+| Device limit              | your team has reached the number of devices its plan allows | no |
 | Duplicate device name     | another device on this tunnel is using this... | **yes**   |
 | Token kind mismatch       | invalid token usage                            | no        |
 | Protocol / clock          | protocol error, update the agent ...           | no        |
+
+**Device limit** counts the devices a team has registered across all of its
+fleets. A device that is already registered is never refused by it.
+
+**Client limit** applies to one fanout tunnel. A tunnel or device that the
+service has no room for right now is reported as service unavailable and is
+retried.
 
 **Unknown fleet device** is non-retryable. Waiting cannot change the answer, and
 the message says what to do.
