@@ -427,7 +427,7 @@ func parseDeviceHost(name, host string) (string, error) {
 		return "", fmt.Errorf("device %q: host takes an address without a scheme", name)
 	}
 	if hasExplicitPort(host) {
-		return "", fmt.Errorf("device %q: host takes an address without a port, the dashboard opens the ports", name)
+		return "", fmt.Errorf("device %q: host takes an address without a port, ports are set in the dashboard", name)
 	}
 	return host, nil
 }

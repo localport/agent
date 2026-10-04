@@ -57,7 +57,7 @@ func (p *devicePorts) Version() uint64 {
 	return p.version
 }
 
-// List returns the open ports sorted by number.
+// List returns the allowed ports sorted by number.
 func (p *devicePorts) List() []proto.DevicePort {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

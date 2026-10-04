@@ -64,12 +64,12 @@ func TestDeviceHeaderNamesTheDeviceAndItsPorts(t *testing.T) {
 	}
 }
 
-// A device with no open ports says so in the header.
-func TestDeviceHeaderWarnsWhenNoPortsAreOpen(t *testing.T) {
+// A device with no allowed ports says so in the header.
+func TestDeviceHeaderWarnsWhenNoPortsAreAllowed(t *testing.T) {
 	ts := deviceState()
 	ts.ports = nil
 	got := strings.Join(renderHeader(deviceSnap(ts)), "\n")
-	if !strings.Contains(got, "no ports open") {
+	if !strings.Contains(got, "no ports allowed") {
 		t.Fatalf("header does not say the device serves nothing:\n%s", got)
 	}
 }

@@ -268,7 +268,7 @@ func (a streamAddr) String() string  { return string(a) }
 func statusError(port uint16, status int) error {
 	switch status {
 	case http.StatusForbidden:
-		return fmt.Errorf("not allowed: check this identity's access to the device, and that port %d is open on it", port)
+		return fmt.Errorf("not allowed: check this identity's access to the device, and that port %d is allowed on it", port)
 	case http.StatusMisdirectedRequest:
 		return errors.New("address does not match the device")
 	case http.StatusMethodNotAllowed:

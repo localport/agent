@@ -440,7 +440,7 @@ func bottomCount(ts tState, s snap) int {
 func bottomEmptyMsg(ts tState, pal Palette) string {
 	switch {
 	case ts.device && len(ts.ports) == 0:
-		return pal.Muted("no ports open: edit this device in the dashboard")
+		return pal.Muted("no ports allowed: edit this device in the dashboard")
 	case ts.device:
 		return pal.Muted("no connections yet")
 	case httpProto(ts.proto):

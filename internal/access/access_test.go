@@ -81,7 +81,7 @@ func TestParseForward(t *testing.T) {
 // Each refusal status maps to an actionable message.
 func TestStatusErrorsAreActionable(t *testing.T) {
 	cases := map[int]string{
-		403: "port 502 is open",
+		403: "port 502 is allowed",
 		421: "address does not match",
 		405: "not a fleet device address",
 		502: "nothing is listening on port 502",

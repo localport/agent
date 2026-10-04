@@ -52,7 +52,7 @@ identical on either carrier.
 | Redirect        | 10  | E → C     | Reconnect to a different edge    |
 | MuxBind         | 11  | C → E     | Attach a multiplexed data conn   |
 | MuxBindAck      | 12  | E → C     | Mux bind result                  |
-| PortsUpdate     | 13  | E → C     | A device's new open ports        |
+| PortsUpdate     | 13  | E → C     | A device's new allowed ports     |
 | PortsAck        | 14  | C → E     | The port version now served      |
 
 ## Payloads
@@ -77,7 +77,7 @@ identical on either carrier.
 
 `kind` is `tunnel` or `device`; absent reads as `tunnel`. A **tunnel** publishes
 one local service and names its `protocol` (`http`, `tcp`, `tls`). A **device**
-joins a fleet, sends no protocol, and serves the ports the dashboard opens on it.
+joins a fleet, sends no protocol, and serves the ports the dashboard allows on it.
 Sending the wrong kind for the token is refused with `PR009`.
 
 `allowed_ports` is a device's optional port ceiling (`--allow-ports`): up to 64
@@ -148,7 +148,7 @@ cannot kick each other in a loop (the replaced one stops).
 
 ### PortsUpdate (13) / PortsAck (14)
 
-A device's open ports are set in the dashboard. The list arrives in `RegisterAck`
+A device's allowed ports are set in the dashboard. The list arrives in `RegisterAck`
 and is replaced by `PortsUpdate`:
 
 ```json
@@ -169,7 +169,7 @@ closes the local sockets it holds for that port when it applies the update. An
 added port is accepted by the edge only after this acknowledgement, since
 control frames and data streams travel on different connections.
 
-A port the dashboard opens outside the device's `allowed_ports` stays in the
+A port the dashboard allows outside the device's `allowed_ports` stays in the
 list and is refused: the dashboard shows it as blocked by the device.
 
 `protocol` is `tcp` (opaque bytes) or `http` (requests are parsed for this
@@ -503,7 +503,7 @@ port must be one the device serves. Refusals come back as status codes:
 | `405`  | not a fleet device address                                    |
 | `421`  | the authority is not the device this connection was opened to |
 | `400`  | the authority carries no usable port                          |
-| `403`  | the identity has no access, or the port is not open           |
+| `403`  | the identity has no access, or the port is not allowed        |
 | `502`  | nothing is listening on that port on the device               |
 | `503`  | the device is busy                                            |
 

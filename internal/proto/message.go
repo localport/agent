@@ -109,7 +109,7 @@ type RegisterAckPayload struct {
 	// next Register to reclaim the slot.
 	SessionID string `json:"session_id,omitempty"`
 
-	// Ports lists the device's open ports as set in the dashboard, with their
+	// Ports lists the device's allowed ports as set in the dashboard, with their
 	// version.
 	PortsVersion uint64       `json:"ports_version,omitempty"`
 	Ports        []DevicePort `json:"ports,omitempty"`
@@ -127,8 +127,8 @@ type DevicePort struct {
 	Protocol string `json:"protocol"` // tcp | http
 }
 
-// PortsUpdatePayload replaces a device's open ports when Version is higher than
-// the current one. The device answers with PortsAck.
+// PortsUpdatePayload replaces a device's allowed ports when Version is higher
+// than the current one. The device answers with PortsAck.
 type PortsUpdatePayload struct {
 	Version uint64       `json:"version"`
 	Ports   []DevicePort `json:"ports"`

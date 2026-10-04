@@ -237,7 +237,7 @@ type Tunnel struct {
 	// probe, or zero when none is pending.
 	fastProbeAt atomic.Int64
 
-	// ports is the device's open ports, nil on a tunnel.
+	// ports is the device's allowed ports, nil on a tunnel.
 	ports *devicePorts
 
 	totalBytesIn  atomic.Int64
@@ -305,7 +305,7 @@ func New(opts Options) *Tunnel {
 // IsDevice reports whether this runtime serves a fleet device.
 func (t *Tunnel) IsDevice() bool { return t.ports != nil }
 
-// Ports lists the device's open ports, nil on a tunnel.
+// Ports lists the device's allowed ports, nil on a tunnel.
 func (t *Tunnel) Ports() []proto.DevicePort {
 	if t.ports == nil {
 		return nil
@@ -335,7 +335,7 @@ func (t *Tunnel) dialTarget(port uint16) (net.Conn, int, error) {
 		return nil, http.StatusForbidden, errors.New("no port requested")
 	}
 	if _, open := t.ports.Protocol(port); !open {
-		return nil, http.StatusForbidden, fmt.Errorf("port %d is not open on this device", port)
+		return nil, http.StatusForbidden, fmt.Errorf("port %d is not allowed on this device", port)
 	}
 	if !t.opts.AllowPorts.Allows(port) {
 		return nil, http.StatusForbidden, fmt.Errorf("port %d is outside this device's --allow-ports", port)

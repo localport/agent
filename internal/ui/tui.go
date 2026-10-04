@@ -67,7 +67,7 @@ type tState struct {
 	lastCode    string
 	connected   bool
 
-	// device marks a fleet device. ports are the open ports and local is the
+	// device marks a fleet device. ports are the allowed ports and local is the
 	// target host.
 	device bool
 	ports  []proto.DevicePort

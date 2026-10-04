@@ -86,7 +86,7 @@ func runSetup(args []string) error {
 		fmt.Fprintf(os.Stderr, "  renews     %s\n", due.Format(time.RFC3339))
 	}
 	fmt.Fprintf(os.Stderr, "\n  next: localport access <device>-<fleet>.<region>.localport.dev -L 5020:502\n")
-	fmt.Fprintf(os.Stderr, "        one -L per port, <local>:<device>. The device's open ports are in the dashboard.\n")
+	fmt.Fprintf(os.Stderr, "        one -L per port, <local>:<device>. The device's allowed ports are in the dashboard.\n")
 	return nil
 }
 
