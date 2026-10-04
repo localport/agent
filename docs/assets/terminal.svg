@@ -1,0 +1,455 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 404" width="600" height="404" role="img" aria-labelledby="title desc" font-family="ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace" font-size="14">
+<title id="title">Localport agent terminal</title>
+<desc id="desc">"localport tcp 18789" opens a tunnel at tcp://example.eu.localport.dev:41234 and lists its live connections. Then "localport http 3000" opens https://myapp.eu.localport.dev and lists each request with its method, path, status and duration.</desc>
+<style>
+/* Unanimated state is the last connected frame, so a renderer that plays no animation still shows the result. */
+.cursor{animation:blink 1s step-end infinite}
+.t{opacity:0;animation:24s step-end infinite}
+.cap{fill:#161614;stroke:#161614;stroke-width:8px;stroke-linejoin:round;paint-order:stroke}
+@keyframes blink{50%{opacity:0}}
+.p0{opacity:0;animation:p0 24s step-end infinite}
+@keyframes p0{0%{opacity:1}12.5%{opacity:0}100%{opacity:0}}
+.f0{opacity:0;animation:f0 24s linear infinite}
+@keyframes f0{0%{opacity:0}12.5%{opacity:0}13.958%{opacity:1}49.958%{opacity:1}50%{opacity:0}100%{opacity:0}}
+.y0{animation:y0 24s linear infinite}
+@keyframes y0{0%{transform:translateX(0)}2.5%{transform:translateX(0);animation-timing-function:steps(43,end)}10%{transform:translateX(361.2px)}100%{transform:translateX(361.2px)}}
+.t00{animation-name:t00}
+@keyframes t00{0%{opacity:0}12.5%{opacity:1}16.667%{opacity:0}100%{opacity:0}}
+.t01{animation-name:t01}
+@keyframes t01{0%{opacity:0}16.667%{opacity:1}20.833%{opacity:0}100%{opacity:0}}
+.t02{animation-name:t02}
+@keyframes t02{0%{opacity:0}20.833%{opacity:1}25%{opacity:0}100%{opacity:0}}
+.t03{animation-name:t03}
+@keyframes t03{0%{opacity:0}25%{opacity:1}29.167%{opacity:0}100%{opacity:0}}
+.t04{animation-name:t04}
+@keyframes t04{0%{opacity:0}29.167%{opacity:1}33.333%{opacity:0}100%{opacity:0}}
+.t05{animation-name:t05}
+@keyframes t05{0%{opacity:0}33.333%{opacity:1}37.5%{opacity:0}100%{opacity:0}}
+.t06{animation-name:t06}
+@keyframes t06{0%{opacity:0}37.5%{opacity:1}41.667%{opacity:0}100%{opacity:0}}
+.t07{animation-name:t07}
+@keyframes t07{0%{opacity:0}41.667%{opacity:1}45.833%{opacity:0}100%{opacity:0}}
+.t08{animation-name:t08}
+@keyframes t08{0%{opacity:0}45.833%{opacity:1}50%{opacity:0}100%{opacity:0}}
+.p1{opacity:0;animation:p1 24s step-end infinite}
+@keyframes p1{0%{opacity:0}50%{opacity:1}62.5%{opacity:0}100%{opacity:0}}
+.f1{opacity:1;animation:f1 24s linear infinite}
+@keyframes f1{0%{opacity:0}62.5%{opacity:0}63.958%{opacity:1}99.958%{opacity:1}100%{opacity:1}}
+.y1{animation:y1 24s linear infinite}
+@keyframes y1{0%{transform:translateX(0)}52.5%{transform:translateX(0);animation-timing-function:steps(43,end)}60%{transform:translateX(361.2px)}100%{transform:translateX(361.2px)}}
+.t10{animation-name:t10}
+@keyframes t10{0%{opacity:0}62.5%{opacity:1}66.667%{opacity:0}100%{opacity:0}}
+.t11{animation-name:t11}
+@keyframes t11{0%{opacity:0}66.667%{opacity:1}70.833%{opacity:0}100%{opacity:0}}
+.t12{animation-name:t12}
+@keyframes t12{0%{opacity:0}70.833%{opacity:1}75%{opacity:0}100%{opacity:0}}
+.t13{animation-name:t13}
+@keyframes t13{0%{opacity:0}75%{opacity:1}79.167%{opacity:0}100%{opacity:0}}
+.t14{animation-name:t14}
+@keyframes t14{0%{opacity:0}79.167%{opacity:1}83.333%{opacity:0}100%{opacity:0}}
+.t15{animation-name:t15}
+@keyframes t15{0%{opacity:0}83.333%{opacity:1}87.5%{opacity:0}100%{opacity:0}}
+.t16{animation-name:t16}
+@keyframes t16{0%{opacity:0}87.5%{opacity:1}91.667%{opacity:0}100%{opacity:0}}
+.t17{animation-name:t17}
+@keyframes t17{0%{opacity:0}91.667%{opacity:1}95.833%{opacity:0}100%{opacity:0}}
+.t18{opacity:1;animation-name:t18}
+@keyframes t18{0%{opacity:0}95.833%{opacity:1}100%{opacity:1}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+<clipPath id="window"><rect width="600" height="404" rx="12"/></clipPath>
+<g clip-path="url(#window)">
+<rect width="600" height="404" fill="#161614"/>
+<rect width="600" height="38" fill="#0e0e0c"/>
+<path d="M0 38.5H600" stroke="#2a2926"/>
+<circle cx="21" cy="19" r="5" fill="#ff5f57"/><circle cx="39" cy="19" r="5" fill="#febc2e"/><circle cx="57" cy="19" r="5" fill="#28c840"/>
+<text x="300" y="23" fill="#848078" text-anchor="middle" font-size="12" fill-opacity=".7">localport</text>
+<g class="p0">
+<text x="18" y="75" fill="#5fa365">$</text>
+<text x="34.8" y="75" fill="#e9e8e4" textLength="361.2">localport tcp 18789 -t tok_LP_9f3a7c2d8b1e4</text>
+<g class="y0"><rect x="34.8" y="60" width="600" height="22" fill="#161614"/><rect class="cursor" x="35.8" y="63" width="7" height="15" fill="#e9e8e4" fill-opacity=".8"/></g>
+</g>
+<g class="f0">
+<rect x="18.5" y="56.5" width="563" height="330" fill="none" stroke="#807765" stroke-opacity=".6"/>
+<path d="M18.5 232.5H581.5" stroke="#807765" stroke-opacity=".6"/>
+<text x="30" y="61" text-anchor="start" class="cap">[xlocalportx]</text><text x="30" y="61" text-anchor="start" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">localport</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="30" y="237" text-anchor="start" class="cap">[xlivexconnectionsx]</text><text x="30" y="237" text-anchor="start" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#848078">live connections</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="93" fill="#848078">Name</text><text x="155.6" y="93" fill="#e9e8e4">Example</text>
+<text x="38" y="115" fill="#848078">Region</text><text x="155.6" y="115" fill="#e9e8e4">Europe</text>
+<text x="38" y="137" fill="#848078">Forwarding</text><text x="155.6" y="137" fill="#5fa365">tcp://example.eu.localport.dev:41234</text>
+<text x="38" y="159" fill="#848078">Local</text><text x="155.6" y="159" fill="#e9e8e4">tcp://localhost:18789</text>
+<text x="38" y="181" fill="#848078">Bandwidth</text>
+<text x="38" y="203" fill="#848078">Connections</text>
+<g class="t t00">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x0sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">0s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="181" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">0B</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">0B</tspan></text>
+<text x="155.6" y="203" fill="#e9e8e4">0</text>
+<text x="570" y="237" text-anchor="end" class="cap">[x0x]</text><text x="570" y="237" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">0</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="300" y="280" fill="#848078" text-anchor="middle">no live connections</text>
+</g>
+<g class="t t01">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x1sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">1s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="181" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">94.1KB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">182.9KB</tspan></text>
+<text x="155.6" y="203" fill="#e9e8e4">1</text>
+<text x="570" y="237" text-anchor="end" class="cap">[x1x]</text><text x="570" y="237" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">1</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="258" fill="#848078">IP</text>
+<text x="276.4" y="258" fill="#848078">DUR</text>
+<text x="461.2" y="258" fill="#848078" text-anchor="end">↓ IN</text>
+<text x="562" y="258" fill="#848078" text-anchor="end">↑ OUT</text>
+<text x="38" y="280" fill="#e9e8e4">203.0.113.42</text>
+<text x="276.4" y="280" fill="#e9e8e4">0s</text>
+<text x="461.2" y="280" fill="#5fa365" text-anchor="end">94.1KB</text>
+<text x="562" y="280" fill="#5fa365" text-anchor="end">182.9KB</text>
+</g>
+<g class="t t02">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x2sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">2s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="181" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">544.8KB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">931.0KB</tspan></text>
+<text x="155.6" y="203" fill="#e9e8e4">1</text>
+<text x="570" y="237" text-anchor="end" class="cap">[x1x]</text><text x="570" y="237" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">1</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="258" fill="#848078">IP</text>
+<text x="276.4" y="258" fill="#848078">DUR</text>
+<text x="461.2" y="258" fill="#848078" text-anchor="end">↓ IN</text>
+<text x="562" y="258" fill="#848078" text-anchor="end">↑ OUT</text>
+<text x="38" y="280" fill="#e9e8e4">203.0.113.42</text>
+<text x="276.4" y="280" fill="#e9e8e4">1s</text>
+<text x="461.2" y="280" fill="#5fa365" text-anchor="end">544.8KB</text>
+<text x="562" y="280" fill="#5fa365" text-anchor="end">931.0KB</text>
+</g>
+<g class="t t03">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x3sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">3s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="181" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">989.1KB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">1.7MB</tspan></text>
+<text x="155.6" y="203" fill="#e9e8e4">2</text>
+<text x="570" y="237" text-anchor="end" class="cap">[x2x]</text><text x="570" y="237" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">2</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="258" fill="#848078">IP</text>
+<text x="276.4" y="258" fill="#848078">DUR</text>
+<text x="461.2" y="258" fill="#848078" text-anchor="end">↓ IN</text>
+<text x="562" y="258" fill="#848078" text-anchor="end">↑ OUT</text>
+<text x="38" y="280" fill="#e9e8e4">198.51.100.7</text>
+<text x="276.4" y="280" fill="#e9e8e4">0s</text>
+<text x="461.2" y="280" fill="#5fa365" text-anchor="end">70.1KB</text>
+<text x="562" y="280" fill="#5fa365" text-anchor="end">151.3KB</text>
+<text x="38" y="302" fill="#e9e8e4">203.0.113.42</text>
+<text x="276.4" y="302" fill="#e9e8e4">2s</text>
+<text x="461.2" y="302" fill="#5fa365" text-anchor="end">918.9KB</text>
+<text x="562" y="302" fill="#5fa365" text-anchor="end">1.5MB</text>
+</g>
+<g class="t t04">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x4sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">4s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="181" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">2.1MB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">3.3MB</tspan></text>
+<text x="155.6" y="203" fill="#e9e8e4">2</text>
+<text x="570" y="237" text-anchor="end" class="cap">[x2x]</text><text x="570" y="237" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">2</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="258" fill="#848078">IP</text>
+<text x="276.4" y="258" fill="#848078">DUR</text>
+<text x="461.2" y="258" fill="#848078" text-anchor="end">↓ IN</text>
+<text x="562" y="258" fill="#848078" text-anchor="end">↑ OUT</text>
+<text x="38" y="280" fill="#e9e8e4">198.51.100.7</text>
+<text x="276.4" y="280" fill="#e9e8e4">1s</text>
+<text x="461.2" y="280" fill="#5fa365" text-anchor="end">705.8KB</text>
+<text x="562" y="280" fill="#5fa365" text-anchor="end">1.0MB</text>
+<text x="38" y="302" fill="#e9e8e4">203.0.113.42</text>
+<text x="276.4" y="302" fill="#e9e8e4">3s</text>
+<text x="461.2" y="302" fill="#5fa365" text-anchor="end">1.4MB</text>
+<text x="562" y="302" fill="#5fa365" text-anchor="end">2.3MB</text>
+</g>
+<g class="t t05">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x5sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">5s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="181" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">2.8MB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">4.4MB</tspan></text>
+<text x="155.6" y="203" fill="#e9e8e4">2</text>
+<text x="570" y="237" text-anchor="end" class="cap">[x2x]</text><text x="570" y="237" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">2</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="258" fill="#848078">IP</text>
+<text x="276.4" y="258" fill="#848078">DUR</text>
+<text x="461.2" y="258" fill="#848078" text-anchor="end">↓ IN</text>
+<text x="562" y="258" fill="#848078" text-anchor="end">↑ OUT</text>
+<text x="38" y="280" fill="#e9e8e4">198.51.100.7</text>
+<text x="276.4" y="280" fill="#e9e8e4">2s</text>
+<text x="461.2" y="280" fill="#5fa365" text-anchor="end">1.1MB</text>
+<text x="562" y="280" fill="#5fa365" text-anchor="end">1.6MB</text>
+<text x="38" y="302" fill="#e9e8e4">203.0.113.42</text>
+<text x="276.4" y="302" fill="#e9e8e4">4s</text>
+<text x="461.2" y="302" fill="#5fa365" text-anchor="end">1.7MB</text>
+<text x="562" y="302" fill="#5fa365" text-anchor="end">2.8MB</text>
+</g>
+<g class="t t06">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x6sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">6s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="181" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">3.7MB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">5.9MB</tspan></text>
+<text x="155.6" y="203" fill="#e9e8e4">2</text>
+<text x="570" y="237" text-anchor="end" class="cap">[x2x]</text><text x="570" y="237" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">2</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="258" fill="#848078">IP</text>
+<text x="276.4" y="258" fill="#848078">DUR</text>
+<text x="461.2" y="258" fill="#848078" text-anchor="end">↓ IN</text>
+<text x="562" y="258" fill="#848078" text-anchor="end">↑ OUT</text>
+<text x="38" y="280" fill="#e9e8e4">198.51.100.7</text>
+<text x="276.4" y="280" fill="#e9e8e4">3s</text>
+<text x="461.2" y="280" fill="#5fa365" text-anchor="end">1.6MB</text>
+<text x="562" y="280" fill="#5fa365" text-anchor="end">2.4MB</text>
+<text x="38" y="302" fill="#e9e8e4">203.0.113.42</text>
+<text x="276.4" y="302" fill="#e9e8e4">5s</text>
+<text x="461.2" y="302" fill="#5fa365" text-anchor="end">2.1MB</text>
+<text x="562" y="302" fill="#5fa365" text-anchor="end">3.5MB</text>
+</g>
+<g class="t t07">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x7sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">7s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="181" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">4.6MB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">7.2MB</tspan></text>
+<text x="155.6" y="203" fill="#e9e8e4">2</text>
+<text x="570" y="237" text-anchor="end" class="cap">[x2x]</text><text x="570" y="237" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">2</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="258" fill="#848078">IP</text>
+<text x="276.4" y="258" fill="#848078">DUR</text>
+<text x="461.2" y="258" fill="#848078" text-anchor="end">↓ IN</text>
+<text x="562" y="258" fill="#848078" text-anchor="end">↑ OUT</text>
+<text x="38" y="280" fill="#e9e8e4">198.51.100.7</text>
+<text x="276.4" y="280" fill="#e9e8e4">4s</text>
+<text x="461.2" y="280" fill="#5fa365" text-anchor="end">2.1MB</text>
+<text x="562" y="280" fill="#5fa365" text-anchor="end">3.1MB</text>
+<text x="38" y="302" fill="#e9e8e4">203.0.113.42</text>
+<text x="276.4" y="302" fill="#e9e8e4">6s</text>
+<text x="461.2" y="302" fill="#5fa365" text-anchor="end">2.5MB</text>
+<text x="562" y="302" fill="#5fa365" text-anchor="end">4.1MB</text>
+</g>
+<g class="t t08">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x8sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">8s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="181" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">5.6MB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">8.8MB</tspan></text>
+<text x="155.6" y="203" fill="#e9e8e4">2</text>
+<text x="570" y="237" text-anchor="end" class="cap">[x2x]</text><text x="570" y="237" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">2</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="258" fill="#848078">IP</text>
+<text x="276.4" y="258" fill="#848078">DUR</text>
+<text x="461.2" y="258" fill="#848078" text-anchor="end">↓ IN</text>
+<text x="562" y="258" fill="#848078" text-anchor="end">↑ OUT</text>
+<text x="38" y="280" fill="#e9e8e4">198.51.100.7</text>
+<text x="276.4" y="280" fill="#e9e8e4">5s</text>
+<text x="461.2" y="280" fill="#5fa365" text-anchor="end">2.7MB</text>
+<text x="562" y="280" fill="#5fa365" text-anchor="end">3.9MB</text>
+<text x="38" y="302" fill="#e9e8e4">203.0.113.42</text>
+<text x="276.4" y="302" fill="#e9e8e4">7s</text>
+<text x="461.2" y="302" fill="#5fa365" text-anchor="end">2.9MB</text>
+<text x="562" y="302" fill="#5fa365" text-anchor="end">4.9MB</text>
+</g>
+</g>
+<g class="p1">
+<text x="18" y="75" fill="#5fa365">$</text>
+<text x="34.8" y="75" fill="#e9e8e4" textLength="361.2">localport http 3000 -t tok_LP_4c81e07d2a9f6</text>
+<g class="y1"><rect x="34.8" y="60" width="600" height="22" fill="#161614"/><rect class="cursor" x="35.8" y="63" width="7" height="15" fill="#e9e8e4" fill-opacity=".8"/></g>
+</g>
+<g class="f1">
+<rect x="18.5" y="56.5" width="563" height="330" fill="none" stroke="#807765" stroke-opacity=".6"/>
+<path d="M18.5 254.5H581.5" stroke="#807765" stroke-opacity=".6"/>
+<text x="30" y="61" text-anchor="start" class="cap">[xlocalportx]</text><text x="30" y="61" text-anchor="start" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">localport</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="30" y="259" text-anchor="start" class="cap">[xrequestsx]</text><text x="30" y="259" text-anchor="start" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#848078">requests</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="93" fill="#848078">Name</text><text x="155.6" y="93" fill="#e9e8e4">My App</text>
+<text x="38" y="115" fill="#848078">Region</text><text x="155.6" y="115" fill="#e9e8e4">Europe</text>
+<text x="38" y="137" fill="#848078">Forwarding</text><text x="155.6" y="137" fill="#5fa365">https://myapp.eu.localport.dev</text>
+<text x="155.6" y="159" fill="#5fa365">http://myapp.eu.localport.dev</text>
+<text x="38" y="181" fill="#848078">Local</text><text x="155.6" y="181" fill="#e9e8e4">http://localhost:3000</text>
+<text x="38" y="203" fill="#848078">Bandwidth</text>
+<text x="38" y="225" fill="#848078">Connections</text>
+<g class="t t10">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x0sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">0s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="203" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">0B</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">0B</tspan></text>
+<text x="155.6" y="225" fill="#e9e8e4">0</text>
+<text x="570" y="259" text-anchor="end" class="cap">[x0x]</text><text x="570" y="259" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">0</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="300" y="302" fill="#848078" text-anchor="middle">no requests yet</text>
+</g>
+<g class="t t11">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x1sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">1s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="203" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">412B</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">18.0KB</tspan></text>
+<text x="155.6" y="225" fill="#e9e8e4">1</text>
+<text x="570" y="259" text-anchor="end" class="cap">[x1x]</text><text x="570" y="259" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">1</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="280" fill="#848078">TIME</text>
+<text x="122" y="280" fill="#848078">METHOD</text>
+<text x="197.6" y="280" fill="#848078">PATH</text>
+<text x="427.6" y="280" fill="#848078">STATUS</text>
+<text x="562" y="280" fill="#848078" text-anchor="end">DUR</text>
+<text x="38" y="302" fill="#848078">14:32:08</text>
+<text x="122" y="302" fill="#e9e8e4">GET</text>
+<text x="197.6" y="302" fill="#e9e8e4">/</text>
+<text x="427.6" y="302" fill="#5fa365">200</text>
+<text x="562" y="302" fill="#e9e8e4" text-anchor="end">12ms</text>
+</g>
+<g class="t t12">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x2sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">2s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="203" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">850B</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">23.1KB</tspan></text>
+<text x="155.6" y="225" fill="#e9e8e4">1</text>
+<text x="570" y="259" text-anchor="end" class="cap">[x2x]</text><text x="570" y="259" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">2</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="280" fill="#848078">TIME</text>
+<text x="122" y="280" fill="#848078">METHOD</text>
+<text x="197.6" y="280" fill="#848078">PATH</text>
+<text x="427.6" y="280" fill="#848078">STATUS</text>
+<text x="562" y="280" fill="#848078" text-anchor="end">DUR</text>
+<text x="38" y="302" fill="#848078">14:32:08</text>
+<text x="122" y="302" fill="#e9e8e4">GET</text>
+<text x="197.6" y="302" fill="#e9e8e4">/</text>
+<text x="427.6" y="302" fill="#5fa365">200</text>
+<text x="562" y="302" fill="#e9e8e4" text-anchor="end">12ms</text>
+<text x="38" y="324" fill="#848078">14:32:09</text>
+<text x="122" y="324" fill="#e9e8e4">GET</text>
+<text x="197.6" y="324" fill="#e9e8e4">/api/users</text>
+<text x="427.6" y="324" fill="#5fa365">200</text>
+<text x="562" y="324" fill="#e9e8e4" text-anchor="end">48ms</text>
+</g>
+<g class="t t13">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x3sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">3s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="203" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">2.7KB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">23.4KB</tspan></text>
+<text x="155.6" y="225" fill="#e9e8e4">2</text>
+<text x="570" y="259" text-anchor="end" class="cap">[x3x]</text><text x="570" y="259" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">3</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="280" fill="#848078">TIME</text>
+<text x="122" y="280" fill="#848078">METHOD</text>
+<text x="197.6" y="280" fill="#848078">PATH</text>
+<text x="427.6" y="280" fill="#848078">STATUS</text>
+<text x="562" y="280" fill="#848078" text-anchor="end">DUR</text>
+<text x="38" y="302" fill="#848078">14:32:08</text>
+<text x="122" y="302" fill="#e9e8e4">GET</text>
+<text x="197.6" y="302" fill="#e9e8e4">/</text>
+<text x="427.6" y="302" fill="#5fa365">200</text>
+<text x="562" y="302" fill="#e9e8e4" text-anchor="end">12ms</text>
+<text x="38" y="324" fill="#848078">14:32:09</text>
+<text x="122" y="324" fill="#e9e8e4">GET</text>
+<text x="197.6" y="324" fill="#e9e8e4">/api/users</text>
+<text x="427.6" y="324" fill="#5fa365">200</text>
+<text x="562" y="324" fill="#e9e8e4" text-anchor="end">48ms</text>
+<text x="38" y="346" fill="#848078">14:32:10</text>
+<text x="122" y="346" fill="#e9e8e4">POST</text>
+<text x="197.6" y="346" fill="#e9e8e4">/webhook/stripe</text>
+<text x="427.6" y="346" fill="#5fa365">200</text>
+<text x="562" y="346" fill="#e9e8e4" text-anchor="end">142ms</text>
+</g>
+<g class="t t14">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x4sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">4s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="203" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">2.7KB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">23.4KB</tspan></text>
+<text x="155.6" y="225" fill="#e9e8e4">2</text>
+<text x="570" y="259" text-anchor="end" class="cap">[x3x]</text><text x="570" y="259" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">3</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="280" fill="#848078">TIME</text>
+<text x="122" y="280" fill="#848078">METHOD</text>
+<text x="197.6" y="280" fill="#848078">PATH</text>
+<text x="427.6" y="280" fill="#848078">STATUS</text>
+<text x="562" y="280" fill="#848078" text-anchor="end">DUR</text>
+<text x="38" y="302" fill="#848078">14:32:08</text>
+<text x="122" y="302" fill="#e9e8e4">GET</text>
+<text x="197.6" y="302" fill="#e9e8e4">/</text>
+<text x="427.6" y="302" fill="#5fa365">200</text>
+<text x="562" y="302" fill="#e9e8e4" text-anchor="end">12ms</text>
+<text x="38" y="324" fill="#848078">14:32:09</text>
+<text x="122" y="324" fill="#e9e8e4">GET</text>
+<text x="197.6" y="324" fill="#e9e8e4">/api/users</text>
+<text x="427.6" y="324" fill="#5fa365">200</text>
+<text x="562" y="324" fill="#e9e8e4" text-anchor="end">48ms</text>
+<text x="38" y="346" fill="#848078">14:32:10</text>
+<text x="122" y="346" fill="#e9e8e4">POST</text>
+<text x="197.6" y="346" fill="#e9e8e4">/webhook/stripe</text>
+<text x="427.6" y="346" fill="#5fa365">200</text>
+<text x="562" y="346" fill="#e9e8e4" text-anchor="end">142ms</text>
+</g>
+<g class="t t15">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x5sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">5s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="203" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">3.1KB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">23.6KB</tspan></text>
+<text x="155.6" y="225" fill="#e9e8e4">2</text>
+<text x="570" y="259" text-anchor="end" class="cap">[x4x]</text><text x="570" y="259" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">4</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="280" fill="#848078">TIME</text>
+<text x="122" y="280" fill="#848078">METHOD</text>
+<text x="197.6" y="280" fill="#848078">PATH</text>
+<text x="427.6" y="280" fill="#848078">STATUS</text>
+<text x="562" y="280" fill="#848078" text-anchor="end">DUR</text>
+<text x="38" y="302" fill="#848078">14:32:08</text>
+<text x="122" y="302" fill="#e9e8e4">GET</text>
+<text x="197.6" y="302" fill="#e9e8e4">/</text>
+<text x="427.6" y="302" fill="#5fa365">200</text>
+<text x="562" y="302" fill="#e9e8e4" text-anchor="end">12ms</text>
+<text x="38" y="324" fill="#848078">14:32:09</text>
+<text x="122" y="324" fill="#e9e8e4">GET</text>
+<text x="197.6" y="324" fill="#e9e8e4">/api/users</text>
+<text x="427.6" y="324" fill="#5fa365">200</text>
+<text x="562" y="324" fill="#e9e8e4" text-anchor="end">48ms</text>
+<text x="38" y="346" fill="#848078">14:32:10</text>
+<text x="122" y="346" fill="#e9e8e4">POST</text>
+<text x="197.6" y="346" fill="#e9e8e4">/webhook/stripe</text>
+<text x="427.6" y="346" fill="#5fa365">200</text>
+<text x="562" y="346" fill="#e9e8e4" text-anchor="end">142ms</text>
+<text x="38" y="368" fill="#848078">14:32:12</text>
+<text x="122" y="368" fill="#e9e8e4">GET</text>
+<text x="197.6" y="368" fill="#e9e8e4">/api/orders/1042</text>
+<text x="427.6" y="368" fill="#d5a44b">404</text>
+<text x="562" y="368" fill="#e9e8e4" text-anchor="end">7ms</text>
+</g>
+<g class="t t16">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x6sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">6s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="203" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">3.8KB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">24.7KB</tspan></text>
+<text x="155.6" y="225" fill="#e9e8e4">3</text>
+<text x="570" y="259" text-anchor="end" class="cap">[x5x]</text><text x="570" y="259" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">5</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="280" fill="#848078">TIME</text>
+<text x="122" y="280" fill="#848078">METHOD</text>
+<text x="197.6" y="280" fill="#848078">PATH</text>
+<text x="427.6" y="280" fill="#848078">STATUS</text>
+<text x="562" y="280" fill="#848078" text-anchor="end">DUR</text>
+<text x="38" y="302" fill="#848078">…1 earlier</text>
+<text x="38" y="324" fill="#848078">14:32:10</text>
+<text x="122" y="324" fill="#e9e8e4">POST</text>
+<text x="197.6" y="324" fill="#e9e8e4">/webhook/stripe</text>
+<text x="427.6" y="324" fill="#5fa365">200</text>
+<text x="562" y="324" fill="#e9e8e4" text-anchor="end">142ms</text>
+<text x="38" y="346" fill="#848078">14:32:12</text>
+<text x="122" y="346" fill="#e9e8e4">GET</text>
+<text x="197.6" y="346" fill="#e9e8e4">/api/orders/1042</text>
+<text x="427.6" y="346" fill="#d5a44b">404</text>
+<text x="562" y="346" fill="#e9e8e4" text-anchor="end">7ms</text>
+<text x="38" y="368" fill="#848078">14:32:13</text>
+<text x="122" y="368" fill="#e9e8e4">POST</text>
+<text x="197.6" y="368" fill="#e9e8e4">/api/login</text>
+<text x="427.6" y="368" fill="#5fa365">200</text>
+<text x="562" y="368" fill="#e9e8e4" text-anchor="end">96ms</text>
+</g>
+<g class="t t17">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x7sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">7s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="203" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">4.2KB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">24.9KB</tspan></text>
+<text x="155.6" y="225" fill="#e9e8e4">3</text>
+<text x="570" y="259" text-anchor="end" class="cap">[x6x]</text><text x="570" y="259" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">6</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="280" fill="#848078">TIME</text>
+<text x="122" y="280" fill="#848078">METHOD</text>
+<text x="197.6" y="280" fill="#848078">PATH</text>
+<text x="427.6" y="280" fill="#848078">STATUS</text>
+<text x="562" y="280" fill="#848078" text-anchor="end">DUR</text>
+<text x="38" y="302" fill="#848078">…2 earlier</text>
+<text x="38" y="324" fill="#848078">14:32:12</text>
+<text x="122" y="324" fill="#e9e8e4">GET</text>
+<text x="197.6" y="324" fill="#e9e8e4">/api/orders/1042</text>
+<text x="427.6" y="324" fill="#d5a44b">404</text>
+<text x="562" y="324" fill="#e9e8e4" text-anchor="end">7ms</text>
+<text x="38" y="346" fill="#848078">14:32:13</text>
+<text x="122" y="346" fill="#e9e8e4">POST</text>
+<text x="197.6" y="346" fill="#e9e8e4">/api/login</text>
+<text x="427.6" y="346" fill="#5fa365">200</text>
+<text x="562" y="346" fill="#e9e8e4" text-anchor="end">96ms</text>
+<text x="38" y="368" fill="#848078">14:32:14</text>
+<text x="122" y="368" fill="#e9e8e4">GET</text>
+<text x="197.6" y="368" fill="#e9e8e4">/health</text>
+<text x="427.6" y="368" fill="#5fa365">200</text>
+<text x="562" y="368" fill="#e9e8e4" text-anchor="end">3ms</text>
+</g>
+<g class="t t18">
+<text x="570" y="61" text-anchor="end" class="cap">[xConnectedx][x8sx]</text><text x="570" y="61" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#5fa365" font-weight="600">Connected</tspan><tspan fill="#848078" fill-opacity=".7"> ][ </tspan><tspan fill="#e9e8e4">8s</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="155.60000000000002" y="203" xml:space="preserve"><tspan fill="#848078">↓ </tspan><tspan fill="#e9e8e4">4.2KB</tspan><tspan fill="#848078">   ↑ </tspan><tspan fill="#e9e8e4">24.9KB</tspan></text>
+<text x="155.6" y="225" fill="#e9e8e4">3</text>
+<text x="570" y="259" text-anchor="end" class="cap">[x6x]</text><text x="570" y="259" text-anchor="end" xml:space="preserve"><tspan fill="#848078" fill-opacity=".7">[ </tspan><tspan fill="#e9e8e4">6</tspan><tspan fill="#848078" fill-opacity=".7"> ]</tspan></text>
+<text x="38" y="280" fill="#848078">TIME</text>
+<text x="122" y="280" fill="#848078">METHOD</text>
+<text x="197.6" y="280" fill="#848078">PATH</text>
+<text x="427.6" y="280" fill="#848078">STATUS</text>
+<text x="562" y="280" fill="#848078" text-anchor="end">DUR</text>
+<text x="38" y="302" fill="#848078">…2 earlier</text>
+<text x="38" y="324" fill="#848078">14:32:12</text>
+<text x="122" y="324" fill="#e9e8e4">GET</text>
+<text x="197.6" y="324" fill="#e9e8e4">/api/orders/1042</text>
+<text x="427.6" y="324" fill="#d5a44b">404</text>
+<text x="562" y="324" fill="#e9e8e4" text-anchor="end">7ms</text>
+<text x="38" y="346" fill="#848078">14:32:13</text>
+<text x="122" y="346" fill="#e9e8e4">POST</text>
+<text x="197.6" y="346" fill="#e9e8e4">/api/login</text>
+<text x="427.6" y="346" fill="#5fa365">200</text>
+<text x="562" y="346" fill="#e9e8e4" text-anchor="end">96ms</text>
+<text x="38" y="368" fill="#848078">14:32:14</text>
+<text x="122" y="368" fill="#e9e8e4">GET</text>
+<text x="197.6" y="368" fill="#e9e8e4">/health</text>
+<text x="427.6" y="368" fill="#5fa365">200</text>
+<text x="562" y="368" fill="#e9e8e4" text-anchor="end">3ms</text>
+</g>
+</g>
+</g>
+<rect x=".5" y=".5" width="599" height="403" rx="11.5" fill="none" stroke="#2a2926"/>
+</svg>

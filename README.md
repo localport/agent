@@ -23,10 +23,14 @@ This repository contains the Localport agent, the client process that runs on th
 
 Accounts and tunnels are managed at [localport.io](https://localport.io).
 
+<p align="center">
+  <img src="docs/assets/terminal.svg" alt="The agent running a TCP tunnel that lists its live connections, then an HTTP tunnel that lists each request with its method, path, status and duration" width="600" />
+</p>
+
 ## Features
 
 - **Protocols.** HTTP, TCP, and TLS tunnels with automatic, browser-trusted HTTPS.
-- **Reserved addresses.** Static subdomains and ports persist across sessions, keeping public links and webhook URLs stable.
+- **Reserved addresses.** Subdomains and reserved ports persist across sessions, keeping public links and webhook URLs stable.
 - **Remote access.** A fleet is a group of devices sharing one token. Each device receives its own address, remains reachable by name behind CGNAT or cellular networks, and serves the ports opened on it in the dashboard. A fleet has no public endpoint. Consumers reach a device with `localport access <device> -L <local>:<remote>` over one mutual TLS connection, presenting a client certificate.
 - **Fanout tunnels.** One permanent URL for the whole team. Each inbound HTTP request is delivered to every connected client and a designated client returns the response, so every developer receives the same webhooks without registering an endpoint of their own.
 - **Scoped access.** Each certificate names a stable identity. What an identity may reach is managed server-side and can be changed without reissuing certificates, and narrowing a grant or revoking a certificate closes live connections. Bring your own certificate authority if you prefer, since only its public chain is stored.

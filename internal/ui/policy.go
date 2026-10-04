@@ -22,9 +22,7 @@ func PolicyHint(lt proto.LimitType) string {
 	case proto.LimitBandwidth:
 		return "bandwidth limit reached. Wait for the billing cycle to reset, or upgrade your plan"
 	case proto.LimitClientConnections:
-		return "client connection limit reached. Disconnect another client, or upgrade"
-	case proto.LimitTunnelCount:
-		return "tunnel limit reached. Remove a tunnel, or upgrade your plan"
+		return "tunnel client limit reached. Disconnect another client, or upgrade your plan"
 	case proto.LimitNoPlan:
 		return "team has no active plan. Subscribe or start a free trial from the dashboard"
 	case proto.LimitPaymentDuePaused:
