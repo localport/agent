@@ -513,6 +513,10 @@ The command re-dials on the next forward, and the new attempt is refused if the
 grant no longer covers it. An idle connection is pinged after 30 s and dropped
 if the ping goes unanswered for 15 s.
 
+**The agent follows no HTTP redirect.** A `3xx` from a control-plane call, the
+CI token request or the WebSocket upgrade is a terminal error reported with its
+status. Following it would send the token or CSR to the `Location` host.
+
 **Every connection the agent makes requires TLS 1.3**, including both carriers,
 the consumer connection and the control-plane calls. TLS 1.3 encrypts the client
 Certificate message, which carries the consumer's SPIFFE identity. Under TLS 1.2
