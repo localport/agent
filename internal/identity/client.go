@@ -62,11 +62,20 @@ func NewClient(baseURL string) (*Client, error) {
 // newHTTPClient builds the control plane client with a TLS 1.3 minimum, since
 // requests carry the setup token and the renewal proof. It clones the default
 // transport to keep proxy settings, timeouts and pooling.
+//
+// CheckRedirect returns a 3xx as is. Following it would resend the request and
+// its credential headers to the Location host.
 func newHTTPClient() *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
-	return &http.Client{Timeout: requestTimeout, Transport: tr}
+	return &http.Client{Timeout: requestTimeout, Transport: tr, CheckRedirect: noRedirect}
 }
+
+// noRedirect stops the client at the first 3xx and returns that response.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// isRedirect reports whether status is 3xx.
+func isRedirect(status int) bool { return status >= 300 && status < 400 }
 
 // errorEnvelope is the control plane error body. It holds a support code, a
 // type label and a sanitized message.
@@ -259,6 +268,15 @@ func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return fmt.Errorf("read %s response: %w", path, err)
+	}
+	if isRedirect(resp.StatusCode) {
+		// an APIError with the 3xx status is terminal for isRetryable, so the
+		// credential is not resent.
+		return &APIError{
+			Path:    path,
+			Status:  resp.StatusCode,
+			Message: fmt.Sprintf("the server answered with a redirect (HTTP %d); refusing to follow it", resp.StatusCode),
+		}
 	}
 	if resp.StatusCode >= 300 {
 		apiErr := &APIError{
