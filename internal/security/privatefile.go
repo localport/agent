@@ -151,3 +151,9 @@ func walkPrivateDir(root, dir string, followRoot, secure bool) error {
 	}
 	return nil
 }
+
+// OpenLockFile opens or creates path read-write without following a symlink or
+// reparse point.
+func OpenLockFile(path string) (*os.File, error) {
+	return openLockNoFollow(path)
+}

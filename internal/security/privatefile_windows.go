@@ -144,6 +144,46 @@ func inspectPrivateDir(path string, follow, secure bool) error {
 	return nil
 }
 
+// openLockNoFollow opens or creates path with FILE_FLAG_OPEN_REPARSE_POINT and
+// refuses a reparse point or directory from the handle attributes, so there is
+// no window between check and use.
+func openLockNoFollow(path string) (*os.File, error) {
+	sa, err := privateSecurityAttributes()
+	if err != nil {
+		return nil, err
+	}
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	h, err := windows.CreateFile(p,
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		sa,
+		windows.OPEN_ALWAYS,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0)
+	if err != nil {
+		// without FILE_FLAG_BACKUP_SEMANTICS a directory or junction fails
+		// with ERROR_ACCESS_DENIED. The open already failed, Lstat only
+		// names the cause.
+		if fi, lErr := os.Lstat(path); lErr == nil && (fi.IsDir() || fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0) {
+			return nil, fmt.Errorf("%w: %s is not a regular file of its own", ErrUntrustedPath, path)
+		}
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		windows.CloseHandle(h)
+		return nil, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
+		windows.CloseHandle(h)
+		return nil, fmt.Errorf("%w: %s is not a regular file of its own", ErrUntrustedPath, path)
+	}
+	return os.NewFile(uintptr(h), path), nil
+}
+
 func verifyPrivate(f *os.File, path string) error {
 	h := windows.Handle(f.Fd())
 

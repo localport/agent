@@ -70,6 +70,10 @@ func inspectPrivateDir(path string, follow, secure bool) error {
 	return nil
 }
 
+func openLockNoFollow(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, privateFilePerm)
+}
+
 // verifyPrivate refuses a file that group or other can reach, or one owned by
 // another account. A 0600 file belonging to someone else is not ours, and
 // reading a key from it would trust whoever placed it there.
