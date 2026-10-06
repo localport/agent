@@ -5,8 +5,6 @@ package security
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -64,35 +62,84 @@ func createPrivate(path string) (*os.File, error) {
 	return os.NewFile(uintptr(h), path), nil
 }
 
-func mkdirPrivate(path string) error {
-	abs, err := filepath.Abs(path)
+// inspectPrivateDir opens path with FILE_FLAG_BACKUP_SEMANTICS, plus
+// FILE_FLAG_OPEN_REPARSE_POINT unless follow, and checks on the handle that it
+// is a directory, not a reparse point, owned by this user, SYSTEM or
+// Administrators. With secure it creates a missing directory and sets the
+// protected DACL on the same handle, without secure it changes nothing.
+func inspectPrivateDir(path string, follow, secure bool) error {
+	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return fmt.Errorf("resolve %s: %w", path, err)
+		return fmt.Errorf("inspect %s: %w", path, err)
 	}
-	if info, err := os.Stat(abs); err == nil {
-		if !info.IsDir() {
-			return fmt.Errorf("%s exists and is not a directory", abs)
+	access := uint32(windows.READ_CONTROL | windows.FILE_READ_ATTRIBUTES)
+	if secure {
+		sa, err := privateSecurityAttributes()
+		if err != nil {
+			return err
 		}
-		return setPrivateDACL(abs)
-	}
-	if parent := filepath.Dir(abs); parent != abs {
-		if _, err := os.Stat(parent); os.IsNotExist(err) {
-			if err := mkdirPrivate(parent); err != nil {
-				return err
-			}
+		if err := windows.CreateDirectory(p, sa); err != nil && err != windows.ERROR_ALREADY_EXISTS {
+			return fmt.Errorf("create %s: %w", path, err)
 		}
+		access |= windows.WRITE_DAC
 	}
 
-	sa, err := privateSecurityAttributes()
+	// FILE_FLAG_OPEN_REPARSE_POINT opens a junction itself, so SetSecurityInfo
+	// can never reach its target.
+	flags := uint32(windows.FILE_FLAG_BACKUP_SEMANTICS)
+	if !follow {
+		flags |= windows.FILE_FLAG_OPEN_REPARSE_POINT
+	}
+	h, err := windows.CreateFile(p,
+		access,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		flags,
+		0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer windows.CloseHandle(h)
+
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		return fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !follow && info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("%w: %s is a reparse point; credential paths must not be redirected", ErrUntrustedPath, path)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return fmt.Errorf("%w: %s is not a directory", ErrUntrustedPath, path)
+	}
+
+	current, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("read security descriptor of %s: %w", path, err)
+	}
+	owner, _, err := current.Owner()
+	if err != nil {
+		return fmt.Errorf("read owner of %s: %w", path, err)
+	}
+	if err := assertOwnerIsTrusted(owner, path); err != nil {
+		return fmt.Errorf("%w: %v", ErrUntrustedPath, err)
+	}
+	if !secure {
+		return nil
+	}
+
+	sd, err := privateSecurityDescriptor()
 	if err != nil {
 		return err
 	}
-	p, err := windows.UTF16PtrFromString(abs)
+	dacl, _, err := sd.DACL()
 	if err != nil {
-		return err
+		return fmt.Errorf("read DACL for %s: %w", path, err)
 	}
-	if err := windows.CreateDirectory(p, sa); err != nil {
-		return fmt.Errorf("create %s: %w", abs, err)
+	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil); err != nil {
+		return fmt.Errorf("secure %s: %w", path, err)
 	}
 	return nil
 }
@@ -194,44 +241,6 @@ func assertOwnerIsTrusted(owner *windows.SID, path string) error {
 	return nil
 }
 
-// setPrivateDACL applies the protected DACL to an existing directory through
-// an open handle, so the path cannot be swapped between check and use.
-// FILE_FLAG_OPEN_REPARSE_POINT opens a junction itself, so a planted junction
-// cannot redirect the DACL to another directory.
-func setPrivateDACL(path string) error {
-	sd, err := privateSecurityDescriptor()
-	if err != nil {
-		return err
-	}
-	dacl, _, err := sd.DACL()
-	if err != nil {
-		return fmt.Errorf("read DACL for %s: %w", path, err)
-	}
-
-	p, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return fmt.Errorf("secure %s: %w", path, err)
-	}
-	h, err := windows.CreateFile(p,
-		windows.WRITE_DAC|windows.READ_CONTROL,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
-	}
-	defer windows.CloseHandle(h)
-
-	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil, nil, dacl, nil); err != nil {
-		return fmt.Errorf("secure %s: %w", path, err)
-	}
-	return nil
-}
-
 func privateSecurityAttributes() (*windows.SecurityAttributes, error) {
 	sd, err := privateSecurityDescriptor()
 	if err != nil {
@@ -295,18 +304,4 @@ func sidIn(sid *windows.SID, set []*windows.SID) bool {
 		}
 	}
 	return false
-}
-
-// isRedirect reports whether a directory entry is a reparse point such as a
-// symlink or junction.
-//
-// It tests FILE_ATTRIBUTE_REPARSE_POINT because Go sets os.ModeSymlink only
-// for IO_REPARSE_TAG_SYMLINK and reports a junction as ModeIrregular. Creating
-// a junction needs only write access to the parent directory.
-func isRedirect(info os.FileInfo) bool {
-	if d, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {
-		return d.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0
-	}
-	// Without attribute data, treat the entry as a redirect.
-	return true
 }

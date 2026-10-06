@@ -3,6 +3,7 @@
 package security
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,7 +96,7 @@ func TestEnsurePrivateDirRefusesASymlinkedParent(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if err := EnsurePrivateDir(root, filepath.Join(link, "team", "client-deploy")); err == nil {
+	if err := EnsurePrivateDir(root, filepath.Join(link, "team", "client-deploy"), true); err == nil {
 		t.Fatal("expected a path through a symlinked parent to be refused")
 	}
 }
@@ -105,7 +106,7 @@ func TestEnsurePrivateDirTightensAnExistingDirectory(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := EnsurePrivateDir(filepath.Dir(dir), dir); err != nil {
+	if err := EnsurePrivateDir(filepath.Dir(dir), dir, true); err != nil {
 		t.Fatalf("EnsurePrivateDir: %v", err)
 	}
 	info, err := os.Stat(dir)
@@ -153,5 +154,94 @@ func TestResolveOptionalTokenRefusesAWorldReadableTokenFile(t *testing.T) {
 	t.Setenv("LP_TEST_TOKEN_FILE", path)
 	if _, err := ResolveOptionalToken("", "LP_TEST_TOKEN"); err == nil {
 		t.Fatal("expected a 0644 token file to be refused")
+	}
+}
+
+// A symlink component is refused before any mkdir or chmod reaches its
+// target.
+func TestEnsurePrivateDirRefusesSymlinkComponent(t *testing.T) {
+	root := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.Mkdir(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(root, "identity")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	err := EnsurePrivateDir(root, filepath.Join(root, "identity"), true)
+	if !errors.Is(err, ErrUntrustedPath) {
+		t.Fatalf("err = %v, want ErrUntrustedPath", err)
+	}
+	info, statErr := os.Stat(victim)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("the link's target was chmod-ed to %#o", got)
+	}
+	if entries, _ := os.ReadDir(victim); len(entries) != 0 {
+		t.Fatalf("something was created inside the link's target: %v", entries)
+	}
+}
+
+// A regular file in place of a directory component is refused.
+func TestEnsurePrivateDirRefusesAFileComponent(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "identity"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsurePrivateDir(root, filepath.Join(root, "identity", "team"), true); !errors.Is(err, ErrUntrustedPath) {
+		t.Fatalf("err = %v, want ErrUntrustedPath", err)
+	}
+}
+
+func TestEnsurePrivateDirCreatesMissing0700(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "home")
+	dir := filepath.Join(root, "identity", "team", "client-deploy")
+	if err := EnsurePrivateDir(root, dir, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{root, filepath.Join(root, "identity"), filepath.Join(root, "identity", "team"), dir} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.IsDir() || info.Mode().Perm() != 0o700 {
+			t.Errorf("%s: mode %v, want a 0700 directory", path, info.Mode())
+		}
+	}
+}
+
+// With followRoot a symlinked root is accepted when its target is ours.
+func TestEnsurePrivateDirAllowsASymlinkedRoot(t *testing.T) {
+	real := filepath.Join(t.TempDir(), "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(real, root); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := EnsurePrivateDir(root, filepath.Join(root, "identity"), true); err != nil {
+		t.Fatalf("a symlinked root was refused: %v", err)
+	}
+}
+
+// A component owned by another uid is refused. Needs root for chown.
+func TestEnsurePrivateDirRefusesForeignOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to create a directory owned by another account")
+	}
+	root := t.TempDir()
+	foreign := filepath.Join(root, "identity")
+	if err := os.Mkdir(foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(foreign, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsurePrivateDir(root, filepath.Join(foreign, "team"), true); !errors.Is(err, ErrUntrustedPath) {
+		t.Fatalf("err = %v, want ErrUntrustedPath", err)
 	}
 }

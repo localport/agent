@@ -294,7 +294,7 @@ func (s *Store) Save(m Material) (Ref, error) {
 
 	dir := s.dir(ref)
 
-	if err := security.EnsurePrivateDir(s.Root, dir); err != nil {
+	if err := security.EnsurePrivateDir(s.Root, dir, true); err != nil {
 		return Ref{}, err
 	}
 

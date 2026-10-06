@@ -3,14 +3,10 @@
 package security
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
-)
-
-const (
-	privateDirPerm  os.FileMode = 0o700
-	privateFilePerm os.FileMode = 0o600
 )
 
 func openNoFollow(path string) (*os.File, error) {
@@ -25,13 +21,50 @@ func createPrivate(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, privateFilePerm)
 }
 
-func mkdirPrivate(path string) error {
-	if err := os.MkdirAll(path, privateDirPerm); err != nil {
-		return fmt.Errorf("create %s: %w", path, err)
+// inspectPrivateDir opens path with O_DIRECTORY, plus O_NOFOLLOW unless follow,
+// and checks the owner uid on the descriptor. With secure it creates a missing
+// directory and fchmods it to 0700, without secure it changes nothing.
+func inspectPrivateDir(path string, follow, secure bool) error {
+	if secure {
+		if err := os.Mkdir(path, privateDirPerm); err != nil && !os.IsExist(err) {
+			return fmt.Errorf("create %s: %w", path, err)
+		}
 	}
-	// MkdirAll applies the umask and leaves an existing directory's mode alone,
-	// so neither a laxer umask nor a directory predating this code is trusted.
-	if err := os.Chmod(path, privateDirPerm); err != nil {
+	flags := os.O_RDONLY | syscall.O_DIRECTORY
+	if !follow {
+		flags |= syscall.O_NOFOLLOW
+	}
+	f, err := os.OpenFile(path, flags, 0)
+	if err != nil {
+		// symlink or non-directory. The errno differs by OS (ELOOP, EMLINK on
+		// FreeBSD, EFTYPE on NetBSD, ENOTDIR).
+		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EMLINK) || errors.Is(err, refusedLinkErrno) {
+			return fmt.Errorf("%w: %s is not a directory of its own; credential paths must not be redirected", ErrUntrustedPath, path)
+		}
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%w: %s is not a directory", ErrUntrustedPath, path)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("cannot read ownership of %s", path)
+	}
+	if uid := os.Geteuid(); int(st.Uid) != uid {
+		return fmt.Errorf("%w: %s is owned by uid %d, not %d", ErrUntrustedPath, path, st.Uid, uid)
+	}
+	if !secure {
+		return nil
+	}
+	// fchmod so the mode lands on the inode just checked. Mkdir is subject to
+	// the umask and leaves an existing directory's mode alone.
+	if err := f.Chmod(privateDirPerm); err != nil {
 		return fmt.Errorf("secure %s: %w", path, err)
 	}
 	return nil
@@ -59,10 +92,4 @@ func verifyPrivate(f *os.File, path string) error {
 		return fmt.Errorf("%s is owned by uid %d, not %d", path, st.Uid, uid)
 	}
 	return nil
-}
-
-// isRedirect reports whether a directory entry points somewhere other than where
-// it appears to. On Unix that is a symlink and nothing else.
-func isRedirect(info os.FileInfo) bool {
-	return info.Mode()&os.ModeSymlink != 0
 }
