@@ -600,6 +600,15 @@ under `~/.localport/identity/` (directories `0700`, files `0600`):
                       renew_after only when the credential renews
 ```
 
+Before every read and write, each directory from the base (`LOCALPORT_HOME`,
+`~/.localport` or the system-wide one) down to the credential is opened without
+following links and must be a directory owned by the agent's user. The base may
+be a symlink only when it comes from `LOCALPORT_HOME` or `$HOME`, and its target
+must have the same owner. The system-wide base is never followed. A failing
+path is refused, never repaired. `meta.json`, the certificate and the key are
+opened with `O_NOFOLLOW` (`FILE_FLAG_OPEN_REPARSE_POINT` on Windows) and must
+be owner-only.
+
 A save writes the certificate and key under new serial-named files, then
 `meta.json`, which names them. Writing `meta.json` is the commit point, so a save
 interrupted before it leaves the previous credential loadable. Files from earlier

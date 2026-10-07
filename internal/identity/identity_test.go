@@ -546,9 +546,12 @@ func TestDefaultRootFallsBackWhenThereIsNoHome(t *testing.T) {
 	t.Setenv("USERPROFILE", "")
 	t.Setenv("ProgramData", `C:\ProgramData`)
 
-	root, err := defaultRoot()
+	root, chosen, err := defaultRoot()
 	if err != nil {
 		t.Fatalf("defaultRoot with no home: %v", err)
+	}
+	if chosen {
+		t.Error("the machine-wide default was reported as chosen, so a link planted there would be followed")
 	}
 	want := map[string]string{
 		"windows": filepath.Join(`C:\ProgramData`, "localport"),

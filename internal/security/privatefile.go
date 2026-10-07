@@ -109,7 +109,9 @@ var ErrUntrustedPath = errors.New("untrusted credential path")
 // checked on the descriptor. It must be a directory owned by the effective
 // user, and its mode is changed through that descriptor. Components above root
 // are not walked, /var is a symlink on macOS and /home on some BSDs. Root is
-// followed only with followRoot, set for LOCALPORT_HOME and $HOME.
+// followed only with followRoot, set for LOCALPORT_HOME and $HOME. The
+// system-wide default is never followed, any local user can create a symlink
+// there before the first run.
 func EnsurePrivateDir(root, dir string, followRoot bool) error {
 	return walkPrivateDir(root, dir, followRoot, true)
 }

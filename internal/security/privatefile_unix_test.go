@@ -228,6 +228,27 @@ func TestEnsurePrivateDirAllowsASymlinkedRoot(t *testing.T) {
 	}
 }
 
+// Without followRoot a symlinked root is refused by both walks.
+func TestEnsurePrivateDirRefusesASymlinkedDefaultRoot(t *testing.T) {
+	real := filepath.Join(t.TempDir(), "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "localport")
+	if err := os.Symlink(real, root); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := EnsurePrivateDir(root, filepath.Join(root, "identity"), false); !errors.Is(err, ErrUntrustedPath) {
+		t.Fatalf("a symlinked default root: err = %v, want ErrUntrustedPath", err)
+	}
+	if err := CheckPrivateDir(root, filepath.Join(root, "identity"), false); !errors.Is(err, ErrUntrustedPath) {
+		t.Fatalf("checking a symlinked default root: err = %v, want ErrUntrustedPath", err)
+	}
+	if entries, _ := os.ReadDir(real); len(entries) != 0 {
+		t.Fatalf("the link's target was written to: %v", entries)
+	}
+}
+
 // A component owned by another uid is refused. Needs root for chown.
 func TestEnsurePrivateDirRefusesForeignOwner(t *testing.T) {
 	if os.Geteuid() != 0 {
