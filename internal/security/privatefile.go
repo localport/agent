@@ -114,6 +114,12 @@ func EnsurePrivateDir(root, dir string, followRoot bool) error {
 	return walkPrivateDir(root, dir, followRoot, true)
 }
 
+// CheckPrivateDir runs the EnsurePrivateDir walk without creating or changing
+// anything. A missing component returns an error wrapping fs.ErrNotExist.
+func CheckPrivateDir(root, dir string, followRoot bool) error {
+	return walkPrivateDir(root, dir, followRoot, false)
+}
+
 func walkPrivateDir(root, dir string, followRoot, secure bool) error {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {

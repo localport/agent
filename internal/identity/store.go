@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -171,6 +172,10 @@ func (s *Store) ListWithSkipped() ([]Ref, []Skipped, error) {
 	refs := make([]Ref, 0, len(matches))
 	var skipped []Skipped
 	for _, path := range matches {
+		if err := s.trusted(filepath.Dir(path)); err != nil {
+			skipped = append(skipped, Skipped{Path: filepath.Dir(path), Reason: err})
+			continue
+		}
 		meta, err := readMeta(path)
 		if err != nil {
 			skipped = append(skipped, Skipped{Path: filepath.Dir(path), Reason: err})
@@ -233,6 +238,9 @@ func (s *Store) Resolve(sel Selector) (Ref, error) {
 // which checks the open descriptor.
 func (s *Store) Load(ref Ref) (*Material, error) {
 	dir := s.dir(ref)
+	if err := s.trusted(dir); err != nil {
+		return nil, err
+	}
 
 	meta, err := readMeta(filepath.Join(dir, metaFile))
 	if err != nil {
@@ -242,11 +250,21 @@ func (s *Store) Load(ref Ref) (*Material, error) {
 	if err != nil {
 		return nil, fmt.Errorf("no usable credential for %s: %w", ref, err)
 	}
-	certPEM, err := os.ReadFile(filepath.Join(dir, meta.Cert))
+	certPEM, err := security.ReadPrivateFile(filepath.Join(dir, meta.Cert))
 	if err != nil {
 		return nil, fmt.Errorf("read certificate: %w", err)
 	}
 	return &Material{CertPEM: certPEM, Key: key, Meta: meta}, nil
+}
+
+// trusted runs the read-only form of the walk Save does before writing.
+// fs.ErrNotExist passes so the read that follows reports it.
+func (s *Store) trusted(dir string) error {
+	err := security.CheckPrivateDir(s.Root, dir, true)
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // Save writes a credential and returns its Ref. The path and the identity
@@ -393,8 +411,10 @@ func (m *Material) TLSCertificate() (*tls.Certificate, error) {
 	return cert, nil
 }
 
+// readMeta opens meta.json with the same checks as the key file. It selects
+// the key and certificate files and the renewal source.
 func readMeta(path string) (Meta, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := security.ReadPrivateFile(path)
 	if err != nil {
 		return Meta{}, fmt.Errorf("read identity metadata: %w", err)
 	}
