@@ -105,21 +105,25 @@ func TestSaveWritesKeyMaterialUnreadableByOthers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{meta.Key.File, meta.Cert, metaFile} {
-		info, err := os.Stat(filepath.Join(store.Dir(ref), name))
+	// on windows Go derives mode bits from FILE_ATTRIBUTE_READONLY only. The
+	// DACL is checked by Load below.
+	if runtime.GOOS != "windows" {
+		for _, name := range []string{meta.Key.File, meta.Cert, metaFile} {
+			info, err := os.Stat(filepath.Join(store.Dir(ref), name))
+			if err != nil {
+				t.Fatalf("stat %s: %v", name, err)
+			}
+			if perm := info.Mode().Perm(); perm&0o077 != 0 {
+				t.Errorf("%s mode %#o is readable by group or other", name, perm)
+			}
+		}
+		dir, err := os.Stat(store.Dir(ref))
 		if err != nil {
-			t.Fatalf("stat %s: %v", name, err)
+			t.Fatal(err)
 		}
-		if perm := info.Mode().Perm(); perm&0o077 != 0 {
-			t.Errorf("%s mode %#o is readable by group or other", name, perm)
+		if perm := dir.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("credential directory mode %#o is readable by group or other", perm)
 		}
-	}
-	dir, err := os.Stat(store.Dir(ref))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := dir.Mode().Perm(); perm&0o077 != 0 {
-		t.Errorf("credential directory mode %#o is readable by group or other", perm)
 	}
 
 	got, err := store.Load(ref)
