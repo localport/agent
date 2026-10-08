@@ -614,8 +614,9 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			t.edgeAddr = addr
 			t.dialer = chosen
 			t.sessionID = ack.SessionID
+			var closedPorts []uint16
 			if t.ports != nil {
-				t.ports.Set(ack.PortsVersion, ack.Ports)
+				closedPorts = t.ports.Reset(ack.PortsVersion, ack.Ports)
 			}
 			t.info = Info{
 				TunnelID:   ack.TunnelID,
@@ -631,6 +632,8 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 				Protocol:   ack.Protocol,
 			}
 			t.mu.Unlock()
+			// Close connections to ports the new session no longer serves.
+			t.closeConnsForPorts(closedPorts)
 			return nil
 
 		case proto.MsgRedirect:

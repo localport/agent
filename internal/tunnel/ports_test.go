@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"math"
 	"testing"
 
 	"github.com/localport/agent/internal/proto"
@@ -72,5 +73,37 @@ func TestPortsSetRejectsARepeatedZeroVersion(t *testing.T) {
 	}
 	if _, open := p.Protocol(502); open {
 		t.Fatal("port 502 should be closed by version 1")
+	}
+}
+
+// RegisterAck resets the list even after a MaxUint64 version.
+func TestRegisterAckResetsPortsAfterMaxVersion(t *testing.T) {
+	p := newDevicePorts()
+	p.Set(math.MaxUint64, []proto.DevicePort{{Port: 22, Protocol: "tcp"}, {Port: 80, Protocol: "http"}})
+
+	removed := p.Reset(1, []proto.DevicePort{{Port: 80, Protocol: "http"}})
+	if len(removed) != 1 || removed[0] != 22 {
+		t.Fatalf("removed = %v, want [22]", removed)
+	}
+	if _, open := p.Protocol(22); open {
+		t.Fatal("port 22 is still open after the reset")
+	}
+	if p.Version() != 1 {
+		t.Fatalf("version = %d, want 1", p.Version())
+	}
+}
+
+// In-session updates with version <= current are ignored.
+func TestPortsUpdateStillVersionCompared(t *testing.T) {
+	p := newDevicePorts()
+	p.Reset(5, []proto.DevicePort{{Port: 80, Protocol: "http"}})
+	if _, applied := p.Set(4, nil); applied {
+		t.Fatal("an older in-session update was applied")
+	}
+	if _, applied := p.Set(5, nil); applied {
+		t.Fatal("a repeated in-session update was applied")
+	}
+	if _, applied := p.Set(6, nil); !applied {
+		t.Fatal("a newer in-session update was refused")
 	}
 }

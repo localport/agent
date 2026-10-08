@@ -35,6 +35,8 @@ identical on either carrier.
 - `type` is a single `MessageType` byte (see the table below).
 - `payload` is JSON-encoded. A frame with no body has `length=1`.
 - Maximum frame size is **1 MiB**.
+- The first frame on a connection (`Register`, `MuxBind` or `ConnectionReady`)
+  must be at most **16 KiB**. A larger first frame closes the connection.
 
 ## Message types
 
@@ -146,6 +148,9 @@ slot immediately on reconnect. A session replaced this way receives a
 non-retryable `Shutdown` with code `TU012`, so two agents sharing one token
 cannot kick each other in a loop (the replaced one stops).
 
+A refused `Register` does not affect the live session. A takeover by a
+different registration (not a resume) stops the replaced agent.
+
 ### PortsUpdate (13) / PortsAck (14)
 
 A device's allowed ports are set in the dashboard. The list arrives in `RegisterAck`
@@ -155,9 +160,10 @@ and is replaced by `PortsUpdate`:
 { "version": 41, "ports": [{ "port": 502, "protocol": "tcp" }, { "port": 80, "protocol": "http" }] }
 ```
 
-`version` orders the list. A device applies an update only when the version is
-higher than the one it holds, and answers every update with the version it
-serves:
+`version` orders the list within a session. A `PortsUpdate` is applied only
+when its version is higher than the current one, and every update is answered
+with the version served. The list in a `RegisterAck` replaces the list and
+version unconditionally, and connections to ports it drops are closed.
 
 ```json
 { "version": 41 }

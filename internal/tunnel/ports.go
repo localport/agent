@@ -8,7 +8,8 @@ import (
 )
 
 // devicePorts is the versioned set of ports the device serves, as set in the
-// dashboard. Only a higher version replaces it, so late updates are ignored.
+// dashboard. Within a session only a higher version replaces it, so late
+// updates are ignored. A new session resets it.
 type devicePorts struct {
 	mu sync.RWMutex
 	// seeded is set by the first Set, so version 0 is accepted only once.
@@ -21,14 +22,27 @@ func newDevicePorts() *devicePorts {
 	return &devicePorts{ports: make(map[uint16]string)}
 }
 
-// Set replaces the ports when version is higher. It returns the closed ports
-// and whether it applied the update.
+// Set applies an in-session update when version is higher. It returns the
+// closed ports and whether it applied the update.
 func (p *devicePorts) Set(version uint64, ports []proto.DevicePort) (removed []uint16, applied bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.seeded && version <= p.version {
 		return nil, false
 	}
+	return p.replace(version, ports), true
+}
+
+// Reset replaces the ports regardless of version and returns the closed ones.
+// RegisterAck uses it, it carries the full list for a new session.
+func (p *devicePorts) Reset(version uint64, ports []proto.DevicePort) (removed []uint16) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.replace(version, ports)
+}
+
+// replace swaps in the new set. The caller holds mu.
+func (p *devicePorts) replace(version uint64, ports []proto.DevicePort) (removed []uint16) {
 	next := make(map[uint16]string, len(ports))
 	for _, port := range ports {
 		next[port.Port] = port.Protocol
@@ -39,7 +53,7 @@ func (p *devicePorts) Set(version uint64, ports []proto.DevicePort) (removed []u
 		}
 	}
 	p.ports, p.version, p.seeded = next, version, true
-	return removed, true
+	return removed
 }
 
 // Protocol returns the protocol of port and whether it is open.
