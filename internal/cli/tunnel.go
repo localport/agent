@@ -122,6 +122,23 @@ func warnTokenFlag(renderer tunnelUI, fromFlag bool) {
 	}
 }
 
+// warnNoPortCeiling logs one warning per device without --allow-ports, the
+// only port limit enforced locally. Plain mode only, the TUI shows it in the
+// device header.
+func warnNoPortCeiling(renderer tunnelUI, devices []config.DeviceSpec) {
+	p, ok := renderer.(*ui.Plain)
+	if !ok {
+		return
+	}
+	for _, device := range devices {
+		if len(device.AllowPorts) > 0 {
+			continue
+		}
+		p.Warn(fmt.Sprintf("device %q: no --allow-ports set; the agent will open any port the dashboard enables on %s. "+
+			"Set --allow-ports (or allow_ports in config) to limit it.", device.Name, device.Host))
+	}
+}
+
 func pickRenderer(mode ui.Mode, a *agent.Agent) tunnelUI {
 	if mode == ui.ModePlain {
 		return ui.NewPlain()

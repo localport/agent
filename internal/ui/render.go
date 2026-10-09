@@ -237,6 +237,11 @@ func deviceHeader(s snap, ts tState, row func(label, value string) string, label
 		portsLine += pal.Foreground(formatPorts(ts.ports, ts.allowed))
 	}
 	lines = append(lines, portsLine)
+	// without --allow-ports only the dashboard list limits this device.
+	if ts.allowed == nil {
+		lines = append(lines, pal.ForegroundDim(padRight("Limit", labelW))+
+			pal.Warning("none: any port the dashboard allows (set --allow-ports)"))
+	}
 
 	st := s.stats[ts.name]
 	lines = append(lines,

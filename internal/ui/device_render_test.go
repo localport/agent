@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/proto"
 	"github.com/localport/agent/internal/tunnel"
 )
@@ -71,6 +72,21 @@ func TestDeviceHeaderWarnsWhenNoPortsAreAllowed(t *testing.T) {
 	got := strings.Join(renderHeader(deviceSnap(ts)), "\n")
 	if !strings.Contains(got, "no ports allowed") {
 		t.Fatalf("header does not say the device serves nothing:\n%s", got)
+	}
+}
+
+// The Limit line is shown only without --allow-ports.
+func TestDeviceHeaderSaysWhenNoPortLimitIsSet(t *testing.T) {
+	ts := deviceState()
+	got := strings.Join(renderHeader(deviceSnap(ts)), "\n")
+	if !strings.Contains(got, "set --allow-ports") {
+		t.Fatalf("header does not say the device has no port limit:\n%s", got)
+	}
+
+	ts.allowed = ports.Ceiling{{From: 80, To: 80}, {From: 502, To: 502}}
+	got = strings.Join(renderHeader(deviceSnap(ts)), "\n")
+	if strings.Contains(got, "set --allow-ports") {
+		t.Fatalf("header warns although a limit is set:\n%s", got)
 	}
 }
 
