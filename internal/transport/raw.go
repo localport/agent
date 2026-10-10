@@ -27,10 +27,10 @@ func (d *RawDialer) Dial(ctx context.Context, host, port string) (net.Conn, erro
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	tcp, err := (&net.Dialer{
+	tcp, err := dialEdge(ctx, &net.Dialer{
 		Timeout:   timeout,
 		KeepAlive: 30 * time.Second,
-	}).DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	}, host, port)
 	if err != nil {
 		return nil, fmt.Errorf("tcp dial: %w", err)
 	}
@@ -44,6 +44,7 @@ func (d *RawDialer) Dial(ctx context.Context, host, port string) (net.Conn, erro
 		conn.Close()
 		return nil, fmt.Errorf("alpn mismatch: edge negotiated %q, expected %q", got, ALPNRaw)
 	}
+	lastGood.remember(host, tcp.RemoteAddr())
 	return conn, nil
 }
 

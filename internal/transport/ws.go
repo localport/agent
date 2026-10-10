@@ -29,13 +29,21 @@ func (d *WSDialer) Dial(ctx context.Context, host, port string) (net.Conn, error
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// dialed is the remote address of this dial, stored in lastGood once the
+	// upgrade, and so the TLS handshake, succeeds.
+	var dialed net.Addr
+	dialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
 	httpClient := wsHTTPClient(&http.Transport{
 		TLSClientConfig:   agentTLSConfig(d.ServerName, host, ALPNWS),
 		ForceAttemptHTTP2: false, // WS rides HTTP/1.1
-		DialContext: (&net.Dialer{
-			Timeout:   timeout,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+			h, p := SplitHostPort(addr)
+			conn, err := dialEdge(ctx, dialer, h, p)
+			if err == nil {
+				dialed = conn.RemoteAddr()
+			}
+			return conn, err
+		},
 	})
 
 	path := d.Path
@@ -50,6 +58,9 @@ func (d *WSDialer) Dial(ctx context.Context, host, port string) (net.Conn, error
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ws dial %s: %w", url, err)
+	}
+	if dialed != nil {
+		lastGood.remember(host, dialed)
 	}
 	// Binary frames carry the protocol bytes unchanged. The context passed here
 	// bounds the connection lifetime, so it cannot be the dial context.

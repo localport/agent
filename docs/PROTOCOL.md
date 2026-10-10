@@ -444,6 +444,23 @@ acceptable client certificate or the connection is refused.
    edge; a permanently lost edge costs at most that window before the tunnel
    returns on a replacement edge.
 
+### Finding an edge
+
+The agent dials `connect.<region>.localport.dev` (TTL 60 s). The name resolves
+to any edge in the region, which may answer with a `Redirect`.
+
+After a successful `Register` the agent reconnects to the same edge. After 90 s
+of failures it returns to the connect host.
+
+When resolving a host fails (timeout, SERVFAIL, unreachable nameserver), the
+agent dials the IP of its last connection to that host that completed TLS.
+
+- A name that resolves is always dialed as resolved.
+- NXDOMAIN is final and never falls back.
+- TLS still verifies the certificate against the hostname, so a stale IP fails
+  the handshake.
+- The table is per process and empty until the first successful connection.
+
 ### Redirect
 
 The edge may answer a `Register` with a `Redirect` pointing at another edge,
