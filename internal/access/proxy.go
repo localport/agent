@@ -13,6 +13,8 @@ import (
 
 // Forward is one local listener mapped to one port on the device.
 type Forward struct {
+	// Socket reports that LocalAddr is a Unix socket path.
+	Socket bool
 	// LocalAddr is the local host:port. An empty port lets the OS assign one,
 	// printed once bound.
 	LocalAddr string
@@ -45,7 +47,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 	}()
 
 	for _, f := range p.Forwards {
-		ln, err := net.Listen("tcp", f.LocalAddr)
+		ln, err := f.listen()
 		if err != nil {
 			return fmt.Errorf("listen %s: %w", f.LocalAddr, err)
 		}
@@ -67,6 +69,13 @@ func (p *Proxy) Run(ctx context.Context) error {
 	}
 	wg.Wait()
 	return nil
+}
+
+func (f Forward) listen() (net.Listener, error) {
+	if f.Socket {
+		return listenSocket(f.LocalAddr)
+	}
+	return net.Listen("tcp", f.LocalAddr)
 }
 
 // serve accepts on one listener. Connections are tracked so Run returns only

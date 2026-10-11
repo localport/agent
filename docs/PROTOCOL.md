@@ -536,6 +536,13 @@ The command re-dials on the next forward, and the new attempt is refused if the
 grant no longer covers it. An idle connection is pinged after 30 s and dropped
 if the ping goes unanswered for 15 s.
 
+A forward listens on `127.0.0.1` by default, reachable by every local user.
+`-L unix:<path>:<device port>` listens on a Unix socket created with mode
+`0600`. A stale socket with no listener is replaced. A live socket or any other
+file at the path is refused. The parent directory must be writable only by the
+owner (for example `/run/user/<uid>`), since whoever can write it can replace
+the socket. Not available on Windows.
+
 **The agent follows no HTTP redirect.** A `3xx` from a control-plane call, the
 CI token request or the WebSocket upgrade is a terminal error reported with its
 status. Following it would send the token or CSR to the `Location` host.

@@ -79,7 +79,7 @@ func LoadAccessConfig(path string) (*AccessConfig, error) {
 				return nil, fmt.Errorf("device %s: %w", label, err)
 			}
 			// Port 0 is assigned by the OS and never collides.
-			if strings.HasSuffix(f.LocalAddr, ":0") {
+			if !f.Socket && strings.HasSuffix(f.LocalAddr, ":0") {
 				continue
 			}
 			if prev, dup := boundBy[f.LocalAddr]; dup {
