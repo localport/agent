@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -123,6 +124,10 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 			"signature": base64.StdEncoding.EncodeToString(sig),
 		}, &resp)
 	}); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden {
+			return nil, fmt.Errorf("%w: this credential can no longer be renewed; run `localport setup <TOKEN>` again", err)
+		}
 		return nil, err
 	}
 	if resp.CertPEM == "" {

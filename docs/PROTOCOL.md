@@ -715,6 +715,10 @@ minute either side of its own). The serial binds the signature to the one
 certificate it was made for, so an intercepted renewal cannot be replayed
 against another certificate of the same identity.
 
+Only an unexpired certificate issued to this agent renews. A certificate
+downloaded from the dashboard or already expired is refused, and
+`localport setup <TOKEN>` issues a new one.
+
 This digest is a wire format shared with the control plane. Both sides pin it
 with the same test vector; do not change one without the other.
 
