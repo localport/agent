@@ -151,7 +151,7 @@ func walkPrivateDir(root, dir string, followRoot, secure bool) error {
 		return nil
 	}
 	cur := absRoot
-	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+	for part := range strings.SplitSeq(rel, string(os.PathSeparator)) {
 		cur = filepath.Join(cur, part)
 		if err := inspectPrivateDir(cur, false, secure); err != nil {
 			return err

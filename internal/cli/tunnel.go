@@ -134,8 +134,8 @@ func warnNoPortCeiling(renderer tunnelUI, devices []config.DeviceSpec) {
 		if len(device.AllowPorts) > 0 {
 			continue
 		}
-		p.Warn(fmt.Sprintf("device %q: no --allow-ports set; the agent will open any port the dashboard enables on %s. "+
-			"Set --allow-ports (or allow_ports in config) to limit it.", device.Name, device.Host))
+		p.Warn(fmt.Sprintf("device %q: no --allow-ports set, so any port the dashboard allows is served on %s; set --allow-ports or allow_ports to limit it",
+			device.Name, device.Host))
 	}
 }
 

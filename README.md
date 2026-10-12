@@ -88,7 +88,7 @@ localport connect --config localport.yaml
 
 Security notes:
 
-- `--allow-ports` is the only port limit enforced on the device. Without it the agent serves any port the dashboard allows on that host. Plain mode (`--no-ui` or no TTY) logs a warning at startup and the TUI shows `Limit  none` in the device header.
+- `--allow-ports` is the only port limit enforced on the device. Without it the agent serves any port the dashboard allows on that host. Plain mode (`--noui` or no TTY) logs a warning at startup and the TUI shows `Limit  none` in the device header.
 - `localport access -L` listens on 127.0.0.1, so any local user can use the forward with your identity, as with `ssh -L`. Avoid `--local-addr 0.0.0.0` on shared hosts. Use a `0600` Unix socket instead, `-L unix:/run/user/1000/plc.sock:502` (not on Windows).
 - `${VAR}` in a config file is expanded from the environment before parsing, so a config can send any environment variable to Localport. Only run trusted config files.
 
