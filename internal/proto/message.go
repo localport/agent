@@ -58,6 +58,7 @@ const (
 	LimitClientConnections LimitType = "client_connections"
 	LimitNoPlan            LimitType = "no_plan"
 	LimitPaymentDuePaused  LimitType = "payment_due_paused"
+	LimitPlanPaused        LimitType = "plan_paused"
 	LimitBlocked           LimitType = "blocked"
 )
 

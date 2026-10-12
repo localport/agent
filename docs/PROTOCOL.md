@@ -253,10 +253,12 @@ agent takes no action.
 | `client_connections` | A fanout tunnel reached its plan's client limit         | yes at registration, no when a session is closed for it |
 | `no_plan`            | Team has no active paid or trialing subscription | no        |
 | `payment_due_paused` | Team holds a plan, payment is overdue, and its grace window has elapsed | no |
+| `plan_paused`        | Team's subscription is paused; it resumes from the billing page | no |
 | `blocked`            | Access blocked for this tunnel or team           | no        |
 
-`payment_due_paused` and `no_plan` are both terminal. The first asks the team
-to pay an overdue invoice, the second to subscribe. The agent uses `limit_type`
+`payment_due_paused`, `plan_paused` and `no_plan` are all terminal. The first
+asks the team to pay an overdue invoice, the second to resume its paused plan,
+the third to subscribe. The agent uses `limit_type`
 only to pick the hint it appends to `reason`. Whether it reconnects is decided
 by `retryable`.
 

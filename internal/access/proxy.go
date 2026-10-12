@@ -215,7 +215,7 @@ func streamError(device string, err error) error {
 		return fmt.Errorf("%s denied this identity: its access to the device was withdrawn or narrowed, check the grants in the dashboard: %w", device, err)
 	case strings.Contains(msg, "tls: certificate expired"),
 		strings.Contains(msg, "tls: expired certificate"):
-		return fmt.Errorf("%s rejected the certificate as expired: run `localport login` again, or `localport identity renew`: %w", device, err)
+		return fmt.Errorf("%s rejected the certificate as expired: for a sign-in, run `localport login` again; for a machine credential, run `localport identity renew`: %w", device, err)
 	default:
 		return fmt.Errorf("connection to %s ended: %w", device, err)
 	}

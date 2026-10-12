@@ -27,6 +27,8 @@ func PolicyHint(lt proto.LimitType) string {
 		return "team has no active plan. Subscribe or start a free trial from the dashboard"
 	case proto.LimitPaymentDuePaused:
 		return "payment is overdue. Update the payment method from the dashboard, then start the agent again"
+	case proto.LimitPlanPaused:
+		return "team plan is paused. Resume it from the billing page in the dashboard, then start the agent again"
 	case proto.LimitBlocked:
 		return "team account is blocked. Contact support"
 	}
