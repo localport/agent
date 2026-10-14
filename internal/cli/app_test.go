@@ -50,6 +50,37 @@ func TestAppOldTunnelVerbNamesItsReplacement(t *testing.T) {
 	}
 }
 
+// A config file describes everything that runs, so an endpoint flag beside it
+// must be refused rather than silently dropped. Per-run switches still apply.
+func TestAppConfigRefusesEndpointFlags(t *testing.T) {
+	app := New("1.2.3", "abc123", "2026-04-13")
+	cases := [][]string{
+		{"connect", "--config", "x.yaml", "--name", "kiosk-9"},
+		{"connect", "--config", "x.yaml", "-t", "tok_x"},
+		{"connect", "--config", "x.yaml", "--allow-ports", "22"},
+		{"connect", "--config", "x.yaml", "--region", "eu"},
+		{"connect", "--config", "x.yaml", "--host", "192.168.1.20"},
+		{"--config", "x.yaml", "--local", "localhost:3000"},
+		{"--config", "x.yaml", "-l", "localhost:3000"},
+		{"--config", "x.yaml", "--region", "eu"},
+		{"--config", "x.yaml", "--proto", "tcp"},
+		{"http", "3000", "--config", "x.yaml"},
+	}
+	for _, args := range cases {
+		err := app.Run(args)
+		if err == nil || !strings.Contains(err.Error(), "cannot be combined with --config") {
+			t.Fatalf("%v must be refused, got %v", args, err)
+		}
+	}
+
+	// --noui is a per-run switch, so it gets past the guard and fails only on
+	// the missing file.
+	err := app.Run([]string{"connect", "--config", "does-not-exist.yaml", "--noui"})
+	if err == nil || strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("--noui beside --config must not be refused, got %v", err)
+	}
+}
+
 // `connect` without a token fails on the missing token.
 func TestAppConnectNeedsAToken(t *testing.T) {
 	t.Setenv("LOCALPORT_TOKEN", "")

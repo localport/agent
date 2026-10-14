@@ -38,6 +38,9 @@ func runConnect(version string, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := refuseBesideConfig(fs, *configPath, "token", "t", "region", "name", "host", "allow-ports"); err != nil {
+		return err
+	}
 
 	cfg, err := buildConnectConfig(*configPath, *token, *region, *name, *host, *allowPorts)
 	if err != nil {
@@ -112,7 +115,8 @@ func usageConnect(fs *flag.FlagSet) {
   One device that serves only the listed ports:
     localport connect -t <token> --allow-ports 502,80,8000-8100
 
-  Every tunnel and device in a file:
+  Every tunnel and device in a file. The file sets them all, so --token,
+  --region, --name, --host and --allow-ports are refused beside it:
     localport connect --config localport.yaml
 
 Environment:

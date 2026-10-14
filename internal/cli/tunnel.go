@@ -49,7 +49,13 @@ func runTunnel(version string, args []string) error {
 		return err
 	}
 
+	if err := refuseBesideConfig(fs, *configPath, "token", "t", "region", "local", "l", "proto", "name"); err != nil {
+		return err
+	}
 	if posProto != "" {
+		if *configPath != "" {
+			return errors.New("a positional protocol and port cannot be combined with --config: set it in the config file")
+		}
 		if *local != "" {
 			return errors.New("--local cannot be combined with positional protocol/address")
 		}
@@ -122,6 +128,36 @@ func warnTokenFlag(renderer tunnelUI, fromFlag bool) {
 	}
 }
 
+// refuseBesideConfig reports the named flags given alongside --config. The file
+// describes everything that runs, so a flag that would otherwise set the
+// endpoint is dropped; refusing it is what stops a person believing a
+// `--name` they typed took effect. Visit sees only flags actually passed, so a
+// default such as --proto=http is never mistaken for one.
+func refuseBesideConfig(fs *flag.FlagSet, configPath string, names ...string) error {
+	if configPath == "" {
+		return nil
+	}
+	conflicting := make(map[string]bool, len(names))
+	for _, n := range names {
+		conflicting[n] = true
+	}
+	var given []string
+	fs.Visit(func(f *flag.Flag) {
+		if !conflicting[f.Name] {
+			return
+		}
+		if len(f.Name) == 1 {
+			given = append(given, "-"+f.Name)
+		} else {
+			given = append(given, "--"+f.Name)
+		}
+	})
+	if len(given) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s cannot be combined with --config: set it in the config file", strings.Join(given, ", "))
+}
+
 func pickRenderer(mode ui.Mode, a *agent.Agent) tunnelUI {
 	if mode == ui.ModePlain {
 		return ui.NewPlain()
@@ -149,7 +185,7 @@ func usageTunnel(fs *flag.FlagSet) {
 	fmt.Fprint(os.Stderr, `Usage: localport <proto> <port|host:port> [flags]
        localport --token <token> --local <address> [flags]
 
-  Config file:
+  Config file (it sets every endpoint, so endpoint flags beside it are refused):
     localport connect --config localport.yaml
 
   Single endpoint, scheme in --local sets the protocol:
