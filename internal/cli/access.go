@@ -383,7 +383,7 @@ func usageAccess(fs *flag.FlagSet) {
         -L 502           reach 502 on a local port the system picks
 
   --stdio  Carry one connection over stdin and stdout, for ssh:
-        ssh -o ProxyCommand="localport access plc-01.ap.localport.dev --stdio 22" user@plc-01
+        ssh -o ProxyCommand="localport access plc-01-factory.ap.localport.dev --stdio 22" user@plc-01
 
   Credentials. With no flag, the identity this machine holds is used and
   renewed in the background, so there is no file to copy and nothing that

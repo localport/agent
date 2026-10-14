@@ -27,7 +27,7 @@ func runConnect(version string, args []string) error {
 		name        = fs.String("name", "", "device name (default: this machine's hostname)")
 		host        = fs.String("host", "", "where this device sends traffic (default: localhost)")
 		allowPorts  = fs.String("allow-ports", "", "serve only these ports, e.g. 502,80,8000-8100 (default: all ports opened in the dashboard)")
-		noUI        = fs.Bool("noui", false, "disable the live view and emit plain logs (auto-enabled when stdout is not a TTY)")
+		noUI        = fs.Bool("noui", false, "disable the live view and emit plain logs (auto-enabled when stderr is not a TTY)")
 		noMux       = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them")
 		noInspect   = fs.Bool("no-inspect", false, "do not inspect HTTP requests")
 		logRequests = fs.Bool("log-requests", false, "log one line per HTTP request in headless mode (http ports)")

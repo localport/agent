@@ -35,7 +35,7 @@ func runTunnel(version string, args []string) error {
 		local       = fs.String("local", "", "local service: tcp://host:port, http://host:port, or host:port")
 		proto       = fs.String("proto", "http", "tunnel protocol: http, tcp, tls (overridden when --local has a scheme)")
 		name        = fs.String("name", "", "endpoint name (default: \"default\")")
-		noUI        = fs.Bool("noui", false, "disable the live TUI and emit plain logs (auto-enabled when stdout is not a TTY)")
+		noUI        = fs.Bool("noui", false, "disable the live TUI and emit plain logs (auto-enabled when stderr is not a TTY)")
 		noMux       = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them")
 		noInspect   = fs.Bool("no-inspect", false, "do not inspect HTTP requests, even under the TUI")
 		logRequests = fs.Bool("log-requests", false, "log one line per HTTP request in headless mode (http tunnels)")

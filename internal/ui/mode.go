@@ -13,8 +13,8 @@ const (
 	ModePlain
 )
 
-// DetectMode picks the renderer. Plain mode is used with --noui, when stdout
-// or stderr is not a TTY, or when TERM=dumb. Otherwise the TUI is used.
+// DetectMode picks the renderer. Plain mode is used with --noui, when out is
+// not a TTY, or when TERM=dumb. Otherwise the TUI is used.
 // NO_COLOR removes colors but keeps the TUI.
 func DetectMode(noUI bool, out *os.File) Mode {
 	if noUI || !IsTTY(out) {
