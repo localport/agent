@@ -27,7 +27,7 @@ func runConnect(version string, args []string) error {
 		name        = fs.String("name", "", "device name (default: this machine's hostname)")
 		host        = fs.String("host", "", "where this device sends traffic (default: localhost)")
 		allowPorts  = fs.String("allow-ports", "", "serve only these ports, e.g. 502,80,8000-8100 (default: all ports opened in the dashboard)")
-		noUI        = fs.Bool("noui", false, "disable the live view and emit plain logs (auto-enabled when stdout is not a TTY)")
+		noUI        = fs.Bool("noui", false, "disable the live view and emit plain logs (auto-enabled when stderr is not a TTY)")
 		noMux       = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them")
 		noInspect   = fs.Bool("no-inspect", false, "do not inspect HTTP requests")
 		logRequests = fs.Bool("log-requests", false, "log one line per HTTP request in headless mode (http ports)")
@@ -36,6 +36,9 @@ func runConnect(version string, args []string) error {
 	fs.Usage = func() { usageConnect(fs) }
 
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := refuseBesideConfig(fs, *configPath, "token", "t", "region", "name", "host", "allow-ports"); err != nil {
 		return err
 	}
 
@@ -112,7 +115,8 @@ func usageConnect(fs *flag.FlagSet) {
   One device that serves only the listed ports:
     localport connect -t <token> --allow-ports 502,80,8000-8100
 
-  Every tunnel and device in a file:
+  Every tunnel and device in a file. The file sets them all, so --token,
+  --region, --name, --host and --allow-ports are refused beside it:
     localport connect --config localport.yaml
 
 Environment:

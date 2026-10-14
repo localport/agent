@@ -33,6 +33,11 @@
 
   launchd has no sandboxing keys, so running as the account in UserName is
   the daemon's only boundary.
+
+  On a fleet device, the token file holds the fleet token and
+  ProgramArguments runs the fleet ExecStart line from localport.service,
+  one string per argument: localport, connect, then the region and name
+  flags each followed by its value.
 -->
 <plist version="1.0">
 <dict>
