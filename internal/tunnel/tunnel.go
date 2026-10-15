@@ -745,6 +745,10 @@ func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 			return
 		}
 
+		// A frame read by a Recv that started after arming answers the probe.
+		// Compared by value since the Windows wall clock is too coarse to
+		// order the arming and a fast answer.
+		armed := t.fastProbeAt.Load()
 		_ = raw.SetReadDeadline(t.readDeadline(lastInbound))
 		msgType, body, err := pc.Recv()
 		if err != nil {
@@ -752,14 +756,9 @@ func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 			if errors.As(err, &ne) && ne.Timeout() {
 				// Deadline reached by expiry or interrupt. The probe window
 				// counts from arming, so silence before it is ignored.
-				if at := t.fastProbeAt.Load(); at != 0 {
-					armed := time.Unix(0, at)
-					if lastInbound.After(armed) {
-						t.fastProbeAt.CompareAndSwap(at, 0)
-					} else if time.Since(armed) > netChangeProbeWindow {
-						t.signalDisconnected()
-						return
-					}
+				if at := t.fastProbeAt.Load(); at != 0 && time.Since(time.Unix(0, at)) > netChangeProbeWindow {
+					t.signalDisconnected()
+					return
 				}
 				if time.Since(lastInbound) > edgeIdleTimeout {
 					t.signalDisconnected()
@@ -771,6 +770,9 @@ func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 			return
 		}
 		lastInbound = time.Now()
+		if armed != 0 {
+			t.fastProbeAt.CompareAndSwap(armed, 0)
+		}
 		t.dispatch(msgType, body)
 	}
 }
