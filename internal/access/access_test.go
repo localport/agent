@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -389,6 +390,12 @@ func TestBuildTLSConfigNamesFileErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "file not found") {
 		t.Fatalf("error should name the cause, got %q", err)
+	}
+
+	// Windows has no mode bits to loosen. There the DACL decides, and a file
+	// in the user's temp dir inherits an owner-only one.
+	if runtime.GOOS == "windows" {
+		return
 	}
 
 	// A PEM file readable by group or other is refused before parsing.
