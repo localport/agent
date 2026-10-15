@@ -95,6 +95,9 @@ func fetchGitHubActionsToken(ctx context.Context, audience string) (string, erro
 	if err != nil {
 		return "", err
 	}
+	if isRedirect(resp.StatusCode) {
+		return "", fmt.Errorf("GitHub Actions OIDC endpoint answered with a redirect (HTTP %d); refusing to follow it", resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		// The response can echo the request token. Do not include it.
 		return "", fmt.Errorf("GitHub Actions OIDC token request failed with status %d", resp.StatusCode)

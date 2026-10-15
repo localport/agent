@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/localport/agent/internal/security"
 )
 
 const (
@@ -39,7 +40,7 @@ type Renewer struct {
 // the holder dies.
 func (r *Renewer) lock() (release func(), held bool, err error) {
 	dir := r.Store.Dir(r.Ref)
-	f, err := os.OpenFile(filepath.Join(dir, lockFile), os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := security.OpenLockFile(filepath.Join(dir, lockFile))
 	if err != nil {
 		return nil, false, fmt.Errorf("open renewal lock: %w", err)
 	}

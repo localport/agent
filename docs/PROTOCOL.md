@@ -35,6 +35,8 @@ identical on either carrier.
 - `type` is a single `MessageType` byte (see the table below).
 - `payload` is JSON-encoded. A frame with no body has `length=1`.
 - Maximum frame size is **1 MiB**.
+- The first frame on a connection (`Register`, `MuxBind` or `ConnectionReady`)
+  must be at most **16 KiB**. A larger first frame closes the connection.
 
 ## Message types
 
@@ -52,7 +54,7 @@ identical on either carrier.
 | Redirect        | 10  | E → C     | Reconnect to a different edge    |
 | MuxBind         | 11  | C → E     | Attach a multiplexed data conn   |
 | MuxBindAck      | 12  | E → C     | Mux bind result                  |
-| PortsUpdate     | 13  | E → C     | A device's new open ports        |
+| PortsUpdate     | 13  | E → C     | A device's new allowed ports     |
 | PortsAck        | 14  | C → E     | The port version now served      |
 
 ## Payloads
@@ -77,7 +79,7 @@ identical on either carrier.
 
 `kind` is `tunnel` or `device`; absent reads as `tunnel`. A **tunnel** publishes
 one local service and names its `protocol` (`http`, `tcp`, `tls`). A **device**
-joins a fleet, sends no protocol, and serves the ports the dashboard opens on it.
+joins a fleet, sends no protocol, and serves the ports the dashboard allows on it.
 Sending the wrong kind for the token is refused with `PR009`.
 
 `allowed_ports` is a device's optional port ceiling (`--allow-ports`): up to 64
@@ -146,18 +148,22 @@ slot immediately on reconnect. A session replaced this way receives a
 non-retryable `Shutdown` with code `TU012`, so two agents sharing one token
 cannot kick each other in a loop (the replaced one stops).
 
+A refused `Register` does not affect the live session. A takeover by a
+different registration (not a resume) stops the replaced agent.
+
 ### PortsUpdate (13) / PortsAck (14)
 
-A device's open ports are set in the dashboard. The list arrives in `RegisterAck`
+A device's allowed ports are set in the dashboard. The list arrives in `RegisterAck`
 and is replaced by `PortsUpdate`:
 
 ```json
 { "version": 41, "ports": [{ "port": 502, "protocol": "tcp" }, { "port": 80, "protocol": "http" }] }
 ```
 
-`version` orders the list. A device applies an update only when the version is
-higher than the one it holds, and answers every update with the version it
-serves:
+`version` orders the list within a session. A `PortsUpdate` is applied only
+when its version is higher than the current one, and every update is answered
+with the version served. The list in a `RegisterAck` replaces the list and
+version unconditionally, and connections to ports it drops are closed.
 
 ```json
 { "version": 41 }
@@ -169,7 +175,7 @@ closes the local sockets it holds for that port when it applies the update. An
 added port is accepted by the edge only after this acknowledgement, since
 control frames and data streams travel on different connections.
 
-A port the dashboard opens outside the device's `allowed_ports` stays in the
+A port the dashboard allows outside the device's `allowed_ports` stays in the
 list and is refused: the dashboard shows it as blocked by the device.
 
 `protocol` is `tcp` (opaque bytes) or `http` (requests are parsed for this
@@ -440,6 +446,23 @@ acceptable client certificate or the connection is refused.
    edge; a permanently lost edge costs at most that window before the tunnel
    returns on a replacement edge.
 
+### Finding an edge
+
+The agent dials `connect.<region>.localport.dev` (TTL 60 s). The name resolves
+to any edge in the region, which may answer with a `Redirect`.
+
+After a successful `Register` the agent reconnects to the same edge. After 90 s
+of failures it returns to the connect host.
+
+When resolving a host fails (timeout, SERVFAIL, unreachable nameserver), the
+agent dials the IP of its last connection to that host that completed TLS.
+
+- A name that resolves is always dialed as resolved.
+- NXDOMAIN is final and never falls back.
+- TLS still verifies the certificate against the hostname, so a stale IP fails
+  the handshake.
+- The table is per process and empty until the first successful connection.
+
 ### Redirect
 
 The edge may answer a `Register` with a `Redirect` pointing at another edge,
@@ -505,7 +528,7 @@ port must be one the device serves. Refusals come back as status codes:
 | `405`  | not a fleet device address                                    |
 | `421`  | the authority is not the device this connection was opened to |
 | `400`  | the authority carries no usable port                          |
-| `403`  | the identity has no access, or the port is not open           |
+| `403`  | the identity has no access, or the port is not allowed        |
 | `502`  | nothing is listening on that port on the device               |
 | `503`  | the device is busy                                            |
 
@@ -514,6 +537,17 @@ chain expires, when a grant is narrowed, and when the certificate is revoked.
 The command re-dials on the next forward, and the new attempt is refused if the
 grant no longer covers it. An idle connection is pinged after 30 s and dropped
 if the ping goes unanswered for 15 s.
+
+A forward listens on `127.0.0.1` by default, reachable by every local user.
+`-L unix:<path>:<device port>` listens on a Unix socket created with mode
+`0600`. A stale socket with no listener is replaced. A live socket or any other
+file at the path is refused. The parent directory must be writable only by the
+owner (for example `/run/user/<uid>`), since whoever can write it can replace
+the socket. Not available on Windows.
+
+**The agent follows no HTTP redirect.** A `3xx` from a control-plane call, the
+CI token request or the WebSocket upgrade is a terminal error reported with its
+status. Following it would send the token or CSR to the `Location` host.
 
 **Every connection the agent makes requires TLS 1.3**, including both carriers,
 the consumer connection and the control-plane calls. TLS 1.3 encrypts the client
@@ -598,6 +632,15 @@ under `~/.localport/identity/` (directories `0700`, files `0600`):
                       renew_after only when the credential renews
 ```
 
+Before every read and write, each directory from the base (`LOCALPORT_HOME`,
+`~/.localport` or the system-wide one) down to the credential is opened without
+following links and must be a directory owned by the agent's user. The base may
+be a symlink only when it comes from `LOCALPORT_HOME` or `$HOME`, and its target
+must have the same owner. The system-wide base is never followed. A failing
+path is refused, never repaired. `meta.json`, the certificate and the key are
+opened with `O_NOFOLLOW` (`FILE_FLAG_OPEN_REPARSE_POINT` on Windows) and must
+be owner-only.
+
 A save writes the certificate and key under new serial-named files, then
 `meta.json`, which names them. Writing `meta.json` is the commit point, so a save
 interrupted before it leaves the previous credential loadable. Files from earlier
@@ -673,6 +716,10 @@ The minute bucket bounds replay without a nonce store (the server accepts the
 minute either side of its own). The serial binds the signature to the one
 certificate it was made for, so an intercepted renewal cannot be replayed
 against another certificate of the same identity.
+
+Only an unexpired certificate issued to this agent renews. A certificate
+downloaded from the dashboard or already expired is refused, and
+`localport setup <TOKEN>` issues a new one.
 
 This digest is a wire format shared with the control plane. Both sides pin it
 with the same test vector; do not change one without the other.

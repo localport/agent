@@ -237,7 +237,7 @@ type Tunnel struct {
 	// probe, or zero when none is pending.
 	fastProbeAt atomic.Int64
 
-	// ports is the device's open ports, nil on a tunnel.
+	// ports is the device's allowed ports, nil on a tunnel.
 	ports *devicePorts
 
 	totalBytesIn  atomic.Int64
@@ -305,7 +305,7 @@ func New(opts Options) *Tunnel {
 // IsDevice reports whether this runtime serves a fleet device.
 func (t *Tunnel) IsDevice() bool { return t.ports != nil }
 
-// Ports lists the device's open ports, nil on a tunnel.
+// Ports lists the device's allowed ports, nil on a tunnel.
 func (t *Tunnel) Ports() []proto.DevicePort {
 	if t.ports == nil {
 		return nil
@@ -335,7 +335,7 @@ func (t *Tunnel) dialTarget(port uint16) (net.Conn, int, error) {
 		return nil, http.StatusForbidden, errors.New("no port requested")
 	}
 	if _, open := t.ports.Protocol(port); !open {
-		return nil, http.StatusForbidden, fmt.Errorf("port %d is not open on this device", port)
+		return nil, http.StatusForbidden, fmt.Errorf("port %d is not allowed on this device", port)
 	}
 	if !t.opts.AllowPorts.Allows(port) {
 		return nil, http.StatusForbidden, fmt.Errorf("port %d is outside this device's --allow-ports", port)
@@ -614,8 +614,9 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			t.edgeAddr = addr
 			t.dialer = chosen
 			t.sessionID = ack.SessionID
+			var closedPorts []uint16
 			if t.ports != nil {
-				t.ports.Set(ack.PortsVersion, ack.Ports)
+				closedPorts = t.ports.Reset(ack.PortsVersion, ack.Ports)
 			}
 			t.info = Info{
 				TunnelID:   ack.TunnelID,
@@ -631,6 +632,8 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 				Protocol:   ack.Protocol,
 			}
 			t.mu.Unlock()
+			// Close connections to ports the new session no longer serves.
+			t.closeConnsForPorts(closedPorts)
 			return nil
 
 		case proto.MsgRedirect:
@@ -742,6 +745,10 @@ func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 			return
 		}
 
+		// A frame read by a Recv that started after arming answers the probe.
+		// Compared by value since the Windows wall clock is too coarse to
+		// order the arming and a fast answer.
+		armed := t.fastProbeAt.Load()
 		_ = raw.SetReadDeadline(t.readDeadline(lastInbound))
 		msgType, body, err := pc.Recv()
 		if err != nil {
@@ -749,14 +756,9 @@ func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 			if errors.As(err, &ne) && ne.Timeout() {
 				// Deadline reached by expiry or interrupt. The probe window
 				// counts from arming, so silence before it is ignored.
-				if at := t.fastProbeAt.Load(); at != 0 {
-					armed := time.Unix(0, at)
-					if lastInbound.After(armed) {
-						t.fastProbeAt.CompareAndSwap(at, 0)
-					} else if time.Since(armed) > netChangeProbeWindow {
-						t.signalDisconnected()
-						return
-					}
+				if at := t.fastProbeAt.Load(); at != 0 && time.Since(time.Unix(0, at)) > netChangeProbeWindow {
+					t.signalDisconnected()
+					return
 				}
 				if time.Since(lastInbound) > edgeIdleTimeout {
 					t.signalDisconnected()
@@ -768,6 +770,9 @@ func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 			return
 		}
 		lastInbound = time.Now()
+		if armed != 0 {
+			t.fastProbeAt.CompareAndSwap(armed, 0)
+		}
 		t.dispatch(msgType, body)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -81,7 +82,7 @@ func TestParseForward(t *testing.T) {
 // Each refusal status maps to an actionable message.
 func TestStatusErrorsAreActionable(t *testing.T) {
 	cases := map[int]string{
-		403: "port 502 is open",
+		403: "port 502 is allowed",
 		421: "address does not match",
 		405: "not a fleet device address",
 		502: "nothing is listening on port 502",
@@ -389,6 +390,12 @@ func TestBuildTLSConfigNamesFileErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "file not found") {
 		t.Fatalf("error should name the cause, got %q", err)
+	}
+
+	// Windows has no mode bits to loosen. There the DACL decides, and a file
+	// in the user's temp dir inherits an owner-only one.
+	if runtime.GOOS == "windows" {
+		return
 	}
 
 	// A PEM file readable by group or other is refused before parsing.

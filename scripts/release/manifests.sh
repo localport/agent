@@ -45,7 +45,8 @@ propose() {
 	local base base_sha current_sha
 
 	base="$(gh api "repos/$repo" --jq .default_branch)"
-	current_sha="$(gh api "repos/$repo/contents/$path?ref=$base" --jq .sha 2>/dev/null || true)"
+	# On a 404 gh prints the error body to stdout, so a failure clears the value.
+	current_sha="$(gh api "repos/$repo/contents/$path?ref=$base" --jq .sha 2>/dev/null)" || current_sha=""
 	if [ -n "$current_sha" ] &&
 		gh api "repos/$repo/contents/$path?ref=$base" --jq .content | base64 -d | cmp -s - "$file"; then
 		echo "    $repo: $path already at $version"

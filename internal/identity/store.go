@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -107,6 +108,11 @@ type Material struct {
 // Store is a directory of credentials, one subdirectory per Ref.
 type Store struct {
 	Root string
+	// Base is where the security.EnsurePrivateDir walk starts, "" means Root.
+	// BaseChosen allows Base to be a symlink. True for LOCALPORT_HOME and $HOME,
+	// false for the system-wide default.
+	Base       string
+	BaseChosen bool
 }
 
 // HomeEnv overrides where credentials live.
@@ -115,19 +121,21 @@ const HomeEnv = "LOCALPORT_HOME"
 // DefaultStore roots the store at ~/.localport/identity, or at the machine-wide
 // state directory when there is no home to use.
 func DefaultStore() (*Store, error) {
-	root, err := defaultRoot()
+	root, chosen, err := defaultRoot()
 	if err != nil {
 		return nil, err
 	}
-	return &Store{Root: filepath.Join(root, "identity")}, nil
+	return &Store{Root: filepath.Join(root, "identity"), Base: root, BaseChosen: chosen}, nil
 }
 
-func defaultRoot() (string, error) {
+// defaultRoot returns the base directory and true when it comes from
+// LOCALPORT_HOME or $HOME, false for the system-wide default.
+func defaultRoot() (string, bool, error) {
 	if v := strings.TrimSpace(os.Getenv(HomeEnv)); v != "" {
-		return v, nil
+		return v, true, nil
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".localport"), nil
+		return filepath.Join(home, ".localport"), true, nil
 	}
 	// systemd sets $HOME only when the unit names a User=, so a service without
 	// one has no home to use.
@@ -135,14 +143,23 @@ func defaultRoot() (string, error) {
 	case "windows":
 		programData := strings.TrimSpace(os.Getenv("ProgramData"))
 		if programData == "" {
-			return "", fmt.Errorf("locate credential directory: neither a home directory nor %%ProgramData%% is set (set %s)", HomeEnv)
+			return "", false, fmt.Errorf("locate credential directory: neither a home directory nor %%ProgramData%% is set (set %s)", HomeEnv)
 		}
-		return filepath.Join(programData, "localport"), nil
+		return filepath.Join(programData, "localport"), false, nil
 	case "darwin":
-		return "/Library/Application Support/localport", nil
+		return "/Library/Application Support/localport", false, nil
 	default:
-		return "/var/lib/localport", nil
+		return "/var/lib/localport", false, nil
 	}
+}
+
+// checkRoot returns where the directory walk starts and whether it may be a
+// symlink.
+func (s *Store) checkRoot() (string, bool) {
+	if s.Base == "" {
+		return s.Root, true
+	}
+	return s.Base, s.BaseChosen
 }
 
 func (s *Store) dir(ref Ref) string { return filepath.Join(s.Root, filepath.FromSlash(ref.dir())) }
@@ -171,6 +188,10 @@ func (s *Store) ListWithSkipped() ([]Ref, []Skipped, error) {
 	refs := make([]Ref, 0, len(matches))
 	var skipped []Skipped
 	for _, path := range matches {
+		if err := s.trusted(filepath.Dir(path)); err != nil {
+			skipped = append(skipped, Skipped{Path: filepath.Dir(path), Reason: err})
+			continue
+		}
 		meta, err := readMeta(path)
 		if err != nil {
 			skipped = append(skipped, Skipped{Path: filepath.Dir(path), Reason: err})
@@ -233,6 +254,9 @@ func (s *Store) Resolve(sel Selector) (Ref, error) {
 // which checks the open descriptor.
 func (s *Store) Load(ref Ref) (*Material, error) {
 	dir := s.dir(ref)
+	if err := s.trusted(dir); err != nil {
+		return nil, err
+	}
 
 	meta, err := readMeta(filepath.Join(dir, metaFile))
 	if err != nil {
@@ -242,11 +266,22 @@ func (s *Store) Load(ref Ref) (*Material, error) {
 	if err != nil {
 		return nil, fmt.Errorf("no usable credential for %s: %w", ref, err)
 	}
-	certPEM, err := os.ReadFile(filepath.Join(dir, meta.Cert))
+	certPEM, err := security.ReadPrivateFile(filepath.Join(dir, meta.Cert))
 	if err != nil {
 		return nil, fmt.Errorf("read certificate: %w", err)
 	}
 	return &Material{CertPEM: certPEM, Key: key, Meta: meta}, nil
+}
+
+// trusted runs the read-only form of the walk Save does before writing.
+// fs.ErrNotExist passes so the read that follows reports it.
+func (s *Store) trusted(dir string) error {
+	base, follow := s.checkRoot()
+	err := security.CheckPrivateDir(base, dir, follow)
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // Save writes a credential and returns its Ref. The path and the identity
@@ -294,7 +329,8 @@ func (s *Store) Save(m Material) (Ref, error) {
 
 	dir := s.dir(ref)
 
-	if err := security.EnsurePrivateDir(s.Root, dir); err != nil {
+	base, follow := s.checkRoot()
+	if err := security.EnsurePrivateDir(base, dir, follow); err != nil {
 		return Ref{}, err
 	}
 
@@ -393,8 +429,10 @@ func (m *Material) TLSCertificate() (*tls.Certificate, error) {
 	return cert, nil
 }
 
+// readMeta opens meta.json with the same checks as the key file. It selects
+// the key and certificate files and the renewal source.
 func readMeta(path string) (Meta, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := security.ReadPrivateFile(path)
 	if err != nil {
 		return Meta{}, fmt.Errorf("read identity metadata: %w", err)
 	}

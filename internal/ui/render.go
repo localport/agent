@@ -237,6 +237,11 @@ func deviceHeader(s snap, ts tState, row func(label, value string) string, label
 		portsLine += pal.Foreground(formatPorts(ts.ports, ts.allowed))
 	}
 	lines = append(lines, portsLine)
+	// without --allow-ports only the dashboard list limits this device.
+	if ts.allowed == nil {
+		lines = append(lines, pal.ForegroundDim(padRight("Limit", labelW))+
+			pal.Warning("none: any port the dashboard allows (set --allow-ports)"))
+	}
 
 	st := s.stats[ts.name]
 	lines = append(lines,
@@ -440,7 +445,7 @@ func bottomCount(ts tState, s snap) int {
 func bottomEmptyMsg(ts tState, pal Palette) string {
 	switch {
 	case ts.device && len(ts.ports) == 0:
-		return pal.Muted("no ports open: edit this device in the dashboard")
+		return pal.Muted("no ports allowed: edit this device in the dashboard")
 	case ts.device:
 		return pal.Muted("no connections yet")
 	case httpProto(ts.proto):

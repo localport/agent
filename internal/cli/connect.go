@@ -26,7 +26,7 @@ func runConnect(version string, args []string) error {
 		region      = fs.String("region", "", "edge region: eu, us, ap")
 		name        = fs.String("name", "", "device name (default: this machine's hostname)")
 		host        = fs.String("host", "", "where this device sends traffic (default: localhost)")
-		allowPorts  = fs.String("allow-ports", "", "serve only these ports, e.g. 502,80,8000-8100 (default: all ports opened in the dashboard)")
+		allowPorts  = fs.String("allow-ports", "", "limit which ports this device serves, e.g. 502,80,8000-8100 (default: any port the dashboard allows)")
 		noUI        = fs.Bool("noui", false, "disable the live view and emit plain logs (auto-enabled when stderr is not a TTY)")
 		noMux       = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them")
 		noInspect   = fs.Bool("no-inspect", false, "do not inspect HTTP requests")
@@ -59,6 +59,7 @@ func runConnect(version string, args []string) error {
 	renderer := pickRenderer(mode, a)
 	renderer.Banner(version, cfg)
 	warnTokenFlag(renderer, *configPath == "" && strings.TrimSpace(*token) != "")
+	warnNoPortCeiling(renderer, cfg.Devices)
 	defer renderer.Shutdown()
 
 	// Stop ends all sessions at once. The renderer shuts down first to

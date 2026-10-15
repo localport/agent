@@ -29,16 +29,22 @@ func (d *WSDialer) Dial(ctx context.Context, host, port string) (net.Conn, error
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig:   agentTLSConfig(d.ServerName, host, ALPNWS),
-			ForceAttemptHTTP2: false, // WS rides HTTP/1.1
-			DialContext: (&net.Dialer{
-				Timeout:   timeout,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
+	// dialed is the remote address of this dial, stored in lastGood once the
+	// upgrade, and so the TLS handshake, succeeds.
+	var dialed net.Addr
+	dialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
+	httpClient := wsHTTPClient(&http.Transport{
+		TLSClientConfig:   agentTLSConfig(d.ServerName, host, ALPNWS),
+		ForceAttemptHTTP2: false, // WS rides HTTP/1.1
+		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+			h, p := SplitHostPort(addr)
+			conn, err := dialEdge(ctx, dialer, h, p)
+			if err == nil {
+				dialed = conn.RemoteAddr()
+			}
+			return conn, err
 		},
-	}
+	})
 
 	path := d.Path
 	if path == "" {
@@ -53,7 +59,19 @@ func (d *WSDialer) Dial(ctx context.Context, host, port string) (net.Conn, error
 	if err != nil {
 		return nil, fmt.Errorf("ws dial %s: %w", url, err)
 	}
+	if dialed != nil {
+		lastGood.remember(host, dialed)
+	}
 	// Binary frames carry the protocol bytes unchanged. The context passed here
 	// bounds the connection lifetime, so it cannot be the dial context.
 	return websocket.NetConn(context.Background(), c, websocket.MessageBinary), nil
+}
+
+// wsHTTPClient returns the client for the WebSocket upgrade. A 3xx is returned
+// as is, the upgrade never follows Location to another host.
+func wsHTTPClient(transport http.RoundTripper) *http.Client {
+	return &http.Client{
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }

@@ -43,14 +43,30 @@ func ParseDevice(raw string) (host, addr string, err error) {
 	return host, net.JoinHostPort(host, port), nil
 }
 
-// ParseForward parses one -L value in OpenSSH order, local port first.
+// socketPrefix marks the local side of a forward as a Unix socket path.
+const socketPrefix = "unix:"
+
+// ParseForward parses one -L value in OpenSSH order, local side first.
 //
-//	5020:502   listen on 5020, reach the device's port 502
-//	502        reach 502, on a local port the operating system picks
+//	5020:502                listen on 5020, reach the device's port 502
+//	502                     reach 502, on a local port the operating system picks
+//	unix:/run/plc.sock:502  listen on a socket only this account can open
 func ParseForward(raw, bindAddr string) (Forward, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return Forward{}, errors.New("-L requires a port")
+	}
+	if rest, ok := strings.CutPrefix(raw, socketPrefix); ok {
+		// the path may contain colons, so split on the last one.
+		split := strings.LastIndex(rest, ":")
+		if split <= 0 {
+			return Forward{}, fmt.Errorf("-L %s: want unix:<path>:<device port>", raw)
+		}
+		remote, err := parsePort(rest[split+1:])
+		if err != nil || remote == 0 {
+			return Forward{}, fmt.Errorf("-L %s: device port must be 1-65535", raw)
+		}
+		return Forward{Socket: true, LocalAddr: rest[:split], RemotePort: remote}, nil
 	}
 	localText, remoteText, hasLocal := strings.Cut(raw, ":")
 	if !hasLocal {

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/ui"
 )
@@ -61,5 +63,30 @@ func TestResolveTokenPrintsNothing(t *testing.T) {
 	})
 	if out != "" {
 		t.Fatalf("ResolveToken wrote %q", out)
+	}
+}
+
+// warnNoPortCeiling logs one line per device without a ceiling.
+func TestWarnsWithoutAllowPorts(t *testing.T) {
+	devices := []config.DeviceSpec{
+		{Name: "gw-01", Host: "127.0.0.1"},
+		{Name: "gw-02", Host: "10.0.0.5", AllowPorts: ports.Ceiling{{From: 502, To: 502}}},
+	}
+	out := captureStderr(t, func() { warnNoPortCeiling(ui.NewPlain(), devices) })
+	if !strings.Contains(out, `device "gw-01": no --allow-ports set`) || !strings.Contains(out, "on 127.0.0.1") {
+		t.Fatalf("missing the warning for the device without a ceiling: %q", out)
+	}
+	if strings.Contains(out, "gw-02") || strings.Count(out, "\n") != 1 {
+		t.Fatalf("want one line, for gw-01 only: %q", out)
+	}
+}
+
+func TestNoWarningWithAllowPorts(t *testing.T) {
+	devices := []config.DeviceSpec{{Name: "gw-02", Host: "10.0.0.5", AllowPorts: ports.Ceiling{{From: 502, To: 502}}}}
+	if out := captureStderr(t, func() { warnNoPortCeiling(ui.NewPlain(), devices) }); out != "" {
+		t.Fatalf("a device with a ceiling must not warn, got %q", out)
+	}
+	if out := captureStderr(t, func() { warnNoPortCeiling(ui.NewTUI(), []config.DeviceSpec{{Name: "gw-01"}}) }); out != "" {
+		t.Fatalf("the TUI must not print the warning, got %q", out)
 	}
 }

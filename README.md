@@ -31,7 +31,7 @@ Accounts and tunnels are managed at [localport.io](https://localport.io).
 
 - **Protocols.** HTTP, TCP, and TLS tunnels with automatic, browser-trusted HTTPS.
 - **Reserved addresses.** Subdomains and reserved ports persist across sessions, keeping public links and webhook URLs stable.
-- **Remote access.** A fleet is a group of devices sharing one token. Each device receives its own address, remains reachable by name behind CGNAT or cellular networks, and serves the ports opened on it in the dashboard. A fleet has no public endpoint. Consumers reach a device with `localport access <device> -L <local>:<remote>` over one mutual TLS connection, presenting a client certificate.
+- **Remote access.** A fleet is a group of devices sharing one token. Each device receives its own address, remains reachable by name behind CGNAT or cellular networks, and serves the ports allowed for it in the dashboard. A fleet has no public endpoint. Consumers reach a device with `localport access <device> -L <local>:<remote>` over one mutual TLS connection, presenting a client certificate.
 - **Fanout tunnels.** One permanent URL for the whole team. Each inbound HTTP request is delivered to every connected client and a designated client returns the response, so every developer receives the same webhooks without registering an endpoint of their own.
 - **Scoped access.** Each certificate names a stable identity. What an identity may reach is managed server-side and can be changed without reissuing certificates, and narrowing a grant or revoking a certificate closes live connections. Bring your own certificate authority if you prefer, since only its public chain is stored.
 - **Self-renewing credentials.** `localport setup <TOKEN>` redeems a single-use token, generates its private key locally, and renews itself from then on. No certificate file to copy around and no long-lived secret on the machine.
@@ -76,7 +76,7 @@ localport http 3000 -t <token>
 # Join a fleet as a device (its ports are set in the dashboard)
 localport connect -t <token> --name plc-01 --host 192.168.1.100
 
-# Serve only these ports, even if the dashboard opens others
+# Serve only these ports, even if the dashboard allows others
 localport connect -t <token> --name plc-01 --allow-ports 502,8000-8100
 
 # Reach that device's ports
@@ -85,6 +85,12 @@ localport access plc-01-factory.ap.localport.dev -L 5020:502 -L 8080:80
 # Run several tunnels and devices from one file
 localport connect --config localport.yaml
 ```
+
+Security notes:
+
+- `--allow-ports` is the only port limit enforced on the device. Without it the agent serves any port the dashboard allows on that host. Plain mode (`--noui` or no TTY) logs a warning at startup and the TUI shows `Limit  none` in the device header.
+- `localport access -L` listens on 127.0.0.1, so any local user can use the forward with your identity, as with `ssh -L`. Avoid `--local-addr 0.0.0.0` on shared hosts. Use a `0600` Unix socket instead, `-L unix:/run/user/1000/plc.sock:502` (not on Windows).
+- `${VAR}` in a config file is expanded from the environment before parsing, so a config can send any environment variable to Localport. Only run trusted config files.
 
 Complete command, flag, configuration, and protocol documentation is maintained on the documentation site:
 

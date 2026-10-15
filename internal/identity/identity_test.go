@@ -105,21 +105,25 @@ func TestSaveWritesKeyMaterialUnreadableByOthers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{meta.Key.File, meta.Cert, metaFile} {
-		info, err := os.Stat(filepath.Join(store.Dir(ref), name))
+	// on windows Go derives mode bits from FILE_ATTRIBUTE_READONLY only. The
+	// DACL is checked by Load below.
+	if runtime.GOOS != "windows" {
+		for _, name := range []string{meta.Key.File, meta.Cert, metaFile} {
+			info, err := os.Stat(filepath.Join(store.Dir(ref), name))
+			if err != nil {
+				t.Fatalf("stat %s: %v", name, err)
+			}
+			if perm := info.Mode().Perm(); perm&0o077 != 0 {
+				t.Errorf("%s mode %#o is readable by group or other", name, perm)
+			}
+		}
+		dir, err := os.Stat(store.Dir(ref))
 		if err != nil {
-			t.Fatalf("stat %s: %v", name, err)
+			t.Fatal(err)
 		}
-		if perm := info.Mode().Perm(); perm&0o077 != 0 {
-			t.Errorf("%s mode %#o is readable by group or other", name, perm)
+		if perm := dir.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("credential directory mode %#o is readable by group or other", perm)
 		}
-	}
-	dir, err := os.Stat(store.Dir(ref))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := dir.Mode().Perm(); perm&0o077 != 0 {
-		t.Errorf("credential directory mode %#o is readable by group or other", perm)
 	}
 
 	got, err := store.Load(ref)
@@ -546,9 +550,12 @@ func TestDefaultRootFallsBackWhenThereIsNoHome(t *testing.T) {
 	t.Setenv("USERPROFILE", "")
 	t.Setenv("ProgramData", `C:\ProgramData`)
 
-	root, err := defaultRoot()
+	root, chosen, err := defaultRoot()
 	if err != nil {
 		t.Fatalf("defaultRoot with no home: %v", err)
+	}
+	if chosen {
+		t.Error("the machine-wide default was reported as chosen, so a link planted there would be followed")
 	}
 	want := map[string]string{
 		"windows": filepath.Join(`C:\ProgramData`, "localport"),
@@ -698,3 +705,32 @@ func TestUnusableMetadataIsRefusedOnRead(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// A 403 on renew keeps the APIError code and adds the `localport setup` hint.
+func TestRenewRefusalSaysToRunSetupAgain(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"code":"SE011","error":"Access Denied By Scope","message":"Renewal denied"}`)
+	}))
+	defer srv.Close()
+	client := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+
+	leaf := selfSigned(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod")
+	cur := &Material{
+		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}),
+		Key:     fileKey{testKey(t)},
+		Meta:    Meta{Identity: "deploy-prod", Source: SourceToken},
+	}
+	_, err := client.Renew(context.Background(), cur)
+	if err == nil {
+		t.Fatal("a refused renewal returned no error")
+	}
+	if !strings.Contains(err.Error(), "localport setup") {
+		t.Fatalf("error does not say how to recover: %v", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != "SE011" {
+		t.Fatalf("the server's code was lost: %v", err)
+	}
+}

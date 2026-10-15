@@ -1,6 +1,7 @@
 package security
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +21,13 @@ import (
 // On Unix the mode bits carry the policy. On Windows the Go runtime synthesises
 // them from the read-only attribute alone, so they say nothing about who can
 // read the file; the DACL carries the policy there instead.
+
+// Modes for everything the store creates. On Windows the DACL is
+// authoritative and these are only passed to Go.
+const (
+	privateDirPerm  os.FileMode = 0o700
+	privateFilePerm os.FileMode = 0o600
+)
 
 // ReadPrivateFile reads a file that must be reachable only by its owner.
 func ReadPrivateFile(path string) ([]byte, error) {
@@ -90,22 +98,31 @@ func WritePrivateFileAtomic(path string, data []byte) error {
 	return nil
 }
 
+// ErrUntrustedPath is returned for a credential path that is a symlink or
+// reparse point, is not a directory, or is owned by another user.
+var ErrUntrustedPath = errors.New("untrusted credential path")
+
 // EnsurePrivateDir creates dir and any missing parents under root, restricted
 // to the current user.
 //
-// Only the components below root are checked for symlinks. Root itself is
-// configuration and the operator chose it, whereas everything under it is
-// created by us, so a link appearing there means somebody redirected a
-// credential. Walking the whole absolute path instead would reject ordinary
-// system layouts, where /var is a symlink on macOS and /home is on several BSDs.
-func EnsurePrivateDir(root, dir string) error {
-	if err := mkdirPrivate(dir); err != nil {
-		return err
-	}
-	return refuseSymlinkBelow(root, dir)
+// Each component from root down to dir is opened without following links and
+// checked on the descriptor. It must be a directory owned by the effective
+// user, and its mode is changed through that descriptor. Components above root
+// are not walked, /var is a symlink on macOS and /home on some BSDs. Root is
+// followed only with followRoot, set for LOCALPORT_HOME and $HOME. The
+// system-wide default is never followed, any local user can create a symlink
+// there before the first run.
+func EnsurePrivateDir(root, dir string, followRoot bool) error {
+	return walkPrivateDir(root, dir, followRoot, true)
 }
 
-func refuseSymlinkBelow(root, dir string) error {
+// CheckPrivateDir runs the EnsurePrivateDir walk without creating or changing
+// anything. A missing component returns an error wrapping fs.ErrNotExist.
+func CheckPrivateDir(root, dir string, followRoot bool) error {
+	return walkPrivateDir(root, dir, followRoot, false)
+}
+
+func walkPrivateDir(root, dir string, followRoot, secure bool) error {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", root, err)
@@ -119,19 +136,32 @@ func refuseSymlinkBelow(root, dir string) error {
 		return fmt.Errorf("%s is not inside %s", absDir, absRoot)
 	}
 
-	cur := absRoot
+	if secure {
+		if err := os.MkdirAll(filepath.Dir(absRoot), privateDirPerm); err != nil {
+			return fmt.Errorf("create %s: %w", filepath.Dir(absRoot), err)
+		}
+	}
+	if err := inspectPrivateDir(absRoot, followRoot, secure); err != nil {
+		if errors.Is(err, ErrUntrustedPath) {
+			return fmt.Errorf("%w; change its owner to this account, or set LOCALPORT_HOME to a directory this account owns", err)
+		}
+		return err
+	}
 	if rel == "." {
 		return nil
 	}
-	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+	cur := absRoot
+	for part := range strings.SplitSeq(rel, string(os.PathSeparator)) {
 		cur = filepath.Join(cur, part)
-		info, err := os.Lstat(cur)
-		if err != nil {
-			return fmt.Errorf("inspect %s: %w", cur, err)
-		}
-		if isRedirect(info) {
-			return fmt.Errorf("%s redirects elsewhere; credential paths must not be redirected", cur)
+		if err := inspectPrivateDir(cur, false, secure); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// OpenLockFile opens or creates path read-write without following a symlink or
+// reparse point.
+func OpenLockFile(path string) (*os.File, error) {
+	return openLockNoFollow(path)
 }

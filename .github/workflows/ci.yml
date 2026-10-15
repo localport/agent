@@ -41,6 +41,22 @@ jobs:
       - run: make test
       - run: make smoke
 
+  # internal/security has windows-only code paths (owner SID, reparse points,
+  # DACL, lock file) that the other runners never build.
+  test-windows:
+    name: Test (windows-latest, Go stable)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache-dependency-path: go.sum
+      - run: go test ./...
+
   vet:
     name: Vet (all platforms)
     runs-on: ubuntu-latest

@@ -128,6 +128,23 @@ func warnTokenFlag(renderer tunnelUI, fromFlag bool) {
 	}
 }
 
+// warnNoPortCeiling logs one warning per device without --allow-ports, the
+// only port limit enforced locally. Plain mode only, the TUI shows it in the
+// device header.
+func warnNoPortCeiling(renderer tunnelUI, devices []config.DeviceSpec) {
+	p, ok := renderer.(*ui.Plain)
+	if !ok {
+		return
+	}
+	for _, device := range devices {
+		if len(device.AllowPorts) > 0 {
+			continue
+		}
+		p.Warn(fmt.Sprintf("device %q: no --allow-ports set, so any port the dashboard allows is served on %s; set --allow-ports or allow_ports to limit it",
+			device.Name, device.Host))
+	}
+}
+
 // refuseBesideConfig reports the named flags given alongside --config. The file
 // describes everything that runs, so a flag that would otherwise set the
 // endpoint is dropped; refusing it is what stops a person believing a

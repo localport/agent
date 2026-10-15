@@ -36,7 +36,7 @@ func runAccess(args []string) error {
 	)
 	// -L is repeatable, one listener per device port.
 	var forwards stringList
-	fs.Var(&forwards, "L", "forward `[local:]remote`, repeatable (5020:502, or 502 for an OS-picked local port)")
+	fs.Var(&forwards, "L", "forward `[local:]remote`, repeatable (5020:502, 502 for an OS-picked local port, or unix:/path.sock:502 for a socket only this account can open)")
 	fs.Usage = func() { usageAccess(fs) }
 
 	// The remote is positional, before or after the flags.
@@ -381,6 +381,8 @@ func usageAccess(fs *flag.FlagSet) {
   -L  [local:]remote, repeatable.
         -L 5020:502      listen on 5020, reach the device's port 502
         -L 502           reach 502 on a local port the system picks
+        -L unix:/run/user/1000/plc.sock:502
+                         listen on a socket only this account can open
 
   --stdio  Carry one connection over stdin and stdout, for ssh:
         ssh -o ProxyCommand="localport access plc-01-factory.ap.localport.dev --stdio 22" user@plc-01

@@ -8,11 +8,11 @@ import (
 	"github.com/localport/agent/internal/proto"
 )
 
-// formatPorts renders a device's open ports sorted by number and marks those
+// formatPorts renders a device's allowed ports sorted by number and marks those
 // outside allowed.
 func formatPorts(open []proto.DevicePort, allowed ports.Ceiling) string {
 	if len(open) == 0 {
-		return "no ports open: edit this device in the dashboard"
+		return "no ports allowed: edit this device in the dashboard"
 	}
 	parts := make([]string, len(open))
 	for i, p := range open {
