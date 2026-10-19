@@ -23,7 +23,8 @@ func createPrivate(path string) (*os.File, error) {
 
 // inspectPrivateDir opens path with O_DIRECTORY, plus O_NOFOLLOW unless follow,
 // and checks the owner uid on the descriptor. With secure it creates a missing
-// directory and fchmods it to 0700, without secure it changes nothing.
+// directory and fchmods it to 0700. Without secure it changes nothing and
+// refuses a directory with a group or other write bit.
 func inspectPrivateDir(path string, follow, secure bool) error {
 	if secure {
 		if err := os.Mkdir(path, privateDirPerm); err != nil && !os.IsExist(err) {
@@ -54,12 +55,17 @@ func inspectPrivateDir(path string, follow, secure bool) error {
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return fmt.Errorf("cannot read ownership of %s", path)
+		return fmt.Errorf("%w: cannot read ownership of %s", ErrUntrustedPath, path)
 	}
 	if uid := os.Geteuid(); int(st.Uid) != uid {
-		return fmt.Errorf("%w: %s is owned by uid %d, not %d", ErrUntrustedPath, path, st.Uid, uid)
+		return fmt.Errorf("%w: %w: %s is owned by uid %d, not %d", ErrUntrustedPath, errForeignOwner, path, st.Uid, uid)
 	}
 	if !secure {
+		// Another account that can write the directory can replace what is in
+		// it. The secure walk instead narrows the mode below.
+		if perm := info.Mode().Perm(); perm&0o022 != 0 {
+			return fmt.Errorf("%w: %s is writable by group or other (mode %#o, want 0700)", ErrUntrustedPath, path, perm)
+		}
 		return nil
 	}
 	// fchmod so the mode lands on the inode just checked. Mkdir is subject to
@@ -83,17 +89,17 @@ func verifyPrivate(f *os.File, path string) error {
 		return fmt.Errorf("inspect %s: %w", path, err)
 	}
 	if mode := info.Mode(); mode&os.ModeType != 0 {
-		return fmt.Errorf("%s is not a regular file", path)
+		return fmt.Errorf("%w: %s is not a regular file", ErrUntrustedPath, path)
 	}
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return fmt.Errorf("%s has too-open permissions %#o (want 0600 or stricter)", path, perm)
+		return fmt.Errorf("%w: %s has too-open permissions %#o (want 0600 or stricter)", ErrUntrustedPath, path, perm)
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return fmt.Errorf("cannot read ownership of %s", path)
+		return fmt.Errorf("%w: cannot read ownership of %s", ErrUntrustedPath, path)
 	}
 	if uid := os.Geteuid(); int(st.Uid) != uid {
-		return fmt.Errorf("%s is owned by uid %d, not %d", path, st.Uid, uid)
+		return fmt.Errorf("%w: %w: %s is owned by uid %d, not %d", ErrUntrustedPath, errForeignOwner, path, st.Uid, uid)
 	}
 	return nil
 }

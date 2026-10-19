@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -264,5 +265,30 @@ func TestEnsurePrivateDirRefusesForeignOwner(t *testing.T) {
 	}
 	if err := EnsurePrivateDir(root, filepath.Join(foreign, "team"), true); !errors.Is(err, ErrUntrustedPath) {
 		t.Fatalf("err = %v, want ErrUntrustedPath", err)
+	}
+}
+
+// The ownership hint names LOCALPORT_HOME only for a root the user chose, and
+// is not attached to a refusal that is not about ownership.
+func TestCheckPrivateDirHintMatchesTheRefusal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("needs an account other than root")
+	}
+	err := CheckPrivateDir("/usr", "/usr", false)
+	if !errors.Is(err, errForeignOwner) || strings.Contains(err.Error(), "LOCALPORT_HOME") ||
+		strings.Contains(err.Error(), "change its owner") || !strings.Contains(err.Error(), "run the agent as the directory's owner") {
+		t.Fatalf("system root owned by root: %v, want an ownership refusal that says to run as its owner", err)
+	}
+	if err := CheckPrivateDir("/usr", "/usr", true); !strings.Contains(err.Error(), "LOCALPORT_HOME") {
+		t.Fatalf("chosen root owned by root: %v, want the LOCALPORT_HOME hint", err)
+	}
+
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	err = CheckPrivateDir(root, root, true)
+	if !errors.Is(err, ErrUntrustedPath) || errors.Is(err, errForeignOwner) || strings.Contains(err.Error(), "change its owner") {
+		t.Fatalf("group-writable root: %v, want a mode refusal without the ownership hint", err)
 	}
 }

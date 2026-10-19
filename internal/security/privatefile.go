@@ -100,9 +100,14 @@ func WritePrivateFileAtomic(path string, data []byte) error {
 	return nil
 }
 
-// ErrUntrustedPath is returned for a credential path that is a symlink or
-// reparse point, is not a directory, or is owned by another user.
+// ErrUntrustedPath is returned for a private path that is a symlink or
+// reparse point, is not the expected type, is owned by another user, or that
+// another account can write (a directory) or reach (a file).
 var ErrUntrustedPath = errcode.New(errcode.UntrustedPath)
+
+// errForeignOwner marks the ErrUntrustedPath refusals caused by ownership, so
+// only those carry the hint about changing the owner.
+var errForeignOwner = errors.New("owned by another account")
 
 // EnsurePrivateDir creates dir and any missing parents under root, restricted
 // to the current user.
@@ -119,7 +124,10 @@ func EnsurePrivateDir(root, dir string, followRoot bool) error {
 }
 
 // CheckPrivateDir runs the EnsurePrivateDir walk without creating or changing
-// anything. A missing component returns an error wrapping fs.ErrNotExist.
+// anything. Each component must also be writable by nobody but its owner (no
+// group or other write bit on Unix, no write grant to another trustee in the
+// DACL on Windows), since the walk cannot narrow it. A missing component
+// returns an error wrapping fs.ErrNotExist.
 func CheckPrivateDir(root, dir string, followRoot bool) error {
 	return walkPrivateDir(root, dir, followRoot, false)
 }
@@ -144,8 +152,13 @@ func walkPrivateDir(root, dir string, followRoot, secure bool) error {
 		}
 	}
 	if err := inspectPrivateDir(absRoot, followRoot, secure); err != nil {
-		if errors.Is(err, ErrUntrustedPath) {
-			return fmt.Errorf("%w; change its owner to this account, or set LOCALPORT_HOME to a directory this account owns", err)
+		if errors.Is(err, errForeignOwner) {
+			if followRoot {
+				return fmt.Errorf("%w; change its owner to this account, or when not running as root or Administrator, set LOCALPORT_HOME to a directory this account owns", err)
+			}
+			// The system-wide directory belongs to root or Administrators by
+			// design; the remedy is the account, not the directory.
+			return fmt.Errorf("%w; run the agent as the directory's owner (root, or an Administrator on Windows)", err)
 		}
 		return err
 	}
