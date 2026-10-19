@@ -48,10 +48,12 @@ type Entry struct {
 
 // The codes. Each has one Entry in registry.
 const (
-	UntrustedPath Code = "AG012"
+	UnsafeExecutable Code = "AG011"
+	UntrustedPath    Code = "AG012"
 )
 
 var registry = []Entry{
+	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
 	{UntrustedPath, "Untrusted credential path", "untrusted credential path"},
 }
 
