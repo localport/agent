@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // Owner-only files and directories for private key material.
@@ -100,7 +102,7 @@ func WritePrivateFileAtomic(path string, data []byte) error {
 
 // ErrUntrustedPath is returned for a credential path that is a symlink or
 // reparse point, is not a directory, or is owned by another user.
-var ErrUntrustedPath = errors.New("untrusted credential path")
+var ErrUntrustedPath = errcode.New(errcode.UntrustedPath)
 
 // EnsurePrivateDir creates dir and any missing parents under root, restricted
 // to the current user.
