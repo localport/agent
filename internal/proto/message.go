@@ -68,8 +68,11 @@ const (
 	KindDevice = "device"
 )
 
+// RegisterPayload is the first message on a control connection. A tunnel
+// authenticates with Token; a device sends no token and authenticates with
+// the TLS client certificate of the connection.
 type RegisterPayload struct {
-	Token      string `json:"token"`
+	Token      string `json:"token,omitempty"`
 	Kind       string `json:"kind,omitempty"` // tunnel or device
 	Protocol   string `json:"protocol"`       // http, tcp or tls for a tunnel, empty for a device
 	ClientName string `json:"client_name"`
@@ -87,6 +90,13 @@ type RegisterPayload struct {
 	// ResumeSessionID echoes the session_id from this tunnel's previous
 	// RegisterAck so the edge can replace the stale session on reconnect.
 	ResumeSessionID string `json:"resume_session_id,omitempty"`
+
+	// Capabilities (terminal, files, desktop), Logins and Desktop (rdp, vnc)
+	// are what a device enabled in its local config. Display only: the agent
+	// enforces them.
+	Capabilities []string `json:"capabilities,omitempty"`
+	Logins       []string `json:"logins,omitempty"`
+	Desktop      []string `json:"desktop,omitempty"`
 }
 
 type RegisterAckPayload struct {
@@ -114,6 +124,10 @@ type RegisterAckPayload struct {
 	// version.
 	PortsVersion uint64       `json:"ports_version,omitempty"`
 	Ports        []DevicePort `json:"ports,omitempty"`
+
+	// RevokedTicketKids lists session ticket signing key ids the device must
+	// stop trusting. Only a device receives it.
+	RevokedTicketKids []string `json:"revoked_ticket_kids,omitempty"`
 }
 
 // PortRange is an inclusive range of ports.
@@ -187,13 +201,21 @@ type RedirectPayload struct {
 
 // MuxBindPayload binds a multiplexed data connection to a session registered on
 // the control connection. It is authenticated separately and has the same replay
-// protection as Register. The edge requires both the token and the session id.
+// protection as Register. A tunnel sends its token, a device none: its
+// connection presents the client certificate its session registered with. The
+// session id is always required.
 type MuxBindPayload struct {
-	Token     string `json:"token"`
+	Token     string `json:"token,omitempty"`
 	SessionID string `json:"session_id"`
 	Timestamp int64  `json:"timestamp"`
 	Nonce     string `json:"nonce"`
+	// Purpose is empty for the port mux and "session" for a device's session
+	// mux, on which the agent is the HTTP/2 client.
+	Purpose string `json:"purpose,omitempty"`
 }
+
+// MuxBindPurposeSession is the MuxBind purpose of a device's session mux.
+const MuxBindPurposeSession = "session"
 
 // MuxBindAckPayload reports whether the edge accepted the data connection. A
 // refusal is not fatal; the tunnel continues on dial-back.

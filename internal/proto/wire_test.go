@@ -85,6 +85,35 @@ func TestFrameRoundTripPreservesTypeAndPayload(t *testing.T) {
 				if strings.Contains(string(b), `"client_id"`) {
 					t.Fatalf("mux bind carries client_id: %s", b)
 				}
+				if strings.Contains(string(b), `"purpose"`) {
+					t.Fatalf("port mux bind carries an empty purpose: %s", b)
+				}
+			},
+		},
+		{
+			name:    "session mux bind",
+			mt:      MsgMuxBind,
+			payload: &MuxBindPayload{SessionID: "s1", Timestamp: 7, Nonce: "n", Purpose: MuxBindPurposeSession},
+			check: func(t *testing.T, b []byte) {
+				var p MuxBindPayload
+				mustJSON(t, b, &p)
+				if p.Purpose != "session" || !strings.Contains(string(b), `"purpose":"session"`) {
+					t.Fatalf("session mux bind = %s", b)
+				}
+			},
+		},
+		{
+			name:    "register ack with revoked ticket kids",
+			mt:      MsgRegisterAck,
+			payload: &RegisterAckPayload{Success: true, RevokedTicketKids: []string{"k1", "k2"}},
+			check: func(t *testing.T, b []byte) {
+				p, err := ParseRegisterAck(b)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(p.RevokedTicketKids) != 2 || p.RevokedTicketKids[0] != "k1" || p.RevokedTicketKids[1] != "k2" {
+					t.Fatalf("revoked_ticket_kids = %v in %s", p.RevokedTicketKids, b)
+				}
 			},
 		},
 		{
