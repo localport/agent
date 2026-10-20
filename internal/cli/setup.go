@@ -61,6 +61,11 @@ func runSetup(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Checked before the one-time secret is spent, so a bad store directory
+	// does not cost it.
+	if err := store.EnsureRoot(); err != nil {
+		return err
+	}
 
 	ctx, cancel := signalContext(nil)
 	defer cancel()

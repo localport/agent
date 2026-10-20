@@ -129,6 +129,17 @@ func DefaultStore() (*Store, error) {
 	return &Store{Root: filepath.Join(root, "identity"), Base: root, BaseChosen: chosen}, nil
 }
 
+// EnsureRoot creates the store directory owner-only when missing and refuses
+// one that fails the private directory walk. connect, setup and login run it
+// before spending their one-time secret.
+func (s *Store) EnsureRoot() error {
+	base, follow := s.StateRoot()
+	if err := security.EnsurePrivateDir(base, s.Root, follow); err != nil {
+		return fmt.Errorf("credential store %s: %w", s.Root, err)
+	}
+	return nil
+}
+
 // ErrDeviceCredential refuses a fleet device's credential where a consumer
 // credential is required: access, setup and login.
 var ErrDeviceCredential = errcode.New(errcode.DeviceCredential)
@@ -158,9 +169,10 @@ func defaultRoot() (string, bool, error) {
 	}
 }
 
-// checkRoot returns where the directory walk starts and whether it may be a
-// symlink.
-func (s *Store) checkRoot() (string, bool) {
+// StateRoot returns the state root, where the private directory walk of the
+// store and of state kept beside it starts, and whether it may be a symlink.
+// An empty Base means Root, which may be a symlink.
+func (s *Store) StateRoot() (string, bool) {
 	if s.Base == "" {
 		return s.Root, true
 	}
@@ -313,7 +325,7 @@ func (s *Store) Load(ref Ref) (*Material, error) {
 // trusted runs the read-only form of the walk Save does before writing.
 // fs.ErrNotExist passes so the read that follows reports it.
 func (s *Store) trusted(dir string) error {
-	base, follow := s.checkRoot()
+	base, follow := s.StateRoot()
 	err := security.CheckPrivateDir(base, dir, follow)
 	if err == nil || errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -366,7 +378,7 @@ func (s *Store) Save(m Material) (Ref, error) {
 
 	dir := s.dir(ref)
 
-	base, follow := s.checkRoot()
+	base, follow := s.StateRoot()
 	if err := security.EnsurePrivateDir(base, dir, follow); err != nil {
 		return Ref{}, err
 	}
