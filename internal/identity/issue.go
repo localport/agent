@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/localport/agent/internal/security"
 )
 
 // issueResponse is POST /v1/mtls/certs. The agent always sends a CSR, so the
@@ -42,6 +44,8 @@ type issuedMaterial struct {
 	RenewAfter string
 	// TeamName is cosmetic and may be empty; see Meta.TeamName.
 	TeamName string
+	// Device is set for a device credential only.
+	Device *DeviceInfo
 }
 
 // RedeemSetupToken redeems a single-use setup token and returns the
@@ -73,13 +77,22 @@ func (c *Client) RedeemSetupToken(
 		return nil, errors.New("control plane returned no certificate for the CSR")
 	}
 
-	return c.assemble(kp.key, issuedMaterial{
+	return consumerOnly(c.assemble(kp.key, issuedMaterial{
 		CertPEM:    resp.CertPEM,
 		ChainPEM:   resp.CAChainPEM,
 		Source:     SourceToken,
 		RenewAfter: resp.RenewAfter,
 		TeamName:   resp.TeamName,
-	})
+	}))
+}
+
+// consumerOnly refuses a device credential from a consumer issuance route
+// (setup token, sign-in) with ErrDeviceCredential.
+func consumerOnly(m *Material, err error) (*Material, error) {
+	if err == nil && m.Meta.Kind == KindDevice {
+		return nil, ErrDeviceCredential
+	}
+	return m, err
 }
 
 // ErrNotRenewable is a sentinel so callers can tell "never renews" from "renewal
@@ -149,6 +162,18 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 	})
 }
 
+// checkIssued refuses an issued credential whose certificate names another
+// credential than want, or does not carry the key generated for it. Either is
+// a broken control plane, and storing it would replace a working credential.
+func checkIssued(m *Material, want Ref) error {
+	if got := (Ref{Team: m.Meta.Team, Kind: m.Meta.Kind, Identity: m.Meta.Identity}); got != want {
+		return fmt.Errorf("control plane issued a certificate for %s, but %s was requested",
+			security.SanitizeDisplay(got.String()), security.SanitizeDisplay(want.String()))
+	}
+	_, err := m.TLSCertificate()
+	return err
+}
+
 // assemble turns a response into on-disk material. Leaf first, then the chain:
 // the order a PEM bundle requires.
 //
@@ -179,6 +204,7 @@ func (c *Client) assemble(key Key, in issuedMaterial) (*Material, error) {
 		APIURL:   c.BaseURL,
 		Serial:   leaf.SerialNumber.Text(16),
 		NotAfter: leaf.NotAfter.UTC(),
+		Device:   in.Device,
 	}
 	// Stored only for a source that renews, so the field's presence and meaning
 	// never disagree. The server's value wins; the fallback covers a renewable

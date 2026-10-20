@@ -151,12 +151,12 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 				return nil, errors.New("control plane returned no certificate")
 			}
 			// No renew_after. A sign-in does not renew.
-			return c.assemble(kp.key, issuedMaterial{
+			return consumerOnly(c.assemble(kp.key, issuedMaterial{
 				CertPEM:  tok.CertPEM,
 				ChainPEM: tok.CAChainPEM,
 				Source:   SourceSSO,
 				TeamName: tok.TeamName,
-			})
+			}))
 		}
 
 		// Branch on the server error code. A proxy can also return 428.

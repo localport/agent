@@ -56,6 +56,9 @@ const (
 	NoTransport Code = "AG071"
 )
 
+// NewJoinCommand is the remedy for every lost or unusable device credential.
+const NewJoinCommand = "create a new join command in the dashboard"
+
 var registry = []Entry{
 	{DeviceCredential, "Device credential used to reach devices", "this is a fleet device credential; it registers the device and cannot be used to reach devices"},
 

@@ -1,6 +1,7 @@
-// Package identity obtains, stores and renews the machine's mTLS credential.
+// Package identity obtains, stores and renews the machine's mTLS credentials
+// (setup token, sign-in, device join token).
 //
-// A machine redeems a setup token once. The private key stays on the machine,
+// A machine redeems each token once. The private key stays on the machine,
 // and the current certificate authorizes each renewal.
 package identity
 
@@ -33,7 +34,7 @@ const (
 type Source string
 
 const (
-	SourceToken Source = "token" // setup token, renews itself
+	SourceToken Source = "token" // setup or join token, renews itself
 	SourceOIDC  Source = "oidc"  // CI workload identity, held in memory
 	SourceSSO   Source = "sso"   // `localport login`, short-lived, for a person
 )
@@ -87,6 +88,10 @@ type Meta struct {
 	RenewAfter *time.Time `json:"renew_after,omitempty"`
 
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// Device is set for a device credential only: what enrolment reported
+	// besides the certificate.
+	Device *DeviceInfo `json:"device,omitempty"`
 }
 
 // NextRenewal returns the renewal time and whether the credential renews. The
@@ -104,6 +109,13 @@ type Material struct {
 	CertPEM []byte // leaf first, then the issuing chain
 	Key     Key
 	Meta    Meta
+
+	// DeviceKeys is the key set a device enrolment or renewal response
+	// carried; nil otherwise. The Store's credential writes ignore it: the
+	// enrolling caller (cli connect) and Renewer pass it to TicketKeys.Replace
+	// after the credential is stored. It is never written to meta.json or
+	// pending.json.
+	DeviceKeys *DeviceKeys
 }
 
 // Store is a directory of credentials, one subdirectory per Ref.
@@ -473,7 +485,11 @@ func (m *Material) TLSCertificate() (*tls.Certificate, error) {
 		return nil, fmt.Errorf("certificate carries an unsupported public key type %T", leaf.PublicKey)
 	}
 	if !matches.Equal(signer.Public()) {
-		return nil, fmt.Errorf("the stored key does not match the stored certificate (serial %s): the credential is unusable and must be obtained again with `localport setup <TOKEN>` or `localport login`", m.Meta.Serial)
+		remedy := "obtain it again with `localport setup <TOKEN>` or `localport login`"
+		if m.Meta.Kind == KindDevice {
+			remedy = errcode.NewJoinCommand
+		}
+		return nil, fmt.Errorf("the stored key does not match the stored certificate (serial %s): the credential is unusable; %s", m.Meta.Serial, remedy)
 	}
 	return cert, nil
 }
@@ -515,6 +531,8 @@ func (m Meta) validate() error {
 		return fmt.Errorf("identity metadata names an unusable certificate file %q", m.Cert)
 	case !validPathComponent(m.Key.File):
 		return fmt.Errorf("identity metadata names an unusable key file %q", m.Key.File)
+	case m.Device != nil && m.Kind != KindDevice:
+		return fmt.Errorf("identity metadata for a %s credential carries device details", m.Kind)
 	}
 	return nil
 }
