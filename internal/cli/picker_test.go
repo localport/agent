@@ -77,7 +77,7 @@ func TestAmbiguousErrorPrintsPastableSelectors(t *testing.T) {
 // principal they never meant to present.
 func TestSuppliedSelectorNeverPrompts(t *testing.T) {
 	store := &identity.Store{Root: t.TempDir()}
-	if _, err := resolveCredential(store, "01kpq7x2/nope", true); err == nil {
+	if _, err := resolveCredential(store, "01kpq7x2/nope", true, true); err == nil {
 		t.Fatal("a supplied selector matching nothing must error")
 	}
 }
@@ -86,7 +86,7 @@ func TestSuppliedSelectorNeverPrompts(t *testing.T) {
 // create one, not at the picker.
 func TestNoCredentialsGivesTheSetupHint(t *testing.T) {
 	store := &identity.Store{Root: t.TempDir()}
-	_, err := resolveCredential(store, "", true)
+	_, err := resolveCredential(store, "", true, true)
 	if err == nil {
 		t.Fatal("want an error when the store is empty")
 	}

@@ -20,8 +20,13 @@ import (
 //
 // A supplied selector matching zero or several is an error, never a prompt: a
 // typo must not open a menu that picks a principal. interactive is false for
-// --config and anywhere a person may not be watching.
-func resolveCredential(store *identity.Store, raw string, interactive bool) (identity.Ref, error) {
+// --config and anywhere a person may not be watching. consumer excludes
+// device credentials.
+func resolveCredential(store *identity.Store, raw string, interactive, consumer bool) (identity.Ref, error) {
+	resolve, list := store.Resolve, store.List
+	if consumer {
+		resolve, list = store.ResolveConsumer, store.ListConsumers
+	}
 	sel, err := identity.ParseSelector(raw)
 	if err != nil {
 		return identity.Ref{}, err
@@ -29,10 +34,10 @@ func resolveCredential(store *identity.Store, raw string, interactive bool) (ide
 
 	// A selector was supplied: it decides, or it fails. No prompt.
 	if raw != "" {
-		return store.Resolve(sel)
+		return resolve(sel)
 	}
 
-	refs, err := store.List()
+	refs, err := list()
 	if err != nil {
 		return identity.Ref{}, err
 	}
@@ -40,7 +45,7 @@ func resolveCredential(store *identity.Store, raw string, interactive bool) (ide
 	case 1:
 		return refs[0], nil
 	case 0:
-		return store.Resolve(sel) // one place builds the "nothing here" message
+		return resolve(sel) // one place builds the "nothing here" message
 	}
 
 	if !interactive || !ui.IsTTY(os.Stdin) {

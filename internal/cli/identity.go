@@ -127,7 +127,7 @@ func runIdentityRenew(args []string) error {
 		return err
 	}
 	// Not interactive. Renewal also runs from timers, where a prompt hangs.
-	ref, err := resolveCredential(store, firstNonEmpty(*selector, os.Getenv(identityEnv)), false)
+	ref, err := resolveCredential(store, firstNonEmpty(*selector, os.Getenv(identityEnv)), false, false)
 	if err != nil {
 		return err
 	}
@@ -167,7 +167,7 @@ func runIdentityRemove(args []string) error {
 	}
 	// Requires an explicit selector. No "remove the only one" convenience:
 	// deleting a credential must not happen because of where a command was run.
-	ref, err := resolveCredential(store, fs.Arg(0), false)
+	ref, err := resolveCredential(store, fs.Arg(0), false, false)
 	if err != nil {
 		return err
 	}

@@ -46,7 +46,12 @@ func Open(store *Store, sel Selector) (*Credential, error) {
 // OpenRef opens exactly the credential a Ref names. Resolving a Ref through a
 // selector would list the whole store to rediscover an answer the caller holds,
 // and re-run the ambiguity check on a choice already made.
+//
+// A device credential is refused with ErrDeviceCredential.
 func OpenRef(store *Store, ref Ref) (*Credential, error) {
+	if ref.Kind == KindDevice {
+		return nil, fmt.Errorf("%s: %w", ref, ErrDeviceCredential)
+	}
 	c := &Credential{store: store, ref: ref}
 	if err := c.reload(); err != nil {
 		return nil, err

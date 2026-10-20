@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/security"
 )
 
@@ -128,6 +129,10 @@ func DefaultStore() (*Store, error) {
 	return &Store{Root: filepath.Join(root, "identity"), Base: root, BaseChosen: chosen}, nil
 }
 
+// ErrDeviceCredential refuses a fleet device's credential where a consumer
+// credential is required: access, setup and login.
+var ErrDeviceCredential = errcode.New(errcode.DeviceCredential)
+
 // defaultRoot returns the base directory and true when it comes from
 // LOCALPORT_HOME or $HOME, false for the system-wide default.
 func defaultRoot() (string, bool, error) {
@@ -230,6 +235,38 @@ func (s *Store) Resolve(sel Selector) (Ref, error) {
 	if err != nil {
 		return Ref{}, err
 	}
+	return resolveIn(sel, all)
+}
+
+// ListConsumers is List without device credentials: what access may present.
+func (s *Store) ListConsumers() ([]Ref, error) {
+	all, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	consumers := all[:0]
+	for _, ref := range all {
+		if ref.Kind != KindDevice {
+			consumers = append(consumers, ref)
+		}
+	}
+	return consumers, nil
+}
+
+// ResolveConsumer is Resolve among the credentials access may present. A
+// selector naming the device kind is refused with ErrDeviceCredential.
+func (s *Store) ResolveConsumer(sel Selector) (Ref, error) {
+	if sel.Kind == KindDevice {
+		return Ref{}, ErrDeviceCredential
+	}
+	consumers, err := s.ListConsumers()
+	if err != nil {
+		return Ref{}, err
+	}
+	return resolveIn(sel, consumers)
+}
+
+func resolveIn(sel Selector, all []Ref) (Ref, error) {
 	var found []Ref
 	for _, ref := range all {
 		if sel.Matches(ref) {

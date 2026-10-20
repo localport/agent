@@ -71,7 +71,7 @@ func TestRefFromCertReadsTheCertificate(t *testing.T) {
 		{
 			// A device carries its tunnel between kind and identity.
 			"spiffe://01kpq7x2abcd34.mtls.localport.dev/device/tun12345/gw-01",
-			Ref{Team: "01kpq7x2abcd34", Kind: KindDevice, Identity: "gw-01"},
+			Ref{Team: "01kpq7x2abcd34", Kind: KindDevice, Identity: "tun12345.gw-01"},
 		},
 	} {
 		got, err := RefFromCert(selfSigned(t, tc.uri))

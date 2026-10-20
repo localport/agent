@@ -60,8 +60,32 @@ const maxRefComponent = 64
 // come from certificates, so they must match the server grammar of lowercase
 // alphanumerics and internal dashes. Invalid components are refused and not
 // repaired.
+//
+// A device identity is `<tunnelIdentifier>.<prefix>`, the two SPIFFE path
+// segments after the kind, and each half follows the component grammar.
 func (r Ref) valid() bool {
-	return r.Kind.Valid() && validRefComponent(r.Team) && validRefComponent(r.Identity)
+	if !r.Kind.Valid() || !validRefComponent(r.Team) {
+		return false
+	}
+	if r.Kind == KindDevice {
+		tunnel, prefix, ok := strings.Cut(r.Identity, ".")
+		return ok && validRefComponent(tunnel) && validRefComponent(prefix)
+	}
+	return validRefComponent(r.Identity)
+}
+
+// ParseDeviceRef reads a device credential in its selector form,
+// `<team>/device/<tunnelIdentifier>.<prefix>`, as the local config names it.
+func ParseDeviceRef(raw string) (Ref, error) {
+	parts := strings.Split(raw, "/")
+	if len(parts) != 3 || Kind(parts[1]) != KindDevice {
+		return Ref{}, fmt.Errorf("identity %q is not of the form <team>/device/<tunnel>.<prefix>", raw)
+	}
+	ref := Ref{Team: parts[0], Kind: KindDevice, Identity: parts[2]}
+	if !ref.valid() {
+		return Ref{}, fmt.Errorf("identity %q is not of the form <team>/device/<tunnel>.<prefix>", raw)
+	}
+	return ref, nil
 }
 
 func validRefComponent(s string) bool {
@@ -167,12 +191,13 @@ func RefFromCert(leaf *x509.Certificate) (Ref, error) {
 			continue
 		}
 		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-		// A device path has the tunnel between kind and identity.
+		// A device path is `/device/<tunnelIdentifier>/<prefix>`; its identity
+		// joins both, since a prefix is unique only within its fleet.
 		switch {
 		case len(parts) == 2:
 			return Ref{Team: team, Kind: Kind(parts[0]), Identity: parts[1]}, nil
 		case len(parts) == 3 && Kind(parts[0]) == KindDevice:
-			return Ref{Team: team, Kind: KindDevice, Identity: parts[2]}, nil
+			return Ref{Team: team, Kind: KindDevice, Identity: parts[1] + "." + parts[2]}, nil
 		}
 	}
 	return Ref{}, errors.New("certificate carries no Localport SPIFFE identity")

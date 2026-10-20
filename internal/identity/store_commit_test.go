@@ -157,7 +157,7 @@ func TestRefValidMatchesTheServerIdentityGrammar(t *testing.T) {
 	ok := []Ref{
 		{Team: "01kpq7x2abcd34", Kind: KindClient, Identity: "gw-01"},
 		{Team: "01kpq7x2abcd34", Kind: KindUser, Identity: "0mkppnsc7lsdcv"},
-		{Team: "01kpq7x2abcd34", Kind: KindDevice, Identity: "plc-01-factory"},
+		{Team: "01kpq7x2abcd34", Kind: KindDevice, Identity: "tun12345.plc-01-factory"},
 	}
 	for _, r := range ok {
 		if !r.valid() {
@@ -166,6 +166,11 @@ func TestRefValidMatchesTheServerIdentityGrammar(t *testing.T) {
 	}
 
 	bad := []Ref{
+		{Team: "01kpq7x2abcd34", Kind: KindDevice, Identity: "plc-01-factory"},
+		{Team: "01kpq7x2abcd34", Kind: KindDevice, Identity: "tun.plc.01"},
+		{Team: "01kpq7x2abcd34", Kind: KindDevice, Identity: ".plc-01"},
+		{Team: "01kpq7x2abcd34", Kind: KindDevice, Identity: "tun12345."},
+		{Team: "01kpq7x2abcd34", Kind: KindClient, Identity: "tun12345.plc-01"},
 		{Team: "", Kind: KindClient, Identity: "gw-01"},
 		{Team: "..", Kind: KindClient, Identity: "gw-01"},
 		{Team: ".", Kind: KindClient, Identity: "gw-01"},

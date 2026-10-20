@@ -101,7 +101,7 @@ func runAccess(args []string) error {
 		if storeErr != nil {
 			return storeErr
 		}
-		chosen, err = resolveCredential(store, firstNonEmpty(*identityArg, os.Getenv(identityEnv)), true)
+		chosen, err = resolveCredential(store, firstNonEmpty(*identityArg, os.Getenv(identityEnv)), true, true)
 		if err != nil {
 			return fmt.Errorf("%w\n  (or pass a credential file with --pem / --p12)", err)
 		}
@@ -319,7 +319,7 @@ func runAccessFromConfig(path string) error {
 		if entry.UsesIdentity() {
 			// Not interactive. This loop builds one session per entry.
 			var ref identity.Ref
-			if ref, err = resolveCredential(store, entry.Identity, false); err == nil {
+			if ref, err = resolveCredential(store, entry.Identity, false, true); err == nil {
 				tlsCfg, _, err = identityTLSConfig(ctx, ref, deviceAddr, deviceHost)
 			}
 		} else {
