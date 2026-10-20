@@ -90,7 +90,7 @@ func TestTLSSessionIsResumedOnReconnect(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cfg := agentTLSConfig("edge.test", host, ALPNRaw)
+		cfg := agentTLSConfig("edge.test", host, ALPNRaw, ClientCert{})
 		cfg.RootCAs = roots
 		conn := tls.Client(tcp, cfg)
 		if err := conn.Handshake(); err != nil {
@@ -134,7 +134,7 @@ func TestTLSSessionsDoNotCrossServerNames(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cfg := agentTLSConfig(serverName, host, ALPNRaw)
+		cfg := agentTLSConfig(serverName, host, ALPNRaw, ClientCert{})
 		cfg.RootCAs = roots
 		cfg.InsecureSkipVerify = true // the cert only names edge.test
 		conn := tls.Client(tcp, cfg)

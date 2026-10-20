@@ -50,11 +50,15 @@ type Entry struct {
 const (
 	UnsafeExecutable Code = "AG011"
 	UntrustedPath    Code = "AG012"
+
+	NoTransport Code = "AG071"
 )
 
 var registry = []Entry{
 	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
 	{UntrustedPath, "Untrusted credential path", "untrusted credential path"},
+
+	{NoTransport, "No transport", "no transport available: every candidate failed (check edge reachability and firewall)"},
 }
 
 // New returns the sentinel of a registered code. An unregistered code is a

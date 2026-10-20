@@ -12,11 +12,13 @@ import (
 
 // WSDialer establishes a WebSocket-over-TLS connection with ALPN
 // localport-ws/1 and returns a net.Conn view of the resulting binary
-// message stream. TLS 1.3 minimum, full server-cert verification.
+// message stream. TLS 1.3 minimum, full server-cert verification. A client
+// certificate is presented in this outer TLS handshake, as on the raw carrier.
 type WSDialer struct {
 	DialTimeout time.Duration
 	Path        string
 	ServerName  string // SNI override; empty = derive from dial host
+	ClientCert  ClientCert
 }
 
 func (d *WSDialer) Kind() Kind { return KindWS }
@@ -34,7 +36,7 @@ func (d *WSDialer) Dial(ctx context.Context, host, port string) (net.Conn, error
 	var dialed net.Addr
 	dialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
 	httpClient := wsHTTPClient(&http.Transport{
-		TLSClientConfig:   agentTLSConfig(d.ServerName, host, ALPNWS),
+		TLSClientConfig:   agentTLSConfig(d.ServerName, host, ALPNWS, d.ClientCert),
 		ForceAttemptHTTP2: false, // WS rides HTTP/1.1
 		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
 			h, p := SplitHostPort(addr)

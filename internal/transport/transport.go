@@ -14,10 +14,12 @@ package transport
 
 import (
 	"context"
-	"errors"
+	"crypto/tls"
 	"net"
 	"strings"
 	"time"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // ALPN identifiers must stay in sync with the edge's agent handler.
@@ -53,7 +55,7 @@ type Dialer interface {
 
 // ErrNoTransport is returned by Probe when every configured transport
 // failed within the probe budget.
-var ErrNoTransport = errors.New("no transport available: every candidate failed (check edge reachability and firewall)")
+var ErrNoTransport = errcode.New(errcode.NoTransport)
 
 // SplitHostPort splits an edge address into host and port. When the port
 // is missing, DefaultPort is used.
@@ -73,4 +75,16 @@ type Options struct {
 	// ServerName overrides the TLS SNI and verification name. A dial to a
 	// per-edge host uses the zone connect host. Empty uses the dial host.
 	ServerName string
+
+	// ClientCert is the TLS client certificate a fleet device presents. The
+	// zero value presents none.
+	ClientCert ClientCert
+}
+
+// ClientCert is a TLS client certificate and the session cache reserved for
+// it. SessionCache must not be shared with dials presenting another
+// certificate; nil disables resumption.
+type ClientCert struct {
+	Certificate  *tls.Certificate
+	SessionCache tls.ClientSessionCache
 }
