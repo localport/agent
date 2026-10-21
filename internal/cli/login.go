@@ -54,9 +54,9 @@ func runLogin(args []string) error {
 	if err != nil {
 		return err
 	}
-	ref, err := store.Save(*material)
+	ref, err := store.SaveIssued(ctx, *material)
 	if err != nil {
-		return err
+		return fmt.Errorf("save the credential: %w\n  sign in again with localport login", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "\n  signed in\n")

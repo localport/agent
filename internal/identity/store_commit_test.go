@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,7 @@ func TestSaveCommitsThroughMetaJSON(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 
 	first := credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod")
-	ref, err := store.Save(first)
+	ref, err := store.Save(context.Background(), first)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +36,7 @@ func TestSaveCommitsThroughMetaJSON(t *testing.T) {
 	}
 
 	// A second Save sweeps the previous pair and keeps the lock.
-	if _, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod")); err != nil {
+	if _, err := store.Save(context.Background(), credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, meta.Cert)); !os.IsNotExist(err) {
@@ -52,7 +53,7 @@ func TestInterruptedSaveLeavesThePreviousCredentialLoadable(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 
 	original := credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod")
-	ref, err := store.Save(original)
+	ref, err := store.Save(context.Background(), original)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +93,7 @@ func TestInterruptedSaveLeavesThePreviousCredentialLoadable(t *testing.T) {
 // A key that does not match the certificate fails locally.
 func TestTLSCertificateRefusesAMismatchedPair(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
-	ref, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
+	ref, err := store.Save(context.Background(), credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
 	if err != nil {
 		t.Fatal(err)
 	}

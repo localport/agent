@@ -48,7 +48,8 @@ type Entry struct {
 
 // The codes. Each has one Entry in registry.
 const (
-	DeviceCredential Code = "AG002"
+	DeviceCredential  Code = "AG002"
+	RenewalInProgress Code = "AG006"
 
 	UnsafeExecutable Code = "AG011"
 	UntrustedPath    Code = "AG012"
@@ -61,6 +62,7 @@ const NewJoinCommand = "create a new join command in the dashboard"
 
 var registry = []Entry{
 	{DeviceCredential, "Device credential used to reach devices", "this is a fleet device credential; it registers the device and cannot be used to reach devices"},
+	{RenewalInProgress, "Renewal in progress", "another process is renewing this credential"},
 
 	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
 	{UntrustedPath, "Untrusted credential path", "untrusted credential path"},

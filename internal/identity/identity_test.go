@@ -96,7 +96,7 @@ func TestRefFromCertRefusesAForeignURI(t *testing.T) {
 
 func TestSaveWritesKeyMaterialUnreadableByOthers(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
-	ref, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
+	ref, err := store.Save(context.Background(), credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -145,11 +145,11 @@ func TestSignInAndSetupTokenDoNotOverwriteEachOther(t *testing.T) {
 	person := credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv")
 	person.Meta.Source = SourceSSO
 
-	machineRef, err := store.Save(machine)
+	machineRef, err := store.Save(context.Background(), machine)
 	if err != nil {
 		t.Fatal(err)
 	}
-	personRef, err := store.Save(person)
+	personRef, err := store.Save(context.Background(), person)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestResolveRefusesToGuessBetweenIdentities(t *testing.T) {
 		"spiffe://02mfr8y3bcde45.mtls.localport.dev/client/deploy-prod",
 		"spiffe://03ngs9z4cdef56.mtls.localport.dev/client/deploy-prod",
 	} {
-		if _, err := store.Save(credentialFor(t, uri)); err != nil {
+		if _, err := store.Save(context.Background(), credentialFor(t, uri)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -206,7 +206,7 @@ func TestResolveRefusesToGuessBetweenIdentities(t *testing.T) {
 // the identity, so a change means another credential replaced the file.
 func TestReloadRefusesASwappedPrincipal(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
-	ref, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
+	ref, err := store.Save(context.Background(), credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +516,7 @@ func credentialFor(t *testing.T, uri string) Material {
 // description, so a second holder conflicts within one process.
 func TestRenewalLockAdmitsOneWriter(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
-	ref, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
+	ref, err := store.Save(context.Background(), credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,7 +616,7 @@ func TestSignerProducesTheSameSignatureFormatAsSignASN1(t *testing.T) {
 // Load reads what Save wrote through the names in meta.json.
 func TestSaveRoundTripsTheKeyBacking(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
-	ref, err := store.Save(credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
+	ref, err := store.Save(context.Background(), credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +647,7 @@ func TestStoredMetadataNeverCarriesAZeroTimestamp(t *testing.T) {
 	cred := credentialFor(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv")
 	cred.Meta.Source = SourceSSO
 
-	ref, err := store.Save(cred)
+	ref, err := store.Save(context.Background(), cred)
 	if err != nil {
 		t.Fatalf("save: %v", err)
 	}

@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"time"
 
-	"github.com/localport/agent/internal/security"
+	"github.com/localport/agent/internal/errcode"
 )
 
 const (
@@ -35,24 +34,9 @@ type Renewer struct {
 	OnEvent func(string)
 }
 
-// lock takes the credential's renewal lock without blocking. It lives beside
-// the material, so it is scoped to one credential, and the OS releases it if
-// the holder dies.
+// lock takes the credential's renewal lock without blocking.
 func (r *Renewer) lock() (release func(), held bool, err error) {
-	dir := r.Store.Dir(r.Ref)
-	f, err := security.OpenLockFile(filepath.Join(dir, lockFile))
-	if err != nil {
-		return nil, false, fmt.Errorf("open renewal lock: %w", err)
-	}
-	held, err = tryLockFile(f)
-	if err != nil || !held {
-		f.Close()
-		return nil, false, err
-	}
-	return func() {
-		_ = unlockFile(f)
-		f.Close()
-	}, true, nil
+	return r.Store.tryLock(r.Ref)
 }
 
 func (r *Renewer) log(format string, args ...any) {
@@ -61,16 +45,17 @@ func (r *Renewer) log(format string, args ...any) {
 	}
 }
 
-// ErrRenewalInProgress means another process holds this credential's renewal
-// lock. The caller waits rather than renewing alongside it.
-var ErrRenewalInProgress = errors.New("another process is renewing this credential")
+// ErrRenewalInProgress means another writer, in this or another process, holds
+// this credential's renewal lock. The caller waits rather than renewing
+// alongside it.
+var ErrRenewalInProgress = errcode.New(errcode.RenewalInProgress)
 
 // RenewOnce renews unconditionally and stores the result.
 //
-// One renewal at a time per credential, across processes: a `localport access`
-// and a cron `localport identity renew` are both legitimate writers, and
-// renewing minutes apart orphans a certificate against the live cap. The
-// in-process guard cannot see another process.
+// One renewal at a time per credential, in and across processes, through the
+// credential's file lock: a `localport access` and a cron `localport identity
+// renew` are both legitimate writers, and renewing minutes apart orphans a
+// certificate against the live cap.
 func (r *Renewer) RenewOnce(ctx context.Context) (*Material, error) {
 	release, held, err := r.lock()
 	if err != nil {
@@ -93,7 +78,7 @@ func (r *Renewer) RenewOnce(ctx context.Context) (*Material, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := r.Store.Save(*next); err != nil {
+	if _, err := r.Store.saveLocked(*next); err != nil {
 		return nil, err
 	}
 	return next, nil

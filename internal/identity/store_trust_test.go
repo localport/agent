@@ -3,6 +3,7 @@
 package identity
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -18,7 +19,7 @@ const trustTestSubject = "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/depl
 func savedCredential(t *testing.T) (*Store, Ref, string, Meta) {
 	t.Helper()
 	store := &Store{Root: t.TempDir()}
-	ref, err := store.Save(credentialFor(t, trustTestSubject))
+	ref, err := store.Save(context.Background(), credentialFor(t, trustTestSubject))
 	if err != nil {
 		t.Fatal(err)
 	}

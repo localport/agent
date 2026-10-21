@@ -80,9 +80,9 @@ func runSetup(args []string) error {
 		// CI logs.
 		return security.SanitizeError(err, secret)
 	}
-	ref, err := store.Save(*material)
+	ref, err := store.SaveIssued(ctx, *material)
 	if err != nil {
-		return err
+		return fmt.Errorf("save the credential: %w\n  the setup token is spent: ask for a new setup token and run setup again", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "\n  set up\n")

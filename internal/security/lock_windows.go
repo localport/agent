@@ -1,6 +1,6 @@
 //go:build windows
 
-package identity
+package security
 
 import (
 	"errors"
@@ -9,7 +9,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func tryLockFile(f *os.File) (bool, error) {
+// TryLockFile takes an exclusive lock on f without blocking. It reports false when
+// another process holds it. The OS releases the lock when the holder exits.
+func TryLockFile(f *os.File) (bool, error) {
 	var overlapped windows.Overlapped
 	err := windows.LockFileEx(windows.Handle(f.Fd()),
 		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
@@ -23,7 +25,8 @@ func tryLockFile(f *os.File) (bool, error) {
 	return false, err
 }
 
-func unlockFile(f *os.File) error {
+// UnlockFile releases a lock TryLockFile took.
+func UnlockFile(f *os.File) error {
 	var overlapped windows.Overlapped
 	return windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &overlapped)
 }

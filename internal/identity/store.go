@@ -6,6 +6,7 @@
 package identity
 
 import (
+	"context"
 	"crypto"
 	"crypto/tls"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -26,7 +28,10 @@ import (
 
 const (
 	metaFile = "meta.json"
-	lockFile = ".renew.lock"
+	// pendingFile commits a renewed device credential that has not yet been
+	// registered with. meta.json keeps naming the current one until Promote.
+	pendingFile = "pending.json"
+	lockFile    = ".renew.lock"
 )
 
 // Source is how a credential was obtained. Values are persisted in meta.json
@@ -92,6 +97,11 @@ type Meta struct {
 	// Device is set for a device credential only: what enrolment reported
 	// besides the certificate.
 	Device *DeviceInfo `json:"device,omitempty"`
+
+	// RenewedFrom is set in pending.json only: the serial of the current
+	// credential the renewal started from. A pending credential whose parent
+	// is no longer current is ignored.
+	RenewedFrom string `json:"renewed_from,omitempty"`
 }
 
 // NextRenewal returns the renewal time and whether the credential renews. The
@@ -126,6 +136,10 @@ type Store struct {
 	// false for the system-wide default.
 	Base       string
 	BaseChosen bool
+
+	// afterMetaRead, when set, runs in readPair between its two reads. Tests
+	// promote there.
+	afterMetaRead func()
 }
 
 // HomeEnv overrides where credentials live.
@@ -323,9 +337,18 @@ func (s *Store) Load(ref Ref) (*Material, error) {
 	if err != nil {
 		return nil, err
 	}
-	key, err := loadKey(dir, meta.Key)
+	m, err := loadMaterial(dir, meta)
 	if err != nil {
 		return nil, fmt.Errorf("no usable credential for %s: %w", ref, err)
+	}
+	return m, nil
+}
+
+// loadMaterial reads the key and certificate files meta names.
+func loadMaterial(dir string, meta Meta) (*Material, error) {
+	key, err := loadKey(dir, meta.Key)
+	if err != nil {
+		return nil, err
 	}
 	certPEM, err := security.ReadPrivateFile(filepath.Join(dir, meta.Cert))
 	if err != nil {
@@ -351,17 +374,73 @@ func (s *Store) trusted(dir string) error {
 // The certificate and key are written first under serial-named files. Writing
 // meta.json commits them, so a crash cannot pair a new key with the old
 // certificate.
-func (s *Store) Save(m Material) (Ref, error) {
-	leaf, err := leafOf(m.CertPEM)
+//
+// Save replaces the whole credential: a pending device renewal is discarded,
+// since a new enrolment revokes every earlier certificate of the device.
+// It stores the certificate only; m.DeviceKeys is the caller's to pass to
+// TicketKeys.Replace. It waits up to saveLockWait for a renewal in flight to
+// finish, then returns ErrRenewalInProgress; it returns ctx.Err() when ctx
+// ends first.
+func (s *Store) Save(ctx context.Context, m Material) (Ref, error) {
+	ref, dir, err := s.prepare(&m)
 	if err != nil {
 		return Ref{}, err
+	}
+	release, err := s.waitLock(ctx, ref, saveLockWait)
+	if err != nil {
+		return Ref{}, err
+	}
+	defer release()
+	return ref, s.commitCurrent(dir, &m)
+}
+
+// SaveIssued is Save for material a spent one-time secret (join token, setup
+// token, login approval) produced. The secret is spent, so cancelling ctx (a
+// signal) does not abandon the save; saveLockWait still bounds the wait.
+func (s *Store) SaveIssued(ctx context.Context, m Material) (Ref, error) {
+	return s.Save(context.WithoutCancel(ctx), m)
+}
+
+// saveLocked is Save for a caller that already holds the renewal lock.
+func (s *Store) saveLocked(m Material) (Ref, error) {
+	ref, dir, err := s.prepare(&m)
+	if err != nil {
+		return Ref{}, err
+	}
+	return ref, s.commitCurrent(dir, &m)
+}
+
+// commitCurrent writes m's files and commits them as the current credential.
+// pending.json is removed before meta.json is written: a crash between them
+// leaves the previous credential current with nothing pending, never a
+// pending certificate beside a credential it was not renewed from.
+func (s *Store) commitCurrent(dir string, m *Material) error {
+	if err := writeKeyMaterial(dir, m); err != nil {
+		return err
+	}
+	if err := removeIfExists(filepath.Join(dir, pendingFile)); err != nil {
+		return err
+	}
+	if err := writeMeta(dir, metaFile, m.Meta); err != nil {
+		return err
+	}
+	s.sweep(dir, m.Meta.Cert, m.Meta.Key.File)
+	return nil
+}
+
+// prepare completes m.Meta from the certificate and creates the credential
+// directory. It writes no credential file.
+func (s *Store) prepare(m *Material) (Ref, string, error) {
+	leaf, err := leafOf(m.CertPEM)
+	if err != nil {
+		return Ref{}, "", err
 	}
 	ref, err := RefFromCert(leaf)
 	if err != nil {
-		return Ref{}, err
+		return Ref{}, "", err
 	}
 	if !ref.valid() {
-		return Ref{}, fmt.Errorf("certificate yields an unusable credential ref (%+v)", ref)
+		return Ref{}, "", fmt.Errorf("certificate yields an unusable credential ref (%+v)", ref)
 	}
 	// Identity fields come from the certificate and override the caller's
 	// values.
@@ -372,68 +451,69 @@ func (s *Store) Save(m Material) (Ref, error) {
 	m.Meta.Key = m.Key.Ref()
 	m.Meta.UpdatedAt = time.Now().UTC()
 
-	pk, ok := m.Key.(persistentKey)
-	if !ok {
-		return Ref{}, errors.New("credential key cannot be written to disk")
-	}
 	// The serial is a path component. Text(16) is hex and always valid.
 	if !validPathComponent(m.Meta.Serial) {
-		return Ref{}, fmt.Errorf("certificate serial %q is not usable as a filename", m.Meta.Serial)
+		return Ref{}, "", fmt.Errorf("certificate serial %q is not usable as a filename", m.Meta.Serial)
 	}
 	m.Meta.Cert = "cert-" + m.Meta.Serial + ".pem"
 	m.Meta.Key.File = "key-" + m.Meta.Serial + ".pem"
 
 	// Validate before writing, since readMeta refuses an invalid record.
 	if err := m.Meta.validate(); err != nil {
-		return Ref{}, fmt.Errorf("refusing to store an unusable credential record: %w", err)
+		return Ref{}, "", fmt.Errorf("refusing to store an unusable credential record: %w", err)
 	}
 
 	dir := s.dir(ref)
-
 	base, follow := s.StateRoot()
 	if err := security.EnsurePrivateDir(base, dir, follow); err != nil {
-		return Ref{}, err
+		return Ref{}, "", err
 	}
-
-	metaRaw, err := json.MarshalIndent(m.Meta, "", "  ")
-	if err != nil {
-		return Ref{}, fmt.Errorf("encode identity metadata: %w", err)
-	}
-
-	keyPEM, err := pk.marshal()
-	if err != nil {
-		return Ref{}, err
-	}
-
-	write := func(name string, data []byte) error {
-		return security.WritePrivateFileAtomic(filepath.Join(dir, name), data)
-	}
-
-	// Unused until meta.json references them.
-	if err := write(m.Meta.Cert, m.CertPEM); err != nil {
-		return Ref{}, err
-	}
-	if err := write(m.Meta.Key.File, keyPEM); err != nil {
-		return Ref{}, err
-	}
-	if err := write(metaFile, append(metaRaw, '\n')); err != nil {
-		return Ref{}, err
-	}
-
-	s.sweep(dir, m.Meta.Cert, m.Meta.Key.File)
-	return ref, nil
+	return ref, dir, nil
 }
 
-// sweep removes serial-named files left by earlier saves. Errors are ignored
-// because leftover files are unused.
-func (s *Store) sweep(dir, keepCert, keepKey string) {
+// writeKeyMaterial writes m's certificate and key under the names prepare
+// chose. They are unused until a metadata file references them.
+func writeKeyMaterial(dir string, m *Material) error {
+	pk, ok := m.Key.(persistentKey)
+	if !ok {
+		return errors.New("credential key cannot be written to disk")
+	}
+	keyPEM, err := pk.marshal()
+	if err != nil {
+		return err
+	}
+	if err := security.WritePrivateFileAtomic(filepath.Join(dir, m.Meta.Cert), m.CertPEM); err != nil {
+		return err
+	}
+	return security.WritePrivateFileAtomic(filepath.Join(dir, m.Meta.Key.File), keyPEM)
+}
+
+// writeMeta commits meta as the named metadata file.
+func writeMeta(dir, name string, meta Meta) error {
+	raw, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode identity metadata: %w", err)
+	}
+	return security.WritePrivateFileAtomic(filepath.Join(dir, name), append(raw, '\n'))
+}
+
+func removeIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return nil
+}
+
+// sweep removes serial-named files no metadata file references. Errors are
+// ignored because leftover files are unused.
+func (s *Store) sweep(dir string, keep ...string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if name == keepCert || name == keepKey {
+		if slices.Contains(keep, name) {
 			continue
 		}
 		if strings.HasPrefix(name, "cert-") || strings.HasPrefix(name, "key-") {
