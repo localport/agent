@@ -13,6 +13,7 @@ terminal sessions, AG06x recordings, AG07x network.
 
 | Code | Title | What to do |
 |---|---|---|
+| AG001 | Renewed device certificate lost | The device's credential store lost the certificate it last registered with. Create a new join command in the dashboard and run it on this machine. |
 | AG002 | Device credential used to reach devices | A device credential only registers its device. Use `localport login` or `localport setup <TOKEN>` for a credential that reaches devices. |
 | AG004 | Ticket keys unreadable | `ticket_keys.json` beside the device's credential is unreadable or not owner-only. Make it a regular file owned by the account running the agent, mode 0600. |
 | AG005 | Ticket keys busy | Another localport process held the device's key lock. Stop the other process, or retry. |

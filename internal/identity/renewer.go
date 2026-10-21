@@ -33,6 +33,12 @@ type Renewer struct {
 	// OnEvent receives one line per notable transition. Optional.
 	OnEvent func(string)
 
+	// OnRefused, optional, receives a renewal the control plane refused for
+	// good (a 4xx other than 429, or ErrNotRenewable), and nil after a renewal
+	// lands. The loop keeps its schedule; a device stops retrying an expired
+	// certificate while a refusal stands.
+	OnRefused func(error)
+
 	// client replaces NewClient(APIURL) in RenewPending. Tests set it to reach
 	// an httptest server.
 	client *Client
@@ -274,6 +280,9 @@ func (r *Renewer) Run(ctx context.Context) {
 				}
 				continue
 			}
+			if r.OnRefused != nil && definitiveRefusal(err) {
+				r.OnRefused(err)
+			}
 			// A failure is retried and the certificate stays in use:
 			// renew_after is two thirds through its life, and an expired device
 			// certificate still renews at the device route. A Retry-After longer
@@ -292,6 +301,9 @@ func (r *Renewer) Run(ctx context.Context) {
 			continue
 		}
 		backoff = minRetry
+		if r.OnRefused != nil {
+			r.OnRefused(nil)
+		}
 		r.log("identity: renewed %s, valid until %s", next.Meta.Identity, next.Meta.NotAfter.Format(time.RFC3339))
 	}
 }
