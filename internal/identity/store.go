@@ -20,6 +20,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/localport/agent/internal/errcode"
@@ -32,6 +33,10 @@ const (
 	// registered with. meta.json keeps naming the current one until Promote.
 	pendingFile = "pending.json"
 	lockFile    = ".renew.lock"
+	// ticketKeysFile holds a device's session ticket keys and team recording
+	// key; ticketKeysLockFile serializes its writers across processes.
+	ticketKeysFile     = "ticket_keys.json"
+	ticketKeysLockFile = ".keys.lock"
 )
 
 // Source is how a credential was obtained. Values are persisted in meta.json
@@ -136,6 +141,12 @@ type Store struct {
 	// false for the system-wide default.
 	Base       string
 	BaseChosen bool
+
+	// ticketKeys holds one TicketKeys per credential directory, so every
+	// caller of this Store shares its locks and memory. Another Store on the
+	// same Root gets instances of its own.
+	ticketKeysMu sync.Mutex
+	ticketKeys   map[string]*TicketKeys
 
 	// afterMetaRead, when set, runs in readPair between its two reads. Tests
 	// promote there.
@@ -263,6 +274,7 @@ func (s *Store) Remove(ref Ref) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("remove credential %s: %w", ref, err)
 	}
+	s.forgetTicketKeys(dir)
 	return nil
 }
 
