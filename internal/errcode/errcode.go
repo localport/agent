@@ -50,6 +50,7 @@ type Entry struct {
 const (
 	PendingLost          Code = "AG001"
 	DeviceCredential     Code = "AG002"
+	NoTicketKeys         Code = "AG003"
 	TicketKeysUnreadable Code = "AG004"
 	TicketKeysBusy       Code = "AG005"
 	RenewalInProgress    Code = "AG006"
@@ -67,6 +68,7 @@ const NewJoinCommand = "create a new join command in the dashboard"
 var registry = []Entry{
 	{PendingLost, "Renewed device certificate lost", "the renewed device certificate is missing from the credential store; " + NewJoinCommand},
 	{DeviceCredential, "Device credential used to reach devices", "this is a fleet device credential; it registers the device and cannot be used to reach devices"},
+	{NoTicketKeys, "No ticket key set", "control plane returned no ticket key set"},
 	{TicketKeysUnreadable, "Ticket keys unreadable", "ticket_keys.json cannot be read"},
 	{TicketKeysBusy, "Ticket keys busy", "another process is writing this identity's ticket keys"},
 	{RenewalInProgress, "Renewal in progress", "another process is renewing this credential"},

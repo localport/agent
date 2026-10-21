@@ -3,10 +3,14 @@ package identity
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -18,6 +22,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/localport/agent/internal/errcode"
+	"github.com/localport/agent/internal/security"
 )
 
 // DefaultAPIURL is the control plane. `--api` and LOCALPORT_API_URL override it.
@@ -323,6 +330,71 @@ func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue
 		return fmt.Errorf("parse %s response: %w", path, err)
 	}
 	return nil
+}
+
+// deviceKeysContext separates the key fetch proof from every other signature
+// the device key makes. It matches the control plane's constant.
+const deviceKeysContext = "localport-device-keys-v1"
+
+// ErrNoTicketKeys means a POST /v1/devices/keys response lacks `keys` or
+// `keys.ticket_keys`, or holds null for either. Storing it would drop every
+// key the device holds, so it is refused; an empty array is a valid set.
+var ErrNoTicketKeys = errcode.New(errcode.NoTicketKeys)
+
+// deviceKeysResponse is POST /v1/devices/keys.
+type deviceKeysResponse struct {
+	Keys *DeviceKeys `json:"keys"`
+}
+
+// FetchDeviceKeys fetches the device's session ticket verification set and its
+// team's recording key from POST /v1/devices/keys. The request carries cur's
+// certificate and its key's signature over deviceKeysDigest, which the control
+// plane accepts within a minute of its clock. Transport failures, 5xx and 429
+// are retried within DefaultRetryBudget; other refusals return at once as an
+// *APIError. A material that is not a device returns ErrNotDeviceIdentity, and
+// a response without a ticket key set returns ErrNoTicketKeys.
+func (c *Client) FetchDeviceKeys(ctx context.Context, cur *Material) (*DeviceKeys, error) {
+	if cur.Meta.Kind != KindDevice {
+		return nil, fmt.Errorf("%w: %s", ErrNotDeviceIdentity, security.SanitizeDisplay(cur.Meta.Identity))
+	}
+	leaf, err := leafOf(cur.CertPEM)
+	if err != nil {
+		return nil, err
+	}
+	serial := leaf.SerialNumber.Text(16)
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))
+
+	// Sign per attempt, since a retry can cross a minute boundary.
+	var resp deviceKeysResponse
+	if err := retry(ctx, DefaultRetryBudget, nil, func() error {
+		sig, signErr := cur.Key.Sign(rand.Reader, deviceKeysDigest(time.Now().Unix()/60, serial), crypto.SHA256)
+		if signErr != nil {
+			return fmt.Errorf("sign key fetch: %w", signErr)
+		}
+		resp = deviceKeysResponse{}
+		return c.post(ctx, "/v1/devices/keys", "", map[string]string{
+			"cert_pem":  certPEM,
+			"signature": base64.StdEncoding.EncodeToString(sig),
+		}, &resp)
+	}); err != nil {
+		return nil, err
+	}
+	if resp.Keys == nil || resp.Keys.TicketKeys == nil {
+		return nil, ErrNoTicketKeys
+	}
+	return resp.Keys, nil
+}
+
+// deviceKeysDigest is SHA-256(deviceKeysContext || bucket as 8 bytes
+// big-endian || serial in lowercase hex), the control plane's construction.
+func deviceKeysDigest(bucket int64, serial string) []byte {
+	h := sha256.New()
+	h.Write([]byte(deviceKeysContext))
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], uint64(bucket))
+	h.Write(b[:])
+	h.Write([]byte(serial))
+	return h.Sum(nil)
 }
 
 // keyPair is a freshly generated private key and the CSR over it. The key never

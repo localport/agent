@@ -3,9 +3,11 @@ package identity
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -117,6 +119,72 @@ func TestHintNeverReachesTheFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertKIDs(t, other, []string{"k1", "k2"}, nil)
+}
+
+// A hint brings the refresher's next fetch to the earliest time the floor
+// allows: at once before any fetch, then keyRefreshFloor after the last start.
+func TestKeyRefresherHintBringsTheNextFetchToTheFloor(t *testing.T) {
+	var hits atomic.Int32
+	f := startKeyRefresher(t, newServer(t, keysHandler(&hits, keySet(tk1))), tk1)
+	f.run(t)
+	assertRefreshWait(t, within(t, f.clock.armed))
+
+	// No fetch has run yet, so the hint starts one at once; its end arms the
+	// scheduled refresh.
+	f.r.Hint()
+	assertRefreshWait(t, within(t, f.clock.armed))
+	if hits.Load() != 1 {
+		t.Fatalf("fetches = %d, want 1", hits.Load())
+	}
+
+	f.r.Hint()
+	if d := within(t, f.clock.armed); d != keyRefreshFloor {
+		t.Fatalf("after a hint inside the floor the wait is %s, want %s", d, keyRefreshFloor)
+	}
+}
+
+// A hint while a fetch is in flight: that fetch does not settle it, and its
+// end schedules the next fetch at the floor rather than in keyRefreshInterval.
+func TestKeyRefresherHintDuringAFetchKeepsTheNextFetchAtTheFloor(t *testing.T) {
+	var hits atomic.Int32
+	reached, release := make(chan struct{}), make(chan struct{})
+	handler := keysHandler(&hits, keySet(tk1, tk2))
+	f := startKeyRefresher(t, newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		reached <- struct{}{}
+		<-release
+		handler(w, r)
+	}), tk1, tk2)
+	f.run(t)
+	assertRefreshWait(t, within(t, f.clock.armed))
+
+	fetched := make(chan error, 1)
+	go func() { fetched <- f.r.RefreshNow(context.Background()) }()
+	within(t, reached)
+	if added, err := f.keys.Hint([]string{"k1"}); err != nil || !added {
+		t.Fatalf("Hint = %v, %v", added, err)
+	}
+	f.r.Hint()
+	close(release)
+	if err := within(t, fetched); err != nil {
+		t.Fatal(err)
+	}
+	assertKIDs(t, f.keys, []string{"k2"}, []string{"k1"})
+	if d := within(t, f.clock.armed); d != keyRefreshFloor {
+		t.Fatalf("next fetch after a hinted fetch in %s, want %s", d, keyRefreshFloor)
+	}
+}
+
+// A hint given before Run starts, as from a RegisterAck that arrives before
+// the refresher's goroutine runs, makes Run fetch at once.
+func TestKeyRefresherHintBeforeRunFetchesAtOnce(t *testing.T) {
+	var hits atomic.Int32
+	f := startKeyRefresher(t, newServer(t, keysHandler(&hits, keySet(tk1))), tk1)
+	f.r.Hint()
+	f.run(t)
+	assertRefreshWait(t, within(t, f.clock.armed))
+	if hits.Load() != 1 {
+		t.Fatalf("fetches = %d, want 1 at start", hits.Load())
+	}
 }
 
 // A renewal whose request started before a hint does not settle it, though
