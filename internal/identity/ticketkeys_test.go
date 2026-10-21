@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -421,6 +422,53 @@ func writeUnreadableTicketKeys(t *testing.T, store *Store, how string) {
 	}
 }
 
+// A ticket_keys.json the store cannot read never stops a renewal from storing
+// its credential: both renewal paths write pending.json, succeed and log the
+// key failure.
+func TestRenewalStoresTheCredentialWhenTicketKeysAreUnreadable(t *testing.T) {
+	for _, how := range []string{"malformed kid", "mode 0644"} {
+		t.Run(how, func(t *testing.T) {
+			ca := newTestCA(t)
+			store, _ := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+			writeUnreadableTicketKeys(t, store, how)
+			srv, _ := renewServer(t, ca, nil)
+			var events []string
+			r := &Renewer{Store: store, Ref: deviceRef, client: &Client{BaseURL: srv.URL, HTTP: srv.Client()},
+				OnEvent: func(e string) { events = append(events, e) }}
+			cur, err := store.Load(deviceRef)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			next, err := r.renewLocked(context.Background(), r.client, cur)
+			if err != nil {
+				t.Fatalf("renewLocked: %v", err)
+			}
+			if pending, err := store.LoadPending(deviceRef); err != nil || pending.Meta.Serial != next.Meta.Serial {
+				t.Fatalf("pending after renewLocked: %v", err)
+			}
+			again, err := r.RenewPending(context.Background())
+			if err != nil {
+				t.Fatalf("RenewPending: %v", err)
+			}
+			if pending, err := store.LoadPending(deviceRef); err != nil || pending.Meta.Serial != again.Meta.Serial {
+				t.Fatalf("pending after RenewPending: %v", err)
+			}
+			logged := 0
+			for _, e := range events {
+				if strings.Contains(e, "ticket keys were not stored") && strings.Contains(e, ticketKeysRemedy) {
+					logged++
+				}
+			}
+			if logged != 2 {
+				t.Fatalf("events %q: want the key failure logged by both renewals", events)
+			}
+		})
+	}
+}
+
+const ticketKeysRemedy = "fix the mode of ticket_keys.json to owner-only, or remove it if it is malformed, owned by another user or not a regular file"
+
 // Load refuses a ticket_keys.json it cannot read with ErrTicketKeysUnreadable.
 func TestLoadOfAnUnreadableFileIsErrTicketKeysUnreadable(t *testing.T) {
 	for _, how := range []string{"malformed kid", "mode 0644"} {
@@ -431,5 +479,58 @@ func TestLoadOfAnUnreadableFileIsErrTicketKeysUnreadable(t *testing.T) {
 				t.Fatalf("Load = %v, want ErrTicketKeysUnreadable", err)
 			}
 		})
+	}
+}
+
+// A renewal whose key set fails for a reason other than reading the file logs
+// the error without the file remedy, since the file may be valid.
+func TestRenewalLogsAKeyFailureOtherThanReadingWithoutTheRemedy(t *testing.T) {
+	store := deviceTicketKeys(t)
+	var events []string
+	r := &Renewer{Store: store, Ref: deviceRef, OnEvent: func(e string) { events = append(events, e) }}
+	r.storeTicketKeys(context.Background(), deviceRef, 0, &Material{DeviceKeys: &DeviceKeys{TicketKeys: []TicketKey{{KID: "K!"}}}})
+	if len(events) != 1 || !strings.Contains(events[0], "ticket keys were not stored") || strings.Contains(events[0], ticketKeysRemedy) {
+		t.Fatalf("events %q: want the key failure logged once without the file remedy", events)
+	}
+}
+
+// A refresh-equivalent Replace while a renewal waits on the control plane
+// completes at once; the renewal's set, written last, is the one that stays.
+func TestReplaceDuringARenewal(t *testing.T) {
+	ca := newTestCA(t)
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	keys := store.mustTicketKeys(deviceRef)
+	inFlight, proceed := make(chan struct{}, 1), make(chan struct{})
+	srv, _ := renewServer(t, ca, oldKey, func() {
+		inFlight <- struct{}{}
+		<-proceed
+	})
+	r := &Renewer{Store: store, Ref: deviceRef}
+	old, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, held, err := r.lock()
+	if err != nil || !held {
+		t.Fatalf("lock: held=%v err=%v", held, err)
+	}
+	renewed := make(chan error, 1)
+	go func() {
+		defer release()
+		_, err := r.renewLocked(context.Background(), &Client{BaseURL: srv.URL, HTTP: srv.Client()}, old)
+		renewed <- err
+	}()
+	<-inFlight
+	if err := keys.Replace(context.Background(), keys.Generation(), keySet(tk2, tk3)); err != nil {
+		t.Fatalf("Replace during a renewal: %v", err)
+	}
+	assertKIDs(t, keys, []string{"k2", "k3"}, []string{"k1"})
+	close(proceed)
+	if err := <-renewed; err != nil {
+		t.Fatal(err)
+	}
+	rec := keys.loaded(t)
+	if !slices.Equal(kidsOf(rec.Keys), []string{"k1"}) {
+		t.Fatalf("after the renewal: %+v", rec)
 	}
 }

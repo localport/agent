@@ -52,6 +52,7 @@ const (
 	TicketKeysUnreadable Code = "AG004"
 	TicketKeysBusy       Code = "AG005"
 	RenewalInProgress    Code = "AG006"
+	NotRenewable         Code = "AG007"
 
 	UnsafeExecutable Code = "AG011"
 	UntrustedPath    Code = "AG012"
@@ -67,6 +68,7 @@ var registry = []Entry{
 	{TicketKeysUnreadable, "Ticket keys unreadable", "ticket_keys.json cannot be read"},
 	{TicketKeysBusy, "Ticket keys busy", "another process is writing this identity's ticket keys"},
 	{RenewalInProgress, "Renewal in progress", "another process is renewing this credential"},
+	{NotRenewable, "Credential does not renew", "a sign-in credential does not renew; run `localport login` again"},
 
 	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
 	{UntrustedPath, "Untrusted credential path", "untrusted credential path"},

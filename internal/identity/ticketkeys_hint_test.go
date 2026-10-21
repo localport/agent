@@ -119,6 +119,41 @@ func TestHintNeverReachesTheFile(t *testing.T) {
 	assertKIDs(t, other, []string{"k1", "k2"}, nil)
 }
 
+// A renewal whose request started before a hint does not settle it, though
+// its set lists the kid: only a set requested after the hint does.
+func TestRenewalStartedBeforeAHintDoesNotSettleIt(t *testing.T) {
+	ca := newTestCA(t)
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	keys := store.mustTicketKeys(deviceRef)
+	if err := keys.Replace(context.Background(), keys.Generation(), testKeys); err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := renewServer(t, ca, oldKey, func() {
+		if _, err := keys.Hint([]string{"k1"}); err != nil {
+			t.Error(err)
+		}
+	})
+	r := &Renewer{Store: store, Ref: deviceRef}
+	cur, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, held, err := r.lock()
+	if err != nil || !held {
+		t.Fatalf("lock: held=%v err=%v", held, err)
+	}
+	_, err = r.renewLocked(context.Background(), &Client{BaseURL: srv.URL, HTTP: srv.Client()}, cur)
+	release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertKIDs(t, keys, nil, []string{"k1"})
+	if err := keys.Replace(context.Background(), keys.Generation(), testKeys); err != nil {
+		t.Fatal(err)
+	}
+	assertKIDs(t, keys, []string{"k1"}, nil)
+}
+
 // A ticket_keys.json holding a revoked list loads; the list is ignored.
 func TestTicketKeysLoadIgnoresALegacyRevokedList(t *testing.T) {
 	store := deviceTicketKeys(t)

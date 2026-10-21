@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/security"
 )
 
@@ -27,12 +28,14 @@ type issueResponse struct {
 	TeamName   string `json:"team_name"`
 }
 
-// renewResponse is POST /v1/mtls/certs/renew.
+// renewResponse is POST /v1/mtls/certs/renew and POST /v1/devices/renew. Keys
+// is set for a device only.
 type renewResponse struct {
-	CertPEM    string `json:"cert_pem"`
-	CAChainPEM string `json:"ca_chain_pem"`
-	RenewAfter string `json:"renew_after"`
-	TeamName   string `json:"team_name"`
+	CertPEM    string      `json:"cert_pem"`
+	CAChainPEM string      `json:"ca_chain_pem"`
+	RenewAfter string      `json:"renew_after"`
+	TeamName   string      `json:"team_name"`
+	Keys       *DeviceKeys `json:"keys"`
 }
 
 // issuedMaterial is one issuance response in the shape assemble consumes. A
@@ -97,11 +100,18 @@ func consumerOnly(m *Material, err error) (*Material, error) {
 
 // ErrNotRenewable is a sentinel so callers can tell "never renews" from "renewal
 // failed, retry": the loop backs off on the second and must stop on the first.
-var ErrNotRenewable = errors.New("a sign-in credential does not renew; run `localport login` again")
+var ErrNotRenewable = errcode.New(errcode.NotRenewable)
 
 // Renew exchanges the stored credential for a new one. The current private
-// key proves possession, so no bearer token is needed. The old certificate
-// stays valid until it expires.
+// key proves possession, so no bearer token is needed. A consumer's old
+// certificate stays valid until it expires.
+//
+// A device credential renews at /v1/devices/renew, which accepts an expired
+// certificate. The result is a pending credential (see Store.Promote); the
+// control plane supersedes the old certificate when the pending one registers.
+//
+// The new certificate must name the same credential and carry the key
+// generated here, or nothing is returned to store.
 func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 	// All renewal paths call Renew, so the check lives here.
 	if !cur.Meta.Source.Renewable() {
@@ -121,6 +131,10 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 	// minute bucket limits replay without a nonce store. The serial binds the
 	// proof to one certificate.
 	serial := leaf.SerialNumber.Text(16)
+	path := "/v1/mtls/certs/renew"
+	if cur.Meta.Kind == KindDevice {
+		path = "/v1/devices/renew"
+	}
 
 	// Sign per attempt, since a retry can cross a minute boundary.
 	var resp renewResponse
@@ -131,13 +145,16 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 			return fmt.Errorf("sign renewal: %w", signErr)
 		}
 		resp = renewResponse{}
-		return c.post(ctx, "/v1/mtls/certs/renew", "", map[string]string{
+		return c.post(ctx, path, "", map[string]string{
 			"cert_pem":  string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})),
 			"csr_pem":   string(kp.csrPEM),
 			"signature": base64.StdEncoding.EncodeToString(sig),
 		}, &resp)
 	}); err != nil {
 		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden && cur.Meta.Kind == KindDevice {
+			return nil, fmt.Errorf("%w: this device can no longer renew its certificate; %s", err, errcode.NewJoinCommand)
+		}
 		if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden {
 			return nil, fmt.Errorf("%w: this credential can no longer be renewed; run `localport setup <TOKEN>` again", err)
 		}
@@ -153,13 +170,31 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 	if teamName == "" {
 		teamName = cur.Meta.TeamName
 	}
-	return c.assemble(kp.key, issuedMaterial{
+	// Device details carry over; the response's keys go to TicketKeys when
+	// the renewal is stored.
+	var device *DeviceInfo
+	if cur.Meta.Device != nil {
+		d := *cur.Meta.Device
+		device = &d
+	}
+	next, err := c.assemble(kp.key, issuedMaterial{
 		CertPEM:    resp.CertPEM,
 		ChainPEM:   resp.CAChainPEM,
 		Source:     cur.Meta.Source,
 		RenewAfter: resp.RenewAfter,
 		TeamName:   teamName,
+		Device:     device,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := checkIssued(next, Ref{Team: cur.Meta.Team, Kind: cur.Meta.Kind, Identity: cur.Meta.Identity}); err != nil {
+		return nil, err
+	}
+	if cur.Meta.Kind == KindDevice {
+		next.DeviceKeys = issuedKeys(resp.Keys)
+	}
+	return next, nil
 }
 
 // checkIssued refuses an issued credential whose certificate names another

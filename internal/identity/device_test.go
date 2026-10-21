@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"io/fs"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +25,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,7 +118,8 @@ func (ca *testCA) signCSR(t *testing.T, csrPEM string, notBefore, notAfter time.
 }
 
 var testKeys = DeviceKeys{
-	TicketKeys: []TicketKey{testTicketKey("k1", 1)},
+	TicketKeys:   []TicketKey{testTicketKey("k1", 1)},
+	RecordingKey: testRecordingKey(1),
 }
 
 // testTicketKey is a valid ticket key whose Ed25519 seed is 32 copies of seed.
@@ -184,8 +188,12 @@ func TestEnrolDeviceRoundTrip(t *testing.T) {
 	}
 	// Save stores the certificate only; the enrolled keys are the caller's to
 	// pass to TicketKeys, and never land in meta.json.
+	assertNoKeysIn(t, filepath.Join(store.Dir(ref), metaFile))
 	if m.DeviceKeys == nil || !slices.Equal(m.DeviceKeys.TicketKeys, testKeys.TicketKeys) {
 		t.Fatalf("enrolment keys = %+v", m.DeviceKeys)
+	}
+	if _, err := os.Stat(filepath.Join(store.Dir(ref), ticketKeysFile)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Save wrote %s: %v", ticketKeysFile, err)
 	}
 	if _, renews := loaded.Meta.NextRenewal(); !renews {
 		t.Fatal("a device credential must renew")
@@ -216,6 +224,17 @@ func TestEnrolDeviceRefusesAResponseThatDisagreesWithItsCertificate(t *testing.T
 	client := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
 	if _, err := client.EnrolDevice(context.Background(), "lpj_x", 0, nil); err == nil {
 		t.Fatal("a response naming another device must be refused")
+	}
+}
+
+// A renewal or enrolment response with a null or absent ticket_keys stores no
+// set; an empty array is a valid one.
+func TestIssuedKeysRefusesANullSet(t *testing.T) {
+	if issuedKeys(nil) != nil || issuedKeys(&DeviceKeys{RecordingKey: testRecordingKey(1)}) != nil {
+		t.Fatal("a null set was accepted")
+	}
+	if k := issuedKeys(&DeviceKeys{TicketKeys: []TicketKey{}}); k == nil {
+		t.Fatal("an empty set was refused")
 	}
 }
 
@@ -314,6 +333,422 @@ func savedDevice(t *testing.T, ca *testCA, notBefore, notAfter time.Time) (*Stor
 	return store, key
 }
 
+// renewServer answers /v1/devices/renew after checking the old-key proof
+// (skipped when oldKey is nil), and refuses every other path.
+// before, when given, runs first in every request.
+func renewServer(t *testing.T, ca *testCA, oldKey *ecdsa.PrivateKey, before ...func()) (*httptest.Server, *[]string) {
+	t.Helper()
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, f := range before {
+			f()
+		}
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path != "/v1/devices/renew" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		var body struct {
+			CertPEM   string `json:"cert_pem"`
+			CSRPEM    string `json:"csr_pem"`
+			Signature string `json:"signature"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		leaf, err := leafOf([]byte(body.CertPEM))
+		if err != nil {
+			t.Fatal(err)
+		}
+		csrBlock, _ := pem.Decode([]byte(body.CSRPEM))
+		sig, err := base64.StdEncoding.DecodeString(body.Signature)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := renewalDigest(csrBlock.Bytes, time.Now().Unix()/60, leaf.SerialNumber.Text(16))
+		if oldKey != nil && !ecdsa.VerifyASN1(&oldKey.PublicKey, digest, sig) {
+			t.Error("renewal proof does not verify with the old key")
+		}
+		writeJSON(t, w, map[string]any{
+			"cert_pem":    string(ca.signCSR(t, body.CSRPEM, time.Now().Add(-time.Minute), time.Now().Add(30*24*time.Hour))),
+			"renew_after": time.Now().Add(20 * 24 * time.Hour).UTC().Format(time.RFC3339),
+			"keys":        testKeys,
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &paths
+}
+
+// An expired device certificate is due now and renews at the device route.
+// The result is pending; the expired one stays current until Promote.
+func TestExpiredDeviceCertificateRenewsAtTheDeviceRoute(t *testing.T) {
+	ca := newTestCA(t)
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-40*24*time.Hour), time.Now().Add(-time.Hour))
+	srv, paths := renewServer(t, ca, oldKey)
+	r := &Renewer{Store: store, Ref: deviceRef}
+
+	cur, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	due, ok, err := r.due(cur.Meta)
+	if err != nil || !ok || time.Until(due) > 0 {
+		t.Fatalf("due = %s ok=%v err=%v, want now", due, ok, err)
+	}
+
+	next, err := r.renewLocked(context.Background(), &Client{BaseURL: srv.URL, HTTP: srv.Client()}, cur)
+	if err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	if len(*paths) != 1 || (*paths)[0] != "/v1/devices/renew" {
+		t.Fatalf("requests = %v, want one to /v1/devices/renew", *paths)
+	}
+
+	still, err := store.Load(deviceRef)
+	if err != nil || still.Meta.Serial != cur.Meta.Serial {
+		t.Fatalf("current changed before promotion: %v", err)
+	}
+	pending, err := store.LoadPending(deviceRef)
+	if err != nil {
+		t.Fatalf("LoadPending: %v", err)
+	}
+	if pending.Meta.Serial != next.Meta.Serial {
+		t.Fatalf("pending serial = %s, want %s", pending.Meta.Serial, next.Meta.Serial)
+	}
+	if d := pending.Meta.Device; d == nil || d.Region != "eu" {
+		t.Fatalf("pending device details = %+v: host and region carry over", d)
+	}
+	assertNoKeysIn(t, filepath.Join(store.Dir(deviceRef), pendingFile))
+	if pub, ok := store.mustTicketKeys(deviceRef).Lookup("k1"); !ok || pub == nil {
+		t.Fatal("the renewal response's keys must reach TicketKeys")
+	}
+	if _, err := pending.TLSCertificate(); err != nil {
+		t.Fatalf("pending credential is unusable: %v", err)
+	}
+
+	// The pending renewal now governs the schedule.
+	due, ok, err = r.due(cur.Meta)
+	if err != nil || !ok || time.Until(due) < 24*time.Hour {
+		t.Fatalf("due after renewal = %s ok=%v err=%v, want the pending renew_after", due, ok, err)
+	}
+}
+
+func TestPromoteInstallsThePendingCredentialAndDropsTheOldKey(t *testing.T) {
+	ca := newTestCA(t)
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	srv, _ := renewServer(t, ca, oldKey)
+	r := &Renewer{Store: store, Ref: deviceRef}
+	client := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+
+	if err := store.Promote(deviceRef, "abc"); !errors.Is(err, ErrNoPending) {
+		t.Fatalf("Promote with nothing pending = %v, want ErrNoPending", err)
+	}
+
+	old, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := r.renewLocked(context.Background(), client, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A second renewal before promotion replaces the pending one.
+	second, err := r.renewLocked(context.Background(), client, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := store.Dir(deviceRef)
+	if _, err := os.Stat(filepath.Join(dir, "key-"+first.Meta.Serial+".pem")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a replaced pending key must be deleted")
+	}
+	if err := store.Promote(deviceRef, first.Meta.Serial); !errors.Is(err, ErrPendingChanged) {
+		t.Fatalf("Promote(replaced serial) = %v, want ErrPendingChanged", err)
+	}
+
+	if err := store.Promote(deviceRef, second.Meta.Serial); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	cur, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Meta.Serial != second.Meta.Serial {
+		t.Fatalf("current serial = %s, want the promoted %s", cur.Meta.Serial, second.Meta.Serial)
+	}
+	if _, err := store.LoadPending(deviceRef); !errors.Is(err, ErrNoPending) {
+		t.Fatalf("LoadPending after Promote = %v, want ErrNoPending", err)
+	}
+	for _, name := range []string{old.Meta.Key.File, old.Meta.Cert} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s survived promotion", name)
+		}
+	}
+	// Repeating a completed promotion succeeds.
+	if err := store.Promote(deviceRef, second.Meta.Serial); err != nil {
+		t.Fatalf("repeated Promote = %v", err)
+	}
+}
+
+// Promote and a renewal both rewrite the credential's files, so they share the
+// renewal lock and Promote never interleaves with a renewal in flight.
+func TestPromoteWaitsOutARenewalInFlight(t *testing.T) {
+	ca := newTestCA(t)
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	srv, _ := renewServer(t, ca, oldKey)
+	r := &Renewer{Store: store, Ref: deviceRef}
+	old, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := r.renewLocked(context.Background(), &Client{BaseURL: srv.URL, HTTP: srv.Client()}, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	release, held, err := r.lock()
+	if err != nil || !held {
+		t.Fatalf("lock: held=%v err=%v", held, err)
+	}
+	if err := store.Promote(deviceRef, next.Meta.Serial); !errors.Is(err, ErrRenewalInProgress) {
+		t.Fatalf("Promote during a renewal = %v, want ErrRenewalInProgress", err)
+	}
+	release()
+	if err := store.Promote(deviceRef, next.Meta.Serial); err != nil {
+		t.Fatalf("Promote after the renewal = %v", err)
+	}
+}
+
+// A renewal that finishes after the credential was replaced (a re-enrolment)
+// must not attach its certificate to the new credential.
+func TestPendingIsRefusedWhenTheCurrentCredentialChanged(t *testing.T) {
+	ca := newTestCA(t)
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	srv, _ := renewServer(t, ca, oldKey)
+	old, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := (&Client{BaseURL: srv.URL, HTTP: srv.Client()}).Renew(context.Background(), old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.savePending(*next, "not-the-current-serial"); !errors.Is(err, ErrCredentialReplaced) {
+		t.Fatalf("savePending = %v, want ErrCredentialReplaced", err)
+	}
+	if _, err := store.LoadPending(deviceRef); !errors.Is(err, ErrNoPending) {
+		t.Fatalf("LoadPending = %v, want ErrNoPending", err)
+	}
+}
+
+// A new enrolment replaces the whole credential, pending renewal included.
+func TestSaveDiscardsAPendingRenewal(t *testing.T) {
+	ca := newTestCA(t)
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	srv, _ := renewServer(t, ca, oldKey)
+	old, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Renewer{Store: store, Ref: deviceRef}).renewLocked(context.Background(), &Client{BaseURL: srv.URL, HTTP: srv.Client()}, old); err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(t)
+	if _, err := store.Save(context.Background(), Material{
+		CertPEM: ca.sign(t, &key.PublicKey, time.Now().Add(-time.Minute), time.Now().Add(time.Hour)),
+		Key:     fileKey{key},
+		Meta:    Meta{APIURL: "https://api.localport.io", Source: SourceToken},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadPending(deviceRef); !errors.Is(err, ErrNoPending) {
+		t.Fatalf("LoadPending after re-enrolment = %v, want ErrNoPending", err)
+	}
+	entries, err := os.ReadDir(store.Dir(deviceRef))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files int
+	for _, e := range entries {
+		if n := e.Name(); strings.HasPrefix(n, "cert-") || strings.HasPrefix(n, "key-") {
+			files++
+		}
+	}
+	if files != 2 {
+		t.Fatalf("%d certificate and key files remain, want the new pair only", files)
+	}
+	// The ticket keys the renewal stored are not credential files and stay.
+	if _, ok := store.mustTicketKeys(deviceRef).Lookup("k1"); !ok {
+		t.Fatal("Save without keys dropped the stored ticket keys")
+	}
+	if _, err := os.Stat(filepath.Join(store.Dir(deviceRef), ticketKeysFile)); err != nil {
+		t.Fatalf("%s did not survive Save: %v", ticketKeysFile, err)
+	}
+}
+
+// Retry-After is honoured in full, plus jitter bounded by retryMaxDelay.
+func TestRetryAfterWaitAddsBoundedJitter(t *testing.T) {
+	err := &APIError{Status: http.StatusTooManyRequests, retryAfter: time.Minute}
+	jittered := false
+	for range 50 {
+		wait, ok := retryAfterWait(err)
+		if !ok || wait < time.Minute || wait > time.Minute+retryMaxDelay {
+			t.Fatalf("wait = %s ok=%v, want [1m, 1m30s]", wait, ok)
+		}
+		jittered = jittered || wait > time.Minute
+	}
+	if !jittered {
+		t.Fatal("50 waits all equal Retry-After: no jitter")
+	}
+	if _, ok := retryAfterWait(&APIError{Status: http.StatusServiceUnavailable}); ok {
+		t.Fatal("no Retry-After, no server-directed wait")
+	}
+}
+
+// renew_after past the expiry (a clock or server fault) must not postpone the
+// renewal of an expired certificate.
+func TestAnExpiredCertificateIsDueWhateverItsRenewAfter(t *testing.T) {
+	store, _ := savedDevice(t, newTestCA(t), time.Now().Add(-48*time.Hour), time.Now().Add(-time.Minute))
+	r := &Renewer{Store: store, Ref: deviceRef}
+	cur, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(24 * time.Hour)
+	cur.Meta.RenewAfter = &later
+	due, ok, err := r.due(cur.Meta)
+	if err != nil || !ok || time.Until(due) > 0 {
+		t.Fatalf("due = %s ok=%v err=%v, want now", due, ok, err)
+	}
+}
+
+// A crash after a re-enrolment committed meta.json but before pending.json
+// was removed must not resurrect the old pending certificate.
+func TestPendingOfAReplacedCredentialIsIgnored(t *testing.T) {
+	ca := newTestCA(t)
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	srv, _ := renewServer(t, ca, oldKey)
+	old, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Renewer{Store: store, Ref: deviceRef}).renewLocked(context.Background(), &Client{BaseURL: srv.URL, HTTP: srv.Client()}, old); err != nil {
+		t.Fatal(err)
+	}
+	pendingPath := filepath.Join(store.Dir(deviceRef), pendingFile)
+	stale, err := os.ReadFile(pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(t)
+	if _, err := store.Save(context.Background(), Material{
+		CertPEM: ca.sign(t, &key.PublicKey, time.Now().Add(-time.Minute), time.Now().Add(time.Hour)),
+		Key:     fileKey{key},
+		Meta:    Meta{APIURL: "https://api.localport.io", Source: SourceToken},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pendingPath, stale, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadPending(deviceRef); !errors.Is(err, ErrNoPending) {
+		t.Fatalf("LoadPending = %v, want ErrNoPending", err)
+	}
+}
+
+// Save waits for a renewal in flight instead of committing under it, so
+// neither sweeps the other's files.
+func TestSaveWaitsForARenewalInFlight(t *testing.T) {
+	ca := newTestCA(t)
+	entered := make(chan struct{})
+	unblock := make(chan struct{})
+	var unblockOnce sync.Once
+	release := func() { unblockOnce.Do(func() { close(unblock) }) }
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	srv, _ := renewServer(t, ca, oldKey, func() {
+		close(entered)
+		<-unblock
+	})
+	// Runs before the server's Close, so a failing test does not hang on the
+	// blocked handler.
+	t.Cleanup(release)
+	r := &Renewer{Store: store, Ref: deviceRef}
+	old, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	renewed := make(chan error, 1)
+	go func() {
+		release, held, err := r.lock()
+		if err != nil || !held {
+			renewed <- fmt.Errorf("lock: held=%v err=%v", held, err)
+			close(entered)
+			return
+		}
+		defer release()
+		_, err = r.renewLocked(context.Background(), &Client{BaseURL: srv.URL, HTTP: srv.Client()}, old)
+		renewed <- err
+	}()
+	<-entered
+
+	key := testKey(t)
+	replacement := Material{
+		CertPEM: ca.sign(t, &key.PublicKey, time.Now().Add(-time.Minute), time.Now().Add(time.Hour)),
+		Key:     fileKey{key},
+		Meta:    Meta{APIURL: "https://api.localport.io", Source: SourceToken},
+	}
+	saved := make(chan error, 1)
+	go func() {
+		_, err := store.Save(context.Background(), replacement)
+		saved <- err
+	}()
+	select {
+	case err := <-saved:
+		t.Fatalf("Save returned (%v) while a renewal held the lock", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	release()
+	if err := <-renewed; err != nil {
+		t.Fatalf("renewal: %v", err)
+	}
+	if err := <-saved; err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	cur, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := cur.TLSCertificate(); err != nil {
+		t.Fatalf("the saved credential lost a file: %v", err)
+	}
+	if _, err := store.LoadPending(deviceRef); !errors.Is(err, ErrNoPending) {
+		t.Fatalf("LoadPending = %v, want ErrNoPending after the re-enrolment", err)
+	}
+}
+
+// A renewal response must certify the generated key for the same credential.
+func TestRenewRefusesACertificateForAnotherKeyOrIdentity(t *testing.T) {
+	for name, broken := range map[string]func(*testCA){
+		"another key":      func(ca *testCA) { ca.wrongKey = true },
+		"another identity": func(ca *testCA) { ca.uri = "spiffe://01kpq7x2abcd34.mtls.localport.dev/device/tun12345/other" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			ca := newTestCA(t)
+			store, oldKey := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+			broken(ca)
+			srv, _ := renewServer(t, ca, oldKey)
+			old, err := store.Load(deviceRef)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (&Client{BaseURL: srv.URL, HTTP: srv.Client()}).Renew(context.Background(), old); err == nil {
+				t.Fatal("Renew must refuse the response")
+			}
+		})
+	}
+}
+
 func TestEnrolDeviceRefusesACertificateForAnotherKey(t *testing.T) {
 	ca := newTestCA(t)
 	ca.wrongKey = true
@@ -336,6 +771,32 @@ func TestEnrolDeviceRefusesACertificateForAnotherKey(t *testing.T) {
 	}
 }
 
+// Promote refuses a pending credential whose files do not load, leaving the
+// current one in place.
+func TestPromoteRefusesAnUnusablePendingCredential(t *testing.T) {
+	ca := newTestCA(t)
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	srv, _ := renewServer(t, ca, oldKey)
+	old, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := (&Renewer{Store: store, Ref: deviceRef}).renewLocked(context.Background(), &Client{BaseURL: srv.URL, HTTP: srv.Client()}, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(store.Dir(deviceRef), "key-"+next.Meta.Serial+".pem")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Promote(deviceRef, next.Meta.Serial); err == nil {
+		t.Fatal("Promote must refuse a pending credential without its key")
+	}
+	cur, err := store.Load(deviceRef)
+	if err != nil || cur.Meta.Serial != old.Meta.Serial {
+		t.Fatalf("current changed: serial %v err %v", cur, err)
+	}
+}
+
 // A credential directory another account can write is refused on load.
 func TestLoadRefusesAGroupWritableCredentialDirectory(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -351,6 +812,71 @@ func TestLoadRefusesAGroupWritableCredentialDirectory(t *testing.T) {
 	}
 	if _, err := store.Load(ref); !errors.Is(err, security.ErrUntrustedPath) {
 		t.Fatalf("Load = %v, want ErrUntrustedPath", err)
+	}
+}
+
+// renewedDevice stores a device credential and one pending renewal of it.
+func renewedDevice(t *testing.T) (store *Store, old, next *Material) {
+	t.Helper()
+	ca := newTestCA(t)
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	srv, _ := renewServer(t, ca, oldKey)
+	old, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err = (&Renewer{Store: store, Ref: deviceRef}).renewLocked(context.Background(), &Client{BaseURL: srv.URL, HTTP: srv.Client()}, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, old, next
+}
+
+// A crash between Promote's meta.json write and its pending.json removal
+// leaves the superseded pair behind. Promoting again finishes the cleanup.
+func TestPromoteAgainCleansUpAfterAnInterruptedPromote(t *testing.T) {
+	store, old, next := renewedDevice(t)
+	dir := store.Dir(deviceRef)
+	pending, err := store.LoadPending(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The first half of Promote, then the crash.
+	promoted := pending.Meta
+	promoted.RenewedFrom = ""
+	if err := writeMeta(dir, metaFile, promoted); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Promote(deviceRef, next.Meta.Serial); err != nil {
+		t.Fatalf("Promote after the crash = %v", err)
+	}
+	for _, name := range []string{pendingFile, old.Meta.Cert, old.Meta.Key.File} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s survived the repeated Promote", name)
+		}
+	}
+	if cur, err := store.Load(deviceRef); err != nil || cur.Meta.Serial != next.Meta.Serial {
+		t.Fatalf("current = %v, %v; want the promoted serial", cur, err)
+	}
+}
+
+// Promote refuses a pending record whose key file holds another pair's key.
+func TestPromoteRefusesAPendingKeyThatDoesNotMatchItsCertificate(t *testing.T) {
+	store, old, next := renewedDevice(t)
+	other, err := fileKey{testKey(t)}.marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(store.Dir(deviceRef), "key-"+next.Meta.Serial+".pem")
+	if err := security.WritePrivateFileAtomic(keyPath, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Promote(deviceRef, next.Meta.Serial); err == nil {
+		t.Fatal("Promote must refuse a pending key that does not match its certificate")
+	}
+	if cur, err := store.Load(deviceRef); err != nil || cur.Meta.Serial != old.Meta.Serial {
+		t.Fatalf("current changed: %v, %v", cur, err)
 	}
 }
 
@@ -416,5 +942,41 @@ func TestWaitLockGivesUpAfterItsBound(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("waitLock ignored its bound")
+	}
+}
+
+// Repeating the Promote of the current serial after a later renewal must keep
+// that renewal pending, not report it as a replaced pending credential.
+func TestPromoteOfTheCurrentSerialKeepsALaterRenewalPending(t *testing.T) {
+	ca := newTestCA(t)
+	store, _ := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	srv, _ := renewServer(t, ca, nil)
+	r := &Renewer{Store: store, Ref: deviceRef}
+	client := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+
+	renew := func() *Material {
+		t.Helper()
+		cur, err := store.Load(deviceRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, err := r.renewLocked(context.Background(), client, cur)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return next
+	}
+	x := renew()
+	if err := store.Promote(deviceRef, x.Meta.Serial); err != nil {
+		t.Fatalf("Promote(X) = %v", err)
+	}
+	y := renew()
+
+	if err := store.Promote(deviceRef, x.Meta.Serial); err != nil {
+		t.Fatalf("repeated Promote(X) with Y pending = %v, want nil", err)
+	}
+	pending, err := store.LoadPending(deviceRef)
+	if err != nil || pending.Meta.Serial != y.Meta.Serial {
+		t.Fatalf("pending after the repeated Promote = %v, %v; want Y kept", pending, err)
 	}
 }

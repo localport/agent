@@ -60,3 +60,20 @@ func TestLoginRefusesADeviceCredential(t *testing.T) {
 		t.Fatalf("Login = %v, want ErrDeviceCredential", err)
 	}
 }
+
+// Consumer resolution never offers or picks a device credential.
+func TestConsumerResolutionSkipsDeviceCredentials(t *testing.T) {
+	store, _, _ := renewedDevice(t)
+	if refs, err := store.ListConsumers(); err != nil || len(refs) != 0 {
+		t.Fatalf("ListConsumers = %v, %v; want none", refs, err)
+	}
+	if _, err := store.ResolveConsumer(Selector{Identity: deviceRef.Identity}); err == nil {
+		t.Fatal("a bare selector resolved to a device credential")
+	}
+	if _, err := store.ResolveConsumer(Selector{Kind: KindDevice, Identity: deviceRef.Identity}); !errors.Is(err, ErrDeviceCredential) {
+		t.Fatalf("a device selector = %v, want ErrDeviceCredential", err)
+	}
+	if ref, err := store.Resolve(Selector{Identity: deviceRef.Identity}); err != nil || ref != deviceRef {
+		t.Fatalf("Resolve for identity management = %v, %v; want the device", ref, err)
+	}
+}

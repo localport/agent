@@ -178,12 +178,10 @@ func retry(ctx context.Context, budget time.Duration, onWait RetryNotice, fn fun
 		}
 
 		wait := jitter(delay)
-		// Retry-After takes precedence, capped at the remaining budget.
-		var apiErr *APIError
-		if errors.As(err, &apiErr) {
-			if asked, ok := apiErr.RetryAfter(); ok {
-				wait = asked
-			}
+		// Retry-After takes precedence. A wait past the remaining budget ends
+		// the retries.
+		if asked, ok := retryAfterWait(err); ok {
+			wait = asked
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 || wait > remaining {
@@ -201,6 +199,32 @@ func retry(ctx context.Context, budget time.Duration, onWait RetryNotice, fn fun
 			delay = retryMaxDelay
 		}
 	}
+}
+
+// retryAfterWait is the server's Retry-After with jitter added, and whether
+// the server sent one.
+func retryAfterWait(err error) (time.Duration, bool) {
+	asked, ok := serverRetryAfter(err)
+	if !ok {
+		return 0, false
+	}
+	return withJitter(asked), true
+}
+
+// serverRetryAfter is the Retry-After of a control plane refusal.
+func serverRetryAfter(err error) (time.Duration, bool) {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return 0, false
+	}
+	return apiErr.RetryAfter()
+}
+
+// withJitter adds up to min(d, retryMaxDelay) to d. It spreads agents behind
+// one address that were refused together, without waking any of
+// them before d.
+func withJitter(d time.Duration) time.Duration {
+	return d + jitter(min(d, retryMaxDelay))
 }
 
 // jitter returns a uniformly random duration in [0, d]. math/rand is
