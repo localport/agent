@@ -89,15 +89,21 @@ func WritePrivateFileAtomic(path string, data []byte) error {
 		os.Remove(tmp)
 		return fmt.Errorf("install %s: %w", path, err)
 	}
-	// Then the directory entry, so the rename itself survives a power loss.
-	// Best-effort: Windows cannot fsync a directory handle, and some filesystems
-	// refuse it. The file's own contents are already durable either way, so a
-	// failure here costs the rename, not the key.
-	if dir, err := os.Open(filepath.Dir(path)); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
-	}
+	// Then the directory entry, so the rename itself survives a power loss. The
+	// file's own contents are already durable either way, so a failed directory
+	// sync costs the rename, not the key.
+	SyncDir(filepath.Dir(path))
 	return nil
+}
+
+// SyncDir flushes dir's entries, so a file or directory just created or
+// renamed in it survives a power loss. Best-effort: Windows cannot fsync a
+// directory handle, and some filesystems refuse it.
+func SyncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 }
 
 // ErrUntrustedPath is returned for a private path that is a symlink or

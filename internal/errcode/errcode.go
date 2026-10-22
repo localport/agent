@@ -59,6 +59,9 @@ const (
 	UnsafeExecutable Code = "AG011"
 	UntrustedPath    Code = "AG012"
 
+	SpoolFull Code = "AG061"
+	DiskLow   Code = "AG062"
+
 	NoTransport Code = "AG071"
 )
 
@@ -76,6 +79,9 @@ var registry = []Entry{
 
 	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
 	{UntrustedPath, "Untrusted credential path", "untrusted credential path"},
+
+	{SpoolFull, "Recording spool full", "recording: spool is full"},
+	{DiskLow, "Disk space low for recordings", "recording: too little free disk space for the spool"},
 
 	{NoTransport, "No transport", "no transport available: every candidate failed (check edge reachability and firewall)"},
 }
