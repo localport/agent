@@ -59,8 +59,9 @@ const (
 	UnsafeExecutable Code = "AG011"
 	UntrustedPath    Code = "AG012"
 
-	SpoolFull Code = "AG061"
-	DiskLow   Code = "AG062"
+	SpoolFull            Code = "AG061"
+	DiskLow              Code = "AG062"
+	RecordingUnavailable Code = "AG063"
 
 	NoTransport Code = "AG071"
 )
@@ -82,6 +83,7 @@ var registry = []Entry{
 
 	{SpoolFull, "Recording spool full", "recording: spool is full"},
 	{DiskLow, "Disk space low for recordings", "recording: too little free disk space for the spool"},
+	{RecordingUnavailable, "Recording unavailable", "recording unavailable"},
 
 	{NoTransport, "No transport", "no transport available: every candidate failed (check edge reachability and firewall)"},
 }
