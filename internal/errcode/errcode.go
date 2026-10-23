@@ -59,8 +59,9 @@ const (
 	UnsafeExecutable Code = "AG011"
 	UntrustedPath    Code = "AG012"
 
-	JTILogLocked   Code = "AG053"
-	JTIUnavailable Code = "AG054"
+	JTILogLocked         Code = "AG053"
+	JTIUnavailable       Code = "AG054"
+	LookupOutputTooLarge Code = "AG056"
 
 	SpoolFull            Code = "AG061"
 	DiskLow              Code = "AG062"
@@ -86,6 +87,7 @@ var registry = []Entry{
 
 	{JTILogLocked, "Session ticket log locked", "session jti log is held by another process"},
 	{JTIUnavailable, "Session ticket log unavailable", "ticket replay cache unavailable"},
+	{LookupOutputTooLarge, "User lookup output too large", "output exceeds 64 KiB"},
 
 	{SpoolFull, "Recording spool full", "recording: spool is full"},
 	{DiskLow, "Disk space low for recordings", "recording: too little free disk space for the spool"},
