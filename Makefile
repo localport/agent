@@ -21,7 +21,7 @@ PLATFORMS = linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64 windows/
 
 DIST = dist
 
-.PHONY: build build-all dist release-sign release-dryrun packages repo repo-apk clean test vet-all smoke lint fmt vet notices notices-check
+.PHONY: build build-all dist release-sign release-dryrun packages repo repo-apk clean test test-root vet-all smoke lint fmt vet notices notices-check
 
 build:
 	$(GO_BUILD) -o bin/localport ./cmd/localport
@@ -104,6 +104,12 @@ clean:
 
 test:
 	go test -race ./...
+
+# The session tests that need euid 0 (real login(1), the session-ending kill).
+# Each is named TestRoot... and skips without root, so `test` runs none of
+# them unprivileged.
+test-root:
+	go test -race -count=1 -v -run '^TestRoot' ./internal/session/
 
 # `go vet` compiles test files for each platform, which a cross build skips.
 vet-all:
