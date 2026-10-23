@@ -61,6 +61,7 @@ const (
 
 	JTILogLocked         Code = "AG053"
 	JTIUnavailable       Code = "AG054"
+	LookupPending        Code = "AG055"
 	LookupOutputTooLarge Code = "AG056"
 
 	SpoolFull            Code = "AG061"
@@ -87,6 +88,7 @@ var registry = []Entry{
 
 	{JTILogLocked, "Session ticket log locked", "session jti log is held by another process"},
 	{JTIUnavailable, "Session ticket log unavailable", "ticket replay cache unavailable"},
+	{LookupPending, "User lookup still pending", "an earlier directory lookup has not returned"},
 	{LookupOutputTooLarge, "User lookup output too large", "output exceeds 64 KiB"},
 
 	{SpoolFull, "Recording spool full", "recording: spool is full"},
