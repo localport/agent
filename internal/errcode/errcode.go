@@ -59,6 +59,8 @@ const (
 	UnsafeExecutable Code = "AG011"
 	UntrustedPath    Code = "AG012"
 
+	SELinuxEnforcing     Code = "AG051"
+	NoLogin              Code = "AG052"
 	JTILogLocked         Code = "AG053"
 	JTIUnavailable       Code = "AG054"
 	LookupPending        Code = "AG055"
@@ -86,6 +88,8 @@ var registry = []Entry{
 	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
 	{UntrustedPath, "Untrusted credential path", "untrusted credential path"},
 
+	{SELinuxEnforcing, "Terminal refused: SELinux enforcing", "SELinux is enforcing"},
+	{NoLogin, "Terminal refused: no login(1)", "no login(1)"},
 	{JTILogLocked, "Session ticket log locked", "session jti log is held by another process"},
 	{JTIUnavailable, "Session ticket log unavailable", "ticket replay cache unavailable"},
 	{LookupPending, "User lookup still pending", "an earlier directory lookup has not returned"},

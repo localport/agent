@@ -6,6 +6,7 @@ toolchain go1.27.2
 
 require (
 	github.com/coder/websocket v1.8.15
+	github.com/creack/pty v1.1.25-0.20260601142114-9246436fffe8
 	go.yaml.in/yaml/v4 v4.0.0-rc.6
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.60.0
