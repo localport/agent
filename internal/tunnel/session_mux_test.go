@@ -1127,3 +1127,33 @@ func TestSessionMuxHandsNoStreamOverOnceStopBegan(t *testing.T) {
 		t.Fatalf("Serve ran %d times after stop began", n)
 	}
 }
+
+func TestRegisterAckHandsRevokedTicketKidsToTheHook(t *testing.T) {
+	cred := &fakeCredential{}
+	tn, d := deviceTunnel(t, cred)
+	calls := make(chan []string, 4)
+	tn.opts.HintRevoked = func(kids []string) { calls <- kids }
+
+	if err := connectWithAck(t, tn, d, proto.RegisterAckPayload{Success: false, Error: "unavailable", ErrorCode: "ED001", Retryable: boolPtr(true), RevokedTicketKids: []string{"refused"}}); err == nil {
+		t.Fatal("a refused registration returned success")
+	}
+	if err := connectWithAck(t, tn, d, proto.RegisterAckPayload{Success: true, SessionID: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := connectWithAck(t, tn, d, proto.RegisterAckPayload{Success: true, SessionID: "s", RevokedTicketKids: []string{"k1", "k2"}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case kids := <-calls:
+		if !slices.Equal(kids, []string{"k1", "k2"}) {
+			t.Fatalf("hook got %v, want the successful ack's kids", kids)
+		}
+	default:
+		t.Fatal("the hook was not called before the registration returned")
+	}
+	select {
+	case kids := <-calls:
+		t.Fatalf("hook called again with %v", kids)
+	default:
+	}
+}

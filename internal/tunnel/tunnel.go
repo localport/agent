@@ -218,6 +218,9 @@ type Options struct {
 	// and enables terminal, files or desktop in Capabilities binds a session
 	// mux per control session, unless DisableMux is set.
 	SessionHandler SessionHandler
+	// HintRevoked receives RegisterAck.revoked_ticket_kids of a successful
+	// registration. It runs on Run's goroutine and must not block.
+	HintRevoked func(kids []string)
 
 	// DisableInspect turns off the HTTP request view on http tunnels.
 	DisableInspect bool
@@ -484,6 +487,14 @@ func (t *Tunnel) Run(ctx context.Context) error {
 	}
 }
 
+// hintRevokedTicketKeys hands the ticket key ids the edge names revoked to
+// the HintRevoked hook.
+func (t *Tunnel) hintRevokedTicketKeys(kids []string) {
+	if t.opts.HintRevoked != nil && len(kids) > 0 {
+		t.opts.HintRevoked(kids)
+	}
+}
+
 // Stop ends the tunnel. Run stops the session mux and the port mux of the
 // current control session on its way out.
 func (t *Tunnel) Stop() {
@@ -716,6 +727,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			}
 			// Close connections to ports the new session no longer serves.
 			t.closeConnsForPorts(closedPorts)
+			t.hintRevokedTicketKeys(ack.RevokedTicketKids)
 			return nil
 
 		case proto.MsgRedirect:
