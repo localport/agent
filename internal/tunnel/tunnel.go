@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/proto"
 	"github.com/localport/agent/internal/security"
@@ -32,10 +33,13 @@ import (
 const (
 	dialTimeout         = 10 * time.Second
 	registrationTimeout = 10 * time.Second
-	heartbeatInterval   = 30 * time.Second
-	sessionDrainTimeout = 5 * time.Second
-	maxBackoff          = 30 * time.Second
-	maxRedirectHops     = 5
+	// rolloverCheckInterval is how often a device session checks for a
+	// pending certificate to register with.
+	rolloverCheckInterval = time.Minute
+	heartbeatInterval     = 30 * time.Second
+	sessionDrainTimeout   = 5 * time.Second
+	maxBackoff            = 30 * time.Second
+	maxRedirectHops       = 5
 
 	// copyBufferSize is the per-direction proxy buffer, the io.Copy default.
 	copyBufferSize = 32 * 1024
@@ -180,8 +184,20 @@ type Options struct {
 	// Host is the device target, resolved on each dial.
 	Host       string
 	ClientName string
+	// Identity is a device's <tunnelIdentifier>.<prefix>, empty on a tunnel.
+	// Label holds the prefix only, which repeats across fleets.
+	Identity string
 	// AllowPorts limits the ports a device dials. Nil allows all.
 	AllowPorts ports.Ceiling
+
+	// Credential supplies a device's TLS client certificate at registration
+	// and carries a renewed one from pending to current. Nil on a tunnel.
+	Credential DeviceCredential
+	// Capabilities, Logins and Desktop are what the device enabled locally,
+	// reported on Register for display.
+	Capabilities []string
+	Logins       []string
+	Desktop      []string
 
 	// AgentVersion is sent on registration for the audit record.
 	AgentVersion string
@@ -197,12 +213,32 @@ type Options struct {
 	// connection stalls all streams.
 	DisableMux bool
 
+	// SessionHandler serves browser and CLI sessions. A device that sets it
+	// and enables terminal, files or desktop in Capabilities binds a session
+	// mux per control session, unless DisableMux is set.
+	SessionHandler SessionHandler
+
 	// DisableInspect turns off the HTTP request view on http tunnels.
 	DisableInspect bool
 }
 
+// DeviceCredential is the certificate source of a device;
+// *identity.DeviceRegistrar implements it and documents each method.
+type DeviceCredential interface {
+	Present() (*identity.Presentation, error)
+	Registered(p *identity.Presentation)
+	Refused(ctx context.Context, p *identity.Presentation, code string) (retry bool, err error)
+	Tick(p *identity.Presentation, now time.Time) (due, force bool)
+}
+
 type Tunnel struct {
 	opts Options
+
+	// newDialers builds the dialers of one connect attempt.
+	newDialers func(transport.Options) []transport.Dialer
+	// rolloverEvery is how often a device session checks for a pending
+	// certificate to register with.
+	rolloverEvery time.Duration
 
 	state   atomic.Int32
 	closing atomic.Bool
@@ -216,6 +252,14 @@ type Tunnel struct {
 	// sessionID is the session secret from the last RegisterAck. The next
 	// Register sends it to replace the stale session.
 	sessionID string
+
+	// presented is the device certificate the current session registered
+	// with. Mux dials reuse the dialer, and so the certificate, of that
+	// registration.
+	presented *identity.Presentation
+	// rollover is set when a session ends to register with a pending
+	// certificate; Run then reconnects without a backoff.
+	rollover atomic.Bool
 
 	terminalMu  sync.Mutex
 	terminalErr error
@@ -287,13 +331,15 @@ func New(opts Options) *Tunnel {
 		opts.Protocol = ""
 	}
 	t := &Tunnel{
-		opts:         opts,
-		edgeAddr:     opts.Edge,
-		activeConns:  make(map[string]*activeConn),
-		shutdown:     make(chan struct{}),
-		disconnected: make(chan struct{}),
-		retryNow:     make(chan struct{}, 1),
-		dataSlots:    make(chan struct{}, maxConcurrentDataConns),
+		opts:          opts,
+		newDialers:    transport.DefaultDialers,
+		rolloverEvery: rolloverCheckInterval,
+		edgeAddr:      opts.Edge,
+		activeConns:   make(map[string]*activeConn),
+		shutdown:      make(chan struct{}),
+		disconnected:  make(chan struct{}),
+		retryNow:      make(chan struct{}, 1),
+		dataSlots:     make(chan struct{}, maxConcurrentDataConns),
 	}
 	if device {
 		t.ports = newDevicePorts()
@@ -420,6 +466,9 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		t.closeConn()
 		t.emitDisconnected(nil)
 
+		if t.rollover.Swap(false) {
+			continue
+		}
 		attempt++
 		t.setState(StateReconnecting)
 		if !t.wait(ctx, backoffFor(attempt)) {
@@ -437,6 +486,9 @@ func (t *Tunnel) Stop() {
 }
 
 func (t *Tunnel) Label() string { return t.opts.Label }
+
+// Identity is the device identity of a device tunnel, empty on a tunnel.
+func (t *Tunnel) Identity() string { return t.opts.Identity }
 
 // Stats returns the cumulative byte and connection counters.
 func (t *Tunnel) Stats() Stats {
@@ -545,6 +597,17 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 	addr := t.edgeAddr
 	budget := dialBudget(t.opts.Transport.DialTimeout, attempt)
 
+	var presented *identity.Presentation
+	if t.opts.Credential != nil {
+		var err error
+		if presented, err = t.opts.Credential.Present(); err != nil {
+			if errors.Is(err, identity.ErrPendingLost) {
+				return &RegistrationError{Message: identity.ErrPendingLost.Msg, Code: string(identity.ErrPendingLost.Code)}
+			}
+			return fmt.Errorf("device credential: %w", err)
+		}
+	}
+
 	for range maxRedirectHops {
 		// SNI follows the zone of the dialed address. A redirect presents the
 		// target zone's connect host. An explicit override takes precedence.
@@ -553,7 +616,10 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			topts.ServerName = sniForAddr(t.opts.Edge, addr)
 		}
 		topts.DialTimeout = budget
-		dialers := transport.DefaultDialers(topts)
+		if presented != nil {
+			topts.ClientCert = transport.ClientCert{Certificate: presented.Certificate, SessionCache: presented.SessionCache}
+		}
+		dialers := t.newDialers(topts)
 
 		raw, chosen, err := transport.Probe(ctx, addr, budget, dialers, slog.Default())
 		if err != nil {
@@ -583,6 +649,9 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			AgentVersion:    t.opts.AgentVersion,
 			AgentOS:         runtime.GOOS + "/" + runtime.GOARCH,
 			ResumeSessionID: resumeID,
+			Capabilities:    t.opts.Capabilities,
+			Logins:          t.opts.Logins,
+			Desktop:         t.opts.Desktop,
 		}
 		if err := pc.SendRegister(reg); err != nil {
 			raw.Close()
@@ -606,7 +675,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			}
 			if !ack.Success {
 				raw.Close()
-				return registrationErrorFrom(ack)
+				return t.refused(ctx, presented, registrationErrorFrom(ack))
 			}
 			t.mu.Lock()
 			t.raw = raw
@@ -614,6 +683,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			t.edgeAddr = addr
 			t.dialer = chosen
 			t.sessionID = ack.SessionID
+			t.presented = presented
 			var closedPorts []uint16
 			if t.ports != nil {
 				closedPorts = t.ports.Reset(ack.PortsVersion, ack.Ports)
@@ -632,6 +702,9 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 				Protocol:   ack.Protocol,
 			}
 			t.mu.Unlock()
+			if presented != nil {
+				t.opts.Credential.Registered(presented)
+			}
 			// Close connections to ports the new session no longer serves.
 			t.closeConnsForPorts(closedPorts)
 			return nil
@@ -666,14 +739,73 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 	return fmt.Errorf("too many redirects (>%d)", maxRedirectHops)
 }
 
+// refused lets the device credential act on a non-retryable refusal of the
+// certificate it presented, which may turn it into a retry.
+func (t *Tunnel) refused(ctx context.Context, presented *identity.Presentation, regErr *RegistrationError) error {
+	if presented == nil || regErr.Retryable {
+		return regErr
+	}
+	retry, err := t.opts.Credential.Refused(ctx, presented, regErr.Code)
+	if err != nil {
+		return &RegistrationError{Message: fmt.Sprintf("%s; renewing the device certificate failed: %v", regErr.Message, err), Code: regErr.Code}
+	}
+	regErr.Retryable = retry
+	return regErr
+}
+
+// rolloverLoop ends the session so the device registers with a pending
+// certificate: when no connection or browser or CLI session is open, or
+// regardless once the current certificate is within identity.RolloverDeadline
+// of expiry.
+func (t *Tunnel) rolloverLoop(sessionDone <-chan struct{}) {
+	tick := time.NewTicker(t.rolloverEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-t.shutdown:
+			return
+		case <-sessionDone:
+			return
+		case now := <-tick.C:
+			t.mu.RLock()
+			presented := t.presented
+			t.mu.RUnlock()
+			due, force := t.opts.Credential.Tick(presented, now)
+			if !due || (!force && (t.openConns() > 0 || t.liveSessions() > 0)) {
+				continue
+			}
+			t.rollover.Store(true)
+			t.signalDisconnected()
+			return
+		}
+	}
+}
+
+func (t *Tunnel) openConns() int {
+	t.acMu.RLock()
+	defer t.acMu.RUnlock()
+	return len(t.activeConns)
+}
+
+// liveSessions returns the sessions the device's session handler serves.
+func (t *Tunnel) liveSessions() int {
+	if t.opts.SessionHandler == nil {
+		return 0
+	}
+	return t.opts.SessionHandler.LiveSessions()
+}
+
 // runSession serves one registered session and returns when it ends.
 // sessionDone is a parameter because Run replaces t.disconnected on each
-// iteration. The local wait group covers the two loops. Data goroutines end
+// iteration. The local wait group covers the session loops. Data goroutines end
 // through closeActiveConns.
 func (t *Tunnel) runSession(ctx context.Context, sessionDone <-chan struct{}) {
 	var loops sync.WaitGroup
 	loops.Go(func() { t.heartbeatLoop(sessionDone) })
 	loops.Go(func() { t.receiveLoop(sessionDone) })
+	if t.opts.Credential != nil {
+		loops.Go(func() { t.rolloverLoop(sessionDone) })
+	}
 
 	select {
 	case <-ctx.Done():
@@ -1337,9 +1469,10 @@ func jitter(max time.Duration) time.Duration {
 	return time.Duration(int(b[0])) * max / 256
 }
 
-// RegistrationError is returned by Run when the edge refuses the tunnel.
-// Callers can errors.As into it to inspect the limit type and decide
-// whether to retry.
+// RegistrationError is returned by Run when the edge refuses the tunnel, or
+// when a device's credential lost its renewed certificate (Code AG001,
+// built locally). Callers can errors.As into it to inspect the limit type
+// and decide whether to retry.
 type RegistrationError struct {
 	Message   string
 	Code      string
@@ -1347,7 +1480,8 @@ type RegistrationError struct {
 	Retryable bool
 }
 
-// Error renders the public, sanitized message supplied by the edge.
+// Error renders the message: the public, sanitized one supplied by the edge,
+// which may carry local detail, or the local AG001 message.
 func (e *RegistrationError) Error() string {
 	s := e.Message
 	if e.LimitType != "" && e.LimitType != proto.LimitUnspecified {

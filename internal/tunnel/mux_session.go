@@ -43,8 +43,10 @@ func (t *Tunnel) startMux(ctx context.Context) func() {
 		return func() {}
 	}
 
+	// Read together, so the mux binds the session this registration created,
+	// using the dialer and client certificate that registered it.
 	t.mu.RLock()
-	addr, session := t.edgeAddr, t.sessionID
+	addr, session, dialer := t.edgeAddr, t.sessionID, t.dialer
 	t.mu.RUnlock()
 
 	muxCtx, cancel := context.WithCancel(ctx)
@@ -52,7 +54,7 @@ func (t *Tunnel) startMux(ctx context.Context) func() {
 
 	go func() {
 		defer close(done)
-		t.runMux(muxCtx, addr, session)
+		t.runMux(muxCtx, addr, session, dialer)
 	}()
 
 	return func() {
@@ -64,8 +66,8 @@ func (t *Tunnel) startMux(ctx context.Context) func() {
 // runMux keeps a multiplexed connection up for the session. The first bind is
 // attempted once, and on failure the tunnel stays on dial-back. A connection
 // that bound and then dropped is retried.
-func (t *Tunnel) runMux(ctx context.Context, addr, session string) {
-	conn, err := t.dialAndBindMux(ctx, addr, session)
+func (t *Tunnel) runMux(ctx context.Context, addr, session string, dialer transport.Dialer) {
+	conn, err := t.dialAndBindMux(ctx, addr, session, dialer, "")
 	if err != nil {
 		// Debug level. The tunnel still serves over dial-back.
 		slog.Default().Debug("multiplexed transport unavailable, using dial-back",
@@ -87,7 +89,7 @@ func (t *Tunnel) runMux(ctx context.Context, addr, session string) {
 			return
 		}
 
-		conn, err = t.dialAndBindMux(ctx, addr, session)
+		conn, err = t.dialAndBindMux(ctx, addr, session, dialer, "")
 		if err != nil {
 			slog.Default().Debug("multiplexed transport could not be re-established, using dial-back",
 				slog.String("tunnel", t.opts.Label),
@@ -150,18 +152,18 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 }
 
 // dialAndBindMux opens and binds the multiplexed data connection for a
-// registered session. It authenticates with the token and the RegisterAck
-// session id. Errors are not fatal to the tunnel.
-func (t *Tunnel) dialAndBindMux(ctx context.Context, edgeAddr, sessionID string) (net.Conn, error) {
+// registered session through the dialer that registered it. A tunnel
+// authenticates with its token, a device with the client certificate that
+// dialer presents; both send the RegisterAck session id. purpose is empty for
+// the port mux and proto.MuxBindPurposeSession for the session mux. Errors are
+// not fatal to the tunnel.
+func (t *Tunnel) dialAndBindMux(ctx context.Context, edgeAddr, sessionID string, dialer transport.Dialer, purpose string) (net.Conn, error) {
 	if sessionID == "" {
 		return nil, errors.New("mux bind: edge did not issue a session id")
 	}
 
-	// Dial with the transport the control connection uses, raw TLS or
-	// WebSocket. The MuxBind frame identifies the connection to the edge.
-	t.mu.RLock()
-	dialer := t.dialer
-	t.mu.RUnlock()
+	// The control connection's transport, raw TLS or WebSocket. The MuxBind
+	// frame identifies the connection to the edge.
 	if dialer == nil {
 		return nil, errors.New("mux dial: control connection has not selected a transport")
 	}
@@ -178,47 +180,59 @@ func (t *Tunnel) dialAndBindMux(ctx context.Context, edgeAddr, sessionID string)
 		return nil, err
 	}
 
-	pc := proto.NewConn(conn)
 	bind := &proto.MuxBindPayload{
 		Token:     t.opts.Token,
 		SessionID: sessionID,
 		Timestamp: time.Now().Unix(),
 		Nonce:     nonce,
+		Purpose:   purpose,
 	}
-	if err := pc.SendMuxBind(bind); err != nil {
+
+	// Closing the conn is what ends a send or ack read blocked when ctx ends.
+	// The conn is then closed by the AfterFunc only; on any other failure it is
+	// closed here, and on success the caller owns it.
+	closeOnDone := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	err = exchangeMuxBind(conn, bind)
+	if !closeOnDone() {
+		return nil, fmt.Errorf("mux bind: %w", context.Cause(ctx))
+	}
+	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("mux bind send: %w", err)
+		return nil, err
+	}
+	return conn, nil
+}
+
+// exchangeMuxBind sends bind on conn and reads the MuxBindAck within
+// muxBindTimeout. It never closes conn.
+func exchangeMuxBind(conn net.Conn, bind *proto.MuxBindPayload) error {
+	pc := proto.NewConn(conn)
+	if err := pc.SendMuxBind(bind); err != nil {
+		return fmt.Errorf("mux bind send: %w", err)
 	}
 
 	if err := conn.SetReadDeadline(time.Now().Add(muxBindTimeout)); err != nil {
-		conn.Close()
-		return nil, err
+		return err
 	}
 	msgType, body, err := pc.Recv()
 	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("mux bind response: %w", err)
+		return fmt.Errorf("mux bind response: %w", err)
 	}
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
-		conn.Close()
-		return nil, err
+		return err
 	}
 
 	if msgType != proto.MsgMuxBindAck {
-		conn.Close()
-		return nil, fmt.Errorf("mux bind: unexpected %s from edge", msgType)
+		return fmt.Errorf("mux bind: unexpected %s from edge", msgType)
 	}
 	ack, err := proto.ParseMuxBindAck(body)
 	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("mux bind ack: %w", err)
+		return fmt.Errorf("mux bind ack: %w", err)
 	}
 	if !ack.Success {
-		conn.Close()
-		return nil, fmt.Errorf("mux bind refused: %s", ack.Error)
+		return fmt.Errorf("mux bind refused: %s", ack.Error)
 	}
-
-	return conn, nil
+	return nil
 }
 
 // serveMux serves streams until the connection drops.
