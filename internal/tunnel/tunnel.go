@@ -210,7 +210,8 @@ type Options struct {
 
 	// DisableMux serves every inbound connection over dial-back. Separate
 	// connections can perform better on lossy or shaped links, where one TCP
-	// connection stalls all streams.
+	// connection stalls all streams. A device then binds no session mux
+	// either, and the edge refuses its sessions with no_session_mux.
 	DisableMux bool
 
 	// SessionHandler serves browser and CLI sessions. A device that sets it
@@ -298,6 +299,10 @@ type Tunnel struct {
 	// proxyData. It persists across reconnects, so a closing connection still
 	// holds its slot.
 	dataSlots chan struct{}
+
+	// sessionMux is the session mux of the current control session, nil while
+	// none runs. RecordingClient reads it.
+	sessionMux atomic.Pointer[sessionMux]
 }
 
 // activeConn records one live connection between edge and local service. The
@@ -455,8 +460,10 @@ func (t *Tunnel) Run(ctx context.Context) error {
 
 		// Start the mux after registration. Dial-back serves until it binds.
 		stopMux := t.startMux(ctx)
+		stopSessionMux := t.startSessionMux(ctx)
 
 		t.runSession(ctx, sessionDone)
+		stopSessionMux()
 		stopMux()
 
 		if t.cancelled(ctx) {
@@ -477,6 +484,8 @@ func (t *Tunnel) Run(ctx context.Context) error {
 	}
 }
 
+// Stop ends the tunnel. Run stops the session mux and the port mux of the
+// current control session on its way out.
 func (t *Tunnel) Stop() {
 	t.mu.Lock()
 	safeClose(t.shutdown)

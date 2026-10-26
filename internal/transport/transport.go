@@ -8,8 +8,9 @@
 //     and TLS-inspecting proxies.
 //
 // The data plane multiplexes over one HTTP/2 connection on the same carrier
-// as the control connection. The edge identifies it by its first frame,
-// MuxBind. See internal/tunnel/mux_session.go.
+// as the control connection, and a device's session mux uses a second one.
+// The edge identifies each by its first frame, MuxBind. See
+// internal/tunnel/mux_session.go and internal/tunnel/session_mux.go.
 package transport
 
 import (
