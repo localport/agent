@@ -31,6 +31,10 @@ terminal sessions, AG06x recordings, AG07x network.
 | AG027 | Files root missing | The files root must be an existing directory. Mount or create it, or change it with `localport set`. |
 | AG028 | Invalid local config | The local config failed validation; the message names the field. Every command that reads it refuses the same way, `localport set` included, so correct `agent.yaml` by hand: in `$LOCALPORT_HOME` (or `~/.localport`), or as root in the machine-wide config directory. |
 | AG036 | No default login | Terminal and files need a login, and the account running the command gives none. Name the accounts with `--logins`. |
+| AG041 | Foreign service definition | A service under the device service's name was not written by localport. Remove it as the message says, then retry. |
+| AG042 | Device service not installed | Nothing to remove. Install the service with `sudo localport service install`. |
+| AG043 | No supported service manager | This machine has no systemd, launchd or Windows service manager. Run the devices with `localport run` under your own supervisor. |
+| AG044 | Windows service marked for deletion | Windows keeps a deleted service until every handle to it closes. Close the Services console, Event Viewer and any tool showing the service, or restart Windows, then retry. |
 | AG051 | Terminal refused: SELinux enforcing | A root terminal needs login(1), which SELinux in enforcing mode denies to the device service. Terminal is not available on this host. |
 | AG052 | Terminal refused: no login(1) | A root terminal runs through login(1), which this host lacks. Install the package that provides login (util-linux or shadow). |
 | AG053 | Session ticket log locked | Another localport process serves this device's sessions. Stop the other process. |

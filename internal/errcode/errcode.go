@@ -70,6 +70,11 @@ const (
 
 	NoDefaultLogin Code = "AG036"
 
+	ForeignUnit     Code = "AG041"
+	NotInstalled    Code = "AG042"
+	Unsupported     Code = "AG043"
+	MarkedForDelete Code = "AG044"
+
 	SELinuxEnforcing     Code = "AG051"
 	NoLogin              Code = "AG052"
 	JTILogLocked         Code = "AG053"
@@ -109,6 +114,11 @@ var registry = []Entry{
 	{InvalidLocalConfig, "Invalid local config", "invalid local config"},
 
 	{NoDefaultLogin, "No default login", "no default login"},
+
+	{ForeignUnit, "Foreign service definition", "a service definition not written by localport is in the way"},
+	{NotInstalled, "Device service not installed", "no device service is installed"},
+	{Unsupported, "No supported service manager", "this system has no service manager localport can install into (systemd, launchd or the Windows service manager)"},
+	{MarkedForDelete, "Windows service marked for deletion", "the device service is deleted, but Windows keeps it until every handle to it closes"},
 
 	{SELinuxEnforcing, "Terminal refused: SELinux enforcing", "SELinux is enforcing"},
 	{NoLogin, "Terminal refused: no login(1)", "no login(1)"},
