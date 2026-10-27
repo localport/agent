@@ -59,6 +59,14 @@ const (
 	UnsafeExecutable Code = "AG011"
 	UntrustedPath    Code = "AG012"
 
+	FleetTokenRetired    Code = "AG022"
+	HostCapability       Code = "AG023"
+	LoginsWithoutSession Code = "AG024"
+	SessionWithoutLogins Code = "AG025"
+	DesktopWithoutTarget Code = "AG026"
+	FilesRootMissing     Code = "AG027"
+	InvalidLocalConfig   Code = "AG028"
+
 	SELinuxEnforcing     Code = "AG051"
 	NoLogin              Code = "AG052"
 	JTILogLocked         Code = "AG053"
@@ -87,6 +95,14 @@ var registry = []Entry{
 
 	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
 	{UntrustedPath, "Untrusted credential path", "untrusted credential path"},
+
+	{FleetTokenRetired, "Fleet token retired", "fleet tokens are retired: create the device in the dashboard and run the command it shows"},
+	{HostCapability, "Terminal or files with a host", "terminal and files act on this machine only and cannot be enabled with a host"},
+	{LoginsWithoutSession, "Logins without terminal or files", "logins apply only to a device that enables terminal or files"},
+	{SessionWithoutLogins, "Terminal or files without logins", "terminal and files need at least one login"},
+	{DesktopWithoutTarget, "Desktop without target", "desktop needs an rdp or vnc target"},
+	{FilesRootMissing, "Files root missing", "files root is not an existing directory"},
+	{InvalidLocalConfig, "Invalid local config", "invalid local config"},
 
 	{SELinuxEnforcing, "Terminal refused: SELinux enforcing", "SELinux is enforcing"},
 	{NoLogin, "Terminal refused: no login(1)", "no login(1)"},
