@@ -16,7 +16,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -156,14 +155,24 @@ type Store struct {
 // HomeEnv overrides where credentials live.
 const HomeEnv = "LOCALPORT_HOME"
 
-// DefaultStore roots the store at ~/.localport/identity, or at the machine-wide
-// state directory when there is no home to use.
+// DefaultStore is the store of an unprivileged process:
+// $LOCALPORT_HOME/identity, or ~/.localport/identity.
 func DefaultStore() (*Store, error) {
 	root, chosen, err := defaultRoot()
 	if err != nil {
 		return nil, err
 	}
 	return &Store{Root: filepath.Join(root, "identity"), Base: root, BaseChosen: chosen}, nil
+}
+
+// SystemStore is the store of a privileged process: <dir>/identity, where dir
+// is the machine-wide config directory. LOCALPORT_HOME is ignored and dir is
+// never followed as a symlink, the same scope as the system local config.
+func SystemStore(dir string) (*Store, error) {
+	if !filepath.IsAbs(dir) {
+		return nil, fmt.Errorf("system credential directory %q is not absolute", dir)
+	}
+	return &Store{Root: filepath.Join(dir, "identity"), Base: dir}, nil
 }
 
 // EnsureRoot creates the store directory owner-only when missing and refuses
@@ -181,8 +190,11 @@ func (s *Store) EnsureRoot() error {
 // credential is required: access, setup and login.
 var ErrDeviceCredential = errcode.New(errcode.DeviceCredential)
 
-// defaultRoot returns the base directory and true when it comes from
-// LOCALPORT_HOME or $HOME, false for the system-wide default.
+// defaultRoot returns the base directory of an unprivileged process,
+// LOCALPORT_HOME or ~/.localport, and true: both are chosen by the user, so
+// the base may be a symlink. There is no machine-wide fallback: a privileged
+// process uses SystemStore, and a machine-wide directory for an unprivileged
+// one would name the privileged root on case-insensitive file systems.
 func defaultRoot() (string, bool, error) {
 	if v := strings.TrimSpace(os.Getenv(HomeEnv)); v != "" {
 		return v, true, nil
@@ -190,20 +202,7 @@ func defaultRoot() (string, bool, error) {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, ".localport"), true, nil
 	}
-	// systemd sets $HOME only when the unit names a User=, so a service without
-	// one has no home to use.
-	switch runtime.GOOS {
-	case "windows":
-		programData := strings.TrimSpace(os.Getenv("ProgramData"))
-		if programData == "" {
-			return "", false, fmt.Errorf("locate credential directory: neither a home directory nor %%ProgramData%% is set (set %s)", HomeEnv)
-		}
-		return filepath.Join(programData, "localport"), false, nil
-	case "darwin":
-		return "/Library/Application Support/localport", false, nil
-	default:
-		return "/var/lib/localport", false, nil
-	}
+	return "", false, fmt.Errorf("locate credential directory: no home directory (set %s)", HomeEnv)
 }
 
 // StateRoot returns the state root, where the private directory walk of the

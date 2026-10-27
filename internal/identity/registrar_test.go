@@ -363,6 +363,25 @@ func TestOpenRefRefusesADeviceCredential(t *testing.T) {
 	}
 }
 
+// The system store sits beside the config directory and never follows it.
+func TestSystemStoreRootsBesideTheConfigDirectory(t *testing.T) {
+	t.Setenv(HomeEnv, t.TempDir())
+	dir := filepath.Join(t.TempDir(), "Localport")
+	s, err := SystemStore(dir)
+	if err != nil || s.Root != filepath.Join(dir, "identity") || s.Base != dir || s.BaseChosen {
+		t.Fatalf("SystemStore = %+v, %v", s, err)
+	}
+	if err := s.EnsureRoot(); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(s.Root); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("store root = %v, %v; want a 0700 directory", info, err)
+	}
+	if _, err := SystemStore("relative"); err == nil {
+		t.Fatal("a relative system directory accepted")
+	}
+}
+
 // RegisteredCertificate is false before any RegisterAck, returns the current
 // certificate after one on it, and the renewed one after a RegisterAck on the
 // pending certificate, even while the renewal lock blocks its promotion.

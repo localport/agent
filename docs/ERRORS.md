@@ -30,6 +30,7 @@ terminal sessions, AG06x recordings, AG07x network.
 | AG026 | Desktop without target | Give desktop a target with `--rdp` or `--vnc`. |
 | AG027 | Files root missing | The files root must be an existing directory. Mount or create it, or change it with `localport set`. |
 | AG028 | Invalid local config | The local config failed validation; the message names the field. Every command that reads it refuses the same way, `localport set` included, so correct `agent.yaml` by hand: in `$LOCALPORT_HOME` (or `~/.localport`), or as root in the machine-wide config directory. |
+| AG036 | No default login | Terminal and files need a login, and the account running the command gives none. Name the accounts with `--logins`. |
 | AG051 | Terminal refused: SELinux enforcing | A root terminal needs login(1), which SELinux in enforcing mode denies to the device service. Terminal is not available on this host. |
 | AG052 | Terminal refused: no login(1) | A root terminal runs through login(1), which this host lacks. Install the package that provides login (util-linux or shadow). |
 | AG053 | Session ticket log locked | Another localport process serves this device's sessions. Stop the other process. |

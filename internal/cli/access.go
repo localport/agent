@@ -97,7 +97,7 @@ func runAccess(args []string) error {
 	// prompt must use the default handler.
 	var chosen identity.Ref
 	if src == credentialStored {
-		store, storeErr := identity.DefaultStore()
+		store, storeErr := currentInvoker(false).store()
 		if storeErr != nil {
 			return storeErr
 		}
@@ -212,7 +212,7 @@ func (l *stringList) Set(value string) error {
 // so a renewal by this process or by `localport identity renew` is picked up on
 // the next handshake without a restart.
 func identityTLSConfig(ctx context.Context, ref identity.Ref, remote, serverName string) (*tls.Config, string, error) {
-	store, err := identity.DefaultStore()
+	store, err := currentInvoker(false).store()
 	if err != nil {
 		return nil, "", err
 	}
@@ -285,7 +285,7 @@ func runAccessFromConfig(path string) error {
 	if err != nil {
 		return err
 	}
-	store, err := identity.DefaultStore()
+	store, err := currentInvoker(false).store()
 	if err != nil {
 		return err
 	}

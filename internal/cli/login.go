@@ -25,7 +25,7 @@ func runLogin(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := identity.DefaultStore()
+	store, err := currentInvoker(false).store()
 	if err != nil {
 		return err
 	}

@@ -51,7 +51,7 @@ func runIdentityList(args []string) error {
 		return err
 	}
 
-	store, err := identity.DefaultStore()
+	store, err := currentInvoker(false).store()
 	if err != nil {
 		return err
 	}
@@ -122,7 +122,7 @@ func runIdentityRenew(args []string) error {
 		return err
 	}
 
-	store, err := identity.DefaultStore()
+	store, err := currentInvoker(false).store()
 	if err != nil {
 		return err
 	}
@@ -161,7 +161,7 @@ func runIdentityRemove(args []string) error {
 		return errors.New("identity remove: name exactly one credential")
 	}
 
-	store, err := identity.DefaultStore()
+	store, err := currentInvoker(false).store()
 	if err != nil {
 		return err
 	}
@@ -261,8 +261,10 @@ func usageIdentity() {
 
   Credentials arrive from "localport setup <TOKEN>" (a machine, renews itself)
   or "localport login" (you, short-lived). They live under
-  ~/.localport/identity/<team>/, one directory per identity, 0700 with keys
-  0600. Set LOCALPORT_HOME to keep them elsewhere.
+  <root>/identity/<team>/, one directory per identity, 0700 with keys 0600.
+  Run as root or Administrator, <root> is the machine-wide config directory and
+  LOCALPORT_HOME is ignored; otherwise it is $LOCALPORT_HOME, or ~/.localport
+  when it is unset.
 
   A SELECTOR names one credential, in any of these forms:
 

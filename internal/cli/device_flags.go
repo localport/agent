@@ -1,0 +1,232 @@
+package cli
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/user"
+	"runtime"
+	"strings"
+
+	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
+	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/ports"
+	"github.com/localport/agent/internal/security"
+)
+
+// invoker is who runs a command, which decides where its local config and
+// credentials live.
+type invoker struct {
+	// privileged is root, an elevated Administrator, or `run --system` (or
+	// `--service`, which implies it).
+	privileged bool
+	// current is the invoking account's login name, empty when it cannot be
+	// looked up.
+	current string
+	// sudoUser is $SUDO_USER, the account that ran sudo.
+	sudoUser string
+	goos     string
+}
+
+// currentInvoker describes this process. system marks it privileged
+// regardless of its token, as `run --system` and `run --service` do.
+func currentInvoker(system bool) invoker {
+	who := invoker{
+		privileged: system || privilegedProcess(),
+		sudoUser:   strings.TrimSpace(os.Getenv("SUDO_USER")),
+		goos:       runtime.GOOS,
+	}
+	if u, err := user.Current(); err == nil {
+		who.current = u.Username
+	}
+	return who
+}
+
+// privilegedProcess and systemLocalConfig are privileged and
+// config.SystemLocalConfig; tests replace them to run a command as root
+// against a temporary directory.
+var (
+	privilegedProcess = privileged
+	systemLocalConfig = config.SystemLocalConfig
+)
+
+// localConfigFile is the system config for a privileged invoker and the
+// user's own otherwise.
+func (who invoker) localConfigFile() (config.LocalConfigFile, error) {
+	if who.privileged {
+		return systemLocalConfig()
+	}
+	return config.UserLocalConfig()
+}
+
+// store is the credential store beside localConfigFile: <config dir>/identity
+// for a privileged invoker, the user's own store otherwise.
+func (who invoker) store() (*identity.Store, error) {
+	if !who.privileged {
+		return identity.DefaultStore()
+	}
+	file, err := systemLocalConfig()
+	if err != nil {
+		return nil, err
+	}
+	return identity.SystemStore(file.Base)
+}
+
+// errNoDefaultLogin means terminal or files is enabled with no login named,
+// and the invoking account gives no usable default.
+var errNoDefaultLogin = errcode.New(errcode.NoDefaultLogin)
+
+// defaultLogin is the login of a device that enables terminal or files and
+// names none: $SUDO_USER when privileged and set to someone other than root,
+// otherwise the invoking user. root is never a default.
+func (who invoker) defaultLogin() (string, error) {
+	name := who.current
+	if who.privileged && who.sudoUser != "" && who.sudoUser != "root" {
+		name = who.sudoUser
+	}
+	switch {
+	case name == "" || name == "root":
+		return "", fmt.Errorf("--logins: %w: this account has none; name the accounts terminal and files sessions may use with --logins", errNoDefaultLogin)
+	case !config.ValidLogin(name):
+		return "", fmt.Errorf("--logins: %w: %q is not a valid user name (lowercase letters, digits, _ and -); name the accounts with --logins", errNoDefaultLogin, security.SanitizeDisplay(name))
+	}
+	return name, nil
+}
+
+// deviceFlags are the capability flags `connect` and `set` share.
+type deviceFlags struct {
+	enable, logins, filesRoot, host, allowPorts *string
+	rdp, vnc                                    string
+}
+
+func addDeviceFlags(fs *flag.FlagSet) *deviceFlags {
+	f := &deviceFlags{
+		enable:     fs.String("enable", "", "session kinds to allow: terminal, files, desktop (comma-separated)"),
+		logins:     fs.String("logins", "", "accounts a terminal or files session may use (comma-separated)"),
+		filesRoot:  fs.String("files-root", "", "top of the tree a files session sees (absolute, existing directory)"),
+		host:       fs.String("host", "", "where port traffic goes, for a device serving another machine (default: this machine)"),
+		allowPorts: fs.String("allow-ports", "", "limit which ports this device serves, e.g. 502,80,8000-8100"),
+	}
+	fs.Var(desktopFlag{target: &f.rdp, def: config.DefaultRDPTarget}, "rdp",
+		"RDP target for desktop sessions, --rdp or --rdp=HOST:PORT (default "+config.DefaultRDPTarget+"), --rdp=false removes it")
+	fs.Var(desktopFlag{target: &f.vnc, def: config.DefaultVNCTarget}, "vnc",
+		"VNC target for desktop sessions, --vnc or --vnc=HOST:PORT (default "+config.DefaultVNCTarget+"), --vnc=false removes it")
+	return f
+}
+
+// apply writes every flag given on fs into d, which holds the stored entry
+// (empty for a new device), and settles the logins of the merged device:
+// cleared when it enables neither terminal nor files, where an explicit
+// --logins is refused; defaulted when it enables one and names none. An
+// unprivileged invoker may list no login but its own.
+func (f *deviceFlags) apply(fs *flag.FlagSet, d *config.LocalDevice, who invoker) error {
+	given := make(map[string]bool)
+	fs.Visit(func(fl *flag.Flag) { given[fl.Name] = true })
+
+	if given["enable"] {
+		d.Enable = nil
+		for _, c := range splitList(*f.enable) {
+			d.Enable = append(d.Enable, config.Capability(c))
+		}
+	}
+	if given["logins"] {
+		d.Logins = splitList(*f.logins)
+	}
+	if given["host"] {
+		d.Host = strings.TrimSpace(*f.host)
+	}
+	if given["allow-ports"] {
+		allowed, err := ports.ParseFlag(*f.allowPorts)
+		if err != nil {
+			return fmt.Errorf("--allow-ports: %w", err)
+		}
+		d.AllowPorts = allowed
+	}
+	if given["files-root"] {
+		d.FilesRoot = strings.TrimSpace(*f.filesRoot)
+	}
+	if given["rdp"] {
+		d.RDP = f.rdp
+	}
+	if given["vnc"] {
+		d.VNC = f.vnc
+	}
+	if !d.UsesLogins() {
+		if given["logins"] && len(d.Logins) > 0 {
+			return fmt.Errorf("--logins: %w", config.ErrLoginsWithoutSession)
+		}
+		d.Logins = nil
+	} else if len(d.Logins) == 0 && who.goos != "windows" {
+		login, err := who.defaultLogin()
+		if err != nil {
+			return err
+		}
+		d.Logins = []string{login}
+	}
+	if !who.privileged {
+		for _, l := range d.Logins {
+			if who.current == "" {
+				return errors.New("--logins: the user running this command cannot be looked up, and without root a device serves only that user")
+			}
+			if l != who.current {
+				return fmt.Errorf("--logins: %q is not the user running this command; without root a device serves only %s", l, who.current)
+			}
+		}
+	}
+	return nil
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, item := range strings.Split(s, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// desktopFlag is --rdp or --vnc: given alone it sets the default target,
+// =HOST:PORT sets that target, =false removes it.
+type desktopFlag struct {
+	target *string
+	def    string
+}
+
+func (f desktopFlag) String() string {
+	if f.target == nil {
+		return ""
+	}
+	return *f.target
+}
+
+func (f desktopFlag) Set(v string) error {
+	switch v {
+	case "true":
+		*f.target = f.def
+	case "false":
+		*f.target = ""
+	default:
+		target, err := config.ParseDesktopTarget(v, f.def)
+		if err != nil {
+			return err
+		}
+		*f.target = target
+	}
+	return nil
+}
+
+func (f desktopFlag) IsBoolFlag() bool { return true }
+
+// loadLocalOrEmpty reads the local config, or returns an empty one when the
+// file does not exist yet.
+func loadLocalOrEmpty(file config.LocalConfigFile) (*config.LocalConfig, error) {
+	cfg, err := config.LoadLocal(file)
+	if errors.Is(err, fs.ErrNotExist) {
+		return &config.LocalConfig{}, nil
+	}
+	return cfg, err
+}

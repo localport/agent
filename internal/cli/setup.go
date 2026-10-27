@@ -57,7 +57,7 @@ func runSetup(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := identity.DefaultStore()
+	store, err := currentInvoker(false).store()
 	if err != nil {
 		return err
 	}
@@ -117,9 +117,12 @@ func usageSetup() {
   LOCALPORT_SETUP_TOKEN_FILE names a file to read it from instead, which is what
   systemd LoadCredential= and docker secrets provide.
 
-  Credentials live under ~/.localport/identity/<team>/, one directory per
-  identity (0700, keys 0600). Set LOCALPORT_HOME to keep them elsewhere; a
-  service with no home directory falls back to a machine-wide state directory.
+  Credentials live under <root>/identity/<team>/, one directory per identity
+  (0700, keys 0600). Run as root or Administrator, <root> is the machine-wide
+  config directory (/etc/localport-device, /Library/Application Support/
+  localport-device or %ProgramData%\localport-device) and LOCALPORT_HOME is
+  ignored. Otherwise <root> is $LOCALPORT_HOME, or ~/.localport when it is
+  unset; an account with no home directory must set LOCALPORT_HOME.
 
   --wait covers a box that boots before its network is ready. The command keeps
   retrying an unreachable control plane for that long, with backoff. A refused

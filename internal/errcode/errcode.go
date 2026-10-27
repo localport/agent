@@ -68,6 +68,8 @@ const (
 	FilesRootMissing     Code = "AG027"
 	InvalidLocalConfig   Code = "AG028"
 
+	NoDefaultLogin Code = "AG036"
+
 	SELinuxEnforcing     Code = "AG051"
 	NoLogin              Code = "AG052"
 	JTILogLocked         Code = "AG053"
@@ -105,6 +107,8 @@ var registry = []Entry{
 	{DesktopWithoutTarget, "Desktop without target", "desktop needs an rdp or vnc target"},
 	{FilesRootMissing, "Files root missing", "files root is not an existing directory"},
 	{InvalidLocalConfig, "Invalid local config", "invalid local config"},
+
+	{NoDefaultLogin, "No default login", "no default login"},
 
 	{SELinuxEnforcing, "Terminal refused: SELinux enforcing", "SELinux is enforcing"},
 	{NoLogin, "Terminal refused: no login(1)", "no login(1)"},

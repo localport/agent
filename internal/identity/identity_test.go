@@ -541,31 +541,16 @@ func TestRenewalLockAdmitsOneWriter(t *testing.T) {
 	release2()
 }
 
-// systemd sets $HOME only for a unit that names a User=, so a service without
-// one runs with none. Failing there would leave the most common machine
-// deployment unable to hold a credential at all.
-func TestDefaultRootFallsBackWhenThereIsNoHome(t *testing.T) {
+// Without a home the unprivileged store has no root. A machine-wide fallback
+// would collide with the privileged root, which differs only in case.
+func TestDefaultRootRefusesWithoutAHome(t *testing.T) {
 	t.Setenv(HomeEnv, "")
 	t.Setenv("HOME", "")
 	t.Setenv("USERPROFILE", "")
-	t.Setenv("ProgramData", `C:\ProgramData`)
+	t.Setenv("home", "")
 
-	root, chosen, err := defaultRoot()
-	if err != nil {
-		t.Fatalf("defaultRoot with no home: %v", err)
-	}
-	if chosen {
-		t.Error("the machine-wide default was reported as chosen, so a link planted there would be followed")
-	}
-	want := map[string]string{
-		"windows": filepath.Join(`C:\ProgramData`, "localport"),
-		"darwin":  "/Library/Application Support/localport",
-	}[runtime.GOOS]
-	if want == "" {
-		want = "/var/lib/localport"
-	}
-	if root != want {
-		t.Fatalf("defaultRoot = %q, want %q", root, want)
+	if root, _, err := defaultRoot(); err == nil {
+		t.Fatalf("defaultRoot with no home = %q, want an error naming %s", root, HomeEnv)
 	}
 }
 
