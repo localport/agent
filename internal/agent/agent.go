@@ -92,15 +92,27 @@ func (a *Agent) Run(ctx context.Context, handler tunnel.EventHandler) error {
 	}
 
 	for _, device := range a.cfg.Devices {
-		start(tunnel.Options{
-			Label:      device.Name,
-			Kind:       proto.KindDevice,
-			Token:      device.Token,
-			Edge:       device.Edge,
-			Host:       device.Host,
-			ClientName: device.Name,
-			AllowPorts: device.AllowPorts,
-		})
+		opts := tunnel.Options{
+			Label:        device.Name,
+			Kind:         proto.KindDevice,
+			Token:        device.Token,
+			Edge:         device.Edge,
+			Host:         device.Host,
+			ClientName:   device.Name,
+			Identity:     device.Identity,
+			AllowPorts:   device.AllowPorts,
+			Capabilities: device.Capabilities,
+			Logins:       device.Logins,
+			Desktop:      device.Desktop,
+			// A nil interface value leaves sessions off.
+			SessionHandler: device.SessionHandler,
+			HintRevoked:    device.HintRevoked,
+		}
+		// A nil *DeviceRegistrar in the interface would read as present.
+		if device.Credential != nil {
+			opts.Credential = device.Credential
+		}
+		start(opts)
 	}
 	wg.Wait()
 	a.mu.Lock()

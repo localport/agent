@@ -7,8 +7,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/security"
+	"github.com/localport/agent/internal/tunnel"
 
 	"go.yaml.in/yaml/v4"
 )
@@ -54,11 +56,24 @@ type TunnelSpec struct {
 // and may name another machine on the local network. Ports come from the
 // dashboard. AllowPorts, when set, limits which of them the agent serves.
 type DeviceSpec struct {
-	Name       string
-	Token      string
+	Name  string
+	Token string
+	// Identity is <tunnelIdentifier>.<prefix>, unique across fleets.
+	Identity   string
 	Host       string
 	Edge       string
 	AllowPorts ports.Ceiling
+	// Credential presents the device certificate at registration.
+	Credential *identity.DeviceRegistrar
+	// Capabilities, Logins and Desktop are reported on Register and configure
+	// the device's session server.
+	Capabilities []string
+	Logins       []string
+	Desktop      []string
+	// SessionHandler serves the device's sessions; nil leaves them off.
+	SessionHandler tunnel.SessionHandler
+	// HintRevoked receives the ticket key ids a RegisterAck names revoked.
+	HintRevoked func(kids []string)
 }
 
 // DefaultDeviceHost is the device host when none is configured.
