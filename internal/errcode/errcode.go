@@ -59,6 +59,7 @@ const (
 	UnsafeExecutable Code = "AG011"
 	UntrustedPath    Code = "AG012"
 
+	RunLocked            Code = "AG021"
 	FleetTokenRetired    Code = "AG022"
 	HostCapability       Code = "AG023"
 	LoginsWithoutSession Code = "AG024"
@@ -96,6 +97,7 @@ var registry = []Entry{
 	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
 	{UntrustedPath, "Untrusted credential path", "untrusted credential path"},
 
+	{RunLocked, "Devices already running", "localport is already running the devices of this config"},
 	{FleetTokenRetired, "Fleet token retired", "fleet tokens are retired: create the device in the dashboard and run the command it shows"},
 	{HostCapability, "Terminal or files with a host", "terminal and files act on this machine only and cannot be enabled with a host"},
 	{LoginsWithoutSession, "Logins without terminal or files", "logins apply only to a device that enables terminal or files"},

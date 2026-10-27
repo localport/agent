@@ -486,6 +486,81 @@ func LockLocal(f LocalConfigFile) (release func(), err error) {
 	return func() { _ = unlockAndClose(lock) }, nil
 }
 
+// ErrRunLocked means another process holds run.lock: a privileged run, connect
+// --foreground or service uninstall --purge on this config's devices.
+var ErrRunLocked = errcode.New(errcode.RunLocked)
+
+// RunLockPath is the lock file LockRun holds in the config directory.
+func (f LocalConfigFile) RunLockPath() string {
+	return filepath.Join(filepath.Dir(f.Path), "run.lock")
+}
+
+// LockRun takes the exclusive run.lock of the config directory, creating the
+// directory owner-only when missing, so only one process serves the devices
+// of a config. It waits up to wait (zero tries once) and then returns
+// ErrRunLocked. The holder records its PID in the file (RunLockHolder). The
+// lock file is opened close-on-exec (not inheritable on Windows), so session
+// children never hold it. release unlocks, then closes the file; the holder
+// calls it before it exits. Lock order: run.lock before agent.yaml.lock; a
+// process holding agent.yaml.lock only tries run.lock.
+func LockRun(f LocalConfigFile, wait time.Duration) (release func() error, err error) {
+	return LockRunContext(context.Background(), f, wait)
+}
+
+// LockRunContext is LockRun with a wait that also ends, with ctx's error,
+// when ctx ends.
+func LockRunContext(ctx context.Context, f LocalConfigFile, wait time.Duration) (release func() error, err error) {
+	path := f.RunLockPath()
+	lock, held, err := lockBeside(ctx, f, path, wait)
+	if err != nil {
+		return nil, fmt.Errorf("lock %s: %w", path, err)
+	}
+	if !held {
+		return nil, fmt.Errorf("%w (%s is held)", ErrRunLocked, path)
+	}
+	if err := recordHolder(lock); err != nil {
+		return nil, errors.Join(fmt.Errorf("record the holder of %s: %w", path, err), unlockAndClose(lock))
+	}
+	return func() error { return unlockAndClose(lock) }, nil
+}
+
+// runLockPIDOffset is where the holder writes its PID. Byte 0 is the range
+// LockFileEx locks on Windows, which no other process can read.
+const runLockPIDOffset = 1
+
+func recordHolder(lock *os.File) error {
+	if err := lock.Truncate(0); err != nil {
+		return err
+	}
+	_, err := lock.WriteAt([]byte("\n"+strconv.Itoa(os.Getpid())+"\n"), 0)
+	return err
+}
+
+// RunLockHolder returns the PID the holder of run.lock recorded, or 0 when
+// none is recorded yet. Callers read it only while LockRun fails, because an
+// unheld file still names its last holder.
+func RunLockHolder(f LocalConfigFile) (int, error) {
+	file, err := os.Open(f.RunLockPath())
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	buf := make([]byte, 24)
+	n, err := file.ReadAt(buf, runLockPIDOffset)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return 0, fmt.Errorf("read %s: %w", f.RunLockPath(), err)
+	}
+	text := strings.TrimSpace(string(buf[:n]))
+	if text == "" {
+		return 0, nil
+	}
+	pid, err := strconv.Atoi(text)
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf("%s records no valid PID: %q", f.RunLockPath(), text)
+	}
+	return pid, nil
+}
+
 // lockPoll is how often a lock wait retries; flock and LockFileEx have no
 // bounded blocking form.
 const lockPoll = 200 * time.Millisecond

@@ -22,6 +22,7 @@ terminal sessions, AG06x recordings, AG07x network.
 | AG007 | Credential does not renew | A sign-in credential expires instead of renewing. Run `localport login` again. |
 | AG011 | Unsafe service executable | The device service runs only a binary that root (SYSTEM, Administrators or TrustedInstaller on Windows) alone can replace. Install localport with the install script under sudo, or an elevated install.ps1, and run it by that absolute path. |
 | AG012 | Untrusted credential path | A credential file or directory is a link, has the wrong owner, or is writable by others. Fix the path the message names. On Linux and macOS: owned by the account running the agent, mode 0700 for directories and 0600 for files. On Windows: owned by that account, SYSTEM or Administrators; a file grants access to no one else, and a directory grants write access to no one else. Under the machine-wide config directory the device service's account `NT SERVICE\localport-device` is allowed too. |
+| AG021 | Devices already running | Another localport process (the device service, `localport run` or `connect --foreground`) serves these devices. Stop it, or let it serve them. |
 | AG022 | Fleet token retired | Create the device in the dashboard and run the command it shows. |
 | AG023 | Terminal or files with a host | Terminal and files act on the machine running the agent. Remove the host, or remove terminal and files. |
 | AG024 | Logins without terminal or files | Logins apply only to terminal and files. Enable one of them, or remove the logins. |
