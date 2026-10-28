@@ -68,8 +68,12 @@ const (
 	FilesRootMissing     Code = "AG027"
 	InvalidLocalConfig   Code = "AG028"
 
-	NoDeviceStarts Code = "AG032"
-	NoDefaultLogin Code = "AG036"
+	NoDevice         Code = "AG031"
+	NoDeviceStarts   Code = "AG032"
+	ServiceInstalled Code = "AG033"
+	MergeConflict    Code = "AG034"
+	ExtraArgument    Code = "AG035"
+	NoDefaultLogin   Code = "AG036"
 
 	ForeignUnit     Code = "AG041"
 	NotInstalled    Code = "AG042"
@@ -114,7 +118,11 @@ var registry = []Entry{
 	{FilesRootMissing, "Files root missing", "files root is not an existing directory"},
 	{InvalidLocalConfig, "Invalid local config", "invalid local config"},
 
+	{NoDevice, "No enrolled device", "no enrolled device"},
 	{NoDeviceStarts, "No device can start", "no enrolled device can start: every device's credential is missing or unreadable (see above)"},
+	{ServiceInstalled, "Device service installed", "the device service is installed and runs the enrolled devices"},
+	{MergeConflict, "Flags conflict with stored settings", "the flags conflict with this device's stored settings"},
+	{ExtraArgument, "Unexpected argument", "unexpected argument"},
 	{NoDefaultLogin, "No default login", "no default login"},
 
 	{ForeignUnit, "Foreign service definition", "a service definition not written by localport is in the way"},

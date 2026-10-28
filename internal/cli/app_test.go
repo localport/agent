@@ -55,10 +55,9 @@ func TestAppOldTunnelVerbNamesItsReplacement(t *testing.T) {
 func TestAppConfigRefusesEndpointFlags(t *testing.T) {
 	app := New("1.2.3", "abc123", "2026-04-13")
 	cases := [][]string{
-		{"connect", "--config", "x.yaml", "--name", "kiosk-9"},
-		{"connect", "--config", "x.yaml", "-t", "tok_x"},
+		{"connect", "--config", "x.yaml", "--enable", "terminal"},
 		{"connect", "--config", "x.yaml", "--allow-ports", "22"},
-		{"connect", "--config", "x.yaml", "--region", "eu"},
+		{"connect", "--config", "x.yaml", "--rdp"},
 		{"connect", "--config", "x.yaml", "--host", "192.168.1.20"},
 		{"--config", "x.yaml", "--local", "localhost:3000"},
 		{"--config", "x.yaml", "-l", "localhost:3000"},

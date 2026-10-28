@@ -154,6 +154,11 @@ func refuseBesideConfig(fs *flag.FlagSet, configPath string, names ...string) er
 	if configPath == "" {
 		return nil
 	}
+	return refuseGiven(fs, "cannot be combined with --config: set it in the config file", names...)
+}
+
+// refuseGiven reports the named flags that were passed, followed by reason.
+func refuseGiven(fs *flag.FlagSet, reason string, names ...string) error {
 	conflicting := make(map[string]bool, len(names))
 	for _, n := range names {
 		conflicting[n] = true
@@ -172,7 +177,7 @@ func refuseBesideConfig(fs *flag.FlagSet, configPath string, names ...string) er
 	if len(given) == 0 {
 		return nil
 	}
-	return fmt.Errorf("%s cannot be combined with --config: set it in the config file", strings.Join(given, ", "))
+	return fmt.Errorf("%s %s", strings.Join(given, ", "), reason)
 }
 
 func pickRenderer(mode ui.Mode, a *agent.Agent) tunnelUI {

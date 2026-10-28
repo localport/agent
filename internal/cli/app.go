@@ -56,7 +56,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage: localport <command> [flags]
 
 Commands:
-  connect   Join a fleet as a device, or run a config file
+  connect   Enrol this machine as a fleet device, or run a config file
   run       Run every device enrolled on this machine
   access    Reach a fleet device's ports through your client certificate
   setup     Redeem a setup token so this MACHINE can reach fleet devices
@@ -76,8 +76,11 @@ Examples:
   # Run several tunnels and devices from one config file:
   localport connect --config localport.yaml
 
-  # Join a fleet as a device (ports are set in the dashboard):
-  localport connect -t <token> --name plc-01 --host 192.168.1.100
+  # Enrol this machine as a fleet device with the command the dashboard shows:
+  sudo localport connect <join-token> --enable terminal,files --logins pi
+
+  # A device serving another machine on this network (ports are set in the dashboard):
+  sudo localport connect <join-token> --host 192.168.1.100 --allow-ports 502,80
 
   # Reach a device's ports with your client certificate:
   localport access plc-01-factory.ap.localport.dev -L 5020:502 -L 8080:80

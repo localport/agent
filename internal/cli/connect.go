@@ -6,11 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/localport/agent/internal/agent"
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/service"
@@ -18,70 +20,195 @@ import (
 	"github.com/localport/agent/internal/ui"
 )
 
-// runConnect joins this machine to a fleet as one device, or runs every tunnel
-// and device in a config file. Device ports come from the dashboard.
-func runConnect(version string, args []string) error {
+// runConnect enrols this machine as a fleet device with a single-use join
+// token and records it in the local config. As root or an elevated
+// Administrator it then installs and starts the device service, unless
+// --foreground; otherwise it runs the device in the foreground. With --config
+// it runs every tunnel in a config file. A run that installs the service runs
+// to the end through a hangup of its terminal and records its outcome in the
+// system log.
+func runConnect(version string, args []string) (retErr error) {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
 	var (
-		configPath  = fs.String("config", "", "path to YAML config")
-		token       = fs.String("token", "", "fleet token")
-		region      = fs.String("region", "", "edge region: eu, us, ap")
-		name        = fs.String("name", "", "device name (default: this machine's hostname)")
-		host        = fs.String("host", "", "where this device sends traffic (default: localhost)")
-		allowPorts  = fs.String("allow-ports", "", "limit which ports this device serves, e.g. 502,80,8000-8100 (default: any port the dashboard allows)")
+		configPath  = fs.String("config", "", "path to a YAML config of tunnels")
+		apiURL      = fs.String("api", "", "control plane base URL (default "+identity.DefaultAPIURL+")")
+		wait        = fs.Duration("wait", identity.DefaultRetryBudget, "how long to keep retrying while the control plane is unreachable (0 = one attempt)")
 		noUI        = fs.Bool("noui", false, "disable the live view and emit plain logs (auto-enabled when stderr is not a TTY)")
-		noMux       = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them")
-		noInspect   = fs.Bool("no-inspect", false, "do not inspect HTTP requests")
-		logRequests = fs.Bool("log-requests", false, "log one line per HTTP request in headless mode (http ports)")
+		noMux       = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them; a device then serves no browser or CLI sessions; as root (Administrator on Windows), only with --foreground or --config")
+		noInspect   = fs.Bool("no-inspect", false, "do not inspect HTTP requests (--config)")
+		logRequests = fs.Bool("log-requests", false, "log one line per HTTP request in headless mode (--config)")
+		foreground  = fs.Bool("foreground", false, "run the device in this terminal instead of installing the service (root or Administrator)")
 	)
-	fs.StringVar(token, "t", "", "alias for --token")
+	// -t/--token is parsed only to refuse it with the retired-token message.
+	retiredToken := fs.String("token", "", "retired: fleet tokens are replaced by join tokens")
+	fs.StringVar(retiredToken, "t", "", "retired: fleet tokens are replaced by join tokens")
+	device := addDeviceFlags(fs)
 	fs.Usage = func() { usageConnect(fs) }
 
-	if err := fs.Parse(args); err != nil {
+	// The join token is a leading positional, as the dashboard shows it.
+	joinToken, rest := "", args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		joinToken, rest = args[0], args[1:]
+	}
+	if err := fs.Parse(rest); err != nil {
 		return err
 	}
-	if err := refuseBesideConfig(fs, *configPath, "token", "t", "region", "name", "host", "allow-ports"); err != nil {
-		return err
+	if tokenFlagGiven(fs) {
+		return config.ErrFleetTokenRetired
 	}
-
-	cfg, err := buildConnectConfig(*configPath, *token, *region, *name, *host, *allowPorts)
-	if err != nil {
+	positional := fs.Args()
+	if joinToken == "" && len(positional) > 0 {
+		joinToken, positional = positional[0], positional[1:]
+	}
+	// Flag parsing stops at the first non-flag, so a flag after a join token
+	// that follows flags would be dropped while the token is spent.
+	if len(positional) > 0 {
 		fs.Usage()
+		return fmt.Errorf("%w: %q; put every flag before the join token or right after it", errExtraArgument, security.SanitizeDisplay(positional[0]))
+	}
+
+	if *configPath != "" {
+		if joinToken != "" {
+			return errors.New("a join token cannot be combined with --config")
+		}
+		if err := refuseBesideConfig(fs, *configPath, "enable", "logins", "files-root", "host", "allow-ports", "rdp", "vnc", "api", "wait", "foreground"); err != nil {
+			return err
+		}
+		return runConfigFile(version, *configPath, *noUI, *noMux, *noInspect, *logRequests)
+	}
+	if joinToken == "" {
+		fs.Usage()
+		return errors.New("join token required: create the device in the dashboard and run the command it shows")
+	}
+	if err := refuseGiven(fs, "apply only with --config", "no-inspect", "log-requests"); err != nil {
 		return err
 	}
-	if *noMux {
-		cfg.NoMux = true
+
+	who := currentInvoker(false)
+	if who.privileged && !*foreground {
+		// The device service runs `run --service`, which keeps the mux.
+		if err := refuseGiven(fs, "applies only to a device run in this terminal: add --foreground", "no-mux"); err != nil {
+			return err
+		}
+		// The service install or restart may end the terminal session this
+		// runs in. The record names no argument, as the join token is one.
+		ignoreHangup()
+		defer func() { logOutcome([]string{"connect"}, retErr, false) }()
 	}
-	cfg.AgentVersion = version
-
-	mode := ui.DetectMode(*noUI, os.Stderr)
-	cfg.NoInspect = inspectDisabled(mode, *noInspect, *logRequests)
-
-	a := agent.New(cfg)
-	renderer := pickRenderer(mode, a)
-	renderer.Banner(version, cfg)
-	warnTokenFlag(renderer, *configPath == "" && strings.TrimSpace(*token) != "")
-	warnNoPortCeiling(renderer, cfg.Devices)
-	defer renderer.Shutdown()
-
-	// Stop ends all sessions at once. The renderer shuts down first to
-	// restore the terminal before teardown output.
-	ctx, stop := signalContext(func() {
-		renderer.Shutdown()
-		a.Stop()
-	})
-	defer stop()
-
-	runErr := a.Run(ctx, renderer)
-	renderer.Shutdown()
-
-	var regErr *tunnel.RegistrationError
-	if errors.As(runErr, &regErr) && regErr.Code != "" {
-		return fmt.Errorf("%s [%s]", regErr.Error(), regErr.Code)
+	d, err := prepareDevice(fs, device, who)
+	if err != nil {
+		return err
 	}
-	return runErr
+	client, err := identity.NewClient(resolveAPIURL(*apiURL))
+	if err != nil {
+		return err
+	}
+	store, err := who.store()
+	if err != nil {
+		return err
+	}
+	if err := store.EnsureRoot(); err != nil {
+		return err
+	}
+	file, err := who.localConfigFile()
+	if err != nil {
+		return err
+	}
+	// Read without the lock, only so a config LoadLocal refuses stops
+	// connect before the spend. recordDevice re-reads it under the lock.
+	if _, err := loadLocalOrEmpty(file); err != nil {
+		return err
+	}
+	if who.privileged && *foreground {
+		release, err := holdRunLock(context.Background(), file, "connect --foreground", false)
+		if err != nil {
+			return err
+		}
+		defer func() { retErr = errors.Join(retErr, release()) }()
+	}
+	var svc *deviceService
+	if who.privileged && !*foreground {
+		if svc, err = prepareService(file); err != nil {
+			return err
+		}
+	}
+
+	ctx, cancel := signalContext(nil)
+	defer cancel()
+	notice := func(attempt int, in time.Duration, err error) {
+		fmt.Fprintf(os.Stderr, "  control plane unreachable (attempt %d), retrying in %s\n", attempt, in.Round(time.Second))
+	}
+	material, err := enrolDevice(client, ctx, joinToken, *wait, notice)
+	if err != nil {
+		// The error may quote the request. Keep the token out of terminals and
+		// logs.
+		err = security.SanitizeError(err, joinToken)
+		if mayHaveSpent(err) {
+			return fmt.Errorf("%w\n  if the control plane redeemed the token before this failure, %s", err, joinTokenSpent)
+		}
+		return err
+	}
+	ref, err := saveIssued(store, ctx, *material)
+	if err != nil {
+		return fmt.Errorf("save the device credential: %w\n  %s", err, joinTokenSpent)
+	}
+	storeEnrolledKeys(store, ref, material.DeviceKeys)
+	cancel()
+
+	inForce, err := recordDevice(file, fs, device, who, ref, d)
+	// The device is in the config whenever its entry is in force, even when
+	// recordDevice kept the stored settings; the service must then restart
+	// to load the new credential.
+	if svc != nil && inForce.Identity == ref {
+		if installErr := svc.install(); installErr != nil {
+			return errors.Join(err, fmt.Errorf("device %s is enrolled and its credential saved, but the %s service was not installed: %w\n  fix the cause, then install the service without a new join token: %s",
+				ref, svc.manager.Name(), installErr, serviceInstallCommand))
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "\n  enrolled\n")
+	printCredential(store, ref, material.Meta)
+	if material.Meta.Device != nil && material.Meta.Device.Host != "" {
+		fmt.Fprintf(os.Stderr, "  host       %s\n", security.SanitizeDisplay(material.Meta.Device.Host))
+	}
+	fmt.Fprintf(os.Stderr, "  config     %s\n", file.Path)
+	printDeviceSettings(inForce)
+	if svc != nil {
+		fmt.Fprintf(os.Stderr, "  service    %s, running\n\n", svc.manager.Name())
+		return nil
+	}
+	fmt.Fprintln(os.Stderr)
+	return serveEnrolled(context.Background(), version, store, []config.LocalDevice{inForce}, *noUI, *noMux)
+}
+
+// storeEnrolledKeys writes the enrolment's ticket key set. The credential is
+// already stored, so a failure warns and enrolment goes on: the device holds
+// no ticket keys until ticket_keys.json loads, and an identity.KeyRefresher
+// fetch (run for every device that serves sessions) or a renewal after the
+// file is readable again writes the set. Only
+// identity.ErrTicketKeysUnreadable gets the file remedy.
+func storeEnrolledKeys(store *identity.Store, ref identity.Ref, set *identity.DeviceKeys) {
+	if set == nil {
+		return
+	}
+	keys, err := store.TicketKeys(ref)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: the device's ticket keys were not saved: %v\n", err)
+		return
+	}
+	// Enrolment runs before the device registers, so no hint is held yet.
+	err = keys.Replace(context.Background(), keys.Generation(), *set)
+	switch {
+	case errors.Is(err, identity.ErrTicketKeysUnreadable):
+		fmt.Fprintf(os.Stderr, "  warning: the device's ticket keys were not saved to %s: %v\n  the device holds no session ticket keys until that file loads; fix its mode to owner-only, or remove it if it is malformed, owned by another user or not a regular file, and the next key fetch or renewal writes the set\n", keys.Path(), err)
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "  warning: the device's ticket keys were not saved to %s: %v\n", keys.Path(), err)
+	}
 }
 
 // deviceService is the service a privileged connect installs, checked
@@ -102,6 +229,72 @@ var (
 	saveIssued         = (*identity.Store).SaveIssued
 	serveEnrolled      = serveDevices
 )
+
+// serviceInstallCommand installs the device service for the enrolled
+// devices without a join token.
+const serviceInstallCommand = "sudo localport service install (an elevated prompt on Windows)"
+
+// prepareService refuses before the spend what would stop the install after
+// it, or what the service must not run: no supported service manager, a
+// service definition under the device service's name that localport did not
+// write, an executable someone other than root could replace, or a manual
+// run holding run.lock, which would keep the started service from serving.
+// It lists the systemd drop-ins that extend the service.
+func prepareService(file config.LocalConfigFile) (*deviceService, error) {
+	m, err := newServiceManager()
+	if err != nil {
+		return nil, fmt.Errorf("%w\n  run the device in the foreground with --foreground", err)
+	}
+	dropIns, err := m.Check()
+	if err != nil {
+		return nil, err
+	}
+	exe, err := serviceExecutable()
+	if err != nil {
+		return nil, err
+	}
+	if err := refuseManualRun(file, m); err != nil {
+		return nil, err
+	}
+	if len(dropIns) > 0 {
+		fmt.Fprintf(os.Stderr, "  drop-ins extend %s: %s\n", m.Name(), strings.Join(dropIns, ", "))
+	}
+	return &deviceService{manager: m, exe: exe}, nil
+}
+
+// refuseManualRun refuses while run.lock is held by any process other than
+// the running device service carrying the marker, as its manager reports the
+// service's main process: a manual run or connect --foreground, or a service
+// the manager is starting, stopping or restarting. The installed service
+// would otherwise wait on that holder. It only tries run.lock and releases it
+// at once; the holder's PID is read only while the try fails.
+func refuseManualRun(file config.LocalConfigFile, m service.Manager) error {
+	release, err := config.LockRun(file, 0)
+	if err == nil {
+		return release()
+	}
+	if !errors.Is(err, config.ErrRunLocked) {
+		return err
+	}
+	holder, holderErr := config.RunLockHolder(file)
+	if holderErr != nil {
+		return errors.Join(err, holderErr)
+	}
+	installed, instErr := m.Installed()
+	if instErr != nil {
+		return errors.Join(err, instErr)
+	}
+	if installed {
+		mainPID, pidErr := m.MainPID(context.Background())
+		if pidErr != nil {
+			return errors.Join(err, pidErr)
+		}
+		if holder != 0 && holder == mainPID {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w by process %d, which is not the running device service %s\n  stop a localport run or connect --foreground serving the devices; when the service is starting, stopping or restarting, retry in a few seconds", err, holder, m.Name())
+}
 
 // serviceRunLockWait bounds how long `run --service` waits for run.lock: a
 // restarting service manager can start the new process before the old one
@@ -152,6 +345,10 @@ func serviceExecutable() (string, error) {
 	return exe, nil
 }
 
+// errServiceInstalled refuses deleting the devices while the device
+// service that runs them is installed.
+var errServiceInstalled = errcode.New(errcode.ServiceInstalled)
+
 // installedDeviceService returns the platform's manager and whether a device
 // service carrying the marker is installed. No supported service manager, or
 // a definition localport did not write, counts as none.
@@ -173,51 +370,218 @@ func installedDeviceService() (service.Manager, bool, error) {
 	return m, installed, nil
 }
 
-func buildConnectConfig(path, flagToken, region, name, host, allowPorts string) (*config.Config, error) {
-	if path != "" {
-		return config.Load(path)
-	}
-	token, err := security.ResolveToken(flagToken, "LOCALPORT_TOKEN")
+// install writes, enables and (re)starts the device service. Each service
+// manager command has its own timeout.
+func (s *deviceService) install() error {
+	return s.manager.Install(context.Background(), s.exe)
+}
+
+// mayHaveSpent reports an enrolment failure after which the control plane may
+// have redeemed the token: anything but an APIError below 500 (a 4xx refusal
+// or a refused redirect), which it answers without redeeming.
+func mayHaveSpent(err error) bool {
+	var apiErr *identity.APIError
+	return !errors.As(err, &apiErr) || apiErr.Status >= 500
+}
+
+// errMergeConflict means the flags of a re-enrolment conflict with the
+// device's stored settings, which stay in force.
+var errMergeConflict = errcode.New(errcode.MergeConflict)
+
+// recordDevice records an enrolled device in the local config, under its
+// lock. A stored entry with the same identity takes the flags given as set
+// does (each given flag overrides, the rest keep their stored values); a new
+// identity appends fresh, the entry the flags alone describe. When the merge
+// is invalid the config is left unchanged and the error wraps
+// errMergeConflict. It returns the entry in force.
+func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFlags, who invoker, ref identity.Ref, fresh config.LocalDevice) (config.LocalDevice, error) {
+	unlock, err := config.LockLocal(file)
 	if err != nil {
-		return nil, err
+		return config.LocalDevice{}, fmt.Errorf("%w\n  %s", err, joinTokenSpent)
 	}
-	if name == "" {
-		host, _ := os.Hostname()
-		name = config.DefaultDeviceName(host)
+	defer unlock()
+	local, err := loadLocalOrEmpty(file)
+	if err != nil {
+		return config.LocalDevice{}, fmt.Errorf("%w\n  %s", err, joinTokenSpent)
 	}
-	if name == "" {
-		return nil, errors.New("--name is required, because this machine reports no usable hostname")
+
+	i := slices.IndexFunc(local.Devices, func(d config.LocalDevice) bool { return d.Identity == ref })
+	if i < 0 {
+		fresh.Identity = ref
+		local.Devices = append(local.Devices, fresh)
+		if err := writeLocal(file, local, ref); err != nil {
+			return config.LocalDevice{}, fmt.Errorf("device %s is enrolled, but the local config was not written: %w\n  %s", ref, err, joinTokenSpent)
+		}
+		return fresh, nil
 	}
-	return config.DeviceFromFlags(token, region, name, host, allowPorts)
+
+	stored := local.Devices[i]
+	merged := stored
+	if err := flags.apply(fs, &merged, who); err != nil {
+		return stored, mergeConflict(ref, err)
+	}
+	if merged.Equal(stored) {
+		return stored, nil
+	}
+	local.Devices[i] = merged
+	switch err := writeLocal(file, local, ref); {
+	case err == nil:
+		return merged, nil
+	case errors.Is(err, config.ErrInvalidLocalConfig):
+		return stored, mergeConflict(ref, err)
+	case errors.Is(err, config.ErrFilesRootMissing):
+		return stored, fmt.Errorf("%w\n  device %s keeps its new credential and its stored settings\n  mount or create its files root, or change it with: localport set %s --files-root DIR",
+			err, ref, ref.Identity)
+	default:
+		return stored, fmt.Errorf("device %s is enrolled, but the local config was not written: %w\n  %s", ref, err, joinTokenSpent)
+	}
+}
+
+// writeLocal is config.WriteLocal; tests replace it to force a write failure.
+var writeLocal = config.WriteLocal
+
+func mergeConflict(ref identity.Ref, err error) error {
+	return fmt.Errorf("%w: %w\n  device %s keeps its new credential and its stored settings\n  change them with: localport set %s [flags]",
+		errMergeConflict, err, ref, ref.Identity)
+}
+
+// printDeviceSettings prints what a device allows.
+func printDeviceSettings(d config.LocalDevice) {
+	or := func(s, none string) string {
+		if s == "" {
+			return none
+		}
+		return s
+	}
+	enable := make([]string, len(d.Enable))
+	for i, c := range d.Enable {
+		enable[i] = string(c)
+	}
+	fmt.Fprintf(os.Stderr, "  enable     %s\n", or(strings.Join(enable, ","), "ports only"))
+	fmt.Fprintf(os.Stderr, "  logins     %s\n", or(strings.Join(d.Logins, ","), "none"))
+	fmt.Fprintf(os.Stderr, "  target     %s\n", or(d.Host, "this machine"))
+	fmt.Fprintf(os.Stderr, "  ports      %s\n", or(d.AllowPorts.String(), "any the dashboard allows"))
+	if d.FilesRoot != "" {
+		fmt.Fprintf(os.Stderr, "  files root %s\n", d.FilesRoot)
+	}
+	if d.RDP != "" {
+		fmt.Fprintf(os.Stderr, "  rdp        %s\n", d.RDP)
+	}
+	if d.VNC != "" {
+		fmt.Fprintf(os.Stderr, "  vnc        %s\n", d.VNC)
+	}
+}
+
+// joinTokenSpent is the remedy printed when enrolment succeeded but its
+// result could not be kept.
+const joinTokenSpent = "the join token is spent: create a new join token for this device in the dashboard and run connect again"
+
+// errExtraArgument refuses an argument beyond the one join token.
+var errExtraArgument = errcode.New(errcode.ExtraArgument)
+
+// prepareDevice builds and validates the device's local settings from the
+// flags alone before any join token is spent: the identity, and so any stored
+// entry, is unknown until enrolment. A refusal a stored entry might have
+// satisfied names the re-enrol-then-set remedy.
+func prepareDevice(fs *flag.FlagSet, flags *deviceFlags, who invoker) (config.LocalDevice, error) {
+	var d config.LocalDevice
+	err := flags.apply(fs, &d, who)
+	if err == nil {
+		err = d.ValidateSettings()
+	}
+	if errors.Is(err, config.ErrLoginsWithoutSession) || errors.Is(err, config.ErrDesktopWithoutTarget) || errors.Is(err, errNoDefaultLogin) {
+		return d, fmt.Errorf("%w\n  before enrolment these flags are checked without the device's stored settings: re-enrol without them, then change them with localport set", err)
+	}
+	if err != nil {
+		return d, err
+	}
+	if d.FilesRoot != "" {
+		if err := config.CheckFilesRoot(d.FilesRoot); err != nil {
+			return d, fmt.Errorf("--files-root: %w", err)
+		}
+	}
+	return d, nil
+}
+
+func tokenFlagGiven(fs *flag.FlagSet) bool {
+	given := false
+	fs.Visit(func(f *flag.Flag) { given = given || f.Name == "token" || f.Name == "t" })
+	return given
+}
+
+// runConfigFile runs every tunnel in a config file.
+func runConfigFile(version, path string, noUI, noMux, noInspect, logRequests bool) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	cfg.NoMux = noMux
+	cfg.AgentVersion = version
+	mode := ui.DetectMode(noUI, os.Stderr)
+	cfg.NoInspect = inspectDisabled(mode, noInspect, logRequests)
+
+	a := agent.New(cfg)
+	renderer := pickRenderer(mode, a)
+	renderer.Banner(version, cfg)
+	defer renderer.Shutdown()
+
+	// Stop ends all sessions at once. The renderer shuts down first to
+	// restore the terminal before teardown output.
+	ctx, stop := signalContext(func() {
+		renderer.Shutdown()
+		a.Stop()
+	})
+	defer stop()
+
+	runErr := a.Run(ctx, renderer)
+	renderer.Shutdown()
+
+	var regErr *tunnel.RegistrationError
+	if errors.As(runErr, &regErr) && regErr.Code != "" {
+		return fmt.Errorf("%s [%s]", regErr.Error(), regErr.Code)
+	}
+	return runErr
 }
 
 func usageConnect(fs *flag.FlagSet) {
-	fmt.Fprint(os.Stderr, `Usage: localport connect -t <token> [--name <device>] [--host <address>]
+	fmt.Fprint(os.Stderr, `Usage: localport connect <join-token> [--enable terminal,files,desktop] [--logins a,b]
+                         [--files-root DIR] [--rdp[=HOST:PORT]] [--vnc[=HOST:PORT]]
+                         [--host HOST] [--allow-ports LIST] [--foreground]
        localport connect --config localport.yaml
 
-  Join a fleet as one device. The ports this device serves are set in the
-  dashboard, and consumers reach them with:
+  Enrol this machine as a fleet device. Create the device in the dashboard;
+  it shows the command with a single-use join token. The machine keeps a
+  private key that never leaves it. The device's settings go to the local
+  config, which only its owner can change (localport set). A second connect
+  with a new token for an enrolled device replaces its credential.
 
-    localport access <device-host> -L <local>:<remote>
+  As root (Administrator on Windows), the device is recorded in the
+  machine-wide config, and connect installs and starts the device service
+  (systemd localport-device.service, launchd io.localport.device, Windows
+  service localport-device), which runs every enrolled device at boot.
+  connect is refused while a manual localport run serves the devices.
 
-  One device, named after this machine:
-    localport connect -t <token>
+  The service runs this binary, so only root (Administrators) may be able to
+  replace it. Install it with the install script under sudo or an elevated
+  install.ps1, and call it by that absolute path. A Homebrew, Scoop, winget
+  or user-profile install cannot run the device service.
 
-  One device, serving another machine on this network:
-    localport connect -t <token> --name plc-01 --host 192.168.1.100
+  --foreground runs the device in this terminal instead, and is refused while
+  another process (the device service or a manual run) serves the devices.
 
-  One device that serves only the listed ports:
-    localport connect -t <token> --allow-ports 502,80,8000-8100
+  Without root, the device is recorded in $LOCALPORT_HOME/agent.yaml and runs
+  in the foreground, and --logins may name only the user running the command.
 
-  Every tunnel and device in a file. The file sets them all, so --token,
-  --region, --name, --host and --allow-ports are refused beside it:
+  --logins defaults to $SUDO_USER when set and not root, otherwise the user
+  running the command; root only when listed. terminal and files act on this
+  machine and are refused with --host and on Windows. desktop needs --rdp or
+  --vnc.
+
+  Every tunnel in a file. The file sets them all, so device flags are refused
+  beside it:
     localport connect --config localport.yaml
 
-Environment:
-  LOCALPORT_TOKEN        fleet token (alternative to --token)
-  LOCALPORT_TOKEN_FILE   file to read the token from, for systemd LoadCredential=
-                         and docker secrets
-  NO_COLOR               disable colored output
+  -t/--token is refused: fleet tokens are retired.
 
 Flags:
 `)

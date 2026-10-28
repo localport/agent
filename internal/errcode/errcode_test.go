@@ -1,6 +1,8 @@
 package errcode
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -48,6 +50,24 @@ func TestRegistryMatchesTheDocs(t *testing.T) {
 		if !seen[code] {
 			t.Errorf("docs/ERRORS.md lists %s, which is not registered", code)
 		}
+	}
+}
+
+func TestWrappedErrorMatchesItsSentinel(t *testing.T) {
+	sentinel := New(RunLocked)
+	wrapped := fmt.Errorf("run: %w", sentinel)
+	if !errors.Is(wrapped, sentinel) {
+		t.Fatal("a wrapped sentinel does not match it")
+	}
+	withCause := &Error{Code: RunLocked, Msg: sentinel.Msg, Err: errors.New("held by 42")}
+	if !errors.Is(withCause, sentinel) {
+		t.Fatal("an Error with the sentinel's code does not match it")
+	}
+	if errors.Is(wrapped, New(NoDevice)) {
+		t.Fatal("an error matched a different code")
+	}
+	if got, want := withCause.Error(), sentinel.Msg+": held by 42 [AG021]"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
 	}
 }
 

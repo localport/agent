@@ -24,6 +24,40 @@ func parseDeviceFlags(t *testing.T, args ...string) (*flag.FlagSet, *deviceFlags
 	return fs, flags
 }
 
+// -t/--token is refused with the retired-token message before anything else.
+// The unroutable --api keeps a regression from reaching a real control plane.
+func TestConnectRefusesAFleetToken(t *testing.T) {
+	// A regression must not touch the real home store or config.
+	t.Setenv(identity.HomeEnv, t.TempDir())
+	for _, args := range [][]string{
+		{"-t", "tok", "--api", "https://127.0.0.1:1"},
+		{"--token=tok", "--api", "https://127.0.0.1:1"},
+		{"lpj_join", "--api", "https://127.0.0.1:1", "--wait", "0", "--token", "tok"},
+	} {
+		if err := runConnect("test", args); !errors.Is(err, config.ErrFleetTokenRetired) {
+			t.Errorf("connect %v = %v, want ErrFleetTokenRetired", args, err)
+		}
+	}
+}
+
+// Flag parsing stops at the first argument that is not a flag, so anything
+// after a second positional would be dropped while the token is spent.
+func TestConnectRefusesAnArgumentBeyondTheJoinToken(t *testing.T) {
+	// A regression must not touch the real home store or config.
+	t.Setenv(identity.HomeEnv, t.TempDir())
+	for _, args := range [][]string{
+		{"--allow-ports", "502", "lpj_x", "--host", "10.0.0.5"},
+		{"lpj_x", "--enable", "files", "extra"},
+	} {
+		// The flags lead, so a regression that parses on stops at the
+		// unroutable --api instead of a real control plane.
+		withAPI := append([]string{"--api", "https://127.0.0.1:1", "--wait", "0"}, args...)
+		if err := runConnect("test", withAPI); !errors.Is(err, errExtraArgument) {
+			t.Errorf("connect %v = %v, want errExtraArgument", args, err)
+		}
+	}
+}
+
 // Without root a device serves only the invoking user.
 func TestUnprivilegedLoginsNameOnlyTheInvokingUser(t *testing.T) {
 	who := invoker{privileged: false, current: "pi", goos: "linux"}
@@ -81,6 +115,48 @@ func TestLoginsFollowTheMergedDevice(t *testing.T) {
 	}
 	if d, err := apply(admin, stored, "--allow-ports", "22"); err != nil || !slices.Equal(d.Logins, []string{"ops"}) {
 		t.Fatalf("set keeping terminal = %v, %v; want the stored logins", d.Logins, err)
+	}
+}
+
+// terminal and files act on this machine and are refused with --host before
+// any join token is spent.
+func TestTerminalAndFilesAreRefusedWithAHost(t *testing.T) {
+	who := invoker{privileged: false, current: "pi", goos: "linux"}
+	for _, capability := range []string{"terminal", "files"} {
+		fs, flags := parseDeviceFlags(t, "--enable", capability, "--host", "192.168.1.10")
+		if _, err := prepareDevice(fs, flags, who); !errors.Is(err, config.ErrHostCapability) {
+			t.Errorf("--enable %s --host = %v, want ErrHostCapability", capability, err)
+		}
+	}
+	fs, flags := parseDeviceFlags(t, "--enable", "desktop", "--rdp", "--host", "192.168.1.10")
+	d, err := prepareDevice(fs, flags, who)
+	if err != nil {
+		t.Fatalf("desktop with a host: %v", err)
+	}
+	if d.RDP != config.DefaultRDPTarget {
+		t.Fatalf("rdp = %q, want the default target", d.RDP)
+	}
+}
+
+func TestDesktopNeedsATarget(t *testing.T) {
+	who := invoker{privileged: false, current: "pi", goos: "linux"}
+	fs, flags := parseDeviceFlags(t, "--enable", "desktop")
+	if _, err := prepareDevice(fs, flags, who); !errors.Is(err, config.ErrDesktopWithoutTarget) || !strings.Contains(err.Error(), "re-enrol without them") {
+		t.Fatalf("desktop without --rdp or --vnc = %v, want ErrDesktopWithoutTarget with the re-enrol remedy", err)
+	}
+	root := invoker{privileged: true, current: "root", goos: "linux"}
+	fs, flags = parseDeviceFlags(t, "--enable", "terminal")
+	if _, err := prepareDevice(fs, flags, root); !errors.Is(err, errNoDefaultLogin) || !strings.Contains(err.Error(), "re-enrol without them") {
+		t.Fatalf("terminal with no default login = %v, want errNoDefaultLogin with the re-enrol remedy", err)
+	}
+	fs, flags = parseDeviceFlags(t, "--enable", "desktop", "--vnc=10.0.0.5:5901")
+	d, err := prepareDevice(fs, flags, who)
+	if err != nil || d.VNC != "10.0.0.5:5901" {
+		t.Fatalf("vnc = %q, %v", d.VNC, err)
+	}
+	fs, flags = parseDeviceFlags(t, "--files-root", filepath.Join(t.TempDir(), "missing"), "--enable", "files")
+	if _, err := prepareDevice(fs, flags, who); err == nil {
+		t.Fatal("a missing --files-root accepted")
 	}
 }
 

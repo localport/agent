@@ -30,7 +30,11 @@ terminal sessions, AG06x recordings, AG07x network.
 | AG026 | Desktop without target | Give desktop a target with `--rdp` or `--vnc`. |
 | AG027 | Files root missing | The files root must be an existing directory. Mount or create it, or change it with `localport set`. |
 | AG028 | Invalid local config | The local config failed validation; the message names the field. Every command that reads it refuses the same way, `localport set` included, so correct `agent.yaml` by hand: in `$LOCALPORT_HOME` (or `~/.localport`), or as root in the machine-wide config directory. |
+| AG031 | No enrolled device | The machine-wide config lists no device. Enrol one with `sudo localport connect <join-token>`. |
 | AG032 | No device can start | Every enrolled device's credential is missing or unreadable; the lines above name each one. Create a new join command in the dashboard for each device and run it. |
+| AG033 | Device service installed | Deleting the devices is refused while the device service is installed, as when another command installed it during the purge. Run `sudo localport service uninstall --purge` again once that command has finished. |
+| AG034 | Flags conflict with stored settings | The flags of a repeated connect differ from the device's settings. Change the settings with `localport set`, or run connect without the conflicting flags. |
+| AG035 | Unexpected argument | connect takes one join token. Put every flag before the join token or right after it. |
 | AG036 | No default login | Terminal and files need a login, and the account running the command gives none. Name the accounts with `--logins`. |
 | AG041 | Foreign service definition | A service under the device service's name was not written by localport. Remove it as the message says, then retry. |
 | AG042 | Device service not installed | Nothing to remove. Install the service with `sudo localport service install`. |
