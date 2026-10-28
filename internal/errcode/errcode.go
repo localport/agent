@@ -68,6 +68,7 @@ const (
 	FilesRootMissing     Code = "AG027"
 	InvalidLocalConfig   Code = "AG028"
 
+	NoDeviceStarts Code = "AG032"
 	NoDefaultLogin Code = "AG036"
 
 	ForeignUnit     Code = "AG041"
@@ -113,6 +114,7 @@ var registry = []Entry{
 	{FilesRootMissing, "Files root missing", "files root is not an existing directory"},
 	{InvalidLocalConfig, "Invalid local config", "invalid local config"},
 
+	{NoDeviceStarts, "No device can start", "no enrolled device can start: every device's credential is missing or unreadable (see above)"},
 	{NoDefaultLogin, "No default login", "no default login"},
 
 	{ForeignUnit, "Foreign service definition", "a service definition not written by localport is in the way"},

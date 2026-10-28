@@ -1,15 +1,19 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/localport/agent/internal/agent"
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/security"
+	"github.com/localport/agent/internal/service"
 	"github.com/localport/agent/internal/tunnel"
 	"github.com/localport/agent/internal/ui"
 )
@@ -78,6 +82,95 @@ func runConnect(version string, args []string) error {
 		return fmt.Errorf("%s [%s]", regErr.Error(), regErr.Code)
 	}
 	return runErr
+}
+
+// deviceService is the service a privileged connect installs, checked
+// before the join token is spent.
+type deviceService struct {
+	manager service.Manager
+	exe     string
+}
+
+// newServiceManager is service.Default, checkServiceBinary is
+// security.CheckServiceBinary, enrolDevice and saveIssued are the enrolment
+// and credential save of connect, and serveEnrolled is serveDevices; tests
+// replace them.
+var (
+	newServiceManager  = service.Default
+	checkServiceBinary = security.CheckServiceBinary
+	enrolDevice        = (*identity.Client).EnrolDevice
+	saveIssued         = (*identity.Store).SaveIssued
+	serveEnrolled      = serveDevices
+)
+
+// serviceRunLockWait bounds how long `run --service` waits for run.lock: a
+// restarting service manager can start the new process before the old one
+// has released it. A variable so tests can shorten it.
+var serviceRunLockWait = 30 * time.Second
+
+// holdRunLock takes run.lock for a privileged run or connect --foreground.
+// With asService (run --service) it waits up to serviceRunLockWait, ending
+// with ctx, and on giving up returns a service.ExitError with
+// service.ExitRunLocked. Any other caller is refused at once while the lock
+// is held, naming the device service when one carrying the marker is
+// installed. The caller holds the lock until it exits and calls release.
+func holdRunLock(ctx context.Context, file config.LocalConfigFile, command string, asService bool) (release func() error, err error) {
+	wait := time.Duration(0)
+	if asService {
+		wait = serviceRunLockWait
+	}
+	release, err = config.LockRunContext(ctx, file, wait)
+	if err == nil || !errors.Is(err, config.ErrRunLocked) {
+		return release, err
+	}
+	if asService {
+		return nil, &service.ExitError{Code: service.ExitRunLocked, Err: err}
+	}
+	m, installed, instErr := installedDeviceService()
+	if instErr != nil {
+		return nil, errors.Join(err, instErr)
+	}
+	if installed {
+		return nil, fmt.Errorf("%w; the device service %s is installed: use it, or stop it before %s", err, m.Name(), command)
+	}
+	return nil, fmt.Errorf("%w; another localport run or connect --foreground serves them", err)
+}
+
+// unsafeBinaryRemedy follows a security.ErrUnsafeExecutable refusal.
+const unsafeBinaryRemedy = `install localport into a directory only root or Administrators can write, then call it by its absolute path: run the install script under sudo (it installs to /usr/local/bin, or /opt/localport/bin when /usr/local/bin is not root-owned) and use sudo /usr/local/bin/localport connect ..., or run install.ps1 elevated and use & "$env:ProgramFiles\Localport\localport.exe" connect ...; a Homebrew, Scoop, winget or user-profile install cannot run the device service`
+
+// serviceExecutable is the resolved running binary, refused unless only root
+// or Administrators can replace it.
+func serviceExecutable() (string, error) {
+	exe, err := service.Executable()
+	if err != nil {
+		return "", err
+	}
+	if err := checkServiceBinary(exe); err != nil {
+		return "", fmt.Errorf("%w\n  %s", err, unsafeBinaryRemedy)
+	}
+	return exe, nil
+}
+
+// installedDeviceService returns the platform's manager and whether a device
+// service carrying the marker is installed. No supported service manager, or
+// a definition localport did not write, counts as none.
+func installedDeviceService() (service.Manager, bool, error) {
+	m, err := newServiceManager()
+	if errors.Is(err, service.ErrUnsupported) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	installed, err := m.Installed()
+	if errors.Is(err, service.ErrForeignUnit) {
+		return m, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return m, installed, nil
 }
 
 func buildConnectConfig(path, flagToken, region, name, host, allowPorts string) (*config.Config, error) {

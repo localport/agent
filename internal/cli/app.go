@@ -26,6 +26,8 @@ func (a *App) Run(args []string) error {
 	switch args[0] {
 	case "connect":
 		return runConnect(a.version, args[1:])
+	case "run":
+		return runRun(a.version, args[1:])
 	case "access":
 		return runAccess(args[1:])
 	case "tunnel":
@@ -55,6 +57,7 @@ func printMainUsage(w io.Writer) {
 
 Commands:
   connect   Join a fleet as a device, or run a config file
+  run       Run every device enrolled on this machine
   access    Reach a fleet device's ports through your client certificate
   setup     Redeem a setup token so this MACHINE can reach fleet devices
   login     Sign in as YOURSELF and get a short-lived certificate
