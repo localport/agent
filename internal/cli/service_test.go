@@ -284,3 +284,253 @@ func TestInstallFailureAfterTheSpendNamesServiceInstall(t *testing.T) {
 		t.Fatalf("config = %+v, want the enrolled device", devices)
 	}
 }
+
+func TestServiceCommandsNeedRoot(t *testing.T) {
+	m := &fakeManager{}
+	asRoot(t, m)
+	privilegedProcess = func() bool { return false }
+	for _, sub := range []string{"install", "uninstall"} {
+		if err := runService([]string{sub}); err == nil || !strings.Contains(err.Error(), "sudo") {
+			t.Errorf("non-root service %s = %v, want a refusal naming sudo", sub, err)
+		}
+	}
+	if m.installs+m.uninstalls != 0 {
+		t.Fatal("a non-root service command reached the service manager")
+	}
+}
+
+func TestServiceInstall(t *testing.T) {
+	m := &fakeManager{}
+	file := asRoot(t, m)
+	if err := runService([]string{"install"}); !errors.Is(err, errNoDevice) || m.installs != 0 {
+		t.Fatalf("install with no device = %v (installs %d), want errNoDevice", err, m.installs)
+	}
+	if err := config.WriteLocal(file, &config.LocalConfig{Devices: []config.LocalDevice{{Identity: deviceRef("factory.gw-01")}}}, deviceRef("factory.gw-01")); err != nil {
+		t.Fatal(err)
+	}
+	checkServiceBinary = func(string) error { return security.ErrUnsafeExecutable }
+	if err := runService([]string{"install"}); !errors.Is(err, security.ErrUnsafeExecutable) || m.installs != 0 {
+		t.Fatalf("install with an unsafe binary = %v (installs %d)", err, m.installs)
+	}
+	checkServiceBinary = func(string) error { return nil }
+	release, err := config.LockRun(file, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runService([]string{"install"}); !errors.Is(err, config.ErrRunLocked) || m.installs != 0 {
+		t.Fatalf("install while a manual run holds run.lock = %v (installs %d), want ErrRunLocked", err, m.installs)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runService([]string{"install"}); err != nil || m.installs != 1 {
+		t.Fatalf("install = %v (installs %d), want one install", err, m.installs)
+	}
+}
+
+func TestServiceUninstallWithNothingToRemoveExitsZero(t *testing.T) {
+	asRoot(t, &fakeManager{uninstallErr: service.ErrNotInstalled})
+	if err := runService([]string{"uninstall"}); err != nil {
+		t.Fatalf("uninstall with no service = %v, want nil", err)
+	}
+	asRoot(t, nil)
+	newServiceManager = func() (service.Manager, error) { return nil, service.ErrUnsupported }
+	if err := runService([]string{"uninstall"}); err != nil {
+		t.Fatalf("uninstall with no service manager = %v, want nil", err)
+	}
+}
+
+// writeDevices fills the config directory with a config, a credential and
+// the lock file.
+func writeDevices(t *testing.T, file config.LocalConfigFile) {
+	t.Helper()
+	ref := deviceRef("factory.gw-01")
+	if err := config.WriteLocal(file, &config.LocalConfig{Devices: []config.LocalDevice{{Identity: ref}}}, ref); err != nil {
+		t.Fatal(err)
+	}
+	cred := filepath.Join(file.Base, "identity", ref.Team, "device-factory.gw-01")
+	if err := os.MkdirAll(cred, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cred, "key.pem"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPurgeStopsAtAForeignDefinition(t *testing.T) {
+	file := asRoot(t, &fakeManager{uninstallErr: service.ErrForeignUnit})
+	writeDevices(t, file)
+	if err := runService([]string{"uninstall", "--purge"}); !errors.Is(err, service.ErrForeignUnit) {
+		t.Fatalf("uninstall --purge = %v, want ErrForeignUnit", err)
+	}
+	if _, err := os.Stat(file.Path); err != nil {
+		t.Fatalf("the config was deleted despite the refusal: %v", err)
+	}
+}
+
+// writeSpool puts a recording entry in the recording spool of the config
+// directory and returns the spool directory.
+func writeSpool(t *testing.T, file config.LocalConfigFile) string {
+	t.Helper()
+	spool := filepath.Join(file.Base, "recordings")
+	entry := filepath.Join(spool, "11111111-1111-4111-8111-111111111111")
+	if err := os.MkdirAll(entry, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(entry, "meta.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return spool
+}
+
+func TestUninstallKeepsTheDevicesAndRecordingSpool(t *testing.T) {
+	file := asRoot(t, &fakeManager{})
+	writeDevices(t, file)
+	spool := writeSpool(t, file)
+	if err := runService([]string{"uninstall"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{file.Path, filepath.Join(file.Base, "identity"), filepath.Join(spool, "11111111-1111-4111-8111-111111111111", "meta.json")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("uninstall without --purge deleted %s: %v", p, err)
+		}
+	}
+}
+
+func TestPurgeDeletesTheConfigDeviceCredentialsAndRecordingSpoolOnly(t *testing.T) {
+	file := asRoot(t, &fakeManager{uninstallErr: service.ErrNotInstalled})
+	writeDevices(t, file)
+	writeSpool(t, file)
+	other := filepath.Join(file.Base, "notes.txt")
+	if err := os.WriteFile(other, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A machine credential from setup shares the system store.
+	machine := filepath.Join(file.Base, "identity", deviceRef("factory.gw-01").Team, "client-ci-runner")
+	if err := os.MkdirAll(machine, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(machine, "key.pem"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runService([]string{"uninstall", "--purge"}); err != nil {
+		t.Fatal(err)
+	}
+	// The lock files and the directory stay, so a concurrent command never
+	// locks an unlinked file; anything else in the directory stays too.
+	entries, err := os.ReadDir(file.Base)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if want := []string{"agent.yaml.lock", "identity", "notes.txt", "run.lock"}; err != nil || !slices.Equal(names, want) {
+		t.Fatalf("directory after purge = %q, %v, want %q", names, err, want)
+	}
+	if _, err := os.Stat(filepath.Join(machine, "key.pem")); err != nil {
+		t.Fatalf("purge deleted the machine credential: %v", err)
+	}
+	devices, err := filepath.Glob(filepath.Join(file.Base, "identity", "*", "device-*"))
+	if err != nil || len(devices) != 0 {
+		t.Fatalf("device credentials after purge = %q, %v, want none", devices, err)
+	}
+
+	// A missing directory is not created.
+	if err := os.RemoveAll(file.Base); err != nil {
+		t.Fatal(err)
+	}
+	if err := runService([]string{"uninstall", "--purge"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(file.Base); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("purge created %s: %v", file.Base, err)
+	}
+}
+
+// --purge refuses while a device service carrying the marker is still
+// installed or marked for deletion, and while another process holds
+// run.lock; each keeps the devices.
+func TestPurgeRefusals(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		m       fakeManager
+		holdRun bool
+		want    error
+	}{
+		{name: "service still installed", m: fakeManager{installed: true}, want: errServiceInstalled},
+		{name: "service marked for deletion", m: fakeManager{installed: true, installedErr: service.ErrMarkedForDelete}, want: service.ErrMarkedForDelete},
+		{name: "run.lock held", m: fakeManager{uninstallErr: service.ErrNotInstalled}, holdRun: true, want: config.ErrRunLocked},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := c.m
+			file := asRoot(t, &m)
+			writeDevices(t, file)
+			if c.holdRun {
+				holdRun(t, file)
+			}
+			if err := runService([]string{"uninstall", "--purge"}); !errors.Is(err, c.want) {
+				t.Fatalf("uninstall --purge = %v, want %v", err, c.want)
+			}
+			if _, err := os.Stat(file.Path); err != nil {
+				t.Fatalf("the config was deleted despite the refusal: %v", err)
+			}
+		})
+	}
+}
+
+// A user-launched privileged run is refused at once while run.lock is held,
+// naming the device service when it is installed; run --service waits and
+// starts once the holder releases it; every privileged run re-checks the
+// binary.
+func TestPrivilegedRunHoldsRunLock(t *testing.T) {
+	m := &fakeManager{installed: true}
+	file := asRoot(t, m)
+	release, err := config.LockRun(file, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notRunning := func() { t.Error("a run refused by the binary check reported running") }
+	err = runEnrolledDevices(context.Background(), "test", currentInvoker(false), false, true, func() {})
+	if !errors.Is(err, config.ErrRunLocked) || !strings.Contains(err.Error(), m.Name()) {
+		t.Fatalf("run beside the holder = %v, want ErrRunLocked naming %s", err, m.Name())
+	}
+
+	time.AfterFunc(300*time.Millisecond, func() { _ = release() })
+	started := false
+	err = runEnrolledDevices(context.Background(), "test", currentInvoker(true), true, true, func() { started = true })
+	if errors.Is(err, config.ErrRunLocked) || !started {
+		t.Fatalf("run --service after the holder released = %v (started %v), want it past the lock", err, started)
+	}
+
+	// A stop request cancels the context, which ends the wait; running was
+	// reported before it, so the Windows service accepts that Stop.
+	held, err := config.LockRun(file, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	started = false
+	err = runEnrolledDevices(ctx, "test", currentInvoker(true), true, true, func() { started = true })
+	if !errors.Is(err, context.Canceled) || !started {
+		t.Fatalf("run --service stopped during the wait = %v (started %v), want context.Canceled after running", err, started)
+	}
+
+	// Giving up the wait exits with ExitRunLocked.
+	serviceRunLockWait = 300 * time.Millisecond
+	t.Cleanup(func() { serviceRunLockWait = 30 * time.Second })
+	err = runEnrolledDevices(context.Background(), "test", currentInvoker(true), true, true, func() {})
+	var exitErr *service.ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != service.ExitRunLocked || !errors.Is(err, config.ErrRunLocked) {
+		t.Fatalf("run --service past its wait = %v, want ExitError %d wrapping ErrRunLocked", err, service.ExitRunLocked)
+	}
+	if err := held(); err != nil {
+		t.Fatal(err)
+	}
+
+	checkServiceBinary = func(string) error { return security.ErrUnsafeExecutable }
+	for _, asService := range []bool{false, true} {
+		if err := runEnrolledDevices(context.Background(), "test", currentInvoker(false), asService, true, notRunning); !errors.Is(err, security.ErrUnsafeExecutable) {
+			t.Fatalf("run (service %v) with an unsafe binary = %v, want ErrUnsafeExecutable", asService, err)
+		}
+	}
+}

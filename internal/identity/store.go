@@ -277,6 +277,23 @@ func (s *Store) Remove(ref Ref) error {
 	return nil
 }
 
+// RemoveDevices deletes every device credential directory, readable or not,
+// and returns their paths. Other credentials and the team directories stay.
+// Local only, as Remove.
+func (s *Store) RemoveDevices() ([]string, error) {
+	dirs, err := filepath.Glob(filepath.Join(s.Root, "*", string(KindDevice)+"-*"))
+	if err != nil {
+		return nil, fmt.Errorf("read identity store: %w", err)
+	}
+	for i, dir := range dirs {
+		if err := os.RemoveAll(dir); err != nil {
+			return dirs[:i], fmt.Errorf("remove %s: %w", dir, err)
+		}
+		s.forgetTicketKeys(dir)
+	}
+	return dirs, nil
+}
+
 // Resolve returns the one credential a selector names. An ambiguous selector
 // is an error.
 func (s *Store) Resolve(sel Selector) (Ref, error) {

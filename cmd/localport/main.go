@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/localport/agent/internal/cli"
 	"github.com/localport/agent/internal/security"
+	"github.com/localport/agent/internal/service"
 )
 
 // Populated via -ldflags at build time.
@@ -22,7 +25,17 @@ func main() {
 
 	app := cli.New(version, commit, date)
 	if err := app.Run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+		os.Exit(report(os.Stderr, err))
 	}
+}
+
+// report prints err, its code included, and returns the exit status: a
+// positive ExitError Code, else 1.
+func report(w io.Writer, err error) int {
+	fmt.Fprintln(w, "error:", err)
+	var exitErr *service.ExitError
+	if errors.As(err, &exitErr) && exitErr.Code > 0 {
+		return exitErr.Code
+	}
+	return 1
 }
