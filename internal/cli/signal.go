@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 )
 
@@ -20,18 +21,31 @@ func signalContext(onFirst func()) (context.Context, context.CancelFunc) {
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
+	// stopped ends the goroutine when the caller stops listening.
+	stopped := make(chan struct{})
 	go func() {
-		<-sig
+		select {
+		case <-sig:
+		case <-stopped:
+			return
+		}
 		if onFirst != nil {
 			onFirst()
 		}
 		cancel()
-		<-sig
-		os.Exit(forcedExitStatus)
+		select {
+		case <-sig:
+			os.Exit(forcedExitStatus)
+		case <-stopped:
+		}
 	}()
 
+	var once sync.Once
 	return ctx, func() {
-		signal.Stop(sig)
-		cancel()
+		once.Do(func() {
+			signal.Stop(sig)
+			close(stopped)
+			cancel()
+		})
 	}
 }
