@@ -178,3 +178,25 @@ func TestTheStoreFollowsThePrivilege(t *testing.T) {
 		t.Fatalf("privileged store = %+v, want %s/identity without following links", system, file.Base)
 	}
 }
+
+func TestFindDevice(t *testing.T) {
+	ref := func(id string) identity.Ref {
+		return identity.Ref{Team: "01kpq7x2abcd34", Kind: identity.KindDevice, Identity: id}
+	}
+	devices := []config.LocalDevice{{Identity: ref("factory.gw-01")}, {Identity: ref("plant.gw-01")}, {Identity: ref("plant.plc-02")}}
+	if i, err := findDevice(devices, "plc-02"); err != nil || i != 2 {
+		t.Fatalf("plc-02 = %d, %v", i, err)
+	}
+	if i, err := findDevice(devices, "plant.gw-01"); err != nil || i != 1 {
+		t.Fatalf("plant.gw-01 = %d, %v", i, err)
+	}
+	if i, err := findDevice(devices, ref("factory.gw-01").String()); err != nil || i != 0 {
+		t.Fatalf("full identity = %d, %v", i, err)
+	}
+	if _, err := findDevice(devices, "gw-01"); err == nil {
+		t.Fatal("an ambiguous name matched")
+	}
+	if _, err := findDevice(devices, "nope"); err == nil {
+		t.Fatal("an unknown name matched")
+	}
+}

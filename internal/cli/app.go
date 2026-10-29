@@ -28,6 +28,8 @@ func (a *App) Run(args []string) error {
 		return runConnect(a.version, args[1:])
 	case "run":
 		return runRun(a.version, args[1:])
+	case "set":
+		return runSet(args[1:])
 	case "service":
 		return runService(args[1:])
 	case "access":
@@ -60,6 +62,7 @@ func printMainUsage(w io.Writer) {
 Commands:
   connect   Enrol this machine as a fleet device, or run a config file
   run       Run every device enrolled on this machine
+  set       Change what an enrolled device allows
   service   Install or remove the device service (service install|uninstall)
   access    Reach a fleet device's ports through your client certificate
   setup     Redeem a setup token so this MACHINE can reach fleet devices
