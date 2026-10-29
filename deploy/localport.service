@@ -31,11 +31,9 @@ Environment=LOCALPORT_HOME=/var/lib/localport
 LoadCredential=token:/etc/localport/token
 Environment=LOCALPORT_TOKEN_FILE=%d/token
 
-; On a fleet device, the token file holds the fleet token and ExecStart joins
-; the fleet under the device's name. The dashboard sets the ports it serves;
-; --allow-ports caps them on this machine:
-;
-;   ExecStart=localport connect --region eu --name kiosk-0142
+; This unit runs an unprivileged tunnel. A fleet device does not use it:
+; `sudo localport connect <join-token>` enrols the machine and installs its
+; own service, localport-device.service.
 
 ; Found in /usr/bin (package) or /usr/local/bin (install script).
 ExecStart=localport http 8080

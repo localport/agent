@@ -79,7 +79,7 @@ Examples:
   localport --token <token> --local 192.168.1.13:3000 --region eu
   localport --token <token> --local tcp://192.168.1.13:11434 --region eu
 
-  # Run several tunnels and devices from one config file:
+  # Run several tunnels from one config file:
   localport connect --config localport.yaml
 
   # Enrol this machine as a fleet device with the command the dashboard shows:

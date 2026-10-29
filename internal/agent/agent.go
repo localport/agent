@@ -95,7 +95,6 @@ func (a *Agent) Run(ctx context.Context, handler tunnel.EventHandler) error {
 		opts := tunnel.Options{
 			Label:        device.Name,
 			Kind:         proto.KindDevice,
-			Token:        device.Token,
 			Edge:         device.Edge,
 			Host:         device.Host,
 			ClientName:   device.Name,

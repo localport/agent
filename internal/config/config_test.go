@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,8 +17,7 @@ func writeConfig(t *testing.T, body string) string {
 	return path
 }
 
-func TestLoadReadsTunnelsAndDevices(t *testing.T) {
-	t.Setenv("FLEET_TOKEN", "fleet-token")
+func TestLoadReadsTunnels(t *testing.T) {
 	path := writeConfig(t, `
 version: 1
 tunnels:
@@ -27,19 +27,13 @@ tunnels:
   - name: db
     token: tunnel-token
     upstream: tcp://localhost:5432
-fleets:
-  - token: ${FLEET_TOKEN}
-    devices:
-      - name: hub
-      - name: plc-01
-        host: 192.168.1.100
 `)
 
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if len(cfg.Tunnels) != 2 || len(cfg.Devices) != 2 {
+	if len(cfg.Tunnels) != 2 || len(cfg.Devices) != 0 {
 		t.Fatalf("got %d tunnels and %d devices", len(cfg.Tunnels), len(cfg.Devices))
 	}
 	if cfg.Tunnels[0].Protocol != "http" || cfg.Tunnels[0].Local != "localhost:8080" {
@@ -48,14 +42,7 @@ fleets:
 	if cfg.Tunnels[1].Protocol != "tcp" {
 		t.Fatalf("tunnel 2 protocol = %q", cfg.Tunnels[1].Protocol)
 	}
-	// A device with no host serves this machine.
-	if cfg.Devices[0].Host != DefaultDeviceHost {
-		t.Fatalf("device 1 host = %q", cfg.Devices[0].Host)
-	}
-	if cfg.Devices[1].Host != "192.168.1.100" || cfg.Devices[1].Token != "fleet-token" {
-		t.Fatalf("device 2 = %+v", cfg.Devices[1])
-	}
-	if cfg.Total() != 4 {
+	if cfg.Total() != 2 {
 		t.Fatalf("total = %d", cfg.Total())
 	}
 }
@@ -68,12 +55,6 @@ func TestLoadRefusesBadFiles(t *testing.T) {
 		{"version 2", "version: 2\ntunnels: []\n"},
 		{"nothing to run", "version: 1\n"},
 		{"tunnel without upstream", "version: 1\ntunnels:\n  - name: api\n    token: t\n"},
-		{"fleet without devices", "version: 1\nfleets:\n  - token: t\n    devices: []\n"},
-		{"duplicate device", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n      - name: GW\n"},
-		{"host with port", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        host: 10.0.0.2:502\n"},
-		{"host with scheme", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        host: tcp://10.0.0.2\n"},
-		{"allow_ports out of range", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        allow_ports: [70000]\n"},
-		{"allow_ports reversed range", "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        allow_ports: [\"100-90\"]\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,28 +65,20 @@ func TestLoadRefusesBadFiles(t *testing.T) {
 	}
 }
 
-// A bare IPv6 device host is not parsed as host:port.
-func TestDeviceHostAcceptsIPv6(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        host: fd00::1\n"))
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if cfg.Devices[0].Host != "fd00::1" {
-		t.Fatalf("host = %q", cfg.Devices[0].Host)
-	}
-}
-
-// allow_ports takes bare ports and quoted ranges in one list.
-func TestDeviceAllowPortsFromYAML(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n        allow_ports: [502, 80, \"8000-8100\"]\n      - name: open\n"))
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if got := cfg.Devices[0].AllowPorts.String(); got != "80,502,8000-8100" {
-		t.Errorf("allow_ports = %q", got)
-	}
-	if cfg.Devices[1].AllowPorts != nil {
-		t.Error("a device without allow_ports must have no ceiling")
+// A fleet section is refused with the retired-token message, whatever it
+// holds, before the version is looked at.
+func TestLoadRefusesAFleetToken(t *testing.T) {
+	for _, body := range []string{
+		"version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n",
+		"version: 1\ntunnels:\n  - name: api\n    token: t\n    upstream: http://localhost:8080\nfleets:\n  - token: t\n",
+		"version: 1\nfleets: {}\n",
+		"version: 1\nfleets:\n",
+		// An unset variable fails interpolation; the fleet is the real error.
+		"version: 1\nfleets:\n  - token: ${LOCALPORT_TEST_UNSET_FLEET_TOKEN:?set it}\n",
+	} {
+		if _, err := Load(writeConfig(t, body)); !errors.Is(err, ErrFleetTokenRetired) {
+			t.Fatalf("Load(%q) = %v, want ErrFleetTokenRetired", body, err)
+		}
 	}
 }
 
@@ -209,11 +182,6 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	cases := []struct {
 		name, yaml, want string
 	}{
-		{
-			name: "device host typo",
-			yaml: "version: 1\nfleets:\n  - token: tok\n    devices:\n      - name: plc-01\n        hosts: 192.168.1.100\n",
-			want: "hosts",
-		},
 		{
 			name: "tunnel upstream typo",
 			yaml: "version: 1\ntunnels:\n  - name: web\n    token: tok\n    upsteam: http://localhost:3000\n",
