@@ -307,6 +307,9 @@ func TestServeMuxAdvertisesStreamLimitAndWindows(t *testing.T) {
 			if v, ok := f.Value(http2.SettingInitialWindowSize); !ok || v != muxUploadBufferPerStream {
 				t.Errorf("INITIAL_WINDOW_SIZE = %d, want %d", v, muxUploadBufferPerStream)
 			}
+			if v, ok := f.Value(http2.SettingMaxFrameSize); !ok || v != muxMaxReadFrameSize {
+				t.Errorf("MAX_FRAME_SIZE = %d, want %d", v, muxMaxReadFrameSize)
+			}
 		case *http2.WindowUpdateFrame:
 			if f.StreamID != 0 {
 				continue

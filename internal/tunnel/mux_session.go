@@ -27,6 +27,10 @@ const (
 	muxUploadBufferPerConnection = 16 << 20
 	muxUploadBufferPerStream     = 4 << 20
 
+	// muxMaxReadFrameSize is the largest frame the agent accepts, the HTTP/2
+	// minimum (RFC 9113 §6.5.2).
+	muxMaxReadFrameSize = 16 << 10
+
 	// Timeout for the bind exchange.
 	muxBindTimeout = 10 * time.Second
 
@@ -254,7 +258,10 @@ func (t *Tunnel) serveMux(conn net.Conn) {
 		Handler:   handler,
 		Protocols: &protocols,
 		HTTP2: &http.HTTP2Config{
-			MaxConcurrentStreams:          maxConcurrentDataConns,
+			MaxConcurrentStreams: maxConcurrentDataConns,
+			// The edge's HTTP/2 client holds a request-body buffer of this size
+			// for every open stream (golang/go#79831), so keep it at the minimum.
+			MaxReadFrameSize:              muxMaxReadFrameSize,
 			MaxReceiveBufferPerConnection: muxUploadBufferPerConnection,
 			MaxReceiveBufferPerStream:     muxUploadBufferPerStream,
 		},

@@ -92,8 +92,9 @@ type RegisterPayload struct {
 	ResumeSessionID string `json:"resume_session_id,omitempty"`
 
 	// Capabilities (terminal, files, desktop), Logins and Desktop (rdp, vnc)
-	// are what a device enabled in its local config. Display only: the agent
-	// enforces them.
+	// are what a device enabled in its local config. The agent enforces them;
+	// the API's session mint also refuses a kind whose capability or desktop
+	// protocol is not listed.
 	Capabilities []string `json:"capabilities,omitempty"`
 	Logins       []string `json:"logins,omitempty"`
 	Desktop      []string `json:"desktop,omitempty"`

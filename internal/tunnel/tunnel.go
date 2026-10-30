@@ -194,7 +194,8 @@ type Options struct {
 	// and carries a renewed one from pending to current. Nil on a tunnel.
 	Credential DeviceCredential
 	// Capabilities, Logins and Desktop are what the device enabled locally,
-	// reported on Register for display.
+	// reported on Register. The agent enforces them; the API's session mint
+	// also refuses a kind whose capability or desktop protocol is not listed.
 	Capabilities []string
 	Logins       []string
 	Desktop      []string

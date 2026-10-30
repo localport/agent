@@ -90,8 +90,9 @@ TLS client certificate of the connection (see
 [Device registration](#device-registration)); a device Register on a
 connection without one is refused.
 
-A device also reports what its local config enables, for display only; the
-agent enforces it:
+A device also reports what its local config enables. The agent enforces it;
+the API's session mint also refuses a kind whose capability or desktop
+protocol is not reported:
 
 ```json
 { "capabilities": ["terminal", "files", "desktop"], "logins": ["pi"], "desktop": ["rdp", "vnc"] }
@@ -365,7 +366,13 @@ secondaries of a fanout tunnel. The visitor's address travels in the
 `Localport-Visitor-Addr` header on each stream.
 
 The edge decides per inbound connection: a stream when the agent has a live
-port mux, a `NewConnection` dial-back otherwise.
+port mux with room for one more stream, a `NewConnection` dial-back
+otherwise. The edge holds at most 64 open streams per port mux, whatever
+`SETTINGS_MAX_CONCURRENT_STREAMS` the agent advertises.
+
+The agent's port mux server advertises `SETTINGS_MAX_FRAME_SIZE` 16384, the
+HTTP/2 minimum. The edge keeps a request-body buffer of that size for every
+open stream, so a larger value raises the edge's memory per stream.
 
 ## Lifecycle
 
