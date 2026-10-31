@@ -70,6 +70,11 @@ type DeviceSpec struct {
 	Capabilities []string
 	Logins       []string
 	Desktop      []string
+	// SessionAuth, RunAsAgent and FullDiskAccess are reported on Register for
+	// display: the launcher's probe and the run_as_agent opt-in.
+	SessionAuth    string
+	RunAsAgent     bool
+	FullDiskAccess string
 	// SessionHandler serves the device's sessions; nil leaves them off.
 	SessionHandler tunnel.SessionHandler
 	// HintRevoked receives the ticket key ids a RegisterAck names revoked.

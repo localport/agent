@@ -9,12 +9,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
@@ -39,6 +39,10 @@ var ErrLoginsWithoutSession = errcode.New(errcode.LoginsWithoutSession)
 // ErrSessionWithoutLogins refuses terminal or files on a device that names no
 // login to run them as.
 var ErrSessionWithoutLogins = errcode.New(errcode.SessionWithoutLogins)
+
+// ErrRunAsAgentLogins refuses logins on a device whose sessions run as the
+// agent account.
+var ErrRunAsAgentLogins = errcode.New(errcode.RunAsAgentLogins)
 
 // ErrDesktopWithoutTarget refuses desktop on a device with no rdp or vnc
 // target.
@@ -79,9 +83,8 @@ const (
 // MaxLogins bounds the logins one device accepts.
 const MaxLogins = 16
 
-// loginPattern is the portable POSIX login grammar the control plane also
-// enforces on agent-reported logins.
-var loginPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+// MaxLoginLen bounds a login in bytes, as the control plane does.
+const MaxLoginLen = 255
 
 // LocalConfig is the device configuration this machine's administrator owns.
 // The agent enforces it on every session; nothing from the network widens it.
@@ -104,6 +107,9 @@ type LocalDevice struct {
 	// RDP and VNC are desktop targets as HOST:PORT. Empty means none.
 	RDP string
 	VNC string
+	// RunAsAgent runs terminal and files sessions as the agent account,
+	// without PAM, for hosts with no usable login. Logins is then empty.
+	RunAsAgent bool
 }
 
 // LocalConfigFile locates the local config and the private directory walk
@@ -115,6 +121,11 @@ type LocalConfigFile struct {
 	// for the system-wide directory.
 	Base       string
 	FollowBase bool
+	// System marks the root-owned device directory on Unix: it is checked and
+	// written with the security system file functions (root:localport 0750
+	// directory, 0640 agent.yaml) and never walked by the private directory
+	// walk. Always false on Windows.
+	System bool
 }
 
 // LockPath is the lock file LockLocal holds beside the config.
@@ -140,7 +151,7 @@ func systemLocalConfig(goos, programData string) (LocalConfigFile, error) {
 	default:
 		dir = filepath.Join("/etc", security.DeviceDirName)
 	}
-	return LocalConfigFile{Path: filepath.Join(dir, localConfigName), Base: dir}, nil
+	return LocalConfigFile{Path: filepath.Join(dir, localConfigName), Base: dir, System: goos != "windows"}, nil
 }
 
 // UserLocalConfig is the config of an agent run by an unprivileged user:
@@ -176,17 +187,31 @@ type localDeviceFile struct {
 	FilesRoot  string   `yaml:"files_root,omitempty"`
 	RDP        string   `yaml:"rdp,omitempty"`
 	VNC        string   `yaml:"vnc,omitempty"`
+	RunAsAgent bool     `yaml:"run_as_agent,omitempty"`
 }
 
 // LoadLocal reads and validates the local config. The directory walk and the
 // file read refuse a symlink, a file or directory owned by another account,
 // and a file group or other can reach (on Windows, a DACL granting anyone
 // else). A missing file returns an error wrapping fs.ErrNotExist.
+//
+// The system config (System) instead needs a root-owned directory nobody else
+// can write and a root-owned regular file that group and other cannot write
+// and other cannot read; the agent account reads it through its group.
 func LoadLocal(f LocalConfigFile) (*LocalConfig, error) {
-	if err := security.CheckPrivateDir(f.Base, filepath.Dir(f.Path), f.FollowBase); err != nil {
-		return nil, fmt.Errorf("local config %s: %w", f.Path, err)
+	var raw []byte
+	var err error
+	if f.System {
+		if err := security.CheckSystemDir(filepath.Dir(f.Path)); err != nil {
+			return nil, fmt.Errorf("local config %s: %w", f.Path, err)
+		}
+		raw, err = security.ReadSystemFile(f.Path)
+	} else {
+		if err := security.CheckPrivateDir(f.Base, filepath.Dir(f.Path), f.FollowBase); err != nil {
+			return nil, fmt.Errorf("local config %s: %w", f.Path, err)
+		}
+		raw, err = security.ReadPrivateFile(f.Path)
 	}
-	raw, err := security.ReadPrivateFile(f.Path)
 	if err != nil {
 		return nil, fmt.Errorf("local config: %w", err)
 	}
@@ -244,6 +269,7 @@ func decodeLocal(raw []byte, goos string) (*LocalConfig, error) {
 			FilesRoot:  d.FilesRoot,
 			RDP:        d.RDP,
 			VNC:        d.VNC,
+			RunAsAgent: d.RunAsAgent,
 		})
 	}
 	if err := cfg.validate(goos); err != nil {
@@ -273,10 +299,65 @@ func WriteLocal(f LocalConfigFile, cfg *LocalConfig, changed identity.Ref) error
 	if err != nil {
 		return err
 	}
-	if err := security.EnsurePrivateDir(f.Base, filepath.Dir(f.Path), f.FollowBase); err != nil {
-		return fmt.Errorf("local config %s: %w", f.Path, err)
+	if !f.System {
+		if err := security.EnsurePrivateDir(f.Base, filepath.Dir(f.Path), f.FollowBase); err != nil {
+			return fmt.Errorf("local config %s: %w", f.Path, err)
+		}
+		return security.WritePrivateFileAtomic(f.Path, raw)
 	}
-	return security.WritePrivateFileAtomic(f.Path, raw)
+	gid, err := ensureSystemDir(f)
+	if err != nil {
+		return err
+	}
+	return security.WriteSystemFileAtomic(f.Path, raw, gid)
+}
+
+// geteuid and agentGroupID are os.Geteuid and security.AgentGroupID; tests
+// replace them to act as root with their own group.
+var (
+	geteuid      = os.Geteuid
+	agentGroupID = security.AgentGroupID
+)
+
+// ErrSystemNotRoot refuses a change to the system config directory by any
+// account but root.
+var ErrSystemNotRoot = errors.New("only root changes the device config directory")
+
+// SystemInstallCommand creates the agent account and group.
+const SystemInstallCommand = "sudo localport service install"
+
+// systemWriter reports whether this process owns the system files (root).
+func systemWriter() bool { return geteuid() == security.SystemOwner() }
+
+// ensureSystemDir creates or secures the system config directory as
+// root:localport 0750 and returns the group's gid. A missing group wraps
+// security.ErrAgentGroupMissing and names SystemInstallCommand.
+func ensureSystemDir(f LocalConfigFile) (int, error) {
+	if !systemWriter() {
+		return 0, fmt.Errorf("local config %s: %w", f.Path, ErrSystemNotRoot)
+	}
+	gid, err := agentGroupID()
+	if errors.Is(err, security.ErrAgentGroupMissing) {
+		return 0, fmt.Errorf("local config %s: %w; create it with: %s", f.Path, err, SystemInstallCommand)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if err := security.EnsureSystemDir(filepath.Dir(f.Path), gid); err != nil {
+		return 0, fmt.Errorf("local config %s: %w", f.Path, err)
+	}
+	return gid, nil
+}
+
+// EnsureSystemRunLock creates or secures the system config directory and its
+// run.lock (root:localport 0660), so the agent account can lock it. Root
+// only; install and connect run it before the agent service starts.
+func EnsureSystemRunLock(f LocalConfigFile) error {
+	lock, err := openLock(f, f.RunLockPath())
+	if err != nil {
+		return err
+	}
+	return lock.Close()
 }
 
 func (c *LocalConfig) marshal() ([]byte, error) {
@@ -295,6 +376,7 @@ func (c *LocalConfig) marshal() ([]byte, error) {
 			FilesRoot:  d.FilesRoot,
 			RDP:        d.RDP,
 			VNC:        d.VNC,
+			RunAsAgent: d.RunAsAgent,
 		}
 	}
 	raw, err := yaml.Marshal(&lf)
@@ -389,7 +471,10 @@ func (d LocalDevice) validateSettings(name, goos string) error {
 	if len(d.Logins) > 0 && !d.UsesLogins() {
 		return fmt.Errorf("device %s: %w", name, ErrLoginsWithoutSession)
 	}
-	if len(d.Logins) == 0 && d.UsesLogins() {
+	if d.RunAsAgent && len(d.Logins) > 0 {
+		return fmt.Errorf("device %s: %w", name, ErrRunAsAgentLogins)
+	}
+	if len(d.Logins) == 0 && d.UsesLogins() && !d.RunAsAgent {
 		return fmt.Errorf("device %s: %w", name, ErrSessionWithoutLogins)
 	}
 	if slices.Contains(d.Enable, CapabilityDesktop) && d.RDP == "" && d.VNC == "" {
@@ -415,7 +500,7 @@ func (d LocalDevice) validateSettings(name, goos string) error {
 func (d LocalDevice) Equal(o LocalDevice) bool {
 	return d.Identity == o.Identity && d.Host == o.Host && d.AllowPorts.String() == o.AllowPorts.String() &&
 		slices.Equal(d.Enable, o.Enable) && slices.Equal(d.Logins, o.Logins) &&
-		d.FilesRoot == o.FilesRoot && d.RDP == o.RDP && d.VNC == o.VNC
+		d.FilesRoot == o.FilesRoot && d.RDP == o.RDP && d.VNC == o.VNC && d.RunAsAgent == o.RunAsAgent
 }
 
 // UsesLogins reports whether d enables a session kind that runs as a login:
@@ -425,16 +510,33 @@ func (d LocalDevice) UsesLogins() bool {
 }
 
 // ValidLogin reports whether name follows the login grammar the control plane
-// also enforces.
-func ValidLogin(name string) bool { return loginPattern.MatchString(name) }
+// also enforces: systemd's relaxed user-name rule (systemd.io/USER_NAMES;
+// user-util.c valid_user_group_name with VALID_USER_RELAX): not empty, valid
+// UTF-8, no control character, no ':' or '/', no leading or trailing space, not
+// all digits, not '-' followed only by digits, not "." or "..". It also refuses
+// ',', the --logins separator, and bounds the length. Whether the account
+// exists is the host's lookup to decide.
+func ValidLogin(name string) bool {
+	if name == "" || len(name) > MaxLoginLen || !utf8.ValidString(name) ||
+		name == "." || name == ".." || name[0] == ' ' || name[len(name)-1] == ' ' ||
+		strings.ContainsAny(name, ":/,") || strings.Trim(strings.TrimPrefix(name, "-"), "0123456789") == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if name[i] < ' ' || name[i] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
 
 func validLogins(logins []string) error {
 	if len(logins) > MaxLogins {
 		return fmt.Errorf("%d logins, over the limit of %d", len(logins), MaxLogins)
 	}
 	for i, l := range logins {
-		if !loginPattern.MatchString(l) {
-			return fmt.Errorf("login %q is not a valid user name (lowercase letters, digits, _ and -, starting with a letter or _, at most 32 characters)", security.SanitizeDisplay(l))
+		if !ValidLogin(l) {
+			return fmt.Errorf("login %q is not a valid user name (no ':', '/', ',' or control characters, not all digits, no leading or trailing space, at most %d bytes)", security.SanitizeDisplay(l), MaxLoginLen)
 		}
 		if slices.Contains(logins[:i], l) {
 			return fmt.Errorf("login %q is listed twice", l)
@@ -471,7 +573,8 @@ func validDesktopTarget(value string) error {
 const localLockWait = 2 * time.Minute
 
 // LockLocal takes the local config's write lock, agent.yaml.lock beside it,
-// creating the directory owner-only when missing. set holds it across its
+// creating the directory owner-only when missing (for the system config, root
+// only, see openLock). set holds it across its
 // read-modify-write, and connect from its re-read after enrolment to its
 // write, so neither drops the other's entry. It waits up to localLockWait.
 // A process that also holds run.lock takes run.lock first (see LockRun).
@@ -496,7 +599,9 @@ func (f LocalConfigFile) RunLockPath() string {
 }
 
 // LockRun takes the exclusive run.lock of the config directory, creating the
-// directory owner-only when missing, so only one process serves the devices
+// directory owner-only when missing (for the system config, root creates both
+// and the agent account opens the existing run.lock), so only one process
+// serves the devices
 // of a config. It waits up to wait (zero tries once) and then returns
 // ErrRunLocked. The holder records its PID in the file (RunLockHolder). The
 // lock file is opened close-on-exec (not inheritable on Windows), so session
@@ -570,10 +675,7 @@ const lockPoll = 200 * time.Millisecond
 // another process still holds the lock at the deadline; the file is then
 // closed.
 func lockBeside(ctx context.Context, f LocalConfigFile, path string, wait time.Duration) (lock *os.File, held bool, err error) {
-	if err := security.EnsurePrivateDir(f.Base, filepath.Dir(f.Path), f.FollowBase); err != nil {
-		return nil, false, fmt.Errorf("local config %s: %w", f.Path, err)
-	}
-	lock, err = security.OpenLockFile(path)
+	lock, err = openLock(f, path)
 	if err != nil {
 		return nil, false, err
 	}
@@ -598,6 +700,38 @@ func lockBeside(ctx context.Context, f LocalConfigFile, path string, wait time.D
 		case <-time.After(lockPoll):
 		}
 	}
+}
+
+// openLock opens the lock file path beside the config. For the system config,
+// root creates or secures the directory and the lock (run.lock root:localport
+// 0660, agent.yaml.lock 0600); any other account only checks the directory and
+// opens the existing run.lock.
+func openLock(f LocalConfigFile, path string) (*os.File, error) {
+	if !f.System {
+		if err := security.EnsurePrivateDir(f.Base, filepath.Dir(f.Path), f.FollowBase); err != nil {
+			return nil, fmt.Errorf("local config %s: %w", f.Path, err)
+		}
+		return security.OpenLockFile(path)
+	}
+	runLock := path == f.RunLockPath()
+	if systemWriter() {
+		gid, err := ensureSystemDir(f)
+		if err != nil {
+			return nil, err
+		}
+		perm := security.SystemConfigLockPerm
+		if runLock {
+			perm = security.SystemRunLockPerm
+		}
+		return security.OpenSystemLock(path, gid, perm)
+	}
+	if !runLock {
+		return nil, fmt.Errorf("local config %s: %w", f.Path, ErrSystemNotRoot)
+	}
+	if err := security.CheckSystemDir(filepath.Dir(f.Path)); err != nil {
+		return nil, fmt.Errorf("local config %s: %w", f.Path, err)
+	}
+	return security.OpenSystemRunLock(path)
 }
 
 func unlockAndClose(lock *os.File) error {

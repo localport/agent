@@ -67,6 +67,7 @@ const (
 	DesktopWithoutTarget Code = "AG026"
 	FilesRootMissing     Code = "AG027"
 	InvalidLocalConfig   Code = "AG028"
+	RunAsAgentLogins     Code = "AG029"
 
 	NoDevice         Code = "AG031"
 	NoDeviceStarts   Code = "AG032"
@@ -117,6 +118,7 @@ var registry = []Entry{
 	{DesktopWithoutTarget, "Desktop without target", "desktop needs an rdp or vnc target"},
 	{FilesRootMissing, "Files root missing", "files root is not an existing directory"},
 	{InvalidLocalConfig, "Invalid local config", "invalid local config"},
+	{RunAsAgentLogins, "Logins with run_as_agent", "a device that runs sessions as the agent account names no logins"},
 
 	{NoDevice, "No enrolled device", "no enrolled device"},
 	{NoDeviceStarts, "No device can start", "no enrolled device can start: every device's credential is missing or unreadable (see above)"},

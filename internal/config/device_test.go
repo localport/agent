@@ -227,9 +227,13 @@ func TestLocalConfigValidation(t *testing.T) {
 		{"host with port", device("    host: 10.0.0.2:502\n"), "linux", "host takes an address without a port"},
 		{"host with scheme", device("    host: tcp://10.0.0.2\n"), "linux", "host takes an address without a scheme"},
 		{"allow_ports out of range", device("    allow_ports: 70000\n"), "linux", "allow_ports:"},
-		{"login with uppercase", device("    logins: [Pi]\n"), "linux", `login "Pi" is not a valid user name`},
-		{"login starting with a digit", device("    logins: [1pi]\n"), "linux", `login "1pi" is not a valid user name`},
-		{"login too long", device("    logins: [" + strings.Repeat("a", 33) + "]\n"), "linux", "is not a valid user name"},
+		{"login of digits only", device("    logins: ['1000']\n"), "linux", `login "1000" is not a valid user name`},
+		{"login of a dash and digits", device("    logins: ['-1']\n"), "linux", `login "-1" is not a valid user name`},
+		{"login with a colon", device("    logins: ['a:b']\n"), "linux", `login "a:b" is not a valid user name`},
+		{"login with a comma", device("    logins: ['a,b']\n"), "linux", `login "a,b" is not a valid user name`},
+		{"login with a leading space", device("    logins: [' pi']\n"), "linux", "is not a valid user name"},
+		{"login dot", device("    logins: ['.']\n"), "linux", `login "." is not a valid user name`},
+		{"login too long", device("    logins: [" + strings.Repeat("a", 256) + "]\n"), "linux", "is not a valid user name"},
 		{"login with a slash", device("    logins: [a/b]\n"), "linux", `login "a/b" is not a valid user name`},
 		{"duplicate login", device("    logins: [pi, pi]\n"), "linux", `login "pi" is listed twice`},
 		{"17 logins", device("    logins: [" + strings.Join(logins17, ", ") + "]\n"), "linux", "17 logins, over the limit of 16"},
@@ -311,8 +315,8 @@ func TestSystemLocalConfigPaths(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if f.Path != want || f.Base != filepath.Dir(want) || f.FollowBase {
-			t.Errorf("%s: %+v, want %s with its own directory as an unfollowed base", goos, f, want)
+		if f.Path != want || f.Base != filepath.Dir(want) || f.FollowBase || f.System != (goos != "windows") {
+			t.Errorf("%s: %+v, want %s with its own directory as an unfollowed base, System off Windows", goos, f, want)
 		}
 	}
 	if _, err := systemLocalConfig("windows", ""); err == nil {

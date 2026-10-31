@@ -1,0 +1,239 @@
+// Package launcher is the privilege boundary between the unprivileged network
+// agent and the root session launcher, `localport-session launcher`.
+//
+// The agent connects to the launcher's Unix socket, sends one Request (with
+// the session channel's file descriptor attached for a session kind) and
+// reads Responses until the connection ends. The launcher authorizes the
+// connection by the peer's uid, re-reads the root-owned device config,
+// refuses anything that config does not enable, and starts one
+// `localport-session helper` per session. The helper and the agent then talk
+// over the channel descriptor with the frames in frame.go; the launcher never
+// sees session bytes.
+//
+// Every message on the request connection is a 4-byte big-endian length and
+// a JSON object. The launcher never parses anything but these typed fields.
+package launcher
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"regexp"
+)
+
+// Version is the request schema version. A launcher refuses any other.
+const Version = 1
+
+// AgentAccount is the system account the network agent runs as: the only
+// peer the launcher serves, and the login of a run_as_agent session.
+const AgentAccount = "localport"
+
+// MaxMessage bounds one request or response body in bytes.
+const MaxMessage = 4 << 10
+
+// Kinds a request may carry.
+const (
+	KindTerminal = "terminal"
+	KindExec     = "exec"
+	KindSFTP     = "sftp"
+	KindProbe    = "probe"
+)
+
+// Refusal codes. The agent maps each to a session error code.
+const (
+	CodeBadRequest         = "bad_request"
+	CodeUnsupportedKind    = "unsupported_kind"
+	CodeDeviceUnknown      = "device_unknown"
+	CodeKindNotEnabled     = "kind_not_enabled"
+	CodeLoginNotEnabled    = "login_not_enabled"
+	CodeBusy               = "busy"
+	CodeAccountUnavailable = "account_unavailable"
+	CodeAccountRefused     = "account_refused"
+	CodePAMFailed          = "pam_failed"
+	CodeSpawnFailed        = "spawn_failed"
+	CodeConfigUnreadable   = "config_unreadable"
+	CodeInternal           = "internal"
+)
+
+// Full Disk Access states a probe reports.
+const (
+	FullDiskAccessGranted = "granted"
+	FullDiskAccessDenied  = "denied"
+	FullDiskAccessUnknown = "unknown"
+)
+
+// Request is the one message an agent sends per connection.
+type Request struct {
+	V      int    `json:"v"`
+	Kind   string `json:"kind"`
+	Device string `json:"device,omitempty"`
+	Login  string `json:"login,omitempty"`
+	Cols   int    `json:"cols,omitempty"`
+	Rows   int    `json:"rows,omitempty"`
+	Term   string `json:"term,omitempty"`
+}
+
+// Limits a session request's fields must meet.
+const (
+	maxTerminalSize = 1000
+	maxDeviceRef    = 128
+	maxLogin        = 256
+)
+
+var termPattern = regexp.MustCompile(`^[a-zA-Z0-9.+-]{1,32}$`)
+
+// Validate checks the fields of a request for its kind, without the config.
+// A request for a kind phase 10 does not serve fails with
+// CodeUnsupportedKind.
+func (r Request) Validate() error {
+	if r.V != Version {
+		return Refusal(CodeBadRequest)
+	}
+	switch r.Kind {
+	case KindProbe:
+		if r.Device != "" || r.Login != "" || r.Cols != 0 || r.Rows != 0 || r.Term != "" {
+			return Refusal(CodeBadRequest)
+		}
+		return nil
+	case KindTerminal:
+	case KindExec, KindSFTP:
+		return Refusal(CodeUnsupportedKind)
+	default:
+		return Refusal(CodeBadRequest)
+	}
+	switch {
+	case r.Device == "" || len(r.Device) > maxDeviceRef,
+		r.Login == "" || len(r.Login) > maxLogin,
+		r.Cols < 1 || r.Cols > maxTerminalSize,
+		r.Rows < 1 || r.Rows > maxTerminalSize,
+		!termPattern.MatchString(r.Term):
+		return Refusal(CodeBadRequest)
+	}
+	return nil
+}
+
+// Response is one launcher message. Exactly one field is set.
+type Response struct {
+	Started *Started `json:"started,omitempty"`
+	Refused *Refused `json:"refused,omitempty"`
+	Probe   *Probe   `json:"probe,omitempty"`
+	Exit    *Exit    `json:"exit,omitempty"`
+}
+
+// Started reports a helper that passed account and session setup and
+// started the login's process.
+type Started struct {
+	SessionID string `json:"session_id"`
+}
+
+// Refused is a typed refusal.
+type Refused struct {
+	Code string `json:"code"`
+}
+
+// Probe reports what the launcher can offer sessions on this host.
+type Probe struct {
+	PAM            bool   `json:"pam"`
+	FullDiskAccess string `json:"full_disk_access"`
+}
+
+// Exit is the helper's exit as the launcher reaped it.
+type Exit struct {
+	Status int `json:"status"`
+	Signal int `json:"signal,omitempty"`
+}
+
+// RefusalError is a refusal carried as an error; errors.As finds it.
+type RefusalError struct{ Code string }
+
+func (e *RefusalError) Error() string { return "launcher refused: " + e.Code }
+
+// Refusal returns a RefusalError for code.
+func Refusal(code string) error { return &RefusalError{Code: code} }
+
+// CodeOf returns the refusal code err carries, or CodeInternal.
+func CodeOf(err error) string {
+	var r *RefusalError
+	if errors.As(err, &r) {
+		return r.Code
+	}
+	return CodeInternal
+}
+
+// errMessageTooLarge refuses a message over MaxMessage.
+var errMessageTooLarge = errors.New("launcher: message too large")
+
+// encode returns v as one length-prefixed message.
+func encode(v any) ([]byte, error) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > MaxMessage {
+		return nil, errMessageTooLarge
+	}
+	out := make([]byte, 4, 4+len(body))
+	binary.BigEndian.PutUint32(out, uint32(len(body)))
+	return append(out, body...), nil
+}
+
+// writeMessage writes v as one length-prefixed message.
+func writeMessage(w io.Writer, v any) error {
+	b, err := encode(v)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(b)
+	return err
+}
+
+// readBody reads one length-prefixed body.
+func readBody(r io.Reader) ([]byte, error) {
+	var hdr [4]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, err
+	}
+	n := binary.BigEndian.Uint32(hdr[:])
+	if n == 0 || n > MaxMessage {
+		return nil, errMessageTooLarge
+	}
+	body := make([]byte, n)
+	if _, err := io.ReadFull(r, body); err != nil {
+		return nil, fmt.Errorf("launcher: short message: %w", err)
+	}
+	return body, nil
+}
+
+// decodeRequest decodes a request body strictly: unknown fields and trailing
+// data are refused.
+func decodeRequest(body []byte) (Request, error) {
+	var req Request
+	if err := decodeStrict(body, &req); err != nil {
+		return Request{}, Refusal(CodeBadRequest)
+	}
+	return req, nil
+}
+
+// readResponse reads and decodes one response.
+func readResponse(r io.Reader) (Response, error) {
+	body, err := readBody(r)
+	if err != nil {
+		return Response{}, err
+	}
+	var resp Response
+	if err := decodeStrict(body, &resp); err != nil {
+		return Response{}, fmt.Errorf("launcher: bad response: %w", err)
+	}
+	set := 0
+	for _, p := range []bool{resp.Started != nil, resp.Refused != nil, resp.Probe != nil, resp.Exit != nil} {
+		if p {
+			set++
+		}
+	}
+	if set != 1 {
+		return Response{}, errors.New("launcher: bad response: exactly one field must be set")
+	}
+	return resp, nil
+}

@@ -29,6 +29,7 @@ terminal sessions, AG06x recordings, AG07x network.
 | AG025 | Terminal or files without logins | Name at least one login with `--logins`. |
 | AG026 | Desktop without target | Give desktop a target with `--rdp` or `--vnc`. |
 | AG027 | Files root missing | The files root must be an existing directory. Mount or create it, or change it with `localport set`. |
+| AG029 | Logins with run_as_agent | A device with `run_as_agent: true` runs terminal and files sessions as the agent account `localport`, so it lists no logins. Remove `--logins`, or drop `--run-as-agent` on a host with usable logins. |
 | AG028 | Invalid local config | The local config failed validation; the message names the field. Every command that reads it refuses the same way, `localport set` included, so correct `agent.yaml` by hand: in `$LOCALPORT_HOME` (or `~/.localport`), or as root in the machine-wide config directory. |
 | AG031 | No enrolled device | The machine-wide config lists no device. Enrol one with `sudo localport connect <join-token>`. |
 | AG032 | No device can start | Every enrolled device's credential is missing or unreadable; the lines above name each one. Create a new join command in the dashboard for each device and run it. |
