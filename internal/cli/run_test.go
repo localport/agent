@@ -16,7 +16,7 @@ func TestRunRefusesWhenNoDeviceCanStart(t *testing.T) {
 	base := t.TempDir()
 	store := &identity.Store{Root: filepath.Join(base, "identity"), Base: base, BaseChosen: true}
 	missing := config.LocalDevice{Identity: identity.Ref{Team: "01kpq7x2abcd34", Kind: identity.KindDevice, Identity: "factory.gw-01"}}
-	if err := serveDevices(context.Background(), "test", store, []config.LocalDevice{missing}, true, false); !errors.Is(err, errNoDeviceStarts) {
+	if err := serveDevices(context.Background(), "test", store, []config.LocalDevice{missing}, true, false, nil); !errors.Is(err, errNoDeviceStarts) {
 		t.Fatalf("serveDevices = %v, want errNoDeviceStarts", err)
 	}
 }

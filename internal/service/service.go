@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/localport/agent/internal/errcode"
+	"github.com/localport/agent/internal/launcher"
 	"github.com/localport/agent/internal/security"
 )
 
@@ -49,6 +50,12 @@ type Manager interface {
 	Install(ctx context.Context, exe string) error
 	// Restart restarts the installed service.
 	Restart(ctx context.Context) error
+	// Stop stops the agent service and returns once it has stopped; the
+	// launcher keeps running. Install starts it again.
+	Stop(ctx context.Context) error
+	// Reload makes the running service re-read its config (SIGHUP on Linux
+	// and macOS); Windows restarts the service.
+	Reload(ctx context.Context) error
 	// Uninstall stops the service and removes its definition. It returns
 	// ErrNotInstalled when there is none.
 	Uninstall(ctx context.Context) error
@@ -157,6 +164,15 @@ func Executable() (string, error) {
 	return filepath.Abs(real)
 }
 
+// AgentAccount is the system account the device service runs as.
+const AgentAccount = launcher.AgentAccount
+
+// SessionExecutable is the session launcher binary, localport-session,
+// installed beside the agent executable exe.
+func SessionExecutable(exe string) string {
+	return filepath.Join(filepath.Dir(exe), "localport-session")
+}
+
 // owned reports whether path exists, and refuses one without Marker.
 func owned(path string) (bool, error) {
 	content, err := os.ReadFile(path)
@@ -172,10 +188,24 @@ func owned(path string) (bool, error) {
 	return true, nil
 }
 
+// checkOwned refuses, before anything is written, when any of paths exists
+// without Marker, so an install never leaves a partial set of definitions.
+func checkOwned(paths ...string) error {
+	for _, p := range paths {
+		if _, err := owned(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // writeOwned replaces path with content, mode 0644, after owned accepts it.
+func writeOwned(path string, content []byte) error { return writeOwnedMode(path, content, 0o644) }
+
+// writeOwnedMode replaces path with content and mode after owned accepts it.
 // The write goes through a temporary file in the same directory and a rename,
 // so the service manager never reads a partial definition.
-func writeOwned(path string, content []byte) error {
+func writeOwnedMode(path string, content []byte, mode os.FileMode) error {
 	if _, err := owned(path); err != nil {
 		return err
 	}
@@ -188,7 +218,7 @@ func writeOwned(path string, content []byte) error {
 		tmp.Close()
 		return fmt.Errorf("write %s: %w", path, err)
 	}
-	if err := tmp.Chmod(0o644); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write %s: %w", path, err)
 	}

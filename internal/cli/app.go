@@ -23,6 +23,12 @@ func (a *App) Run(args []string) error {
 	if len(args) == 0 {
 		return runTunnel(a.version, args)
 	}
+	if args[0] == agentChildCommand {
+		return runAgentChild(a, args[1:])
+	}
+	if rootRunsAsAgent(args[0]) {
+		return runAsAgentAccount(args, os.Stdin, os.Stdout)
+	}
 	switch args[0] {
 	case "connect":
 		return runConnect(a.version, args[1:])
@@ -32,6 +38,8 @@ func (a *App) Run(args []string) error {
 		return runSet(args[1:])
 	case "service":
 		return runService(args[1:])
+	case "status":
+		return runStatus(args[1:])
 	case "access":
 		return runAccess(args[1:])
 	case "tunnel":
@@ -64,6 +72,7 @@ Commands:
   run       Run every device enrolled on this machine
   set       Change what an enrolled device allows
   service   Install or remove the device service (service install|uninstall)
+  status    Show the device service, and to root or group localport the devices
   access    Reach a fleet device's ports through your client certificate
   setup     Redeem a setup token so this MACHINE can reach fleet devices
   login     Sign in as YOURSELF and get a short-lived certificate

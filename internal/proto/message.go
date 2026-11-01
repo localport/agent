@@ -98,6 +98,14 @@ type RegisterPayload struct {
 	Capabilities []string `json:"capabilities,omitempty"`
 	Logins       []string `json:"logins,omitempty"`
 	Desktop      []string `json:"desktop,omitempty"`
+
+	// SessionAuth (pam, no_pam) and FullDiskAccess (granted, denied, unknown;
+	// omitted off macOS) are the session launcher's probe; RunAsAgent is the
+	// device config's opt-in to run sessions as the agent account. Display
+	// only: the control plane shows them and decides nothing on them.
+	SessionAuth    string `json:"session_auth,omitempty"`
+	RunAsAgent     bool   `json:"run_as_agent,omitempty"`
+	FullDiskAccess string `json:"full_disk_access,omitempty"`
 }
 
 type RegisterAckPayload struct {

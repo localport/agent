@@ -81,12 +81,8 @@ const (
 	Unsupported     Code = "AG043"
 	MarkedForDelete Code = "AG044"
 
-	SELinuxEnforcing     Code = "AG051"
-	NoLogin              Code = "AG052"
-	JTILogLocked         Code = "AG053"
-	JTIUnavailable       Code = "AG054"
-	LookupPending        Code = "AG055"
-	LookupOutputTooLarge Code = "AG056"
+	JTILogLocked   Code = "AG053"
+	JTIUnavailable Code = "AG054"
 
 	SpoolFull            Code = "AG061"
 	DiskLow              Code = "AG062"
@@ -132,12 +128,8 @@ var registry = []Entry{
 	{Unsupported, "No supported service manager", "this system has no service manager localport can install into (systemd, launchd or the Windows service manager)"},
 	{MarkedForDelete, "Windows service marked for deletion", "the device service is deleted, but Windows keeps it until every handle to it closes"},
 
-	{SELinuxEnforcing, "Terminal refused: SELinux enforcing", "SELinux is enforcing"},
-	{NoLogin, "Terminal refused: no login(1)", "no login(1)"},
 	{JTILogLocked, "Session ticket log locked", "session jti log is held by another process"},
 	{JTIUnavailable, "Session ticket log unavailable", "ticket replay cache unavailable"},
-	{LookupPending, "User lookup still pending", "an earlier directory lookup has not returned"},
-	{LookupOutputTooLarge, "User lookup output too large", "output exceeds 64 KiB"},
 
 	{SpoolFull, "Recording spool full", "recording: spool is full"},
 	{DiskLow, "Disk space low for recordings", "recording: too little free disk space for the spool"},

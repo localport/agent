@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -41,6 +40,9 @@ const (
 const (
 	CloseIdle     = "idle"
 	CloseShutdown = "shutdown"
+	// CloseConfigChanged ends the sessions of a device whose local config
+	// entry a reload changed or removed.
+	CloseConfigChanged = "config_changed"
 	// CloseExited follows the kind's exit message when the process it serves
 	// ended by itself.
 	CloseExited = "exited"
@@ -97,6 +99,11 @@ type ServerConfig struct {
 	// Identifier is the device's identity (identity.Ref.Identity), kept in
 	// each recording's spool metadata.
 	Identifier string
+	// Device names the device's local config entry (identity.Ref.String()),
+	// which the launcher authorizes each session against.
+	Device string
+	// Launcher starts terminal sessions; nil is the launcher socket.
+	Launcher Launcher
 
 	// clock replaces the wall clock for expiry and idle checks. Tests set it.
 	clock clock
@@ -130,11 +137,6 @@ type Server struct {
 	// build serves none; kindFor in production. Tests replace it before the
 	// first Serve.
 	kinds func(kind string) prepareKind
-	// users resolves a ticket's login to its account (lookupUser in
-	// production) and euid returns the agent's effective uid (os.Geteuid).
-	// Tests replace both before the first Serve.
-	users func(ctx context.Context, login string) (*userRecord, error)
-	euid  func() int
 
 	// mu guards the fields below and every decision on them.
 	mu       sync.Mutex
@@ -148,11 +150,14 @@ type Server struct {
 // handler is one Serve call.
 type handler struct {
 	stream net.Conn
-	// stop is closed by Shutdown. reading is set until the ticket read ends.
-	// stopped and reading are guarded by mu.
-	stop    chan struct{}
-	stopped bool
-	reading bool
+	// stop is closed by Shutdown, after stopReason is set. reading is set
+	// until the ticket read ends. stopped, stopReason and reading are guarded
+	// by mu; stopReason is read without it once stop is closed, as it is never
+	// written again.
+	stop       chan struct{}
+	stopped    bool
+	stopReason string
+	reading    bool
 }
 
 // kindSession serves the records of one accepted session after its start.
@@ -178,38 +183,26 @@ type kindSession interface {
 	Wait()
 }
 
-// userRecord is the account a kind runs as, resolved by Server.resolveUser.
-// Groups starts with GID. Shell is empty when the lookup gives none (macOS
-// with the agent as root).
-type userRecord struct {
-	Name   string
-	UID    uint32
-	GID    uint32
-	Groups []uint32
-	Home   string
-	Shell  string
-}
-
 // newKind starts a session from its start record body for the ticket's login.
-// user is the account the server resolved for login, nil when it resolved
-// none. Writes go through ch.
-// rec records the session, nil when it is not recorded.
-type newKind func(ch *Channel, start []byte, login string, user *userRecord, rec *sessionRecorder) (kindSession, error)
+// Writes go through ch. rec records the session, nil when it is not
+// recorded.
+type newKind func(ch *Channel, start []byte, login string, rec *sessionRecorder) (kindSession, error)
 
-// prepareKind is a kind's check-time step: it runs after the user lookup and
-// before Accept and the spend, and returns the session's constructor. root
-// reports whether the agent runs as root; log writes one line to the
-// server's OnEvent and stays usable after the session ended. An error
+// prepareKind is a kind's check-time step: it runs under the session's slot,
+// before Accept and the spend, and returns the session's constructor. device
+// is the device's config entry (ServerConfig.Device); log writes one line to
+// the server's OnEvent and stays usable after the session ended. An error
 // refuses the ticket unspent with its *Error code (kind_unavailable
 // otherwise); the server logs it.
-type prepareKind func(login string, user *userRecord, root bool, log func(format string, args ...any)) (newKind, error)
+type prepareKind func(device, login string, log func(format string, args ...any)) (newKind, error)
 
 // NewServer returns the session server of one device.
 func NewServer(cfg ServerConfig) *Server {
 	if cfg.clock == nil {
 		cfg.clock = wallClock{}
 	}
-	return &Server{cfg: cfg, kinds: kindFor, users: lookupUser, euid: os.Geteuid, handlers: map[*handler]struct{}{}}
+	kinds := func(kind string) prepareKind { return kindFor(kind, cfg.Launcher) }
+	return &Server{cfg: cfg, kinds: kinds, handlers: map[*handler]struct{}{}}
 }
 
 // LiveSessions returns the number of streams holding a session slot.
@@ -273,14 +266,9 @@ func (s *Server) Serve(stream net.Conn) {
 		return
 	}
 	defer s.releaseSlot()
-	// The lookup runs under the slot, so at most maxSessions run at once, and
-	// before the spend, so every refusal leaves the ticket unspent.
-	user, code := s.resolveUser(t.Login, start)
-	if code != "" {
-		refuse(stream, code)
-		return
-	}
-	kind, err := prepare(t.Login, user, s.euid() == 0, s.log)
+	// Under the slot, so at most maxSessions run at once, and before the
+	// spend, so every refusal leaves the ticket unspent.
+	kind, err := prepare(s.cfg.Device, t.Login, s.log)
 	if err != nil {
 		s.log("session: %v", err)
 		refuse(stream, errorCode(err, CodeKindUnavailable))
@@ -330,7 +318,7 @@ func (s *Server) Serve(stream net.Conn) {
 		rec.end()
 		return
 	}
-	s.run(h, ch, kind, t.Login, user, rec)
+	s.run(h, ch, kind, t.Login, rec)
 }
 
 // check verifies the ticket and the local config. It spends nothing. A
@@ -495,6 +483,16 @@ func (s *Server) releaseSlot() {
 // agent_busy; one still reading its ticket is reset. Serve calls after it
 // returns are served.
 func (s *Server) Shutdown(ctx context.Context) error {
+	return s.shutdown(ctx, CloseShutdown)
+}
+
+// ShutdownConfigChanged is Shutdown for a device whose local config entry
+// changed: sessions holding a slot get close {config_changed}.
+func (s *Server) ShutdownConfigChanged(ctx context.Context) error {
+	return s.shutdown(ctx, CloseConfigChanged)
+}
+
+func (s *Server) shutdown(ctx context.Context, reason string) error {
 	s.mu.Lock()
 	s.closing++
 	for h := range s.handlers {
@@ -502,6 +500,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			continue
 		}
 		h.stopped = true
+		h.stopReason = reason
 		close(h.stop)
 		if h.reading {
 			// Expires the ticket read at once; endTicketRead then ends Serve.
@@ -544,7 +543,6 @@ type session struct {
 	ch    *Channel
 	kind  newKind
 	login string
-	user  *userRecord
 	rec   *sessionRecorder
 	// started receives the kind once the reader handed it over.
 	started      chan kindSession
@@ -589,9 +587,9 @@ func (ss *session) open() bool {
 // kind (End unless the kind ended the session itself), sends the agent's close
 // when the end has a reason, joins the reader and the kind, and then ends the
 // recording, after the kind's last tap.
-func (s *Server) run(h *handler, ch *Channel, kind newKind, login string, user *userRecord, rec *sessionRecorder) {
+func (s *Server) run(h *handler, ch *Channel, kind newKind, login string, rec *sessionRecorder) {
 	defer rec.end()
-	ss := &session{ch: ch, kind: kind, login: login, user: user, rec: rec, started: make(chan kindSession, 1)}
+	ss := &session{ch: ch, kind: kind, login: login, rec: rec, started: make(chan kindSession, 1)}
 	ss.lastActivity.Store(s.cfg.clock.Now().UnixNano())
 	ended := make(chan sessionEnd, 1)
 	readerDone := make(chan struct{})
@@ -622,7 +620,7 @@ wait:
 			reason = e.reason
 			break wait
 		case <-h.stop:
-			reason = CloseShutdown
+			reason = h.stopReason
 			break wait
 		case <-rec.failedC():
 			reason = CloseRecordingFailed
@@ -662,7 +660,7 @@ func (s *Server) read(ss *session) sessionEnd {
 	if m.Type != TypeStart {
 		return sessionEnd{reason: CodeProtocolError}
 	}
-	k, err := ss.kind(ss.ch, m.Body, ss.login, ss.user, ss.rec)
+	k, err := ss.kind(ss.ch, m.Body, ss.login, ss.rec)
 	if err != nil {
 		return endOf(err)
 	}

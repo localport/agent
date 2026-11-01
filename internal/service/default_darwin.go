@@ -4,5 +4,5 @@ package service
 
 // Default is the launchd manager.
 func Default() (Manager, error) {
-	return launchd{plistPath: LaunchdPlistPath, logPath: launchdLog, logUID: 0, run: execRun}, nil
+	return launchd{plistPath: LaunchdPlistPath, logDir: launchdAgentLogDir, account: LookupAccount, run: execRun}, nil
 }

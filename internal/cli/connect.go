@@ -101,17 +101,6 @@ func runConnect(version string, args []string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	client, err := identity.NewClient(resolveAPIURL(*apiURL))
-	if err != nil {
-		return err
-	}
-	store, err := who.store()
-	if err != nil {
-		return err
-	}
-	if err := store.EnsureRoot(); err != nil {
-		return err
-	}
 	file, err := who.localConfigFile()
 	if err != nil {
 		return err
@@ -121,12 +110,19 @@ func runConnect(version string, args []string) (retErr error) {
 	if _, err := loadLocalOrEmpty(file); err != nil {
 		return err
 	}
-	if who.privileged && *foreground {
-		release, err := holdRunLock(context.Background(), file, "connect --foreground", false)
-		if err != nil {
+	// As root on the system layout the store belongs to the agent account:
+	// enrolment and the foreground run happen in agent-account children.
+	viaChild := needsAgentChild(file)
+	if viaChild && *noMux {
+		return errors.New("--no-mux is not available to a device enrolled as root; run it as an ordinary user, or leave it out")
+	}
+	if viaChild {
+		// First: the service check below locks run.lock, which needs the
+		// account's group.
+		m, exe := platformManager()
+		if err := prepareSystemLayout(context.Background(), file, m, exe); err != nil {
 			return err
 		}
-		defer func() { retErr = errors.Join(retErr, release()) }()
 	}
 	var svc *deviceService
 	if who.privileged && !*foreground {
@@ -134,28 +130,39 @@ func runConnect(version string, args []string) (retErr error) {
 			return err
 		}
 	}
-
-	ctx, cancel := signalContext(nil)
-	defer cancel()
-	notice := func(attempt int, in time.Duration, err error) {
-		fmt.Fprintf(os.Stderr, "  control plane unreachable (attempt %d), retrying in %s\n", attempt, in.Round(time.Second))
-	}
-	material, err := enrolDevice(client, ctx, joinToken, *wait, notice)
-	if err != nil {
-		// The error may quote the request. Keep the token out of terminals and
-		// logs.
-		err = security.SanitizeError(err, joinToken)
-		if mayHaveSpent(err) {
-			return fmt.Errorf("%w\n  if the control plane redeemed the token before this failure, %s", err, joinTokenSpent)
+	req := enrolRequest{JoinToken: joinToken, APIURL: resolveAPIURL(*apiURL), Wait: *wait}
+	var store *identity.Store
+	var res enrolResult
+	if viaChild {
+		if *foreground {
+			// The child run holds run.lock; refuse a holder before the spend.
+			release, err := holdRunLock(context.Background(), file, "connect --foreground", false)
+			if err != nil {
+				return err
+			}
+			if err := release(); err != nil {
+				return err
+			}
 		}
-		return err
+		if res, err = enrolAsAgent(req); err != nil {
+			return err
+		}
+	} else {
+		if store, err = who.store(); err != nil {
+			return err
+		}
+		if who.privileged && *foreground {
+			release, err := holdRunLock(context.Background(), file, "connect --foreground", false)
+			if err != nil {
+				return err
+			}
+			defer func() { retErr = errors.Join(retErr, release()) }()
+		}
+		if res, err = enrolInStore(store, req); err != nil {
+			return err
+		}
 	}
-	ref, err := saveIssued(store, ctx, *material)
-	if err != nil {
-		return fmt.Errorf("save the device credential: %w\n  %s", err, joinTokenSpent)
-	}
-	storeEnrolledKeys(store, ref, material.DeviceKeys)
-	cancel()
+	ref := res.Ref
 
 	inForce, err := recordDevice(file, fs, device, who, ref, d)
 	// The device is in the config whenever its entry is in force, even when
@@ -171,10 +178,8 @@ func runConnect(version string, args []string) (retErr error) {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "\n  enrolled\n")
-	printCredential(store, ref, material.Meta)
-	if material.Meta.Device != nil && material.Meta.Device.Host != "" {
-		fmt.Fprintf(os.Stderr, "  host       %s\n", security.SanitizeDisplay(material.Meta.Device.Host))
+	if res.Host != "" {
+		fmt.Fprintf(os.Stderr, "  host       %s\n", security.SanitizeDisplay(res.Host))
 	}
 	fmt.Fprintf(os.Stderr, "  config     %s\n", file.Path)
 	printDeviceSettings(inForce)
@@ -183,7 +188,30 @@ func runConnect(version string, args []string) (retErr error) {
 		return nil
 	}
 	fmt.Fprintln(os.Stderr)
-	return serveEnrolled(context.Background(), version, store, []config.LocalDevice{inForce}, *noUI, *noMux)
+	if viaChild {
+		// The child serves every device of the system config, as run does.
+		args := []string{"run", "--system"}
+		if *noUI {
+			args = append(args, "--noui")
+		}
+		return runAsAgentAccount(args, os.Stdin, os.Stdout)
+	}
+	return serveEnrolled(context.Background(), version, store, []config.LocalDevice{inForce}, *noUI, *noMux, nil)
+}
+
+// platformManager is the manager and executable a conversion stops and
+// reinstalls an installed service with, so its devices keep running; nil
+// without a supported service manager or an acceptable executable.
+func platformManager() (service.Manager, string) {
+	m, err := newServiceManager()
+	if err != nil {
+		return nil, ""
+	}
+	exe, err := serviceExecutable()
+	if err != nil {
+		return nil, ""
+	}
+	return m, exe
 }
 
 // storeEnrolledKeys writes the enrolment's ticket key set. The credential is

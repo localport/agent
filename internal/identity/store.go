@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -165,14 +166,24 @@ func DefaultStore() (*Store, error) {
 	return &Store{Root: filepath.Join(root, "identity"), Base: root, BaseChosen: chosen}, nil
 }
 
-// SystemStore is the store of a privileged process: <dir>/identity, where dir
-// is the machine-wide config directory. LOCALPORT_HOME is ignored and dir is
-// never followed as a symlink, the same scope as the system local config.
+// SystemStore is the store of the device service: <dir>/identity, where dir is
+// the machine-wide config directory. LOCALPORT_HOME is ignored and nothing is
+// followed as a symlink. On Unix the identity directory is owned by the agent
+// account inside the root-owned dir, so it is its own walk base and the
+// recording spool lands in it; on Windows the walk starts at dir.
 func SystemStore(dir string) (*Store, error) {
+	return systemStore(dir, runtime.GOOS)
+}
+
+func systemStore(dir, goos string) (*Store, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, fmt.Errorf("system credential directory %q is not absolute", dir)
 	}
-	return &Store{Root: filepath.Join(dir, "identity"), Base: dir}, nil
+	root := filepath.Join(dir, "identity")
+	if goos == "windows" {
+		return &Store{Root: root, Base: dir}, nil
+	}
+	return &Store{Root: root, Base: root}, nil
 }
 
 // EnsureRoot creates the store directory owner-only when missing and refuses
@@ -241,6 +252,12 @@ func (s *Store) ListWithSkipped() ([]Ref, []Skipped, error) {
 	refs := make([]Ref, 0, len(matches))
 	var skipped []Skipped
 	for _, path := range matches {
+		// Only `<team>/<kind>-<identity>` holds a credential; the recording
+		// spool's `recordings/<uuid>/meta.json` shares the glob.
+		kind, _, ok := strings.Cut(filepath.Base(filepath.Dir(path)), "-")
+		if !ok || !Kind(kind).Valid() {
+			continue
+		}
 		if err := s.trusted(filepath.Dir(path)); err != nil {
 			skipped = append(skipped, Skipped{Path: filepath.Dir(path), Reason: err})
 			continue

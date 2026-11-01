@@ -299,6 +299,20 @@ func installService(ctx context.Context, exe string, existing winService, create
 	return restart(ctx, s)
 }
 
+// Reload restarts the service: the Windows service control manager has no
+// reload control the agent handles.
+func (c scm) Reload(ctx context.Context) error { return c.Restart(ctx) }
+
+// Stop stops the service and waits until it has stopped.
+func (c scm) Stop(ctx context.Context) error {
+	return c.open(func(_ *mgr.Mgr, s *mgr.Service) error {
+		if s == nil {
+			return ErrNotInstalled
+		}
+		return stop(ctx, scmService{s})
+	})
+}
+
 func (c scm) Restart(ctx context.Context) error {
 	return c.open(func(_ *mgr.Mgr, s *mgr.Service) error {
 		if s == nil {

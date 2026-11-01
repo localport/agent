@@ -24,6 +24,7 @@ import (
 
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/launcher"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/session"
 )
@@ -34,6 +35,8 @@ import (
 // frame with its key. A terminal ticket for the current user bound to it is
 // accepted; a ticket bound to another key is refused as for another device.
 func TestDeviceSessionsUseTheRegisteredCertificate(t *testing.T) {
+	sessionLauncher = probingLauncher{}
+	t.Cleanup(func() { sessionLauncher = nil })
 	store := sessionsStore(t)
 	enc := base64.RawURLEncoding
 	ticketKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
@@ -209,4 +212,16 @@ func TestDeviceSessionsNeedACapability(t *testing.T) {
 	if err != nil || state != nil || spec.SessionHandler != nil {
 		t.Fatalf("deviceSessions = %v, %v, handler %v; want none", state, err, spec.SessionHandler)
 	}
+}
+
+// probingLauncher answers the probe that precedes a terminal ticket's spend
+// and starts nothing.
+type probingLauncher struct{}
+
+func (probingLauncher) Probe(context.Context) (launcher.Probe, error) {
+	return launcher.Probe{PAM: true, FullDiskAccess: launcher.FullDiskAccessUnknown}, nil
+}
+
+func (probingLauncher) Start(context.Context, launcher.Request, *os.File) (*launcher.Session, error) {
+	return nil, launcher.Refusal(launcher.CodeInternal)
 }

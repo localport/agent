@@ -100,9 +100,6 @@ func newTestServer(t *testing.T, edit func(*ServerConfig)) *testServer {
 		edit(&cfg)
 	}
 	ts := &testServer{Server: NewServer(cfg), f: f, clock: clk, jti: jti}
-	// The agent runs as root and every login has an account.
-	ts.users = func(_ context.Context, login string) (*userRecord, error) { return testUser(login, 1000), nil }
-	ts.euid = func() int { return 0 }
 	t.Cleanup(ts.wg.Wait)
 	return ts
 }
@@ -325,66 +322,6 @@ func (s *resetStream) peerFirstFrame() (map[string]string, error) {
 		return nil, err
 	}
 	return m, nil
-}
-
-// resetPeer is the edge's side of a resetStream as a net.Conn: Close resets
-// the stream, and an expired read deadline resets it, which ends a blocked
-// Read.
-type resetPeer struct {
-	s     *resetStream
-	mu    sync.Mutex
-	timer *time.Timer
-}
-
-func (p *resetPeer) Read(b []byte) (int, error)  { return p.s.peerRead(b) }
-func (p *resetPeer) Write(b []byte) (int, error) { return p.s.peerIn.Write(b) }
-func (p *resetPeer) Close() error                { return p.s.Close() }
-func (p *resetPeer) LocalAddr() net.Addr         { return &net.TCPAddr{} }
-func (p *resetPeer) RemoteAddr() net.Addr        { return &net.TCPAddr{} }
-func (p *resetPeer) SetDeadline(t time.Time) error {
-	return p.SetReadDeadline(t)
-}
-func (p *resetPeer) SetWriteDeadline(time.Time) error { return nil }
-
-func (p *resetPeer) SetReadDeadline(t time.Time) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.timer != nil {
-		p.timer.Stop()
-		p.timer = nil
-	}
-	if !t.IsZero() {
-		p.timer = time.AfterFunc(time.Until(t), func() { _ = p.s.Close() })
-	}
-	return nil
-}
-
-// openResetStart runs a session with raw over a resetStream through the
-// accept frame and sends start; the client's conn is the edge's side.
-func (ts *testServer) openResetStart(t *testing.T, raw, start []byte) *testClient {
-	t.Helper()
-	s, done := ts.serveReset(t, raw)
-	body, err := s.peerFrame()
-	if err != nil {
-		t.Fatalf("first frame: %v", err)
-	}
-	var msg AcceptMessage
-	if err := json.Unmarshal(body, &msg); err != nil || msg.Type != "accept" {
-		t.Fatalf("first frame %s, %v; want accept", body, err)
-	}
-	keys, err := Open(raw, ts.f.spkiDER, &msg, ts.f.client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	peer := &resetPeer{s: s}
-	ch, err := keys.ClientChannel(peer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ch.WriteMessage(TypeStart, start); err != nil {
-		t.Fatal(err)
-	}
-	return &testClient{conn: peer, ch: ch, done: done}
 }
 
 type readerFunc func([]byte) (int, error)

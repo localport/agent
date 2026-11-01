@@ -32,10 +32,11 @@ type invoker struct {
 }
 
 // currentInvoker describes this process. system marks it privileged
-// regardless of its token, as `run --system` and `run --service` do.
+// regardless of its token, as `run --system` and `run --service` do, and so
+// does running as the agent-account child (asAgentChild).
 func currentInvoker(system bool) invoker {
 	who := invoker{
-		privileged: system || privilegedProcess(),
+		privileged: system || asAgentChild || privilegedProcess(),
 		sudoUser:   strings.TrimSpace(os.Getenv("SUDO_USER")),
 		goos:       runtime.GOOS,
 	}
@@ -91,7 +92,7 @@ func (who invoker) defaultLogin() (string, error) {
 	case name == "" || name == "root":
 		return "", fmt.Errorf("--logins: %w: this account has none; name the accounts terminal and files sessions may use with --logins", errNoDefaultLogin)
 	case !config.ValidLogin(name):
-		return "", fmt.Errorf("--logins: %w: %q is not a valid user name (lowercase letters, digits, _ and -); name the accounts with --logins", errNoDefaultLogin, security.SanitizeDisplay(name))
+		return "", fmt.Errorf("--logins: %w: %q is not a valid user name; name the accounts with --logins", errNoDefaultLogin, security.SanitizeDisplay(name))
 	}
 	return name, nil
 }

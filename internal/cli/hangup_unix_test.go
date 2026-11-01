@@ -45,6 +45,8 @@ func (hangupManagerProcess) run(ctx context.Context) error {
 
 func (m *hangupManagerProcess) Install(ctx context.Context, _ string) error { return m.run(ctx) }
 func (m *hangupManagerProcess) Restart(ctx context.Context) error           { return m.run(ctx) }
+func (m *hangupManagerProcess) Reload(ctx context.Context) error            { return m.run(ctx) }
+func (m *hangupManagerProcess) Stop(ctx context.Context) error              { return m.run(ctx) }
 func (m *hangupManagerProcess) Uninstall(ctx context.Context) error         { return m.run(ctx) }
 
 // TestHangupSafeHelper is the re-executed test binary. As the command it runs
@@ -110,7 +112,7 @@ func hungUpTerminal(t *testing.T) *os.File {
 	return slave
 }
 
-// set, service install, service uninstall and a privileged connect, run from
+// service install, service uninstall and a privileged connect, run from
 // a terminal session whose hangup reaches them and their service manager
 // command while it runs, and with their stdout and stderr gone, run to the
 // end and log that they completed. The connect record names no argument. A
@@ -118,7 +120,6 @@ func hungUpTerminal(t *testing.T) *os.File {
 // closed fd 0, 1 or 2 at startup (runtime.checkfds).
 func TestHangupSafeCommandsRunToTheEnd(t *testing.T) {
 	for args, want := range map[string]string{
-		"set factory.gw-01":              "localport set factory.gw-01: completed",
 		"service install":                "localport service install: completed",
 		"service uninstall":              "localport service uninstall: completed",
 		"connect " + hangupSentinelToken: "localport connect: completed",

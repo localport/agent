@@ -12,13 +12,12 @@ import (
 )
 
 // runSet edits one enrolled device's settings in the local config and, as
-// root or an elevated Administrator, restarts the installed device service so
-// they apply. Besides a re-enrolment with connect, it is the way to change
-// what an enrolled device allows. It runs to the end through a hangup of the
-// terminal it runs in, which the restart may cause, and as root records its
-// outcome in the system log.
+// root or an elevated Administrator, reloads the installed device service so
+// they apply (Manager.Reload: the agent applies the changed devices only on
+// Unix; the Windows service restarts). Besides a re-enrolment with connect,
+// it is the way to change what an enrolled device allows. As root it records
+// its outcome in the system log.
 func runSet(args []string) (err error) {
-	ignoreHangup()
 	var who invoker
 	defer func() {
 		if who.privileged {
@@ -59,20 +58,20 @@ func runSet(args []string) (err error) {
 		fmt.Fprintf(os.Stderr, "  restart `localport run` to apply it\n")
 		return nil
 	}
-	restarted, err := restartDeviceService()
+	reloaded, err := reloadDeviceService()
 	switch {
 	case err != nil:
-		return fmt.Errorf("the settings are saved, but the device service did not restart: %w", err)
-	case restarted:
-		fmt.Fprintf(os.Stderr, "  restarted the device service\n")
+		return fmt.Errorf("the settings are saved, but the device service did not reload: %w", err)
+	case reloaded:
+		fmt.Fprintf(os.Stderr, "  reloaded the device service\n")
 	default:
-		fmt.Fprintf(os.Stderr, "  no device service is installed, so nothing was restarted; restart `localport run` to apply it\n")
+		fmt.Fprintf(os.Stderr, "  no device service is installed, so nothing was reloaded; restart `localport run` to apply it\n")
 	}
 	return nil
 }
 
 // updateDevice applies the flags to one device's entry under the local
-// config's lock, released before the service restarts.
+// config's lock, released before the service reloads.
 func updateDevice(file config.LocalConfigFile, fs *flag.FlagSet, device *deviceFlags, who invoker, name string) (identity.Ref, error) {
 	unlock, err := config.LockLocal(file)
 	if err != nil {
@@ -98,14 +97,14 @@ func updateDevice(file config.LocalConfigFile, fs *flag.FlagSet, device *deviceF
 	return d.Identity, nil
 }
 
-// restartDeviceService restarts the device service when one carrying the
+// reloadDeviceService reloads the device service when one carrying the
 // marker is installed, reporting whether it did.
-func restartDeviceService() (bool, error) {
+func reloadDeviceService() (bool, error) {
 	m, installed, err := installedDeviceService()
 	if err != nil || !installed {
 		return false, err
 	}
-	if err := m.Restart(context.Background()); err != nil {
+	if err := m.Reload(context.Background()); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -138,8 +137,10 @@ func usageSet(fs *flag.FlagSet) {
   Change what an enrolled device allows, in the local config. <device> is its
   identity, <fleet>.<device>, or the device name when unique. Only the flags
   given change; a list flag replaces the whole list. As root (Administrator on
-  Windows) set restarts the installed device service, which applies the
-  change; a device run with localport run applies it when restarted.
+  Windows) set reloads the installed device service, which applies the
+  change: only the changed device restarts and its open sessions end
+  (Windows restarts the service). A device run with localport run applies it
+  when restarted.
 
 Flags:
 `)

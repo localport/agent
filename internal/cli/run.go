@@ -16,6 +16,7 @@ import (
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/launcher"
 	"github.com/localport/agent/internal/recording"
 	"github.com/localport/agent/internal/service"
 	"github.com/localport/agent/internal/session"
@@ -33,6 +34,7 @@ func runRun(version string, args []string) error {
 	noUI := fs.Bool("noui", false, "disable the live view and emit plain logs (auto-enabled when stderr is not a TTY)")
 	system := fs.Bool("system", false, "use the machine-wide config and credentials whatever the account")
 	asService := fs.Bool("service", false, "run as the installed device service (implies --system)")
+	logFile := fs.String("log-file", "", "write stdout and stderr to this file and rotate it (launchd, OpenRC)")
 	fs.Usage = usageRun
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -40,6 +42,12 @@ func runRun(version string, args []string) error {
 	if fs.NArg() > 0 {
 		usageRun()
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	if *logFile != "" {
+		// Rotation runs for the life of the process.
+		if err := startLogFile(context.Background(), *logFile); err != nil {
+			return err
+		}
 	}
 
 	who := currentInvoker(*system || *asService)
@@ -86,49 +94,49 @@ func runEnrolledDevices(ctx context.Context, version string, who invoker, asServ
 	if err != nil {
 		return err
 	}
-	return serveDevices(ctx, version, store, cfg.Devices, noUI, false)
+	// Only the service reloads on SIGHUP: a run in a terminal keeps ending on
+	// the terminal's hangup.
+	var reload func() ([]config.LocalDevice, error)
+	if asService {
+		reload = func() ([]config.LocalDevice, error) {
+			cfg, err := config.LoadLocal(file)
+			if err != nil {
+				return nil, err
+			}
+			return cfg.Devices, nil
+		}
+	}
+	return serveDevices(ctx, version, store, cfg.Devices, noUI, false, reload)
 }
 
 // serveDevices runs the enrolled devices until a signal or until parent ends,
 // with the renewal loop of each renewable device credential. A device whose
 // credential is missing or unreadable is logged and skipped; it refuses to
 // start when no device can. noMux serves every inbound connection over its
-// own connection, so the devices serve no sessions.
-func serveDevices(parent context.Context, version string, store *identity.Store, devices []config.LocalDevice, noUI, noMux bool) error {
+// own connection, so the devices serve no sessions. With reload set, each
+// reload signal (SIGHUP on Unix) re-reads the devices through it and applies
+// the changed ones only (deviceRunner.reload).
+func serveDevices(parent context.Context, version string, store *identity.Store, devices []config.LocalDevice, noUI, noMux bool, reload func() ([]config.LocalDevice, error)) error {
 	logEvent := func(line string) { fmt.Fprintf(os.Stderr, "  [identity] %s\n", line) }
 	cfg := &config.Config{AgentVersion: version, NoMux: noMux}
 	var a *agent.Agent
+	runner := &deviceRunner{parent: parent, store: store, logEvent: logEvent, served: map[identity.Ref]*servedDevice{}}
+	runner.configured.Store(&devices)
 	// The uploader runs only after a is set.
-	uploads := openUploader(store, devices, func(identifier string) (recording.Client, error) {
+	runner.uploads = openUploader(store, runner.isConfigured, func(identifier string) (recording.Client, error) {
 		return deviceRecordingClient(a, identifier)
 	})
-	var renewers []*identity.Renewer
-	var refreshers []*identity.KeyRefresher
-	var jtiLogs []*session.JTILog
+	uploads := runner.uploads
+	// With noMux no session runs, so the launcher is not probed.
+	runner.probed = noMux
 	defer func() {
-		for _, l := range jtiLogs {
-			_ = l.Close()
+		for _, s := range runner.served {
+			s.end()
 		}
 	}()
 	for _, d := range devices {
-		spec, renews, err := deviceSpec(store, d, logEvent)
-		if err != nil {
-			// err names the device.
-			fmt.Fprintf(os.Stderr, "  skipped: %v\n", err)
-			continue
-		}
-		sessions, err := deviceSessions(store, d.Identity, &spec, uploads, logEvent)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  device %s: sessions disabled: %v\n", d.Identity, err)
-		} else if sessions != nil {
-			refreshers = append(refreshers, sessions.refresher)
-			jtiLogs = append(jtiLogs, sessions.jti)
-		}
-		cfg.Devices = append(cfg.Devices, spec)
-		if renews {
-			renewers = append(renewers, &identity.Renewer{
-				Store: store, Ref: d.Identity, OnEvent: logEvent, OnRefused: spec.Credential.RenewalRefused,
-			})
+		if spec, ok := runner.build(d); ok {
+			cfg.Devices = append(cfg.Devices, spec)
 		}
 	}
 	if len(cfg.Devices) == 0 {
@@ -163,18 +171,22 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 	if uploads != nil {
 		renewing.Go(func() { uploads.Run(upCtx) })
 	}
-	for _, r := range renewers {
-		renewing.Go(func() { r.Run(ctx) })
+	for _, s := range runner.served {
+		s.start(ctx)
 	}
-	for _, r := range refreshers {
-		renewing.Go(func() { r.Run(ctx) })
+	if reload != nil {
+		renewing.Go(func() { runner.watchReload(ctx, a, reload) })
 	}
 	runErr := a.Run(ctx, renderer)
-	// Every device has stopped; end the renewal and key refresh loops with
-	// them.
+	// Every device has stopped; end the reload, renewal and key refresh loops
+	// with them.
 	stop()
-	stopUploads()
 	renewing.Wait()
+	for _, s := range runner.served {
+		s.end()
+	}
+	runner.served = nil
+	stopUploads()
 	renderer.Shutdown()
 
 	var regErr *tunnel.RegistrationError
@@ -188,9 +200,9 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 var errNoDeviceStarts = errcode.New(errcode.NoDeviceStarts)
 
 // deviceSpec builds the runtime spec of one enrolled device from its local
-// config entry and its stored credential. renews reports whether the
-// credential renews itself.
-func deviceSpec(store *identity.Store, d config.LocalDevice, logEvent func(string)) (spec config.DeviceSpec, renews bool, err error) {
+// config entry, its stored credential and the launcher probe. renews
+// reports whether the credential renews itself.
+func deviceSpec(store *identity.Store, d config.LocalDevice, probe sessionProbe, logEvent func(string)) (spec config.DeviceSpec, renews bool, err error) {
 	m, err := store.Load(d.Identity)
 	if err != nil {
 		return config.DeviceSpec{}, false, fmt.Errorf("device %s: %w", d.Identity, err)
@@ -217,7 +229,12 @@ func deviceSpec(store *identity.Store, d config.LocalDevice, logEvent func(strin
 	// The edge names the device by the prefix in its certificate; the
 	// client name only labels it in this agent's output.
 	_, prefix, _ := strings.Cut(d.Identity.Identity, ".")
-	return config.DeviceSpec{
+	logins := d.Logins
+	if d.RunAsAgent && d.UsesLogins() {
+		// The session mint checks the login against the reported list.
+		logins = []string{launcher.AgentAccount}
+	}
+	spec = config.DeviceSpec{
 		Name:         prefix,
 		Identity:     d.Identity.Identity,
 		Host:         host,
@@ -225,9 +242,14 @@ func deviceSpec(store *identity.Store, d config.LocalDevice, logEvent func(strin
 		AllowPorts:   d.AllowPorts,
 		Credential:   identity.NewDeviceRegistrar(store, d.Identity, logEvent),
 		Capabilities: capabilities,
-		Logins:       d.Logins,
+		Logins:       logins,
 		Desktop:      desktop,
-	}, m.Meta.Source.Renewable(), nil
+		RunAsAgent:   d.RunAsAgent,
+	}
+	if d.UsesLogins() {
+		spec.SessionAuth, spec.FullDiskAccess = probe.sessionAuth, probe.fullDiskAccess
+	}
+	return spec, m.Meta.Source.Renewable(), nil
 }
 
 // deviceSessionState is what serving one device's sessions holds for the run:
@@ -279,6 +301,8 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 		OnEvent:      logEvent,
 		Uploader:     uploads,
 		Identifier:   ref.Identity,
+		Device:       ref.String(),
+		Launcher:     sessionLauncher,
 	})
 	return &deviceSessionState{refresher: refresher, jti: jti}, nil
 }
@@ -304,7 +328,7 @@ func hintRevoked(keys *identity.TicketKeys, refresher *identity.KeyRefresher, lo
 // entries queued for resume. It returns nil, logged, when the spool cannot be
 // opened: Best effort sessions then run unrecorded and Strict sessions are
 // refused recording_unavailable.
-func openUploader(store *identity.Store, devices []config.LocalDevice, client func(string) (recording.Client, error)) *recording.Uploader {
+func openUploader(store *identity.Store, configured func(identifier string) bool, client func(string) (recording.Client, error)) *recording.Uploader {
 	root, followRoot := store.StateRoot()
 	spool, scan, err := recording.OpenSpool(root, recordingSpoolDir(store), followRoot)
 	if err != nil {
@@ -315,11 +339,9 @@ func openUploader(store *identity.Store, devices []config.LocalDevice, client fu
 		slog.Warn("recording spool entry dropped", slog.String("recording", d.ID), slog.String("path", d.Path), slog.Any("error", d.Err))
 	}
 	u := recording.NewUploader(recording.UploaderConfig{
-		Spool:  spool,
-		Client: client,
-		Configured: func(identifier string) bool {
-			return slices.ContainsFunc(devices, func(d config.LocalDevice) bool { return d.Identity.Identity == identifier })
-		},
+		Spool:      spool,
+		Client:     client,
+		Configured: configured,
 	})
 	u.Resume(scan)
 	return u
@@ -358,7 +380,7 @@ func deviceTunnel(tunnels []*tunnel.Tunnel, identifier string) *tunnel.Tunnel {
 }
 
 func usageRun() {
-	fmt.Fprint(os.Stderr, `Usage: localport run [--noui] [--system | --service]
+	fmt.Fprint(os.Stderr, `Usage: localport run [--noui] [--system | --service] [--log-file PATH]
 
   Run every device enrolled on this machine, as listed in the local config:
   /etc/localport-device/agent.yaml (Linux), /Library/Application Support/
@@ -378,5 +400,12 @@ Flags:
   --system    use the machine-wide config and credentials whatever the account
   --service   run as the installed device service: implies --system, and
               waits up to 30 s for run.lock while a restarting service stops
+  --log-file  write stdout and stderr to PATH and rotate it by size (Linux
+              and macOS; the launchd and OpenRC definitions pass it)
+
+  With --service on Linux and macOS, SIGHUP (the service manager's reload)
+  re-reads the local config and restarts only the devices whose entry
+  changed, was added or was removed; their open sessions end with
+  config_changed. A config that fails to load keeps the running devices.
 `)
 }

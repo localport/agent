@@ -199,6 +199,11 @@ type Options struct {
 	Capabilities []string
 	Logins       []string
 	Desktop      []string
+	// SessionAuth, RunAsAgent and FullDiskAccess are reported on Register
+	// for display only.
+	SessionAuth    string
+	RunAsAgent     bool
+	FullDiskAccess string
 
 	// AgentVersion is sent on registration for the audit record.
 	AgentVersion string
@@ -673,6 +678,9 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			Capabilities:    t.opts.Capabilities,
 			Logins:          t.opts.Logins,
 			Desktop:         t.opts.Desktop,
+			SessionAuth:     t.opts.SessionAuth,
+			RunAsAgent:      t.opts.RunAsAgent,
+			FullDiskAccess:  t.opts.FullDiskAccess,
 		}
 		if err := pc.SendRegister(reg); err != nil {
 			raw.Close()

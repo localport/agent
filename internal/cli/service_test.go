@@ -26,13 +26,15 @@ type fakeManager struct {
 	installedErr                       error
 	installed                          bool
 	mainPID                            int
-	installs, uninstalls               int
+	installs, uninstalls, reloads      int
 }
 
 func (f *fakeManager) Name() string                  { return "localport-device.service" }
 func (f *fakeManager) Check() ([]string, error)      { return nil, f.checkErr }
 func (f *fakeManager) Installed() (bool, error)      { return f.installed, f.installedErr }
 func (f *fakeManager) Restart(context.Context) error { return nil }
+func (f *fakeManager) Reload(context.Context) error  { f.reloads++; return nil }
+func (f *fakeManager) Stop(context.Context) error    { return nil }
 func (f *fakeManager) MainPID(context.Context) (int, error) {
 	return f.mainPID, nil
 }
@@ -368,11 +370,16 @@ func TestPurgeStopsAtAForeignDefinition(t *testing.T) {
 	}
 }
 
-// writeSpool puts a recording entry in the recording spool of the config
-// directory and returns the spool directory.
+// writeSpool puts a recording entry in the recording spool of the system
+// store (in the identity directory off Windows) and returns the spool
+// directory.
 func writeSpool(t *testing.T, file config.LocalConfigFile) string {
 	t.Helper()
-	spool := filepath.Join(file.Base, "recordings")
+	store, err := identity.SystemStore(file.Base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spool := recordingSpoolDir(store)
 	entry := filepath.Join(spool, "11111111-1111-4111-8111-111111111111")
 	if err := os.MkdirAll(entry, 0o700); err != nil {
 		t.Fatal(err)

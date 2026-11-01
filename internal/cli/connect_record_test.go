@@ -262,7 +262,7 @@ func TestConnectNoMuxReachesTheDevice(t *testing.T) {
 	t.Cleanup(func() { serveEnrolled = prev })
 	for _, want := range []bool{false, true} {
 		got := !want
-		serveEnrolled = func(_ context.Context, _ string, _ *identity.Store, _ []config.LocalDevice, _, noMux bool) error {
+		serveEnrolled = func(_ context.Context, _ string, _ *identity.Store, _ []config.LocalDevice, _, noMux bool, _ func() ([]config.LocalDevice, error)) error {
 			got = noMux
 			return nil
 		}

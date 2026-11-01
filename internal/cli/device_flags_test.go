@@ -92,13 +92,17 @@ func TestLoginsFollowTheMergedDevice(t *testing.T) {
 	if d, err := apply(sudo, config.LocalDevice{}, "--enable", "terminal"); err != nil || !slices.Equal(d.Logins, []string{"pi"}) {
 		t.Fatalf("sudo default = %v, %v; want [pi]", d.Logins, err)
 	}
+	// The relaxed grammar accepts the names directory services produce.
+	if d, err := apply(invoker{privileged: false, current: "john.doe", goos: "linux"}, config.LocalDevice{}, "--enable", "terminal"); err != nil || !slices.Equal(d.Logins, []string{"john.doe"}) {
+		t.Fatalf("john.doe default = %v, %v; want [john.doe]", d.Logins, err)
+	}
 	if d, err := apply(invoker{privileged: false, current: "john.doe", goos: "linux"}, config.LocalDevice{}, "--allow-ports", "502"); err != nil || d.Logins != nil {
 		t.Fatalf("a port-only device = %v, %v; want no logins and no refusal", d.Logins, err)
 	}
 	for _, who := range []invoker{
 		{privileged: true, current: "root", goos: "linux"},
 		{privileged: true, current: "root", sudoUser: "root", goos: "linux"},
-		{privileged: false, current: "john.doe", goos: "linux"},
+		{privileged: false, current: "1000", goos: "linux"},
 		{privileged: false, current: "", goos: "linux"},
 	} {
 		if _, err := apply(who, config.LocalDevice{}, "--enable", "files"); err == nil || !strings.Contains(err.Error(), "--logins") {

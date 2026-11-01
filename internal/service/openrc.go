@@ -1,0 +1,224 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+// The OpenRC services: the agent and the session launcher, init scripts in
+// /etc/init.d run by supervise-daemon (research.md X33).
+const (
+	OpenRCService         = "localport-device"
+	OpenRCLauncherService = "localport-session"
+	openrcInitDir         = "/etc/init.d"
+)
+
+// The OpenRC logs: supervise-daemon opens an output_log once, so each
+// process opens and rotates its own (--log-file), as under launchd.
+const (
+	openrcAgentLogDir = "/var/log/localport"
+	openrcAgentLog    = openrcAgentLogDir + "/device.log"
+	openrcLauncherLog = "/var/log/localport-session.log"
+)
+
+// openrc manages the device service and the session launcher as OpenRC
+// services in the default runlevel.
+type openrc struct {
+	initDir string
+	// rcService and rcUpdate are the absolute paths of rc-service and
+	// rc-update.
+	rcService, rcUpdate string
+	logDir              string
+	account             func() (Account, error)
+	run                 runner
+}
+
+func (o openrc) Name() string { return OpenRCService }
+
+func (o openrc) script(name string) string { return filepath.Join(o.initDir, name) }
+
+func (o openrc) paths() []string {
+	return []string{o.script(OpenRCLauncherService), o.script(OpenRCService)}
+}
+
+// Check refuses an init script without Marker. OpenRC loads a service only
+// from its script in /etc/init.d, so the file is the whole definition.
+func (o openrc) Check() ([]string, error) { return nil, checkOwned(o.paths()...) }
+
+func (o openrc) Installed() (bool, error) { return owned(o.script(OpenRCService)) }
+
+// MainPID asks the agent's script for the child pid supervise-daemon
+// records; a service that is not started reports 0 (status exits non-zero).
+func (o openrc) MainPID(ctx context.Context) (int, error) {
+	if _, err := o.run(ctx, o.rcService, OpenRCService, "status"); err != nil {
+		var cmdErr *CommandError
+		if errors.As(err, &cmdErr) && cmdErr.ExitCode > 0 {
+			return 0, nil
+		}
+		return 0, err
+	}
+	out, err := o.run(ctx, o.rcService, OpenRCService, "mainpid")
+	if err != nil {
+		return 0, err
+	}
+	value := strings.TrimSpace(out)
+	if value == "" {
+		return 0, nil
+	}
+	pid, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s %s mainpid: %q: %w", o.rcService, OpenRCService, value, err)
+	}
+	return pid, nil
+}
+
+// Install writes both scripts, adds them to the default runlevel and starts
+// the launcher and (re)starts the agent. A running launcher is restarted so
+// an upgraded binary takes effect; supervise-daemon signals only its child,
+// so open sessions keep running.
+func (o openrc) Install(ctx context.Context, exe string) error {
+	if err := checkOwned(o.paths()...); err != nil {
+		return err
+	}
+	scripts, err := openrcScripts(exe)
+	if err != nil {
+		return err
+	}
+	acct, err := o.account()
+	if err != nil {
+		return err
+	}
+	if err := prepareLogDir(o.logDir, acct); err != nil {
+		return err
+	}
+	for _, name := range []string{OpenRCLauncherService, OpenRCService} {
+		if err := writeOwnedMode(o.script(name), scripts[name], 0o755); err != nil {
+			return err
+		}
+	}
+	for _, args := range [][]string{
+		{o.rcUpdate, "add", OpenRCLauncherService, "default"},
+		{o.rcUpdate, "add", OpenRCService, "default"},
+		// restart starts a stopped service and restarts a running one.
+		{o.rcService, OpenRCLauncherService, "restart"},
+		{o.rcService, OpenRCService, "restart"},
+	} {
+		if _, err := o.run(ctx, args[0], args[1:]...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (o openrc) Restart(ctx context.Context) error {
+	_, err := o.run(ctx, o.rcService, OpenRCService, "restart")
+	return err
+}
+
+// Stop stops the agent; rc-service returns once supervise-daemon has stopped it.
+func (o openrc) Stop(ctx context.Context) error {
+	_, err := o.run(ctx, o.rcService, OpenRCService, "stop")
+	return err
+}
+
+// Reload runs the script's reload, which sends SIGHUP to the agent.
+func (o openrc) Reload(ctx context.Context) error {
+	_, err := o.run(ctx, o.rcService, OpenRCService, "reload")
+	return err
+}
+
+// Uninstall stops both services, removes them from every runlevel and
+// deletes their scripts.
+func (o openrc) Uninstall(ctx context.Context) error {
+	if err := checkOwned(o.paths()...); err != nil {
+		return err
+	}
+	exists, err := owned(o.script(OpenRCService))
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotInstalled
+	}
+	for _, name := range []string{OpenRCService, OpenRCLauncherService} {
+		if _, err := o.run(ctx, o.rcService, name, "stop"); err != nil {
+			return err
+		}
+		if _, err := o.run(ctx, o.rcUpdate, "del", name); err != nil {
+			var cmdErr *CommandError
+			// del exits non-zero when the service is in no runlevel.
+			if !errors.As(err, &cmdErr) || cmdErr.ExitCode <= 0 {
+				return err
+			}
+		}
+		if err := removeOwned(o.script(name)); err != nil && !errors.Is(err, ErrNotInstalled) {
+			return err
+		}
+	}
+	return nil
+}
+
+// openrcScripts are the init scripts for the agent at exe and the launcher
+// beside it, by service name. The paths go into shell variables unquoted
+// by the shell's own rules, so they must match systemdSafePath.
+func openrcScripts(exe string) (map[string][]byte, error) {
+	if !systemdSafePath.MatchString(exe) {
+		return nil, fmt.Errorf("%w: %q (OpenRC needs an absolute path of letters, digits and ._+@/-)", ErrUnsafeExecutable, exe)
+	}
+	return map[string][]byte{
+		OpenRCService: fmt.Appendf(nil, `#!/sbin/openrc-run
+# %[1]s
+# Configure the devices with localport set; /etc/localport-device/agent.yaml
+# holds their settings and /etc/localport-device/identity their private keys,
+# so keep that directory out of backups and configuration management.
+
+description="Localport fleet device agent"
+supervisor=supervise-daemon
+command="%[2]s"
+command_args="run --service --log-file %[3]s"
+command_user="%[4]s:%[4]s"
+umask=077
+no_new_privs=yes
+# A core dump would contain the device's private keys.
+rc_ulimit="-c 0"
+respawn_delay=5
+respawn_max=0
+extra_started_commands="reload mainpid"
+
+depend() {
+	need net %[5]s
+	after %[5]s
+}
+
+# localport set changes the config and reloads; the agent applies the
+# changed devices only.
+reload() {
+	ebegin "Reloading ${RC_SVCNAME}"
+	supervise-daemon "${RC_SVCNAME}" --signal HUP
+	eend $?
+}
+
+mainpid() {
+	service_get_value child_pid
+}
+`, Marker, exe, openrcAgentLog, AgentAccount, OpenRCLauncherService),
+
+		OpenRCLauncherService: fmt.Appendf(nil, `#!/sbin/openrc-run
+# %[1]s
+
+description="Localport session launcher"
+supervisor=supervise-daemon
+command="%[2]s"
+command_args="launcher --log-file %[3]s"
+respawn_delay=1
+respawn_max=0
+# Sessions are children of the launcher. supervise-daemon stops only its
+# child, so a stop or restart leaves them running, each with its own channel
+# to the agent. The launcher binds its socket itself.
+`, Marker, SessionExecutable(exe), openrcLauncherLog),
+	}, nil
+}

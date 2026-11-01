@@ -6,24 +6,40 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/localport/agent/internal/launcher"
 )
 
 // LaunchdLabel is the device service's launchd label.
 const LaunchdLabel = "io.localport.device"
 
-// LaunchdPlistPath is where the daemon's plist is installed.
+// LaunchdLauncherLabel is the session launcher's launchd label.
+const LaunchdLauncherLabel = "io.localport.session"
+
+// LaunchdPlistPath is where the daemon's plist is installed; the launcher's
+// sits beside it.
 const LaunchdPlistPath = "/Library/LaunchDaemons/" + LaunchdLabel + ".plist"
 
-// launchdLog is where the daemon's output goes. launchd opens it once at
-// spawn, so it is not rotated. Install creates it owner-only first, since
-// launchd would create it readable by every account.
-const launchdLog = "/var/log/localport-device.log"
+// The service logs. Each process opens and rotates its own (internal/logfile),
+// since launchd opens a StandardOutPath once and never reopens it.
+// The agent's log is in a directory of its own account, since rotating
+// renames files in the directory; the root launcher's is in /var/log.
+const (
+	launchdAgentLogDir = "/var/log/localport"
+	launchdAgentLog    = launchdAgentLogDir + "/device.log"
+	launchdLauncherLog = "/var/log/localport-session.log"
+)
+
+// launchdSocketName is the Sockets key the launcher checks in with
+// (launch_activate_socket); cmd/localport-session names the same.
+const launchdSocketName = "Listeners"
 
 const launchctlPath = "/bin/launchctl"
 
@@ -35,69 +51,127 @@ const (
 	bootoutPoll = 200 * time.Millisecond
 )
 
-// launchd manages the device service as a launchd daemon in the system
-// domain, run as root. logPath is launchdLog and logUID root outside tests.
+// launchd manages the device service and the session launcher as launchd
+// daemons in the system domain: the agent as AgentAccount, the launcher as
+// root. plistPath is the agent's; the launcher's sits beside it.
 type launchd struct {
 	plistPath string
-	logPath   string
-	logUID    int
-	run       runner
+	// logDir is launchdAgentLogDir outside tests.
+	logDir string
+	// account resolves the agent account's ids (LookupAccount).
+	account func() (Account, error)
+	run     runner
 }
 
-const launchdTarget = "system/" + LaunchdLabel
+// job is one daemon this manager installs.
+type job struct {
+	label, plist string
+}
 
 func (l launchd) Name() string { return LaunchdLabel }
 
-// Check refuses a plist without Marker, and a loaded io.localport.device
-// whose plist is not ours.
+func (l launchd) jobs() []job {
+	dir := filepath.Dir(l.plistPath)
+	return []job{
+		{LaunchdLauncherLabel, filepath.Join(dir, LaunchdLauncherLabel+".plist")},
+		{LaunchdLabel, l.plistPath},
+	}
+}
+
+func (l launchd) plists() []string {
+	var paths []string
+	for _, j := range l.jobs() {
+		paths = append(paths, j.plist)
+	}
+	return paths
+}
+
+func target(label string) string { return "system/" + label }
+
+// Check refuses a plist without Marker, and a loaded job whose plist is not
+// ours.
 func (l launchd) Check() ([]string, error) {
-	exists, err := owned(l.plistPath)
-	if err != nil || exists {
+	if err := checkOwned(l.plists()...); err != nil {
 		return nil, err
 	}
-	loaded, err := l.loaded(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	if loaded {
-		return nil, fmt.Errorf("%w: launchd has %s loaded, but not from %s; unload it with launchctl bootout %s, then run the command again", ErrForeignUnit, LaunchdLabel, l.plistPath, launchdTarget)
+	for _, j := range l.jobs() {
+		if exists, _ := owned(j.plist); exists {
+			continue
+		}
+		loaded, err := l.loaded(context.Background(), j.label)
+		if err != nil {
+			return nil, err
+		}
+		if loaded {
+			return nil, fmt.Errorf("%w: launchd has %s loaded, but not from %s; unload it with launchctl bootout %s, then run the command again", ErrForeignUnit, j.label, j.plist, target(j.label))
+		}
 	}
 	return nil, nil
 }
 
 func (l launchd) Installed() (bool, error) { return owned(l.plistPath) }
 
+// Install writes both plists and boots each daemon out and in again, the
+// launcher first, so the agent's first session finds its socket.
 func (l launchd) Install(ctx context.Context, exe string) error {
-	plist, err := launchdPlist(exe)
+	if err := checkOwned(l.plists()...); err != nil {
+		return err
+	}
+	acct, err := l.account()
 	if err != nil {
 		return err
 	}
-	if err := writeOwned(l.plistPath, plist); err != nil {
+	plists := map[string][]byte{}
+	if plists[LaunchdLabel], err = launchdAgentPlist(exe); err != nil {
 		return err
 	}
-	if err := prepareLog(l.logPath, l.logUID); err != nil {
+	if plists[LaunchdLauncherLabel], err = launchdLauncherPlist(SessionExecutable(exe), acct.GID); err != nil {
 		return err
 	}
-	// A loaded daemon keeps its old definition and credential until it is
-	// booted out and bootstrapped again.
-	if err := l.bootoutIfLoaded(ctx); err != nil {
+	if err := prepareLogDir(l.logDir, acct); err != nil {
 		return err
 	}
-	// enable clears a disabled override, which would make bootstrap fail.
-	if _, err := l.run(ctx, launchctlPath, "enable", launchdTarget); err != nil {
-		return err
+	for _, j := range l.jobs() {
+		if err := writeOwned(j.plist, plists[j.label]); err != nil {
+			return err
+		}
 	}
-	_, err = l.run(ctx, launchctlPath, "bootstrap", "system", l.plistPath)
-	return err
+	for _, j := range l.jobs() {
+		// A loaded daemon keeps its old definition until it is booted out
+		// and bootstrapped again.
+		if err := l.bootoutIfLoaded(ctx, j.label); err != nil {
+			return err
+		}
+		// enable clears a disabled override, which would make bootstrap fail.
+		if _, err := l.run(ctx, launchctlPath, "enable", target(j.label)); err != nil {
+			return err
+		}
+		if _, err := l.run(ctx, launchctlPath, "bootstrap", "system", j.plist); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (l launchd) Restart(ctx context.Context) error {
-	_, err := l.run(ctx, launchctlPath, "kickstart", "-k", launchdTarget)
+	_, err := l.run(ctx, launchctlPath, "kickstart", "-k", target(LaunchdLabel))
 	return err
 }
 
-// Uninstall boots the daemon out and removes its plist.
+// Stop boots the agent out and waits until launchd no longer knows it.
+func (l launchd) Stop(ctx context.Context) error { return l.bootoutIfLoaded(ctx, LaunchdLabel) }
+
+// Reload sends SIGHUP: the agent re-reads its config.
+func (l launchd) Reload(ctx context.Context) error {
+	_, err := l.run(ctx, launchctlPath, "kill", "HUP", target(LaunchdLabel))
+	return err
+}
+
+// Uninstall boots both daemons out and removes their plists.
 func (l launchd) Uninstall(ctx context.Context) error {
+	if err := checkOwned(l.plists()...); err != nil {
+		return err
+	}
 	exists, err := owned(l.plistPath)
 	if err != nil {
 		return err
@@ -105,16 +179,21 @@ func (l launchd) Uninstall(ctx context.Context) error {
 	if !exists {
 		return ErrNotInstalled
 	}
-	if err := l.bootoutIfLoaded(ctx); err != nil {
-		return err
+	for _, j := range l.jobs() {
+		if err := l.bootoutIfLoaded(ctx, j.label); err != nil {
+			return err
+		}
+		if err := removeOwned(j.plist); err != nil && !errors.Is(err, ErrNotInstalled) {
+			return err
+		}
 	}
-	return removeOwned(l.plistPath)
+	return nil
 }
 
 // MainPID reads the `state =` and `pid =` lines of launchctl print. A label
 // launchd does not know, or one in any state but running, reports 0.
 func (l launchd) MainPID(ctx context.Context) (int, error) {
-	out, err := l.run(ctx, launchctlPath, "print", launchdTarget)
+	out, err := l.run(ctx, launchctlPath, "print", target(LaunchdLabel))
 	var cmdErr *CommandError
 	switch {
 	case errors.As(err, &cmdErr) && cmdErr.ExitCode > 0:
@@ -133,7 +212,7 @@ func (l launchd) MainPID(ctx context.Context) (int, error) {
 			state = value
 		case key == "pid" && pid == 0:
 			if pid, err = strconv.Atoi(value); err != nil {
-				return 0, fmt.Errorf("launchctl print %s: pid %q: %w", launchdTarget, value, err)
+				return 0, fmt.Errorf("launchctl print %s: pid %q: %w", target(LaunchdLabel), value, err)
 			}
 		}
 	}
@@ -143,10 +222,10 @@ func (l launchd) MainPID(ctx context.Context) (int, error) {
 	return pid, nil
 }
 
-// loaded reports whether launchd knows the label; print exits non-zero for
-// one it does not.
-func (l launchd) loaded(ctx context.Context) (bool, error) {
-	_, err := l.run(ctx, launchctlPath, "print", launchdTarget)
+// loaded reports whether launchd knows label; print exits non-zero for one
+// it does not.
+func (l launchd) loaded(ctx context.Context, label string) (bool, error) {
+	_, err := l.run(ctx, launchctlPath, "print", target(label))
 	var cmdErr *CommandError
 	switch {
 	case err == nil:
@@ -158,67 +237,83 @@ func (l launchd) loaded(ctx context.Context) (bool, error) {
 	}
 }
 
-// bootoutIfLoaded boots the daemon out when launchd has it loaded and waits,
-// at most bootoutWait, until launchd no longer knows the label.
-func (l launchd) bootoutIfLoaded(ctx context.Context) error {
-	loaded, err := l.loaded(ctx)
+// bootoutIfLoaded boots label out when launchd has it loaded and waits, at
+// most bootoutWait, until launchd no longer knows it.
+func (l launchd) bootoutIfLoaded(ctx context.Context, label string) error {
+	loaded, err := l.loaded(ctx, label)
 	if err != nil || !loaded {
 		return err
 	}
-	if _, err := l.run(ctx, launchctlPath, "bootout", launchdTarget); err != nil {
+	if _, err := l.run(ctx, launchctlPath, "bootout", target(label)); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, bootoutWait)
 	defer cancel()
 	for {
-		loaded, err := l.loaded(ctx)
+		loaded, err := l.loaded(ctx, label)
 		if err != nil {
-			return fmt.Errorf("wait for launchd to unload %s: %w", LaunchdLabel, err)
+			return fmt.Errorf("wait for launchd to unload %s: %w", label, err)
 		}
 		if !loaded {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("wait for launchd to unload %s: %w", LaunchdLabel, ctx.Err())
+			return fmt.Errorf("wait for launchd to unload %s: %w", label, ctx.Err())
 		case <-time.After(bootoutPoll):
 		}
 	}
 }
 
-// prepareLog creates the daemon's log file, or takes over an existing one,
-// as a regular file of uid with mode 0600. The log directory is writable by
-// root only, so the file cannot be swapped between the check and the open.
-func prepareLog(path string, uid int) error {
-	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() {
-		return fmt.Errorf("prepare %s: not a regular file", path)
+// prepareLogDir creates the agent's log directory, or takes over an existing
+// one, as a directory (never a symlink) of acct with mode 0750. Its parent,
+// /var/log, is writable by root only, so nothing swaps it between the check
+// and the chown.
+func prepareLogDir(dir string, acct Account) error {
+	if err := os.Mkdir(dir, 0o750); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("prepare %s: %w", dir, err)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	fi, err := os.Lstat(dir)
 	if err != nil {
-		return fmt.Errorf("prepare %s: %w", path, err)
+		return fmt.Errorf("prepare %s: %w", dir, err)
 	}
-	defer f.Close()
-	if err := f.Chown(uid, -1); err != nil {
-		return fmt.Errorf("prepare %s: %w", path, err)
+	if !fi.IsDir() {
+		return fmt.Errorf("prepare %s: not a directory", dir)
 	}
-	if err := f.Chmod(0o600); err != nil {
-		return fmt.Errorf("prepare %s: %w", path, err)
+	if err := os.Lchown(dir, acct.UID, acct.GID); err != nil {
+		return fmt.Errorf("prepare %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		return fmt.Errorf("prepare %s: %w", dir, err)
 	}
 	return nil
 }
 
-// launchdPlist is the daemon definition running exe.
-func launchdPlist(exe string) ([]byte, error) {
-	if !filepath.IsAbs(exe) || strings.ContainsFunc(exe, unicode.IsControl) {
-		return nil, fmt.Errorf("%w: %q", ErrUnsafeExecutable, exe)
+// xmlPath escapes p for a plist <string>, refusing a relative path or a
+// control character.
+func xmlPath(p string) (string, error) {
+	if !filepath.IsAbs(p) || strings.ContainsFunc(p, unicode.IsControl) {
+		return "", fmt.Errorf("%w: %q", ErrUnsafeExecutable, p)
 	}
-	var program bytes.Buffer
-	if err := xml.EscapeText(&program, []byte(exe)); err != nil {
+	var b bytes.Buffer
+	if err := xml.EscapeText(&b, []byte(p)); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+const plistHeader = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+`
+
+// launchdAgentPlist is the agent's daemon definition: exe as AgentAccount,
+// its own rotated log.
+func launchdAgentPlist(exe string) ([]byte, error) {
+	program, err := xmlPath(exe)
+	if err != nil {
 		return nil, err
 	}
-	return fmt.Appendf(nil, `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- %s
+	return fmt.Appendf(nil, plistHeader+`<!-- %s
      Configure the devices with localport set. /Library/Application Support/localport-device
      holds their settings and, under identity/, their private keys. -->
 <plist version="1.0">
@@ -230,16 +325,61 @@ func launchdPlist(exe string) ([]byte, error) {
     <string>%s</string>
     <string>run</string>
     <string>--service</string>
+    <string>--log-file</string>
+    <string>%s</string>
   </array>
+  <key>UserName</key>
+  <string>%s</string>
+  <key>GroupName</key>
+  <string>%s</string>
+  <key>Umask</key>
+  <integer>63</integer>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <key>StandardOutPath</key>
-  <string>%s</string>
-  <key>StandardErrorPath</key>
-  <string>%s</string>
 </dict>
 </plist>
-`, Marker, LaunchdLabel, program.String(), launchdLog, launchdLog), nil
+`, Marker, LaunchdLabel, program, launchdAgentLog, AgentAccount, AgentAccount), nil
+}
+
+// launchdLauncherPlist is the launcher's daemon definition: root, with the
+// socket launchd binds root:gid 0660 (SockPathMode is decimal).
+func launchdLauncherPlist(session string, gid int) ([]byte, error) {
+	program, err := xmlPath(session)
+	if err != nil {
+		return nil, err
+	}
+	return fmt.Appendf(nil, plistHeader+`<!-- %s -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>%s</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>%s</string>
+    <string>launcher</string>
+    <string>--log-file</string>
+    <string>%s</string>
+  </array>
+  <key>Sockets</key>
+  <dict>
+    <key>%s</key>
+    <dict>
+      <key>SockPathName</key>
+      <string>%s</string>
+      <key>SockPathOwner</key>
+      <integer>0</integer>
+      <key>SockPathGroup</key>
+      <integer>%d</integer>
+      <key>SockPathMode</key>
+      <integer>432</integer>
+    </dict>
+  </dict>
+  <!-- Sessions are the launcher's children; they keep running when it stops. -->
+  <key>AbandonProcessGroup</key>
+  <true/>
+</dict>
+</plist>
+`, Marker, LaunchdLauncherLabel, program, launchdLauncherLog, launchdSocketName, launcher.DarwinSocketPath, gid), nil
 }

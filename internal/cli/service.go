@@ -12,6 +12,7 @@ import (
 
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/errcode"
+	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/service"
 )
 
@@ -71,6 +72,14 @@ func installService(who invoker) error {
 	if len(local.Devices) == 0 {
 		return fmt.Errorf("%w: %s lists no device; enrol one with: sudo localport connect <join-token>", errNoDevice, file.Path)
 	}
+	if needsAgentChild(file) {
+		// Before prepareService, whose run.lock check needs the account's
+		// group; a root-run install is converted here.
+		m, exe := platformManager()
+		if err := prepareSystemLayout(context.Background(), file, m, exe); err != nil {
+			return err
+		}
+	}
 	svc, err := prepareService(file)
 	if err != nil {
 		return err
@@ -129,9 +138,14 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 	if err != nil {
 		return err
 	}
-	store, err := who.store()
-	if err != nil {
-		return err
+	// As root on the system layout the agent account deletes the store's
+	// contents (runAsAgentAccount); root only removes the config.
+	viaChild := needsAgentChild(file)
+	var store *identity.Store
+	if !viaChild {
+		if store, err = who.store(); err != nil {
+			return err
+		}
 	}
 	const stillValid = "  the device certificates stay valid until the devices are removed in the dashboard"
 	dir := filepath.Dir(file.Path)
@@ -166,19 +180,28 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 	if err := os.Remove(file.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove %s: %w", file.Path, err)
 	}
-	removed, err := store.RemoveDevices()
-	for _, d := range removed {
-		fmt.Fprintf(os.Stderr, "  deleted %s\n", d)
-	}
-	if err != nil {
+	fmt.Fprintf(os.Stderr, "  deleted %s\n", file.Path)
+	if err := purgeDeviceStore(dir, viaChild, store); err != nil {
 		return err
 	}
-	spool := recordingSpoolDir(store)
-	if err := os.RemoveAll(spool); err != nil {
-		return fmt.Errorf("remove %s: %w", spool, err)
-	}
-	fmt.Fprintf(os.Stderr, "  deleted %s and %s; other credentials in %s, %s, %s and %s remain\n%s\n", file.Path, spool, store.Root, file.LockPath(), file.RunLockPath(), dir, stillValid)
+	fmt.Fprintf(os.Stderr, "  %s, %s and %s remain\n%s\n", file.LockPath(), file.RunLockPath(), dir, stillValid)
 	return nil
+}
+
+// purgeDeviceStore deletes the device credentials and the spool: in the
+// agent-account child when viaChild (nothing to do without an identity
+// directory), otherwise in store.
+func purgeDeviceStore(dir string, viaChild bool, store *identity.Store) error {
+	if !viaChild {
+		return purgeStore(store)
+	}
+	idDir := filepath.Join(dir, "identity")
+	if _, err := os.Lstat(idDir); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect %s: %w", idDir, err)
+	}
+	return runAsAgentAccount([]string{"purge"}, nil, os.Stdout)
 }
 
 func usageService() {

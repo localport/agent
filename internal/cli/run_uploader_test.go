@@ -46,7 +46,7 @@ func TestOpenUploaderSpoolsUnderRootWhenBaseIsEmpty(t *testing.T) {
 	if got := recordingSpoolDir(store); got != want {
 		t.Fatalf("recordingSpoolDir = %q, want %q", got, want)
 	}
-	if u := openUploader(store, nil, func(string) (recording.Client, error) { return nil, recording.ErrNoSessionMux }); u == nil {
+	if u := openUploader(store, func(string) bool { return false }, func(string) (recording.Client, error) { return nil, recording.ErrNoSessionMux }); u == nil {
 		t.Fatal("openUploader returned nil")
 	}
 	fi, err := os.Stat(filepath.Join(real, "recordings"))
@@ -83,7 +83,7 @@ func TestOpenUploaderResumesTheSpoolOfConfiguredDevices(t *testing.T) {
 	var mu sync.Mutex
 	var asked []string
 	first := make(chan struct{}, 1)
-	u := openUploader(store, []config.LocalDevice{{Identity: deviceRef("factory.gw-01")}}, func(identifier string) (recording.Client, error) {
+	u := openUploader(store, func(id string) bool { return id == deviceRef("factory.gw-01").Identity }, func(identifier string) (recording.Client, error) {
 		mu.Lock()
 		asked = append(asked, identifier)
 		mu.Unlock()

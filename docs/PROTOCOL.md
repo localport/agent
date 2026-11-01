@@ -635,9 +635,13 @@ one session:
    `start`. The agent ends a session with an authenticated `close` record and
    one of these reasons: `idle` (30 minutes without a client `data` or
    `activity` record), `shutdown` (the control session is ending; sent within
-   2 s), `exited` (the process the session runs ended by itself; terminal),
+   2 s), `config_changed` (`localport set` changed the device's entry and the
+   agent reloaded it; the device's other sessions end too), `exited` (the process the session runs ended by itself; terminal),
    `recording_failed` (a Strict recording could no longer keep the session's
-   output; terminal) or `protocol_error` (a first record that is not `start`, or
+   output; terminal), `helper_failed` (the session helper's channel ended
+   without an exit; terminal), `launcher_unavailable` (the session launcher
+   could not be reached after the ticket was spent; terminal) or
+   `protocol_error` (a first record that is not `start`, or
    a malformed or unauthenticated record). After its `close` the agent
    half-closes the stream and reads it to its end for at most 2 s, and it sends
    no record after `close`. A client `close` ends the session without an agent

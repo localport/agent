@@ -126,6 +126,26 @@ func TestLoadAndListRefuseALinkedDirectory(t *testing.T) {
 	}
 }
 
+// The recording spool shares the store root on a device: its
+// recordings/<uuid>/meta.json is neither listed nor reported as skipped.
+func TestListIgnoresTheRecordingSpool(t *testing.T) {
+	store, ref, _, _ := savedCredential(t)
+	spool := filepath.Join(store.Root, "recordings", "0f1e2d3c")
+	if err := os.MkdirAll(spool, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spool, metaFile), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refs, skipped, err := store.ListWithSkipped()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 || refs[0] != ref || len(skipped) != 0 {
+		t.Fatalf("List = %v, skipped %+v; want only %s", refs, skipped, ref)
+	}
+}
+
 // A missing credential is fs.ErrNotExist, not ErrUntrustedPath.
 func TestLoadOfAMissingCredentialIsNotATrustError(t *testing.T) {
 	store := &Store{Root: t.TempDir()}

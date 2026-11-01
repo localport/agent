@@ -13,6 +13,8 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,7 +26,6 @@ import (
 type testKind struct {
 	ch      *Channel
 	login   string
-	user    *userRecord
 	rec     *sessionRecorder
 	selfEnd chan string
 	onEnd   func(k *testKind)
@@ -67,12 +68,12 @@ type kindServer struct {
 func newTestKindServer(t *testing.T, edit func(*ServerConfig)) *kindServer {
 	t.Helper()
 	ks := &kindServer{testServer: newTestServer(t, edit), made: make(chan *testKind, 64)}
-	start := func(ch *Channel, _ []byte, login string, user *userRecord, rec *sessionRecorder) (kindSession, error) {
+	start := func(ch *Channel, _ []byte, login string, rec *sessionRecorder) (kindSession, error) {
 		rec.start(time.Now(), 80, 24)
 		if ks.gate != nil {
 			<-ks.gate
 		}
-		k := &testKind{ch: ch, login: login, user: user, rec: rec, selfEnd: make(chan string, 1)}
+		k := &testKind{ch: ch, login: login, rec: rec, selfEnd: make(chan string, 1)}
 		if ks.edit != nil {
 			ks.edit(k)
 		}
@@ -83,9 +84,40 @@ func newTestKindServer(t *testing.T, edit func(*ServerConfig)) *kindServer {
 		if kind != "terminal" {
 			return nil
 		}
-		return func(string, *userRecord, bool, func(string, ...any)) (newKind, error) { return start, nil }
+		return func(string, string, func(string, ...any)) (newKind, error) { return start, nil }
 	}
 	return ks
+}
+
+// eventLog records a server's OnEvent lines.
+type eventLog struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *eventLog) add(s string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, s)
+}
+
+func (l *eventLog) has(substr string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, s := range l.lines {
+		if strings.Contains(s, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// lookupServer is a kind server whose events are recorded.
+func lookupServer(t *testing.T) (*kindServer, *eventLog) {
+	t.Helper()
+	events := &eventLog{}
+	ts := newTestKindServer(t, func(c *ServerConfig) { c.OnEvent = events.add })
+	return ts, events
 }
 
 // kind returns the next kind the server made.
@@ -533,6 +565,25 @@ func TestServeClosesWhenTheFirstRecordIsNotStart(t *testing.T) {
 	c := &testClient{conn: conn, ch: ch, done: done}
 	c.expectClose(t, CodeProtocolError)
 	waitDone(t, done)
+}
+
+// ShutdownConfigChanged ends a live session with close {config_changed}.
+func TestShutdownConfigChangedSendsItsReason(t *testing.T) {
+	ts := newTestKindServer(t, nil)
+	c := ts.open(t, ts.ticketN(t, 1))
+	c.echo(t, "live")
+	shut := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		shut <- ts.ShutdownConfigChanged(ctx)
+	}()
+	c.expectClose(t, CloseConfigChanged)
+	c.conn.Close()
+	if err := <-shut; err != nil {
+		t.Fatalf("ShutdownConfigChanged = %v", err)
+	}
+	waitDone(t, c.done)
 }
 
 // Shutdown sends close {shutdown} to the sessions it finds, refuses streams
