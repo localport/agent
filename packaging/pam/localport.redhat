@@ -1,0 +1,20 @@
+#%PAM-1.0
+# PAM service "localport" for RHEL, Rocky, AlmaLinux, Fedora and Amazon Linux,
+# installed as /etc/pam.d/localport. localport-session runs account, setcred and
+# the session stack. The user is authenticated upstream by a Localport
+# certificate, so pam_authenticate is never called; the auth stack is present for
+# pam_setcred, as in sshd.
+auth       substack     password-auth
+auth       include      postlogin
+account    required     pam_sepermit.so
+account    required     pam_nologin.so
+account    include      password-auth
+password   include      password-auth
+# pam_selinux.so close must be the first session rule.
+session    required     pam_selinux.so close
+session    required     pam_loginuid.so
+# pam_selinux.so open must be followed only by rules that run in the user's context.
+session    required     pam_selinux.so open env_params
+session    optional     pam_keyinit.so force revoke
+session    include      password-auth
+session    include      postlogin

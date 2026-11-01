@@ -12,8 +12,14 @@
 #
 # Output:
 #   <out>/deb/*.deb             amd64, arm64, armhf, plus the keyring (all)
-#   <out>/rpm/*.rpm             x86_64, aarch64, plus the keyring (noarch)
-#   <out>/apk/<arch>/*.apk      x86_64, aarch64, armhf, armv7
+#   <out>/rpm/*.rpm             x86_64, aarch64, plus the keyring and
+#                               localport-selinux (noarch)
+#   <out>/apk/<arch>/*.apk      localport and localport-pam: x86_64, aarch64,
+#                               armhf, armv7
+#
+# Each package carries the localport-session build its target needs (see
+# packaging/nfpm/localport.yaml); the OpenWrt feed is built by
+# packaging/openwrt/sdk.sh.
 #
 # The linux/arm binary backs both armhf and armv7. There is no 32-bit ARM rpm.
 set -euo pipefail
@@ -56,36 +62,55 @@ cd "$root"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-sed "s|@APK_KEY_NAME@|$APK_KEY_NAME|" packaging/nfpm/localport.yaml >"$work/localport.yaml"
+for f in localport.yaml localport-pam.yaml; do
+	sed "s|@APK_KEY_NAME@|$APK_KEY_NAME|" "packaging/nfpm/$f" >"$work/$f"
+done
 
 pkg() {
-	# pkg <config> <packager> <nfpm arch> <binary> <target>
-	NFPM_ARCH="$3" BINARY="$4" nfpm package \
-		--config "$1" --packager "$2" --target "$5" >/dev/null
+	# pkg <config> <packager> <nfpm arch> <binary> <session binary> <target>
+	NFPM_ARCH="$3" BINARY="$4" SESSION_BINARY="$5" nfpm package \
+		--config "$1" --packager "$2" --target "$6" >/dev/null
+}
+
+# session <suffix>: the localport-session build of the release set, which
+# must exist (make dist checks the set; this names the package's choice).
+session() {
+	local f="$dist/localport-session_$1"
+	[ -f "$f" ] || die "$f is missing"
+	printf '%s' "$f"
 }
 
 rm -rf "$out/deb" "$out/rpm" "$out/apk"
 mkdir -p "$out/deb" "$out/rpm"
 
+# deb and rpm ship the glibc build with PAM; the 32-bit ARM one targets
+# ARMv6 hard float (Raspberry Pi OS).
 echo ">>> deb"
 for a in amd64:amd64 arm64:arm64 arm6:arm; do
-	pkg "$work/localport.yaml" deb "${a%%:*}" "$dist/localport-linux-${a#*:}" "$out/deb/"
+	bin="${a#*:}"
+	pkg "$work/localport.yaml" deb "${a%%:*}" "$dist/localport-linux-$bin" "$(session "linux_$bin")" "$out/deb/"
 done
-pkg packaging/nfpm/keyring.yaml deb all "" "$out/deb/"
+pkg packaging/nfpm/keyring.yaml deb all "" "" "$out/deb/"
 
 echo ">>> rpm"
 for a in amd64:amd64 arm64:arm64; do
-	pkg "$work/localport.yaml" rpm "${a%%:*}" "$dist/localport-linux-${a#*:}" "$out/rpm/"
+	bin="${a#*:}"
+	pkg "$work/localport.yaml" rpm "${a%%:*}" "$dist/localport-linux-$bin" "$(session "linux_$bin")" "$out/rpm/"
 done
-pkg packaging/nfpm/keyring.yaml rpm all "" "$out/rpm/"
+pkg packaging/nfpm/keyring.yaml rpm all "" "" "$out/rpm/"
+pkg packaging/nfpm/localport-selinux.yaml rpm all "" "" "$out/rpm/"
 
-# apk fetches <repository>/<arch>/<name>-<version>.apk.
+# apk fetches <repository>/<arch>/<name>-<version>.apk. localport ships the
+# musl build without PAM; localport-pam replaces it with the musl PAM build
+# on hosts with linux-pam.
 echo ">>> apk"
 for a in amd64:amd64:x86_64 arm64:arm64:aarch64 arm6:arm:armhf arm7:arm:armv7; do
 	IFS=: read -r nfpm_arch bin apk_arch <<<"$a"
 	mkdir -p "$out/apk/$apk_arch"
-	pkg "$work/localport.yaml" apk "$nfpm_arch" "$dist/localport-linux-$bin" \
+	pkg "$work/localport.yaml" apk "$nfpm_arch" "$dist/localport-linux-$bin" "$(session "linux_${bin}_musl_nopam")" \
 		"$out/apk/$apk_arch/localport-$PKG_VERSION-r1.apk"
+	pkg "$work/localport-pam.yaml" apk "$nfpm_arch" "" "$(session "linux_${bin}_musl")" \
+		"$out/apk/$apk_arch/localport-pam-$PKG_VERSION-r1.apk"
 done
 
 (cd "$out" && find . -type f | sed 's|^\./|    |' | LC_ALL=C sort)

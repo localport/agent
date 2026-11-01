@@ -85,7 +85,48 @@ jobs:
           cache-dependency-path: go.sum
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.14.0
+          version: v2.15.0
+
+  # The TestRoot tests, as root with libpam and the localport PAM service.
+  test-root:
+    name: Test as root (PAM)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: libpam and the PAM service
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y --no-install-recommends libpam0g-dev >/dev/null
+          sudo install -m 0644 packaging/pam/localport.debian /etc/pam.d/localport
+          sudo useradd --create-home --shell /bin/sh lptest
+      - run: sudo env "PATH=$PATH" GOTOOLCHAIN=local LOCALPORT_TEST_LOGIN=lptest make test-root
+
+  # Compiles the SELinux CIL module against the targeted policy.
+  selinux:
+    name: SELinux module
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    container:
+      image: fedora:45@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: dnf -y -q install selinux-policy-targeted policycoreutils
+      - run: semodule -n -s targeted -X 200 -i packaging/selinux/localport.cil
+      - run: semodule -n -s targeted -l | grep -qx localport
+
+  # Every cgo localport-session build of the release (glibc, musl, ARMv6,
+  # signed darwin), with the floor and architecture checks they run.
+  sessions:
+    uses: ./.github/workflows/session.yml
 
   notices:
     name: Third-party notices

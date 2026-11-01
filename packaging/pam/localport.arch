@@ -1,0 +1,11 @@
+#%PAM-1.0
+# PAM service "localport" for Arch Linux, installed as /etc/pam.d/localport.
+# localport-session runs account, setcred and the session stack. The user is
+# authenticated upstream by a Localport certificate, so pam_authenticate is never
+# called; the auth stack is present for pam_setcred, as in sshd.
+# system-remote-login includes system-login, which carries pam_nologin,
+# pam_loginuid, pam_keyinit, pam_limits, pam_env and pam_systemd.
+auth       include      system-remote-login
+account    include      system-remote-login
+password   include      system-remote-login
+session    include      system-remote-login

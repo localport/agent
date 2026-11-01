@@ -1,0 +1,45 @@
+# localport-pam package (apk only): the musl localport-session build with PAM
+# and the Alpine PAM service file. It replaces the build without PAM that the
+# localport package installs at the same path.
+# Variables are set by scripts/release/packages.sh; SESSION_BINARY is the musl
+# build with PAM.
+
+name: localport-pam
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${PKG_VERSION}
+release: 1
+section: net
+priority: optional
+maintainer: Localport <support@localport.io>
+vendor: Localport
+homepage: https://localport.io
+license: Apache-2.0
+description: |-
+  Localport agent: PAM sessions
+  Runs Localport terminal sessions through the host's PAM stack (account
+  checks, limits, environment) on Alpine Linux with linux-pam.
+
+depends:
+  - localport=${PKG_VERSION}-r1
+  - linux-pam
+replaces:
+  - localport
+
+contents:
+  - src: ${SESSION_BINARY}
+    dst: /usr/bin/localport-session
+    expand: true
+    file_info:
+      mode: 0755
+  - src: packaging/pam/localport.alpine
+    dst: /etc/pam.d/localport
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+# nfpm does not expand variables in key_name. packages.sh fills it in.
+apk:
+  signature:
+    key_file: ${APK_KEY_FILE}
+    key_name: "@APK_KEY_NAME@"

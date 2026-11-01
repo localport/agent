@@ -1,0 +1,11 @@
+# localport: auth account password session
+# PAM service "localport" for macOS, installed as /etc/pam.d/localport.
+# localport-session runs account, setcred and the session stack. The user is
+# authenticated upstream by a Localport certificate, so pam_authenticate is never
+# called; the auth rule is present for pam_setcred, as in sshd. pam_launchd moves
+# the session into the user's launchd bootstrap namespace.
+auth       required       pam_opendirectory.so
+account    required       pam_nologin.so
+account    required       pam_opendirectory.so
+password   required       pam_deny.so
+session    required       pam_launchd.so

@@ -1,0 +1,39 @@
+# localport-selinux package (rpm only, noarch): the SELinux policy module for
+# the agent (localport_t) and localport-session (localport_session_t) on the
+# targeted policy. Variables are set by scripts/release/packages.sh.
+
+name: localport-selinux
+arch: all
+platform: linux
+version: ${PKG_VERSION}
+release: 1
+maintainer: Localport <support@localport.io>
+vendor: Localport
+homepage: https://localport.io
+license: Apache-2.0
+description: |-
+  Localport agent: SELinux policy module
+  Confines the Localport agent and lets localport-session start login
+  sessions in the user's SELinux context on targeted-policy hosts.
+
+depends:
+  - localport = ${PKG_VERSION}-1
+  - selinux-policy-targeted
+  - policycoreutils
+
+contents:
+  - src: packaging/selinux/localport.cil
+    dst: /usr/share/selinux/packages/targeted/localport.cil
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: packaging/selinux/postinstall.sh
+  postremove: packaging/selinux/postremove.sh
+
+rpm:
+  summary: SELinux policy module for the Localport agent
+  packager: Localport <support@localport.io>
+  compression: zstd
+  signature:
+    key_file: ${RPM_KEY_FILE}

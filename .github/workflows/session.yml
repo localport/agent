@@ -1,0 +1,148 @@
+name: Session builds
+
+# cgo builds of localport-session for every release platform, and the signed
+# darwin binaries. Called by the packaging workflow (cache on) and the release
+# workflow (cache off). Artifacts: session-linux-<suffix>, session-linux-arm,
+# darwin; download them into bin/ with the pattern "*" and merge-multiple.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version stamped into the binaries; empty uses git describe.
+        type: string
+        default: ""
+      cache:
+        description: Use the Go and ARMv6 toolchain caches.
+        type: boolean
+        default: true
+
+permissions: {}
+
+env:
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  linux:
+    name: localport-session (${{ matrix.entry }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The Docker entries of SESSION_LINUX in the Makefile; `make dist`
+        # fails when one is missing.
+        entry:
+          - linux/amd64:glibc-el8:pam:linux_amd64
+          - linux/arm64:glibc-el8:pam:linux_arm64
+          - linux/amd64:musl:pam:linux_amd64_musl
+          - linux/arm64:musl:pam:linux_arm64_musl
+          - linux/arm/v6:musl:pam:linux_arm_musl
+          - linux/amd64:musl::linux_amd64_musl_nopam
+          - linux/arm64:musl::linux_arm64_musl_nopam
+          - linux/arm/v6:musl::linux_arm_musl_nopam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build
+        env:
+          ENTRY: ${{ matrix.entry }}
+        run: |
+          make build-session-linux SESSION_LINUX="$ENTRY" ${VERSION:+VERSION="$VERSION"} \
+            BUILDVCS=true SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          echo "NAME=localport-session_${ENTRY##*:}" >>"$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: session-${{ env.NAME }}
+          path: bin/${{ env.NAME }}
+          if-no-files-found: error
+          retention-days: 3
+
+  # 32-bit ARM glibc with PAM, for ARMv6 hard float.
+  linux-arm:
+    name: localport-session (ARMv6 glibc)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ inputs.cache }}
+
+      - name: Toolchain cache
+        id: cache
+        if: inputs.cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/x-tools-localport
+          key: armv6-toolchain-${{ runner.os }}-${{ hashFiles('packaging/session/armv6/*') }}
+
+      - name: crosstool-ng dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y --no-install-recommends \
+            autoconf automake bison flex gawk gperf help2man libncurses-dev \
+            libtool-bin make patch python3-dev rsync texinfo unzip xz-utils >/dev/null
+
+      - name: Toolchain
+        run: packaging/session/armv6/toolchain.sh ~/x-tools-localport
+
+      - name: Build
+        run: |
+          make build-session-armv6 ${VERSION:+VERSION="$VERSION"} \
+            BUILDVCS=true SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: session-linux-arm
+          path: bin/localport-session_linux_arm
+          if-no-files-found: error
+          retention-days: 3
+
+  # Agent and localport-session for darwin, ad-hoc signed with the hardened
+  # runtime. codesign needs macOS.
+  darwin:
+    name: darwin (signed)
+    runs-on: macos-26
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: ${{ inputs.cache }}
+
+      - name: Build and sign
+        run: |
+          make build-darwin ${VERSION:+VERSION="$VERSION"} \
+            BUILDVCS=true SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: darwin
+          path: |
+            bin/localport-darwin-*
+            bin/localport-session_darwin_*
+          if-no-files-found: error
+          retention-days: 3

@@ -1,0 +1,4 @@
+# Build context is the agent module root.
+.git
+bin
+dist

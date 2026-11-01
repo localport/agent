@@ -1,5 +1,10 @@
-# localport package (deb, rpm, apk).
-# Variables are set by scripts/release/packages.sh.
+# localport package (deb, rpm, Alpine apk). The OpenWrt package is built with
+# the OpenWrt SDK from packaging/openwrt/.
+# Variables are set by scripts/release/packages.sh. SESSION_BINARY is the
+# localport-session build the target needs: glibc with PAM for deb and rpm, musl
+# without PAM for apk (localport-pam.yaml replaces it with the musl PAM build).
+# Service units are not packaged: `localport connect` and
+# `localport service install` write them.
 
 name: localport
 arch: ${NFPM_ARCH}
@@ -23,6 +28,24 @@ contents:
     expand: true
     file_info:
       mode: 0755
+  - src: ${SESSION_BINARY}
+    dst: /usr/bin/localport-session
+    expand: true
+    file_info:
+      mode: 0755
+
+  - src: packaging/pam/localport.debian
+    dst: /etc/pam.d/localport
+    type: config|noreplace
+    packager: deb
+    file_info:
+      mode: 0644
+  - src: packaging/pam/localport.redhat
+    dst: /etc/pam.d/localport
+    type: config|noreplace
+    packager: rpm
+    file_info:
+      mode: 0644
 
   - src: packaging/deb/copyright
     dst: /usr/share/doc/localport/copyright
@@ -71,6 +94,14 @@ contents:
     packager: apk
     file_info:
       mode: 0644
+
+scripts:
+  postinstall: packaging/nfpm/postinstall.sh
+
+overrides:
+  rpm:
+    recommends:
+      - localport-selinux
 
 rpm:
   summary: Localport agent for secure tunnels and remote access

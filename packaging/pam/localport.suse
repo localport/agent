@@ -1,0 +1,12 @@
+#%PAM-1.0
+# PAM service "localport" for openSUSE and SLES, installed as /etc/pam.d/localport.
+# localport-session runs account, setcred and the session stack. The user is
+# authenticated upstream by a Localport certificate, so pam_authenticate is never
+# called; the auth stack is present for pam_setcred, as in sshd.
+auth       include      common-auth
+account    required     pam_nologin.so
+account    include      common-account
+password   include      common-password
+session    required     pam_loginuid.so
+session    optional     pam_keyinit.so force revoke
+session    include      common-session

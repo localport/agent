@@ -18,10 +18,56 @@ env:
   IMAGE: ghcr.io/localport/agent
 
 jobs:
+  # The cgo localport-session builds and the signed darwin binaries; the
+  # build job ships them with the rest of the release set.
+  sessions:
+    uses: ./.github/workflows/session.yml
+    permissions:
+      contents: read
+    with:
+      version: ${{ github.ref_name }}
+      cache: false
+
+  # OpenWrt packages, built with the OpenWrt SDK of each package arch. The
+  # build job ships them in the release set; publish indexes the feed.
+  openwrt:
+    name: OpenWrt (${{ matrix.arch }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64
+          - aarch64_generic
+          - aarch64_cortex-a53
+          - arm_cortex-a7_neon-vfpv4
+          - arm_arm1176jzf-s_vfp
+          - mipsel_24kc
+          - mips_24kc
+          - riscv64_generic
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build
+        run: packaging/openwrt/sdk.sh build "${{ matrix.arch }}" "${TAG#v}" out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openwrt-${{ matrix.arch }}
+          path: out/localport-openwrt-*.apk
+          if-no-files-found: error
+          retention-days: 1
+
   build:
     name: Build draft
+    needs: [sessions, openwrt]
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: write # create the draft release
       id-token: write # Sigstore signing and build provenance
@@ -53,12 +99,28 @@ jobs:
 
       - run: go install github.com/google/go-licenses/v2@v2.0.1
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "{session-*,darwin}"
+          path: bin
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: openwrt-*
+          path: openwrt
+          merge-multiple: true
+
+      # Artifacts do not keep file modes.
+      - run: chmod 0755 bin/localport-*
+
       - name: Build
         run: |
           make dist \
             VERSION="$TAG" \
             BUILDVCS=true \
             SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          cp openwrt/localport-openwrt-*.apk dist/
 
       - name: SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
@@ -137,11 +199,13 @@ jobs:
         env:
           REPO_GPG_PRIVATE_KEY: ${{ secrets.REPO_GPG_PRIVATE_KEY }}
           APK_PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
+          OPENWRT_PRIVATE_KEY: ${{ secrets.OPENWRT_PRIVATE_KEY }}
         run: |
           umask 077
           mkdir -p "$RUNNER_TEMP/keys"
           printf '%s\n' "$REPO_GPG_PRIVATE_KEY" >"$RUNNER_TEMP/keys/repo.asc"
           printf '%s\n' "$APK_PRIVATE_KEY" >"$RUNNER_TEMP/keys/apk.rsa"
+          printf '%s\n' "$OPENWRT_PRIVATE_KEY" >"$RUNNER_TEMP/keys/openwrt.pem"
 
       - name: Packages
         if: env.STABLE == 'true'
@@ -167,10 +231,22 @@ jobs:
         if: env.STABLE == 'true'
         env:
           REPO_GPG_PASSPHRASE: ${{ secrets.REPO_GPG_PASSPHRASE }}
+          # One SDK download serves every arch's index.
+          SDK_DIR: ${{ runner.temp }}/openwrt-sdk
         run: |
           cp release/keys/localport-archive-keyring.gpg release/keys/RPM-GPG-KEY-localport release/keys/*.rsa.pub dist/repo/
           make repo REPO_GPG_KEY_FILE="$RUNNER_TEMP/keys/repo.asc"
           make repo-apk APK_KEY_FILE="$RUNNER_TEMP/keys/apk.rsa"
+          # OpenWrt feed: openwrt/<release>/<package arch>/, named as apk
+          # fetches it (name-version), with a signed packages.adb per arch.
+          for f in dist/localport-openwrt-*.apk; do
+            arch="${f#dist/localport-openwrt-}"; arch="${arch%.apk}"
+            dir="dist/repo/openwrt/25.12/$arch"
+            mkdir -p "$dir"
+            cp "$f" "$dir/localport-${TAG#v}-r1.apk"
+            packaging/openwrt/sdk.sh index "$dir" "$RUNNER_TEMP/keys/openwrt.pem"
+          done
+          cp release/keys/localport-openwrt.pem dist/repo/openwrt/
 
       - name: Install test
         if: env.STABLE == 'true'
