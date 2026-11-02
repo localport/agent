@@ -64,6 +64,9 @@ build-all:
 		[ "$$os" = windows ] && ext=.exe; \
 		echo "build $$os/$$arch"; \
 		GOOS=$$os GOARCH=$$arch GOARM=6 $(GO_BUILD) -o bin/localport-$$os-$$arch$$ext ./cmd/localport || exit 1; \
+		if [ "$$os" = windows ]; then \
+			GOOS=$$os GOARCH=$$arch $(GO_BUILD) -o bin/localport-session-$$os-$$arch$$ext ./cmd/localport-session || exit 1; \
+		fi; \
 	done
 
 # The Docker builds in SESSION_LINUX; CI runs one entry per job by setting

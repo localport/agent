@@ -46,9 +46,11 @@ type HelperRequest struct {
 	AgentAccount bool `json:"agent_account,omitempty"`
 	// Pipe is the session channel pipe the helper opens (Windows).
 	Pipe string `json:"pipe,omitempty"`
-	// Password selects a LogonUser logon over S4U (Windows); the helper
-	// zeroes it after the logon.
-	Password []byte `json:"password,omitempty"`
+	// HasPassword announces a password trailer after the message (Windows).
+	HasPassword bool `json:"password,omitempty"`
+	// Password selects a LogonUser logon over S4U (Windows). It travels as
+	// a raw trailer, never in JSON; the helper zeroes it after the logon.
+	Password []byte `json:"-"`
 }
 
 // HelperReply is the helper's one control message: started, or a refusal
@@ -85,7 +87,8 @@ func authorize(load func() (*config.LocalConfig, error), agentAccount string, re
 	if !slices.Contains(d.Enable, config.CapabilityTerminal) {
 		return HelperRequest{}, Refusal(CodeKindNotEnabled)
 	}
-	h := HelperRequest{Kind: req.Kind, Login: req.Login, Cols: req.Cols, Rows: req.Rows, Term: req.Term, Pipe: req.Pipe, Password: req.Password}
+	h := HelperRequest{Kind: req.Kind, Login: req.Login, Cols: req.Cols, Rows: req.Rows, Term: req.Term, Pipe: req.Pipe,
+		HasPassword: req.HasPassword, Password: req.Password}
 	switch {
 	case d.RunAsAgent:
 		if agentAccount == "" || req.Login != agentAccount {
@@ -101,7 +104,14 @@ func authorize(load func() (*config.LocalConfig, error), agentAccount string, re
 // WriteHelperRequest writes the launcher's request on a helper's control
 // channel.
 func WriteHelperRequest(control io.Writer, req HelperRequest) error {
-	return writeMessage(control, req)
+	req.HasPassword = len(req.Password) > 0
+	if err := writeMessage(control, req); err != nil {
+		return err
+	}
+	if req.HasPassword {
+		return writeSecret(control, req.Password)
+	}
+	return nil
 }
 
 // ReadHelperReply reads a helper's one reply: started, or a refusal.
@@ -125,10 +135,13 @@ func ReadHelperRequest(control io.Reader) (HelperRequest, error) {
 		return HelperRequest{}, err
 	}
 	var req HelperRequest
-	err = decodeStrict(body, &req)
-	clear(body)
-	if err != nil {
+	if err := decodeStrict(body, &req); err != nil {
 		return HelperRequest{}, err
+	}
+	if req.HasPassword {
+		if req.Password, err = readSecret(control); err != nil {
+			return HelperRequest{}, err
+		}
 	}
 	return req, nil
 }

@@ -77,10 +77,14 @@ type Request struct {
 	// created for this session (SessionPipePrefix and 32 hex digits). Unix
 	// passes the channel as a descriptor and refuses the field.
 	Pipe string `json:"pipe,omitempty"`
-	// Password is the login's Windows password for a session that needs a
-	// full logon (LogonUser) instead of S4U. The launcher and the helper
-	// zero it once used and never store it. Unix refuses the field.
-	Password []byte `json:"password,omitempty"`
+	// HasPassword announces a password trailer after the message (Windows):
+	// the login's password for a full logon (LogonUser) instead of S4U.
+	// Unix refuses it.
+	HasPassword bool `json:"password,omitempty"`
+	// Password travels outside JSON, as a raw length-prefixed trailer
+	// (writeSecret, readSecret), so no encoder buffer ever holds it; each
+	// hop zeroes its copy once used and nothing stores it.
+	Password []byte `json:"-"`
 }
 
 // Limits a session request's fields must meet.
@@ -108,7 +112,7 @@ func (r Request) Validate() error {
 	}
 	switch r.Kind {
 	case KindProbe:
-		if r.Device != "" || r.Login != "" || r.Cols != 0 || r.Rows != 0 || r.Term != "" || r.Pipe != "" || len(r.Password) != 0 {
+		if r.Device != "" || r.Login != "" || r.Cols != 0 || r.Rows != 0 || r.Term != "" || r.Pipe != "" || r.HasPassword || len(r.Password) != 0 {
 			return Refusal(CodeBadRequest)
 		}
 		return nil
@@ -125,6 +129,7 @@ func (r Request) Validate() error {
 		r.Rows < 1 || r.Rows > maxTerminalSize,
 		!termPattern.MatchString(r.Term),
 		r.Pipe != "" && !pipePattern.MatchString(r.Pipe),
+		r.HasPassword != (len(r.Password) > 0),
 		len(r.Password) > maxPassword:
 		return Refusal(CodeBadRequest)
 	}
@@ -150,10 +155,21 @@ type Refused struct {
 	Code string `json:"code"`
 }
 
+// S4U states a Windows probe reports.
+const (
+	S4ULocal             = "local"
+	S4UDomain            = "domain"
+	S4UDomainUnreachable = "domain_unreachable"
+	S4UUnknown           = "unknown"
+)
+
 // Probe reports what the launcher can offer sessions on this host.
 type Probe struct {
 	PAM            bool   `json:"pam"`
 	FullDiskAccess string `json:"full_disk_access"`
+	// S4U is the Windows password-less logon's reach, one of the S4U*
+	// states; empty off Windows.
+	S4U string `json:"s4u,omitempty"`
 }
 
 // Exit is the helper's exit as the launcher reaped it.
@@ -221,6 +237,37 @@ func readBody(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("launcher: short message: %w", err)
 	}
 	return body, nil
+}
+
+// writeSecret writes secret as a 4-byte big-endian length and the raw bytes,
+// in two writes, so no buffer but the caller's holds it.
+func writeSecret(w io.Writer, secret []byte) error {
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(secret)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(secret)
+	return err
+}
+
+// readSecret reads one writeSecret trailer of 1 to maxPassword bytes into a
+// buffer the caller owns and must clear.
+func readSecret(r io.Reader) ([]byte, error) {
+	var hdr [4]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, err
+	}
+	n := binary.BigEndian.Uint32(hdr[:])
+	if n == 0 || n > maxPassword {
+		return nil, Refusal(CodeBadRequest)
+	}
+	secret := make([]byte, n)
+	if _, err := io.ReadFull(r, secret); err != nil {
+		clear(secret)
+		return nil, err
+	}
+	return secret, nil
 }
 
 // decodeRequest decodes a request body strictly: unknown fields and trailing

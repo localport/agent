@@ -75,12 +75,20 @@ func (s *Server) handle(conn *os.File) {
 		return
 	}
 	req, err := decodeRequest(body)
-	clear(body)
-	defer clear(req.Password)
 	if err != nil {
 		s.refuse(conn, CodeOf(err))
 		return
 	}
+	if req.HasPassword {
+		_ = conn.SetReadDeadline(time.Now().Add(requestTimeout))
+		req.Password, err = readSecret(conn)
+		_ = conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			s.refuse(conn, CodeBadRequest)
+			return
+		}
+	}
+	defer clear(req.Password)
 	if err := req.Validate(); err != nil {
 		s.refuse(conn, CodeOf(err))
 		return
@@ -164,6 +172,9 @@ func (s *Server) run(conn *os.File, req HelperRequest) {
 	s.Log("launcher: session %s: %s for %q, helper %d", id, req.Kind, req.Login, cmd.Process.Pid)
 	respond(conn, Response{Started: &Started{SessionID: id}})
 	e := waitExit(cmd)
+	if e.Status != 0 {
+		s.Log("launcher: session %s: helper %d exited with status %d; a profile it loaded stays loaded until Windows unloads it", id, cmd.Process.Pid, e.Status)
+	}
 	respond(conn, Response{Exit: &e})
 }
 

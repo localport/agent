@@ -68,6 +68,7 @@ func (c Client) Start(ctx context.Context, req Request, channel *os.File) (*Sess
 		return nil, errors.New("launcher: Windows passes the session channel by pipe name")
 	}
 	req.V = Version
+	req.HasPassword = len(req.Password) > 0
 	if req.Kind != KindProbe && req.Pipe == "" {
 		return nil, Refusal(CodeBadRequest)
 	}
@@ -80,13 +81,10 @@ func (c Client) Start(ctx context.Context, req Request, channel *os.File) (*Sess
 	if err != nil {
 		return nil, err
 	}
-	msg, err := encode(req)
-	if err != nil {
-		conn.Close()
-		return nil, err
+	err = writeMessage(conn, req)
+	if err == nil && req.HasPassword {
+		err = writeSecret(conn, req.Password)
 	}
-	_, err = conn.Write(msg)
-	clear(msg)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)

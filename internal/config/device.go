@@ -198,7 +198,9 @@ type localDeviceFile struct {
 //
 // The system config (System) instead needs a root-owned directory nobody else
 // can write and a root-owned regular file that group and other cannot write
-// and other cannot read; the agent account reads it through its group.
+// and other cannot read; the agent account reads it through its group. On
+// Windows both are owned by Administrators and the device service may only
+// read them (security.ReadSystemFile).
 func LoadLocal(f LocalConfigFile) (*LocalConfig, error) {
 	var raw []byte
 	var err error
@@ -705,9 +707,10 @@ func lockBeside(ctx context.Context, f LocalConfigFile, path string, wait time.D
 }
 
 // openLock opens the lock file path beside the config. For the system config,
-// root creates or secures the directory and the lock (run.lock root:localport
-// 0660, agent.yaml.lock 0600); any other account only checks the directory and
-// opens the existing run.lock.
+// root (an elevated Administrator on Windows) creates or secures the
+// directory and the lock (run.lock root:localport 0660, agent.yaml.lock 0600;
+// on Windows the matching DACLs); any other account only checks the
+// directory and opens the existing run.lock.
 func openLock(f LocalConfigFile, path string) (*os.File, error) {
 	if !f.System {
 		if err := security.EnsurePrivateDir(f.Base, filepath.Dir(f.Path), f.FollowBase); err != nil {

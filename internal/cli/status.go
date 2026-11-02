@@ -58,12 +58,14 @@ func printStatus(ctx context.Context, w io.Writer) error {
 		// Root's status runs here as the agent account, which owns the keys.
 		printFingerprints(w, cfg.Devices)
 	}
-	probe := probeLauncher(ctx, func(line string) { fmt.Fprintf(w, "launcher   %s\n", line) })
-	auth := probe.sessionAuth
-	if runtime.GOOS == "windows" && probe.answered {
-		auth = "windows logon (S4U, or LogonUser with a password)"
+	if runtime.GOOS == "windows" {
+		// Only the device service may open the launcher pipe; the service
+		// reports the logon state, shown per device in the dashboard.
+		fmt.Fprintln(w, "launcher   session logon state: see the device in the dashboard")
+		return nil
 	}
-	fmt.Fprintf(w, "launcher   session auth %s\n", valueOrUnknown(auth))
+	probe := probeLauncher(ctx, func(line string) { fmt.Fprintf(w, "launcher   %s\n", line) })
+	fmt.Fprintf(w, "launcher   session auth %s\n", valueOrUnknown(probe.sessionAuth))
 	if probe.fullDiskAccess != "" {
 		fmt.Fprintf(w, "launcher   full disk access %s\n", probe.fullDiskAccess)
 	}

@@ -26,6 +26,11 @@ const PipePath = `\\.\pipe\localport-session`
 // client can never serve an instance of the name itself.
 const pipeClientAccess = "0x12008b"
 
+// pipeClientRights is pipeClientAccess as the rights a client requests:
+// FILE_GENERIC_READ and FILE_WRITE_DATA. GENERIC_WRITE would ask for more
+// than the DACL grants and be denied.
+const pipeClientRights = 0x12008b
+
 const pipeBufferSize = 64 << 10
 
 var procImpersonateNamedPipeClient = windows.NewLazySystemDLL("advapi32.dll").NewProc("ImpersonateNamedPipeClient")
@@ -62,6 +67,12 @@ type PipeListener struct {
 	name, sddl string
 	first      bool
 	stop       windows.Handle
+	// next is the instance waiting for the next client. Accept creates it
+	// before returning a connection, so the name does not lapse between
+	// clients unless that creation fails. A process that takes a lapsed
+	// name only denies service: the agent refuses a pipe not owned by
+	// SYSTEM.
+	next windows.Handle
 }
 
 // ListenPipe creates the launcher pipe owned by SYSTEM, granting SYSTEM full
@@ -78,7 +89,25 @@ func ListenPipe(agent *windows.SID) (*PipeListener, error) {
 		first: true,
 		stop:  stop,
 	}
+	// The first instance now: a name already taken fails the start.
+	if err := l.prepare(); err != nil {
+		_ = windows.CloseHandle(stop)
+		return nil, err
+	}
 	return l, nil
+}
+
+// prepare creates the waiting instance when there is none.
+func (l *PipeListener) prepare() error {
+	if l.next != 0 {
+		return nil
+	}
+	h, err := createPipeInstance(l.name, l.sddl, l.first, windows.PIPE_UNLIMITED_INSTANCES)
+	if err != nil {
+		return err
+	}
+	l.first, l.next = false, h
+	return nil
 }
 
 // Accept waits for the next client and returns its connection, pollable so
@@ -87,15 +116,19 @@ func (l *PipeListener) Accept() (*os.File, error) {
 	if ev, _ := windows.WaitForSingleObject(l.stop, 0); ev == windows.WAIT_OBJECT_0 {
 		return nil, net.ErrClosed
 	}
-	h, err := createPipeInstance(l.name, l.sddl, l.first, windows.PIPE_UNLIMITED_INSTANCES)
-	if err != nil {
+	if err := l.prepare(); err != nil {
 		return nil, err
 	}
-	l.first = false
+	h := l.next
 	if err := connectPipe(h, l.stop); err != nil {
 		_ = windows.CloseHandle(h)
+		l.next = 0
 		return nil, err
 	}
+	// The next instance exists before this one is handed out; when that
+	// fails the next Accept tries again.
+	l.next = 0
+	_ = l.prepare()
 	// The handle joins the runtime poller only now, so the completion of the
 	// connect above never reaches it.
 	return os.NewFile(uintptr(h), l.name), nil
@@ -193,7 +226,7 @@ func dialPipe(ctx context.Context, name string, owner *windows.SID) (*os.File, e
 	}
 	var h windows.Handle
 	for {
-		h, err = windows.CreateFile(p, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING,
+		h, err = windows.CreateFile(p, pipeClientRights, 0, nil, windows.OPEN_EXISTING,
 			windows.FILE_FLAG_OVERLAPPED|windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION, 0)
 		if err == nil {
 			break

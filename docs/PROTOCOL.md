@@ -975,10 +975,14 @@ root and refuses to start.
 
 On Windows the machine-wide credentials are shared by the elevated
 Administrator that runs `connect` and the device service, which runs as the
-virtual account `NT SERVICE\localport-device`: files under that directory
-grant SYSTEM, Administrators and that account, and only a privileged process,
-and only for paths under that directory, accepts that account as an owner or
-writer. The machine-wide directory holds the devices' private keys; keep it out
+virtual account `NT SERVICE\localport-device`: files under its `identity\`
+directory grant SYSTEM, Administrators and that account, and only a
+privileged process, and only for paths under `identity\`, accepts that
+account as an owner or writer. The rest of the directory belongs to
+Administrators: the service may read the directory and `agent.yaml`, read and
+write `run.lock` (to lock it and record its PID), and cannot open
+`agent.yaml.lock`. The
+machine-wide directory holds the devices' private keys; keep it out
 of backups and configuration management.
 
 ```

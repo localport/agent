@@ -99,7 +99,8 @@ type RegisterPayload struct {
 	Logins       []string `json:"logins,omitempty"`
 	Desktop      []string `json:"desktop,omitempty"`
 
-	// SessionAuth (pam, no_pam) and FullDiskAccess (granted, denied, unknown;
+	// SessionAuth (pam, no_pam; on Windows s4u, s4u_domain_unreachable) and
+	// FullDiskAccess (granted, denied, unknown;
 	// omitted off macOS) are the session launcher's probe; RunAsAgent is the
 	// device config's opt-in to run sessions as the agent account. Display
 	// only: the control plane shows them and decides nothing on them.

@@ -140,8 +140,8 @@ func usageSet(fs *flag.FlagSet) {
   identity, <fleet>.<device>, or the device name when unique. Only the flags
   given change; a list flag replaces the whole list. As root (Administrator on
   Windows) set reloads the installed device service, which applies the
-  change: only the changed device restarts and its open sessions end
-  (Windows restarts the service). A device run with localport run applies it
+  change: only the changed device restarts and its open sessions end. A
+  device run with localport run applies it
   when restarted.
 
 Flags:

@@ -6,14 +6,13 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/localport/agent/internal/launcher"
 	"github.com/localport/agent/internal/session"
 )
 
 // sessionProbe is what the session launcher reported at start, for the
 // device registration. Empty fields are unknown: no launcher answered.
 type sessionProbe struct {
-	// answered is true when the launcher answered the probe.
-	answered       bool
 	sessionAuth    string
 	fullDiskAccess string
 }
@@ -36,12 +35,18 @@ func probeLauncher(ctx context.Context, logEvent func(string)) sessionProbe {
 		logEvent(fmt.Sprintf("session: the session launcher did not answer its probe: %v", err))
 		return sessionProbe{}
 	}
-	// session_auth describes the PAM path only; Windows logs on through LSA
-	// and leaves it unset.
+	// Windows logs on by S4U; the dashboard shows when a joined device found
+	// no domain controller, so domain logins fail.
 	if runtime.GOOS == "windows" {
-		return sessionProbe{answered: true}
+		switch p.S4U {
+		case launcher.S4ULocal, launcher.S4UDomain:
+			return sessionProbe{sessionAuth: "s4u"}
+		case launcher.S4UDomainUnreachable:
+			return sessionProbe{sessionAuth: "s4u_domain_unreachable"}
+		}
+		return sessionProbe{}
 	}
-	out := sessionProbe{sessionAuth: "no_pam", answered: true}
+	out := sessionProbe{sessionAuth: "no_pam"}
 	if p.PAM {
 		out.sessionAuth = "pam"
 	}

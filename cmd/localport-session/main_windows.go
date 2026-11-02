@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync/atomic"
+	"time"
 
 	"golang.org/x/sys/windows"
 
@@ -54,6 +56,9 @@ func main() {
 	}
 }
 
+// s4uRefresh is how often the launcher re-checks the domain.
+const s4uRefresh = time.Minute
+
 func isLocalSystem() bool {
 	u, err := windows.GetCurrentProcessToken().GetTokenUser()
 	return err == nil && u.User.Sid.IsWellKnown(windows.WinLocalSystemSid)
@@ -76,12 +81,29 @@ func runLauncher(ctx context.Context, running func(), logger *log.Logger) error 
 	if err != nil {
 		return err
 	}
+	// Domain controller discovery can block for seconds, and the agent
+	// probes before every session, so the probe answers from a value kept
+	// fresh in the background.
+	var s4u atomic.Value
+	s4u.Store(launcher.S4UUnknown)
+	go func() {
+		t := time.NewTicker(s4uRefresh)
+		defer t.Stop()
+		for {
+			s4u.Store(sessionhelper.S4UAvailability())
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
 	s := &launcher.Server{
 		AgentSID:   agent,
 		LoadConfig: func() (*config.LocalConfig, error) { return config.LoadLocal(file) },
 		HelperPath: exe,
 		Probe: func() launcher.Probe {
-			return launcher.Probe{PAM: false, FullDiskAccess: launcher.FullDiskAccessUnknown}
+			return launcher.Probe{PAM: false, FullDiskAccess: launcher.FullDiskAccessUnknown, S4U: s4u.Load().(string)}
 		},
 		Log: logger.Printf,
 	}

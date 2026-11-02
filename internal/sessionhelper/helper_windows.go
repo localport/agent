@@ -104,11 +104,15 @@ func Run(log func(string, ...any)) int {
 // console is a shell attached to a pseudoconsole. The helper holds the
 // shell by its process handle, so the exit code is never another process's.
 type console struct {
-	pc       windows.Handle
-	process  windows.Handle
-	input    *os.File
-	output   *os.File
-	closeOne sync.Once
+	process windows.Handle
+	input   *os.File
+	output  *os.File
+
+	// mu guards pc against a resize racing its close: pc is never used once
+	// closed is set.
+	mu     sync.Mutex
+	pc     windows.Handle
+	closed bool
 }
 
 // startConsole starts %SystemRoot%\System32\cmd.exe as token's user in a
@@ -178,8 +182,16 @@ func (k *console) spawn(token windows.Token) error {
 	if err != nil {
 		return err
 	}
+	// An empty desktop connects the shell to a window station of its own
+	// logon session; inheriting the helper's (the SYSTEM service desktop)
+	// would deny the user and fail the start.
+	desktop, err := windows.UTF16PtrFromString("")
+	if err != nil {
+		return err
+	}
 	si := windows.StartupInfoEx{ProcThreadAttributeList: attrs.List()}
 	si.StartupInfo.Cb = uint32(unsafe.Sizeof(si))
+	si.StartupInfo.Desktop = desktop
 	var pi windows.ProcessInformation
 	if err := windows.CreateProcessAsUser(token, app, cmdLine, nil, nil, false,
 		windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT, env, wd, &si.StartupInfo, &pi); err != nil {
@@ -193,10 +205,23 @@ func (k *console) spawn(token windows.Token) error {
 // close ends the pseudoconsole, which ends every process attached to it.
 // The output reader keeps draining meanwhile, as ClosePseudoConsole needs.
 func (k *console) close() {
-	k.closeOne.Do(func() {
-		windows.ClosePseudoConsole(k.pc)
-		_ = k.input.Close()
-	})
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.closed {
+		return
+	}
+	k.closed = true
+	windows.ClosePseudoConsole(k.pc)
+	_ = k.input.Close()
+}
+
+// resize resizes the pseudoconsole unless it is closed.
+func (k *console) resize(cols, rows uint16) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.closed {
+		_ = windows.ResizePseudoConsole(k.pc, windows.Coord{X: int16(cols), Y: int16(rows)})
+	}
 }
 
 // relay serves the channel until the shell exits or the agent ends the
@@ -237,7 +262,7 @@ func (k *console) relay(channel *os.File, log func(string, ...any)) {
 					log("sessionhelper: input: %v", err)
 				}
 			case launcher.FrameResize:
-				_ = windows.ResizePseudoConsole(k.pc, windows.Coord{X: int16(f.Cols), Y: int16(f.Rows)})
+				k.resize(f.Cols, f.Rows)
 			}
 		}
 		// The agent ended the channel: end the session.

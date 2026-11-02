@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,6 +99,28 @@ func TestPipeClientAndOwnerChecks(t *testing.T) {
 			t.Fatalf("dial expecting SYSTEM = %v, want errPipeOwner", err)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A client granted only pipeClientAccess, as the agent and the helper are,
+// can open and use the pipe.
+func TestDialNeedsOnlyTheGrantedRights(t *testing.T) {
+	me := currentSID(t)
+	name := SessionPipePrefix + strings.Repeat("cd", 16)
+	server, err := createPipeInstance(name, "O:"+me.String()+"D:P(A;;"+pipeClientAccess+";;;"+me.String()+")", true, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(server)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := dialPipe(ctx, name, me)
+	if err != nil {
+		t.Fatalf("dial with only %s granted: %v", pipeClientAccess, err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("x")); err != nil {
+		t.Fatal(err)
 	}
 }
 

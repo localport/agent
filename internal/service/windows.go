@@ -90,27 +90,40 @@ func (scm) open(fn func(*mgr.Mgr, *mgr.Service) error) error {
 	return fn(m, s)
 }
 
-// ownedService refuses a service under WindowsName this package did not
-// create, and returns its configuration.
-func ownedService(s interface{ Config() (mgr.Config, error) }) (mgr.Config, error) {
+// ownedService refuses a service under name this package did not create,
+// and returns its configuration.
+func ownedService(name string, s interface{ Config() (mgr.Config, error) }) (mgr.Config, error) {
 	cfg, err := s.Config()
 	if err != nil {
-		return cfg, fmt.Errorf("read service %s: %w", WindowsName, err)
+		return cfg, fmt.Errorf("read service %s: %w", name, err)
 	}
 	if !strings.Contains(cfg.Description, Marker) {
-		return cfg, fmt.Errorf("%w: Windows service %q; remove it (sc.exe delete %s), then run the command again", ErrForeignUnit, WindowsName, WindowsName)
+		return cfg, fmt.Errorf("%w: Windows service %q; remove it (sc.exe delete %s), then run the command again", ErrForeignUnit, name, name)
 	}
 	return cfg, nil
 }
 
+// Check refuses a foreign service under the device or the launcher service
+// name, and a launcher service deleted but still held, before anything is
+// spent; Installed reports the device service's own state.
 func (c scm) Check() ([]string, error) {
-	return nil, c.open(func(_ *mgr.Mgr, s *mgr.Service) error {
-		if s == nil {
+	for _, name := range []string{WindowsName, LauncherName} {
+		if err := openService(name, func(_ *mgr.Mgr, s *mgr.Service) error {
+			if s == nil {
+				return nil
+			}
+			if _, err := ownedService(name, s); err != nil {
+				return err
+			}
+			if name == LauncherName {
+				return checkNotMarkedForDelete(name, scmService{s})
+			}
 			return nil
+		}); err != nil {
+			return nil, err
 		}
-		_, err := ownedService(s)
-		return err
-	})
+	}
+	return nil, nil
 }
 
 // Installed returns true with ErrMarkedForDelete for a deleted service that
@@ -135,10 +148,10 @@ func installedState(s interface {
 	Config() (mgr.Config, error)
 	ChangeNothing() error
 }) (bool, error) {
-	if _, err := ownedService(s); err != nil {
+	if _, err := ownedService(WindowsName, s); err != nil {
 		return false, err
 	}
-	return true, checkNotMarkedForDelete(s)
+	return true, checkNotMarkedForDelete(WindowsName, s)
 }
 
 // ChangeNothing calls ChangeServiceConfig with no change. It fails with
@@ -151,9 +164,9 @@ func (s scmService) ChangeNothing() error {
 
 // checkNotMarkedForDelete returns ErrMarkedForDelete for a deleted service
 // that a handle still holds.
-func checkNotMarkedForDelete(s interface{ ChangeNothing() error }) error {
+func checkNotMarkedForDelete(name string, s interface{ ChangeNothing() error }) error {
 	if err := s.ChangeNothing(); err != nil {
-		return markedForDelete(fmt.Errorf("read service %s: %w", WindowsName, err))
+		return markedForDelete(fmt.Errorf("read service %s: %w", name, err))
 	}
 	return nil
 }
@@ -333,7 +346,7 @@ func installDefinition(ctx context.Context, d serviceDef, existing winService, c
 		defer closeCreated()
 		s = created
 	} else {
-		cfg, err := ownedService(s)
+		cfg, err := ownedService(d.name, s)
 		if err != nil {
 			return err
 		}
@@ -408,7 +421,7 @@ func (c scm) Uninstall(ctx context.Context) error {
 				}
 				return nil
 			}
-			if _, err := ownedService(s); err != nil {
+			if _, err := ownedService(name, s); err != nil {
 				return err
 			}
 			if err := stop(ctx, name, scmService{s}); err != nil {

@@ -2,7 +2,12 @@
 
 package sessionhelper
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"golang.org/x/sys/windows"
+)
 
 func TestParseLogin(t *testing.T) {
 	for in, want := range map[string]login{
@@ -26,12 +31,26 @@ func TestParseLogin(t *testing.T) {
 }
 
 // A password logon zeroes the password on every path, a refusal included.
+// The valid password reaches LogonUserW, which refuses the unknown account
+// as an account refusal; the invalid one is refused before the call.
 func TestPasswordLogonZeroesThePassword(t *testing.T) {
-	pw := []byte("not-the-password-\x00")
-	_, _ = passwordLogonToken(login{User: "localport-no-such-user"}, pw)
-	for _, b := range pw {
-		if b != 0 {
-			t.Fatalf("password not zeroed: %q", pw)
+	for _, tc := range []struct {
+		pw         []byte
+		reachedAPI bool
+	}{{[]byte("Not-the-password-1é"), true}, {[]byte("bad-\x00"), false}} {
+		pw := tc.pw
+		_, err := passwordLogonToken(login{User: "localport-no-such-user"}, pw)
+		if !errors.Is(err, errAccount) {
+			t.Errorf("logon with %d-byte password = %v, want errAccount", len(pw), err)
+		}
+		// Only a call that reached LogonUserW carries its error.
+		if got := errors.Is(err, windows.ERROR_LOGON_FAILURE); got != tc.reachedAPI {
+			t.Errorf("logon with %d-byte password = %v; reached LogonUserW %v, want %v", len(pw), err, got, tc.reachedAPI)
+		}
+		for _, b := range pw {
+			if b != 0 {
+				t.Fatalf("password not zeroed: %q", pw)
+			}
 		}
 	}
 }

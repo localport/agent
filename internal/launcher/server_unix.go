@@ -95,8 +95,7 @@ func (s *Server) handle(conn *net.UnixConn) {
 		return
 	}
 	// The channel is the passed descriptor, and PAM never takes a password.
-	if req.Pipe != "" || len(req.Password) != 0 {
-		clear(req.Password)
+	if req.Pipe != "" || req.HasPassword {
 		s.refuse(conn, CodeBadRequest)
 		return
 	}
