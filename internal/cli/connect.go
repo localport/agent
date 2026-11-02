@@ -116,9 +116,9 @@ func runConnect(version string, args []string) (retErr error) {
 	if viaChild && *noMux {
 		return errors.New("--no-mux is not available to a device enrolled as root; run it as an ordinary user, or leave it out")
 	}
-	if viaChild {
+	if needsSystemLayout(file) {
 		// First: the service check below locks run.lock, which needs the
-		// account's group.
+		// account's group (on Windows its system DACL).
 		m, exe := platformManager()
 		if err := prepareSystemLayout(context.Background(), file, m, exe); err != nil {
 			return err

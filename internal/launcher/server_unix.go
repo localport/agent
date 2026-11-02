@@ -4,15 +4,11 @@ package launcher
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
-	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -21,40 +17,6 @@ import (
 
 	"github.com/localport/agent/internal/config"
 )
-
-const (
-	// requestTimeout bounds reading the one request after accept.
-	requestTimeout = 5 * time.Second
-	// helperStartTimeout bounds a helper's account lookup, PAM account and
-	// session setup and process start (A10); the launcher kills a helper
-	// still starting after it.
-	helperStartTimeout = 30 * time.Second
-	// maxHelpers bounds the helpers one launcher runs at once.
-	maxHelpers = 64
-	// CodeStartTimeout refuses a helper that did not start in time.
-	CodeStartTimeout = "start_timeout"
-)
-
-// HelperRequest is what the launcher sends a helper on its control
-// descriptor: the request after the config check, with the decision the
-// config made. The helper trusts it; only the launcher writes it.
-type HelperRequest struct {
-	Kind  string `json:"kind"`
-	Login string `json:"login"`
-	Cols  int    `json:"cols"`
-	Rows  int    `json:"rows"`
-	Term  string `json:"term"`
-	// AgentAccount runs the session as the agent's own account without PAM
-	// (tier 3 opt-in). Login is then the agent account's name.
-	AgentAccount bool `json:"agent_account,omitempty"`
-}
-
-// HelperReply is the helper's one control message: started, or a refusal
-// code.
-type HelperReply struct {
-	Started bool   `json:"started,omitempty"`
-	Refused string `json:"refused,omitempty"`
-}
 
 // Server is the launcher daemon's configuration.
 type Server struct {
@@ -132,6 +94,12 @@ func (s *Server) handle(conn *net.UnixConn) {
 		s.refuse(conn, CodeOf(err))
 		return
 	}
+	// The channel is the passed descriptor, and PAM never takes a password.
+	if req.Pipe != "" || len(req.Password) != 0 {
+		clear(req.Password)
+		s.refuse(conn, CodeBadRequest)
+		return
+	}
 	if req.Kind == KindProbe {
 		if channel != nil {
 			s.refuse(conn, CodeBadRequest)
@@ -163,29 +131,7 @@ func (s *Server) handle(conn *net.UnixConn) {
 
 // authorize checks req against the device config it re-reads now.
 func (s *Server) authorize(req Request) (HelperRequest, error) {
-	cfg, err := s.LoadConfig()
-	if err != nil {
-		return HelperRequest{}, fmt.Errorf("%w: %w", Refusal(CodeConfigUnreadable), err)
-	}
-	i := slices.IndexFunc(cfg.Devices, func(d config.LocalDevice) bool { return d.Identity.String() == req.Device })
-	if i < 0 {
-		return HelperRequest{}, Refusal(CodeDeviceUnknown)
-	}
-	d := cfg.Devices[i]
-	if !slices.Contains(d.Enable, config.CapabilityTerminal) {
-		return HelperRequest{}, Refusal(CodeKindNotEnabled)
-	}
-	h := HelperRequest{Kind: req.Kind, Login: req.Login, Cols: req.Cols, Rows: req.Rows, Term: req.Term}
-	switch {
-	case d.RunAsAgent:
-		if req.Login != s.AgentAccount {
-			return HelperRequest{}, Refusal(CodeLoginNotEnabled)
-		}
-		h.AgentAccount = true
-	case !slices.Contains(d.Logins, req.Login):
-		return HelperRequest{}, Refusal(CodeLoginNotEnabled)
-	}
-	return h, nil
+	return authorize(s.LoadConfig, s.AgentAccount, req)
 }
 
 // run starts one helper with channel on fd 3 and its control socket on fd
@@ -239,18 +185,11 @@ func (s *Server) run(conn *net.UnixConn, req HelperRequest, channel *os.File) {
 	respond(conn, Response{Exit: &e})
 }
 
-// replyTimeout bounds one response write, so an agent that stopped reading
-// never holds a launcher goroutine.
-const replyTimeout = 5 * time.Second
-
 // respond writes one response under its own write deadline.
 func respond(conn *net.UnixConn, r Response) {
 	_ = conn.SetWriteDeadline(time.Now().Add(replyTimeout))
 	_ = sendMessage(conn, r, nil)
 }
-
-// errHelperTimeout is a helper that did not answer within helperStartTimeout.
-var errHelperTimeout = errors.New("helper did not start in time")
 
 // start sends req on the control socket and reads the helper's one reply.
 func (s *Server) start(control *os.File, req HelperRequest) (HelperReply, error) {
@@ -263,32 +202,6 @@ func (s *Server) start(control *os.File, req HelperRequest) (HelperReply, error)
 		return HelperReply{}, errHelperTimeout
 	}
 	return reply, err
-}
-
-// WriteHelperRequest writes the launcher's request on a helper's control
-// descriptor.
-func WriteHelperRequest(control io.Writer, req HelperRequest) error {
-	return writeMessage(control, req)
-}
-
-// ReadHelperReply reads a helper's one reply: started, or a refusal.
-func ReadHelperReply(control io.Reader) (HelperReply, error) {
-	body, err := readBody(control)
-	if err != nil {
-		return HelperReply{}, err
-	}
-	var reply HelperReply
-	if err := decodeStrict(body, &reply); err != nil || reply.Started == (reply.Refused != "") {
-		return HelperReply{}, errors.New("bad helper reply")
-	}
-	return reply, nil
-}
-
-func startFailureCode(err error) string {
-	if errors.Is(err, errHelperTimeout) {
-		return CodeStartTimeout
-	}
-	return CodeSpawnFailed
 }
 
 func (s *Server) refuse(conn *net.UnixConn, code string) {
@@ -339,29 +252,4 @@ func SocketPair() (ours, theirs *os.File, err error) {
 		return nil, nil, err
 	}
 	return os.NewFile(uintptr(fds[0]), "launcher-control"), os.NewFile(uintptr(fds[1]), "helper-control"), nil
-}
-
-func newSessionID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
-}
-
-// ReadHelperRequest reads the launcher's request on the helper's control
-// descriptor.
-func ReadHelperRequest(control *os.File) (HelperRequest, error) {
-	body, err := readBody(control)
-	if err != nil {
-		return HelperRequest{}, err
-	}
-	var req HelperRequest
-	if err := decodeStrict(body, &req); err != nil {
-		return HelperRequest{}, err
-	}
-	return req, nil
-}
-
-// WriteHelperReply writes the helper's one control reply.
-func WriteHelperReply(control *os.File, reply HelperReply) error {
-	return writeMessage(control, reply)
 }

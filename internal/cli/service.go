@@ -72,9 +72,10 @@ func installService(who invoker) error {
 	if len(local.Devices) == 0 {
 		return fmt.Errorf("%w: %s lists no device; enrol one with: sudo localport connect <join-token>", errNoDevice, file.Path)
 	}
-	if needsAgentChild(file) {
+	if needsSystemLayout(file) {
 		// Before prepareService, whose run.lock check needs the account's
-		// group; a root-run install is converted here.
+		// group (on Windows its system DACL); an earlier install is
+		// converted here.
 		m, exe := platformManager()
 		if err := prepareSystemLayout(context.Background(), file, m, exe); err != nil {
 			return err

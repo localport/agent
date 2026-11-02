@@ -19,7 +19,7 @@ import (
 //
 // Permitted trustees are the owner, LocalSystem and Administrators, the set
 // Win32 OpenSSH enforces, plus the device service SID under the device
-// directory (allowedTrustees). Administrators can take ownership of any object.
+// identity directory (allowedTrustees). Administrators can take ownership of any object.
 
 // openNoFollow opens path without traversing a junction or symlink.
 func openNoFollow(path string) (*os.File, error) {
@@ -258,7 +258,7 @@ func verifyPrivate(f *os.File, path string) error {
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
 			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 			if !sidIn(sid, allowed) {
-				return fmt.Errorf("%w: %s grants access to %s; only this account, SYSTEM, Administrators and, under the device config directory, NT SERVICE\\localport-device may reach a private key",
+				return fmt.Errorf("%w: %s grants access to %s; only this account, SYSTEM, Administrators and, under the device identity directory, NT SERVICE\\localport-device may reach a private key",
 					ErrUntrustedPath, path, sid)
 			}
 		default:
@@ -308,7 +308,7 @@ func assertNoForeignWriter(dacl *windows.ACL, path string) error {
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
 			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 			if ace.Mask&directoryWriteRights != 0 && !sidIn(sid, allowed) {
-				return fmt.Errorf("%w: %s lets %s write to it; only this account, SYSTEM, Administrators and, under the device config directory, NT SERVICE\\localport-device may", ErrUntrustedPath, path, sid)
+				return fmt.Errorf("%w: %s lets %s write to it; only this account, SYSTEM, Administrators and, under the device identity directory, NT SERVICE\\localport-device may", ErrUntrustedPath, path, sid)
 			}
 		default:
 			return fmt.Errorf("%w: %s carries an access-control entry of type %d this check cannot evaluate; refusing rather than assuming it grants nothing",
@@ -338,7 +338,7 @@ func assertOwnerIsTrusted(owner *windows.SID, path string) error {
 		return err
 	}
 	if !sidIn(owner, trusted) {
-		return fmt.Errorf("%w: %w: %s is owned by %s, not by this account, SYSTEM, Administrators or, under the device config directory, NT SERVICE\\localport-device", ErrUntrustedPath, errForeignOwner, path, owner)
+		return fmt.Errorf("%w: %w: %s is owned by %s, not by this account, SYSTEM, Administrators or, under the device identity directory, NT SERVICE\\localport-device", ErrUntrustedPath, errForeignOwner, path, owner)
 	}
 	return nil
 }
@@ -358,7 +358,7 @@ func privateSecurityAttributes(path string) (*windows.SecurityAttributes, error)
 // the current user, LocalSystem and Administrators, and to nobody else. `P`
 // marks it protected, so nothing is inherited from the parent directory.
 //
-// For a path under the device config directory, a privileged process grants
+// For a path under the device identity directory, a privileged process grants
 // the device service's virtual account instead of its own user, so the
 // elevated Administrator that runs connect and the service that runs the
 // renewer can each read and replace what the other wrote. An elevated process
@@ -370,7 +370,7 @@ func privateSecurityDescriptor(path string) (*windows.SECURITY_DESCRIPTOR, error
 		return nil, err
 	}
 	sddl := fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)", t.user)
-	if t.servesDeviceDir(path) {
+	if t.servesIdentityDir(path) {
 		sddl = fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)", t.service)
 		if t.elevated {
 			sddl = "O:BA" + sddl
@@ -394,21 +394,23 @@ type processTrust struct {
 // Administrator or the device service's virtual account.
 func (t processTrust) privileged() bool { return t.elevated || t.user.Equals(t.service) }
 
-// servesDeviceDir reports whether the service's virtual account is trusted
-// for path: only a privileged process, and only under the device config
-// directory, so the service SID never widens a check elsewhere.
-func (t processTrust) servesDeviceDir(path string) bool {
-	return t.privileged() && underDeviceDir(path, os.Getenv("ProgramData"))
+// servesIdentityDir reports whether the service's virtual account is
+// trusted for path: only a privileged process, and only under the device
+// identity directory, so the service SID never widens a check elsewhere. The
+// rest of the device directory holds system files (systemfile_windows.go).
+func (t processTrust) servesIdentityDir(path string) bool {
+	return t.privileged() && underIdentityDir(path, os.Getenv("ProgramData"))
 }
 
-// underDeviceDir reports whether path is %ProgramData%\localport-device or
-// below it, compared case-insensitively as NTFS does.
-func underDeviceDir(path, programData string) bool {
+// underIdentityDir reports whether path is
+// %ProgramData%\localport-device\identity or below it, compared
+// case-insensitively as NTFS does.
+func underIdentityDir(path, programData string) bool {
 	programData = strings.TrimSpace(programData)
 	if programData == "" || !filepath.IsAbs(path) {
 		return false
 	}
-	root := filepath.Join(programData, DeviceDirName)
+	root := filepath.Join(programData, DeviceDirName, "identity")
 	p := filepath.Clean(path)
 	if len(p) < len(root) || !strings.EqualFold(p[:len(root)], root) {
 		return false
@@ -438,7 +440,7 @@ func currentUserSID() (*windows.SID, error) {
 
 // allowedTrustees returns the SIDs that may own or access the private file
 // or directory at path: this account, SYSTEM and Administrators, and for a
-// privileged process under the device config directory also the device
+// privileged process under the device identity directory also the device
 // service's virtual account NT SERVICE\localport-device.
 func allowedTrustees(path string) ([]*windows.SID, error) {
 	t, err := currentTrust()
@@ -446,7 +448,7 @@ func allowedTrustees(path string) ([]*windows.SID, error) {
 		return nil, err
 	}
 	allowed := []*windows.SID{t.user}
-	if t.servesDeviceDir(path) {
+	if t.servesIdentityDir(path) {
 		allowed = append(allowed, t.service)
 	}
 	for _, wk := range []windows.WELL_KNOWN_SID_TYPE{

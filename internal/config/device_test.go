@@ -242,7 +242,6 @@ func TestLocalConfigValidation(t *testing.T) {
 		{"terminal with host", device("    host: 10.0.0.2\n    enable: [terminal]\n"), "linux", "terminal: terminal and files act on this machine only"},
 		{"files with host", device("    host: 10.0.0.2\n    enable: [files]\n"), "linux", "files: terminal and files act on this machine only"},
 		{"logins without terminal or files", device("    enable: [desktop]\n    rdp: 127.0.0.1:3389\n    logins: [pi]\n"), "linux", "logins apply only to a device that enables terminal or files"},
-		{"terminal on windows", device("    enable: [terminal]\n"), "windows", "terminal is not available on Windows"},
 		{"files on windows", device("    enable: [files]\n"), "windows", "files is not available on Windows"},
 		{"desktop without a target", device("    enable: [desktop]\n"), "linux", "desktop needs an rdp or vnc target"},
 		{"rdp without port", device("    enable: [desktop]\n    rdp: 127.0.0.1\n"), "linux", `rdp: "127.0.0.1" is not HOST:PORT`},
@@ -266,6 +265,7 @@ func TestLocalConfigValidation(t *testing.T) {
 	for _, ok := range []struct{ name, body, goos string }{
 		{"terminal and files on this machine", device("    enable: [terminal, files]\n    logins: [pi, _svc-1]\n    files_root: " + dir + "\n"), "linux"},
 		{"desktop with host on windows", device("    host: 10.0.0.2\n    enable: [desktop]\n    rdp: 10.0.0.2:3389\n"), "windows"},
+		{"terminal on windows with every login form", device("    enable: [terminal]\n    logins: [admin, 'CORP\\alice', bob@corp.example]\n"), "windows"},
 		{"bare device", device(""), "linux"},
 		// An unmounted volume must not stop the devices from loading.
 		{"files_root missing", device("    files_root: " + filepath.Join(dir, "missing") + "\n"), "linux"},
@@ -315,8 +315,8 @@ func TestSystemLocalConfigPaths(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if f.Path != want || f.Base != filepath.Dir(want) || f.FollowBase || f.System != (goos != "windows") {
-			t.Errorf("%s: %+v, want %s with its own directory as an unfollowed base, System off Windows", goos, f, want)
+		if f.Path != want || f.Base != filepath.Dir(want) || f.FollowBase || !f.System {
+			t.Errorf("%s: %+v, want the System file %s with its own directory as an unfollowed base", goos, f, want)
 		}
 	}
 	if _, err := systemLocalConfig("windows", ""); err == nil {

@@ -73,6 +73,14 @@ type Request struct {
 	Cols   int    `json:"cols,omitempty"`
 	Rows   int    `json:"rows,omitempty"`
 	Term   string `json:"term,omitempty"`
+	// Pipe is the session channel on Windows: the named pipe the agent
+	// created for this session (SessionPipePrefix and 32 hex digits). Unix
+	// passes the channel as a descriptor and refuses the field.
+	Pipe string `json:"pipe,omitempty"`
+	// Password is the login's Windows password for a session that needs a
+	// full logon (LogonUser) instead of S4U. The launcher and the helper
+	// zero it once used and never store it. Unix refuses the field.
+	Password []byte `json:"password,omitempty"`
 }
 
 // Limits a session request's fields must meet.
@@ -80,9 +88,16 @@ const (
 	maxTerminalSize = 1000
 	maxDeviceRef    = 128
 	maxLogin        = 256
+	maxPassword     = 256
 )
 
-var termPattern = regexp.MustCompile(`^[a-zA-Z0-9.+-]{1,32}$`)
+// SessionPipePrefix starts the name of every per-session channel pipe.
+const SessionPipePrefix = `\\.\pipe\localport-session-`
+
+var (
+	termPattern = regexp.MustCompile(`^[a-zA-Z0-9.+-]{1,32}$`)
+	pipePattern = regexp.MustCompile(`^` + regexp.QuoteMeta(SessionPipePrefix) + `[0-9a-f]{32}$`)
+)
 
 // Validate checks the fields of a request for its kind, without the config.
 // A request for a kind phase 10 does not serve fails with
@@ -93,7 +108,7 @@ func (r Request) Validate() error {
 	}
 	switch r.Kind {
 	case KindProbe:
-		if r.Device != "" || r.Login != "" || r.Cols != 0 || r.Rows != 0 || r.Term != "" {
+		if r.Device != "" || r.Login != "" || r.Cols != 0 || r.Rows != 0 || r.Term != "" || r.Pipe != "" || len(r.Password) != 0 {
 			return Refusal(CodeBadRequest)
 		}
 		return nil
@@ -108,7 +123,9 @@ func (r Request) Validate() error {
 		r.Login == "" || len(r.Login) > maxLogin,
 		r.Cols < 1 || r.Cols > maxTerminalSize,
 		r.Rows < 1 || r.Rows > maxTerminalSize,
-		!termPattern.MatchString(r.Term):
+		!termPattern.MatchString(r.Term),
+		r.Pipe != "" && !pipePattern.MatchString(r.Pipe),
+		len(r.Password) > maxPassword:
 		return Refusal(CodeBadRequest)
 	}
 	return nil

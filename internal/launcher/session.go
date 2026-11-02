@@ -3,7 +3,7 @@ package launcher
 import (
 	"errors"
 	"fmt"
-	"net"
+	"io"
 )
 
 // ErrUnavailable means the launcher socket could not be reached or the
@@ -13,7 +13,7 @@ var ErrUnavailable = errors.New("launcher unavailable")
 // Session is a started session's request connection. Its exit report is
 // secondary: the helper's exit frame on the channel is the session's exit.
 type Session struct {
-	conn net.Conn
+	conn io.ReadWriteCloser
 	ID   string
 }
 

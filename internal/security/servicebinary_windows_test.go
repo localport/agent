@@ -20,21 +20,28 @@ func TestCheckServiceBinaryRefusesAUserBinary(t *testing.T) {
 	}
 }
 
-func TestUnderDeviceDir(t *testing.T) {
+// The service SID is trusted under identity\ only: agent.yaml, run.lock and
+// the device directory itself are system files it cannot write.
+func TestUnderIdentityDir(t *testing.T) {
 	const pd = `C:\ProgramData`
 	for path, want := range map[string]bool{
-		`C:\ProgramData\localport-device`:                    true,
-		`C:\PROGRAMDATA\Localport-Device\identity\x\key.pem`: true,
-		`C:\ProgramData\localport-device-evil\agent.yaml`:    false,
-		`C:\ProgramData\localport\agent.yaml`:                false,
-		`C:\Users\me\.localport\identity`:                    false,
-		`localport-device\agent.yaml`:                        false,
+		`C:\ProgramData\localport-device\identity`:                  true,
+		`C:\PROGRAMDATA\Localport-Device\Identity\x\key.pem`:        true,
+		`C:\ProgramData\localport-device\identity\recordings\a.seg`: true,
+		`C:\ProgramData\localport-device`:                           false,
+		`C:\ProgramData\localport-device\agent.yaml`:                false,
+		`C:\ProgramData\localport-device\run.lock`:                  false,
+		`C:\ProgramData\localport-device\identity-evil\key.pem`:     false,
+		`C:\ProgramData\localport-device-evil\identity\key.pem`:     false,
+		`C:\ProgramData\localport\identity`:                         false,
+		`C:\Users\me\.localport\identity`:                           false,
+		`localport-device\identity\key.pem`:                         false,
 	} {
-		if got := underDeviceDir(path, pd); got != want {
-			t.Errorf("underDeviceDir(%s) = %v, want %v", path, got, want)
+		if got := underIdentityDir(path, pd); got != want {
+			t.Errorf("underIdentityDir(%s) = %v, want %v", path, got, want)
 		}
 	}
-	if underDeviceDir(`C:\ProgramData\localport-device`, "") {
+	if underIdentityDir(`C:\ProgramData\localport-device\identity`, "") {
 		t.Error("an unset %ProgramData% must trust nothing")
 	}
 }

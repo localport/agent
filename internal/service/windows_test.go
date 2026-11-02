@@ -16,6 +16,45 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
+// The device service accepts SERVICE_CONTROL_PARAMCHANGE once running and
+// hands each one to its reload; the launcher service, without one, does not
+// accept it.
+func TestExecuteDeliversParamChange(t *testing.T) {
+	for _, withReload := range []bool{true, false} {
+		reloads := make(chan struct{}, 1)
+		h := &scmHandler{name: "test", serve: func(ctx context.Context, running func()) error {
+			running()
+			<-ctx.Done()
+			return nil
+		}}
+		if withReload {
+			h.paramChange = func() { reloads <- struct{}{} }
+		}
+		requests := make(chan svc.ChangeRequest, 2)
+		status := make(chan svc.Status, 4)
+		done := make(chan struct{})
+		go func() { h.Execute(nil, requests, status); close(done) }()
+		<-status
+		running := <-status
+		if got := running.Accepts&svc.AcceptParamChange != 0; got != withReload {
+			t.Fatalf("reload %v: accepts ParamChange = %v", withReload, got)
+		}
+		if withReload {
+			requests <- svc.ChangeRequest{Cmd: svc.ParamChange, CurrentStatus: running}
+			select {
+			case <-reloads:
+			case <-time.After(5 * time.Second):
+				t.Fatal("ParamChange did not reach the reload")
+			}
+			if got := <-status; got != running {
+				t.Fatalf("status after ParamChange = %+v, want %+v", got, running)
+			}
+		}
+		requests <- svc.ChangeRequest{Cmd: svc.Stop}
+		<-done
+	}
+}
+
 // After serve calls running, the service reports SERVICE_RUNNING accepting
 // Stop, and a Stop cancels serve's context, which ends a wait in progress.
 func TestExecuteAcceptsStopOnceRunningAndCancelsServe(t *testing.T) {

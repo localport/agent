@@ -1,7 +1,11 @@
 package cli
 
-import "os"
+import (
+	"os"
 
-// notifyReload delivers nothing: the Windows service restarts to apply a
-// config change.
-func notifyReload() (<-chan os.Signal, func()) { return nil, func() {} }
+	"github.com/localport/agent/internal/service"
+)
+
+// notifyReload delivers each SERVICE_CONTROL_PARAMCHANGE the device service
+// receives (`localport set` sends one) as SIGHUP.
+func notifyReload() (<-chan os.Signal, func()) { return service.ParamChanges(), func() {} }

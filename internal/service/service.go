@@ -53,8 +53,8 @@ type Manager interface {
 	// Stop stops the agent service and returns once it has stopped; the
 	// launcher keeps running. Install starts it again.
 	Stop(ctx context.Context) error
-	// Reload makes the running service re-read its config (SIGHUP on Linux
-	// and macOS); Windows restarts the service.
+	// Reload makes the running service re-read its config: SIGHUP on Linux
+	// and macOS, SERVICE_CONTROL_PARAMCHANGE on Windows.
 	Reload(ctx context.Context) error
 	// Uninstall stops the service and removes its definition. It returns
 	// ErrNotInstalled when there is none.
@@ -171,10 +171,11 @@ const AgentAccount = launcher.AgentAccount
 // owned by AgentAccount.
 const AgentLogDir = "/var/log/localport"
 
-// SessionExecutable is the session launcher binary, localport-session,
-// installed beside the agent executable exe.
+// SessionExecutable is the session launcher binary, localport-session (with
+// exe's extension, .exe on Windows), installed beside the agent executable
+// exe.
 func SessionExecutable(exe string) string {
-	return filepath.Join(filepath.Dir(exe), "localport-session")
+	return filepath.Join(filepath.Dir(exe), "localport-session"+filepath.Ext(exe))
 }
 
 // owned reports whether path exists, and refuses one without Marker.

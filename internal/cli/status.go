@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/localport/agent/internal/config"
@@ -58,7 +59,11 @@ func printStatus(ctx context.Context, w io.Writer) error {
 		printFingerprints(w, cfg.Devices)
 	}
 	probe := probeLauncher(ctx, func(line string) { fmt.Fprintf(w, "launcher   %s\n", line) })
-	fmt.Fprintf(w, "launcher   session auth %s\n", valueOrUnknown(probe.sessionAuth))
+	auth := probe.sessionAuth
+	if runtime.GOOS == "windows" && probe.answered {
+		auth = "windows logon (S4U, or LogonUser with a password)"
+	}
+	fmt.Fprintf(w, "launcher   session auth %s\n", valueOrUnknown(auth))
 	if probe.fullDiskAccess != "" {
 		fmt.Fprintf(w, "launcher   full disk access %s\n", probe.fullDiskAccess)
 	}

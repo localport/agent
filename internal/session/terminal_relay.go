@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package session
 
@@ -81,14 +81,16 @@ type relay struct {
 // refusal or an unreachable launcher ends the session with its reason; the
 // ticket is spent by then.
 func startRelay(l Launcher, ch *Channel, device, login string, st terminalStart, log func(string, ...any), rec *sessionRecorder) kindSession {
-	ours, theirs, err := launcher.SocketPair()
+	ours, theirs, pipe, err := newSessionChannel()
 	if err != nil {
 		log("session: terminal: session channel: %v", err)
 		return endedKind(CodeKindUnavailable)
 	}
-	req := launcher.Request{Kind: launcher.KindTerminal, Device: device, Login: login, Cols: st.Cols, Rows: st.Rows, Term: st.Term}
+	req := launcher.Request{Kind: launcher.KindTerminal, Device: device, Login: login, Cols: st.Cols, Rows: st.Rows, Term: st.Term, Pipe: pipe}
 	sess, err := l.Start(context.Background(), req, theirs)
-	_ = theirs.Close()
+	if theirs != nil {
+		_ = theirs.Close()
+	}
 	if err != nil {
 		_ = ours.Close()
 		log("session: terminal for %q did not start: %v", login, err)

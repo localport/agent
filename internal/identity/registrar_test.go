@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -364,21 +363,13 @@ func TestOpenRefRefusesADeviceCredential(t *testing.T) {
 	}
 }
 
-// The system store sits beside the config directory and never follows it. On
-// Unix the identity directory is its own walk base; on Windows the walk starts
-// at the config directory.
+// The system store sits beside the config directory and never follows it;
+// the identity directory is its own walk base on every OS.
 func TestSystemStoreRootsBesideTheConfigDirectory(t *testing.T) {
 	t.Setenv(HomeEnv, t.TempDir())
 	dir := filepath.Join(t.TempDir(), "Localport")
-	if w, err := systemStore(dir, "windows"); err != nil || w.Base != dir || w.Root != filepath.Join(dir, "identity") {
-		t.Fatalf("windows systemStore = %+v, %v", w, err)
-	}
 	s, err := SystemStore(dir)
-	wantBase := filepath.Join(dir, "identity")
-	if runtime.GOOS == "windows" {
-		wantBase = dir
-	}
-	if err != nil || s.Root != filepath.Join(dir, "identity") || s.Base != wantBase || s.BaseChosen {
+	if err != nil || s.Root != filepath.Join(dir, "identity") || s.Base != s.Root || s.BaseChosen {
 		t.Fatalf("SystemStore = %+v, %v", s, err)
 	}
 	if err := s.EnsureRoot(); err != nil {

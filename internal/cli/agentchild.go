@@ -42,7 +42,8 @@ var agentChildCommands = []string{"run", "status", "identity", "login", "setup",
 
 // needsAgentChild reports whether this process is root and file is the
 // system config, so the store must be reached through the agent account.
-// Windows keeps the Administrators-owned store (file.System is false there).
+// Never on Windows (no euid 0): the elevated Administrator writes the
+// identity directory directly with a DACL that grants the device service.
 func needsAgentChild(file config.LocalConfigFile) bool {
 	return file.System && agentChildRoot()
 }

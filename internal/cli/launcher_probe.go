@@ -12,6 +12,8 @@ import (
 // sessionProbe is what the session launcher reported at start, for the
 // device registration. Empty fields are unknown: no launcher answered.
 type sessionProbe struct {
+	// answered is true when the launcher answered the probe.
+	answered       bool
 	sessionAuth    string
 	fullDiskAccess string
 }
@@ -34,7 +36,12 @@ func probeLauncher(ctx context.Context, logEvent func(string)) sessionProbe {
 		logEvent(fmt.Sprintf("session: the session launcher did not answer its probe: %v", err))
 		return sessionProbe{}
 	}
-	out := sessionProbe{sessionAuth: "no_pam"}
+	// session_auth describes the PAM path only; Windows logs on through LSA
+	// and leaves it unset.
+	if runtime.GOOS == "windows" {
+		return sessionProbe{answered: true}
+	}
+	out := sessionProbe{sessionAuth: "no_pam", answered: true}
 	if p.PAM {
 		out.sessionAuth = "pam"
 	}

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"syscall"
 )
 
@@ -19,6 +21,26 @@ const (
 	// SystemConfigLockPerm is agent.yaml.lock: only root writes the config.
 	SystemConfigLockPerm os.FileMode = 0o600
 )
+
+// AgentGroupID returns the gid of AgentGroup, or ErrAgentGroupMissing.
+func AgentGroupID() (int, error) {
+	g, err := user.LookupGroup(AgentGroup)
+	if err != nil {
+		var unknown user.UnknownGroupError
+		if errors.As(err, &unknown) {
+			return 0, ErrAgentGroupMissing
+		}
+		return 0, fmt.Errorf("look up group %s: %w", AgentGroup, err)
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		return 0, fmt.Errorf("group %s has a non-numeric gid %q", AgentGroup, g.Gid)
+	}
+	return gid, nil
+}
+
+// IsSystemWriter reports whether euid owns the system files.
+func IsSystemWriter(euid int) bool { return euid == systemOwner }
 
 // CheckSystemDir refuses dir unless it is a directory, not a symlink, owned by
 // root and writable by nobody else. It changes nothing.

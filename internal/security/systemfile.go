@@ -1,19 +1,14 @@
 package security
 
-import (
-	"errors"
-	"fmt"
-	"os/user"
-	"strconv"
-)
+import "errors"
 
 // System files are the root-owned device config directory and the files in it
 // that root writes and the unprivileged agent account reads through group
 // AgentGroup: the directory is root:localport 0750, agent.yaml root:localport
 // 0640, run.lock root:localport 0660 and agent.yaml.lock root-only 0600. Every
 // check runs on a descriptor opened without following a symlink, as for the
-// private files. Only Unix has them; on Windows every function returns
-// errors.ErrUnsupported.
+// private files. Windows has the same set guarded by DACLs instead
+// (systemfile_windows.go); the gid arguments are unused there.
 
 // AgentGroup is the group of the agent account, the only group besides root
 // that reaches the system files.
@@ -37,20 +32,3 @@ func OverrideSystemOwner(uid int) (restore func()) {
 
 // SystemOwner is the uid that owns the system files: root outside tests.
 func SystemOwner() int { return systemOwner }
-
-// AgentGroupID returns the gid of AgentGroup, or ErrAgentGroupMissing.
-func AgentGroupID() (int, error) {
-	g, err := user.LookupGroup(AgentGroup)
-	if err != nil {
-		var unknown user.UnknownGroupError
-		if errors.As(err, &unknown) {
-			return 0, ErrAgentGroupMissing
-		}
-		return 0, fmt.Errorf("look up group %s: %w", AgentGroup, err)
-	}
-	gid, err := strconv.Atoi(g.Gid)
-	if err != nil {
-		return 0, fmt.Errorf("group %s has a non-numeric gid %q", AgentGroup, g.Gid)
-	}
-	return gid, nil
-}

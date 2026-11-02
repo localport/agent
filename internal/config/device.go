@@ -121,10 +121,11 @@ type LocalConfigFile struct {
 	// for the system-wide directory.
 	Base       string
 	FollowBase bool
-	// System marks the root-owned device directory on Unix: it is checked and
-	// written with the security system file functions (root:localport 0750
-	// directory, 0640 agent.yaml) and never walked by the private directory
-	// walk. Always false on Windows.
+	// System marks the machine-wide device directory: it is checked and
+	// written with the security system file functions (on Unix root:localport
+	// 0750 directory and 0640 agent.yaml; on Windows owned by Administrators,
+	// read-only to the device service) and never walked by the private
+	// directory walk.
 	System bool
 }
 
@@ -151,7 +152,7 @@ func systemLocalConfig(goos, programData string) (LocalConfigFile, error) {
 	default:
 		dir = filepath.Join("/etc", security.DeviceDirName)
 	}
-	return LocalConfigFile{Path: filepath.Join(dir, localConfigName), Base: dir, System: goos != "windows"}, nil
+	return LocalConfigFile{Path: filepath.Join(dir, localConfigName), Base: dir, System: true}, nil
 }
 
 // UserLocalConfig is the config of an agent run by an unprivileged user:
@@ -320,14 +321,15 @@ var (
 )
 
 // ErrSystemNotRoot refuses a change to the system config directory by any
-// account but root.
-var ErrSystemNotRoot = errors.New("only root changes the device config directory")
+// account but root (an elevated Administrator on Windows).
+var ErrSystemNotRoot = errors.New("only root or an elevated Administrator changes the device config directory")
 
 // SystemInstallCommand creates the agent account and group.
 const SystemInstallCommand = "sudo localport service install"
 
-// systemWriter reports whether this process owns the system files (root).
-func systemWriter() bool { return geteuid() == security.SystemOwner() }
+// systemWriter reports whether this process owns the system files: root, or
+// an elevated Administrator on Windows.
+func systemWriter() bool { return security.IsSystemWriter(geteuid()) }
 
 // ensureSystemDir creates or secures the system config directory as
 // root:localport 0750 and returns the group's gid. A missing group wraps
@@ -463,7 +465,7 @@ func (d LocalDevice) validateSettings(name, goos string) error {
 			if d.Host != "" {
 				return fmt.Errorf("device %s: %s: %w", name, c, ErrHostCapability)
 			}
-			if goos == "windows" {
+			if goos == "windows" && c == CapabilityFiles {
 				return fmt.Errorf("device %s: %s is not available on Windows", name, c)
 			}
 		}

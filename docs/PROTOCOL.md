@@ -613,7 +613,7 @@ one session:
    | `device` and `device_spki_sha256` name this device's registered certificate | `ticket_wrong_device` |
    | the kind is enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) | `kind_disabled` |
    | the login is listed in the local `logins` | `login_not_allowed` |
-   | this build serves the kind (Windows serves no `terminal`) | `kind_unavailable` |
+   | this build serves the kind | `kind_unavailable` |
    | a ticket with `rec` is a `terminal` ticket | `kind_unavailable` |
    | the held team recording key hashes to `rec.pub_sha256`; a mismatch triggers one key fetch, under the same 5-minute floor, and one retry | `recording_key_mismatch` |
    | fewer than 8 sessions run, and the agent is not shutting down | `agent_busy` |

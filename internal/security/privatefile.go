@@ -97,14 +97,9 @@ func WritePrivateFileAtomic(path string, data []byte) error {
 }
 
 // SyncDir flushes dir's entries, so a file or directory just created or
-// renamed in it survives a power loss. Best-effort: Windows cannot fsync a
-// directory handle, and some filesystems refuse it.
-func SyncDir(dir string) {
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
-	}
-}
+// renamed in it survives a power loss. Best-effort: some filesystems refuse
+// it, and on Windows it needs write access to the directory.
+func SyncDir(dir string) { syncDir(dir) }
 
 // ErrUntrustedPath is returned for a private path that is a symlink or
 // reparse point, is not the expected type, is owned by another user, or that

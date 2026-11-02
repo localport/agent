@@ -16,7 +16,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -168,21 +167,14 @@ func DefaultStore() (*Store, error) {
 
 // SystemStore is the store of the device service: <dir>/identity, where dir is
 // the machine-wide config directory. LOCALPORT_HOME is ignored and nothing is
-// followed as a symlink. On Unix the identity directory is owned by the agent
-// account inside the root-owned dir, so it is its own walk base and the
-// recording spool lands in it; on Windows the walk starts at dir.
+// followed as a symlink. The identity directory belongs to the agent account
+// (on Windows the device service's SID) inside the system-owned dir, so it
+// is its own walk base and the recording spool lands in it.
 func SystemStore(dir string) (*Store, error) {
-	return systemStore(dir, runtime.GOOS)
-}
-
-func systemStore(dir, goos string) (*Store, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, fmt.Errorf("system credential directory %q is not absolute", dir)
 	}
 	root := filepath.Join(dir, "identity")
-	if goos == "windows" {
-		return &Store{Root: root, Base: dir}, nil
-	}
 	return &Store{Root: root, Base: root}, nil
 }
 
