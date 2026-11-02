@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/identity"
 )
@@ -33,7 +35,13 @@ func fakeHelper() int {
 	if err != nil {
 		return 1
 	}
-	if req.Login == "refuse" {
+	switch req.Login {
+	case "refuse":
+		_ = WriteHelperReply(control, HelperReply{Refused: CodeAccountRefused})
+		return 1
+	case "slow-refuse":
+		// A lookup or PAM account step slower than the request read bound.
+		time.Sleep(requestTimeout + time.Second)
 		_ = WriteHelperReply(control, HelperReply{Refused: CodeAccountRefused})
 		return 1
 	}
@@ -119,6 +127,53 @@ func TestPeerOtherThanTheAgentAccountIsRefused(t *testing.T) {
 	}
 }
 
+// openFDs counts this process's open descriptors.
+func openFDs(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(entries)
+}
+
+// A request carrying more than one descriptor is a bad request: refused
+// before the config is read or anything starts, with every received
+// descriptor closed.
+func TestRequestWithTwoDescriptorsIsRefused(t *testing.T) {
+	c, _ := serve(t, uint32(os.Getuid()), testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityTerminal}, Logins: []string{"pi"}}))
+	conn, err := c.dial(ctx(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	a, b, err := SocketPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	defer b.Close()
+	req := terminalRequest("pi")
+	req.V = Version
+	msg, err := encode(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := openFDs(t)
+	if _, _, err := conn.WriteMsgUnix(msg, unix.UnixRights(int(a.Fd()), int(b.Fd())), nil); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := readResponse(conn)
+	if err != nil || resp.Refused == nil || resp.Refused.Code != CodeBadRequest {
+		t.Fatalf("response %+v, %v; want refused %s", resp, err, CodeBadRequest)
+	}
+	// The server shares this process: descriptors it received and kept
+	// would show here.
+	if after := openFDs(t); after > before {
+		t.Fatalf("open descriptors %d after the refusal, %d before: the received ones leaked", after, before)
+	}
+}
+
 func TestStartRelaysTheHelpersChannel(t *testing.T) {
 	c, _ := serve(t, uint32(os.Getuid()), testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityTerminal}, Logins: []string{"pi"}}))
 	ours, theirs, err := SocketPair()
@@ -167,6 +222,7 @@ func TestStartRefusesWhatTheConfigDoesNotEnable(t *testing.T) {
 		}(), CodeDeviceUnknown},
 		{"run_as_agent takes only the agent account", config.LocalDevice{Enable: terminal, RunAsAgent: true}, terminalRequest("pi"), CodeLoginNotEnabled},
 		{"helper refusal", config.LocalDevice{Enable: terminal, Logins: []string{"refuse"}}, terminalRequest("refuse"), CodeAccountRefused},
+		{"helper refusal after the request read bound", config.LocalDevice{Enable: terminal, Logins: []string{"slow-refuse"}}, terminalRequest("slow-refuse"), CodeAccountRefused},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := serve(t, uint32(os.Getuid()), testConfig(t, tc.device))

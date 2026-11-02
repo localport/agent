@@ -67,3 +67,14 @@ func TestCommandsFor(t *testing.T) {
 		t.Errorf("adduser = %q", usr)
 	}
 }
+
+func TestDeleteCommandsFor(t *testing.T) {
+	usr, group := deleteCommandsFor("/usr/sbin/useradd", true)
+	if !slices.Equal(usr, []string{"/usr/sbin/userdel", "localport"}) || !slices.Equal(group, []string{"/usr/sbin/groupdel", "localport"}) {
+		t.Errorf("shadow: %q, %q", usr, group)
+	}
+	usr, group = deleteCommandsFor("/usr/sbin/adduser", false)
+	if !slices.Equal(usr, []string{"/usr/sbin/deluser", "localport"}) || !slices.Equal(group, []string{"/usr/sbin/delgroup", "localport"}) {
+		t.Errorf("BusyBox: %q, %q", usr, group)
+	}
+}

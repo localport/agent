@@ -80,8 +80,36 @@ func ensureAccount(ctx context.Context, run runner, db accounts) (Account, error
 	return lookupAccount(db)
 }
 
+// ErrNoAccountTool means the host has no userdel or deluser (OpenWrt, whose
+// localport package creates and owns the account).
+var ErrNoAccountTool = errors.New("no userdel or deluser on this host")
+
+// RemoveAccount deletes the system user and group AgentAccount. A missing
+// account is no error; a host without the tools returns ErrNoAccountTool. The caller removes it only once it owns nothing the
+// device service left behind.
+func RemoveAccount(ctx context.Context) error {
+	if _, _, found, err := (hostAccounts{}).lookup(AgentAccount); err != nil || !found {
+		return err
+	}
+	if err := deleteAccount(ctx, execRun); err != nil {
+		return fmt.Errorf("remove the account %s: %w", AgentAccount, err)
+	}
+	return nil
+}
+
+// deleteCommandsFor are the commands that delete the user and its group,
+// the counterparts of commandsFor's.
+func deleteCommandsFor(tool string, shadow bool) (usr, group []string) {
+	if shadow {
+		dir := strings.TrimSuffix(tool, "useradd")
+		return []string{dir + "userdel", AgentAccount}, []string{dir + "groupdel", AgentAccount}
+	}
+	dir := strings.TrimSuffix(tool, "adduser")
+	return []string{dir + "deluser", AgentAccount}, []string{dir + "delgroup", AgentAccount}
+}
+
 // accountTool picks the first tool present: shadow's useradd, or BusyBox
-// adduser (Alpine without shadow, OpenWrt).
+// adduser (Alpine without shadow). OpenWrt's default BusyBox has neither.
 func accountTool(exists func(string) bool) (string, bool) {
 	for _, p := range []string{"/usr/sbin/useradd", "/sbin/useradd"} {
 		if exists(p) {

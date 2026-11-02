@@ -104,11 +104,17 @@ func convertIdentityTree(ctx context.Context, dir, idDir string, acct service.Ac
 			return fmt.Errorf("stop %s before handing %s to the account %s: %w", m.Name(), idDir, service.AgentAccount, err)
 		}
 	}
+	stopped := func(err error) error {
+		if !installed {
+			return err
+		}
+		return fmt.Errorf("%w\n  %s is stopped; fix the cause, then run: %s", err, m.Name(), serviceInstallCommand)
+	}
 	if err := moveSpool(filepath.Join(dir, "recordings"), filepath.Join(idDir, "recordings")); err != nil {
-		return err
+		return stopped(err)
 	}
 	if err := chownTree(idDir, acct.UID, acct.GID); err != nil {
-		return err
+		return stopped(err)
 	}
 	fmt.Fprintf(os.Stderr, "  handed %s to the account %s\n", idDir, service.AgentAccount)
 	if installed {
@@ -142,24 +148,29 @@ func moveSpool(from, to string) error {
 
 // chownTree chowns path and everything below it to uid:gid. Each directory
 // is opened relative to its parent's descriptor with O_NOFOLLOW and each
-// entry is inspected with AT_SYMLINK_NOFOLLOW; a symlink or anything but a
-// directory or regular file stops the walk, as the agent never writes one.
+// entry is inspected with AT_SYMLINK_NOFOLLOW. A first pass changes nothing
+// and refuses a symlink or anything but a directory or regular file, as the
+// agent never writes one. The second pass chowns each directory after its
+// entries, so a walk that stops partway leaves path owned by root and the
+// next run converts again.
 func chownTree(path string, uid, gid int) error {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+	for _, apply := range []bool{false, true} {
+		fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return fmt.Errorf("open %s: %w", path, err)
+		}
+		if err := walkTree(fd, path, uid, gid, apply); err != nil {
+			return err
+		}
 	}
-	return chownDir(fd, path, uid, gid)
+	return nil
 }
 
-// chownDir chowns the directory fd (named path in errors) and its entries,
-// and closes fd.
-func chownDir(fd int, path string, uid, gid int) error {
+// walkTree inspects (and with apply chowns) the directory fd, named path in
+// errors, and its entries; it closes fd.
+func walkTree(fd int, path string, uid, gid int, apply bool) error {
 	dir := os.NewFile(uintptr(fd), path)
 	defer dir.Close()
-	if err := unix.Fchown(fd, uid, gid); err != nil {
-		return fmt.Errorf("chown %s: %w", path, err)
-	}
 	names, err := dir.Readdirnames(-1)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
@@ -172,6 +183,9 @@ func chownDir(fd int, path string, uid, gid int) error {
 		}
 		switch st.Mode & syscall.S_IFMT {
 		case syscall.S_IFREG:
+			if !apply {
+				continue
+			}
 			if err := unix.Fchownat(fd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 				return fmt.Errorf("chown %s: %w", child, err)
 			}
@@ -180,13 +194,49 @@ func chownDir(fd int, path string, uid, gid int) error {
 			if err != nil {
 				return fmt.Errorf("open %s: %w", child, err)
 			}
-			if err := chownDir(sub, child, uid, gid); err != nil {
+			if err := walkTree(sub, child, uid, gid, apply); err != nil {
 				return err
 			}
 		default:
 			return fmt.Errorf("%s is not a regular file or directory; move it aside, then run the command again", child)
 		}
 	}
+	if !apply {
+		return nil
+	}
+	if err := unix.Fchown(fd, uid, gid); err != nil {
+		return fmt.Errorf("chown %s: %w", path, err)
+	}
+	return nil
+}
+
+// removeAgentAccount runs after `service uninstall --purge` emptied the
+// store: when the identity directory holds nothing more it removes it, the
+// agent's log directory and the account. While the directory still holds
+// credentials (machine credentials from setup) the account keeps them, so a
+// reinstall finds them under the same uid.
+func removeAgentAccount(ctx context.Context, dir string) error {
+	idDir := filepath.Join(dir, "identity")
+	switch err := os.Remove(idDir); {
+	case err == nil, errors.Is(err, fs.ErrNotExist):
+	case errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.EEXIST):
+		fmt.Fprintf(os.Stderr, "  kept the account %s: it owns the credentials left in %s\n", service.AgentAccount, idDir)
+		return nil
+	default:
+		return fmt.Errorf("remove %s: %w", idDir, err)
+	}
+	// Its parent, /var/log, is writable by root only; RemoveAll unlinks a
+	// link instead of following it.
+	if err := os.RemoveAll(service.AgentLogDir); err != nil {
+		return fmt.Errorf("remove %s: %w", service.AgentLogDir, err)
+	}
+	if err := service.RemoveAccount(ctx); errors.Is(err, service.ErrNoAccountTool) {
+		fmt.Fprintf(os.Stderr, "  kept the account %s: this host has no userdel or deluser; the package that created it removes it\n", service.AgentAccount)
+		return nil
+	} else if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "  removed the account %s\n", service.AgentAccount)
 	return nil
 }
 

@@ -20,7 +20,7 @@ const (
 // The OpenRC logs: supervise-daemon opens an output_log once, so each
 // process opens and rotates its own (--log-file), as under launchd.
 const (
-	openrcAgentLogDir = "/var/log/localport"
+	openrcAgentLogDir = AgentLogDir
 	openrcAgentLog    = openrcAgentLogDir + "/device.log"
 	openrcLauncherLog = "/var/log/localport-session.log"
 )

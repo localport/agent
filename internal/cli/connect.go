@@ -36,10 +36,10 @@ func runConnect(version string, args []string) (retErr error) {
 		apiURL      = fs.String("api", "", "control plane base URL (default "+identity.DefaultAPIURL+")")
 		wait        = fs.Duration("wait", identity.DefaultRetryBudget, "how long to keep retrying while the control plane is unreachable (0 = one attempt)")
 		noUI        = fs.Bool("noui", false, "disable the live view and emit plain logs (auto-enabled when stderr is not a TTY)")
-		noMux       = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them; a device then serves no browser or CLI sessions; as root (Administrator on Windows), only with --foreground or --config")
+		noMux       = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them; a device then serves no browser or CLI sessions; as Administrator on Windows only with --foreground or --config, as root on Linux and macOS only with --config")
 		noInspect   = fs.Bool("no-inspect", false, "do not inspect HTTP requests (--config)")
 		logRequests = fs.Bool("log-requests", false, "log one line per HTTP request in headless mode (--config)")
-		foreground  = fs.Bool("foreground", false, "run the device in this terminal instead of installing the service (root or Administrator)")
+		foreground  = fs.Bool("foreground", false, "run the device in this terminal instead of installing the service (root or Administrator); as root on Linux and macOS it runs every device in the machine-wide config")
 	)
 	// -t/--token is parsed only to refuse it with the retired-token message.
 	retiredToken := fs.String("token", "", "retired: fleet tokens are replaced by join tokens")
@@ -89,7 +89,7 @@ func runConnect(version string, args []string) (retErr error) {
 	who := currentInvoker(false)
 	if who.privileged && !*foreground {
 		// The device service runs `run --service`, which keeps the mux.
-		if err := refuseGiven(fs, "applies only to a device run in this terminal: add --foreground", "no-mux"); err != nil {
+		if err := refuseGiven(fs, "applies only to a device run in this terminal: add --foreground on Windows, or run without root on Linux and macOS", "no-mux"); err != nil {
 			return err
 		}
 		// The service install or restart may end the terminal session this
@@ -596,6 +596,9 @@ func usageConnect(fs *flag.FlagSet) {
 
   --foreground runs the device in this terminal instead, and is refused while
   another process (the device service or a manual run) serves the devices.
+  As root on Linux and macOS it runs every device in the machine-wide config,
+  as localport run --system does, under the localport account; --no-mux is
+  not available there.
 
   Without root, the device is recorded in $LOCALPORT_HOME/agent.yaml and runs
   in the foreground, and --logins may name only the user running the command.

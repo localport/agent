@@ -132,6 +132,40 @@ func TestTerminalShellHoldsOnlyThePTY(t *testing.T) {
 	s.expectExit(t, 0)
 }
 
+// closeExtraFDs marks every descriptor from first up close-on-exec, the
+// first one included, and leaves those below it alone.
+func TestCloseExtraFDsMarksFromFirst(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	fd, err := unix.Dup(int(r.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	cloexec := func(fd int) bool {
+		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return flags&unix.FD_CLOEXEC != 0
+	}
+	if cloexec(fd) {
+		t.Fatal("dup returned a close-on-exec descriptor")
+	}
+	closeExtraFDs(fd + 1)
+	if cloexec(fd) {
+		t.Fatal("a descriptor below first was marked")
+	}
+	closeExtraFDs(fd)
+	if !cloexec(fd) {
+		t.Fatal("the first descriptor was not marked close-on-exec")
+	}
+}
+
 // The shell leads its own session and process group.
 func TestTerminalShellHasItsOwnSession(t *testing.T) {
 	s := startShell(t)

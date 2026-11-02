@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -199,7 +201,39 @@ func purgeStore(store *identity.Store) error {
 	if err := os.RemoveAll(spool); err != nil {
 		return fmt.Errorf("remove %s: %w", spool, err)
 	}
+	if err := removeEmptyTeamDirs(store.Root); err != nil {
+		return err
+	}
 	fmt.Fprintf(os.Stderr, "  deleted %s; other credentials in %s remain\n", spool, store.Root)
+	return nil
+}
+
+// removeEmptyTeamDirs removes the team directories of root that hold
+// nothing any more.
+func removeEmptyTeamDirs(root string) error {
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", root, err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		path := filepath.Join(root, e.Name())
+		left, err := os.ReadDir(path)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", path, err)
+		}
+		if len(left) > 0 {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("remove %s: %w", path, err)
+		}
+	}
 	return nil
 }
 

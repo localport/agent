@@ -184,6 +184,11 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 	if err := purgeDeviceStore(dir, viaChild, store); err != nil {
 		return err
 	}
+	if viaChild {
+		if err := removeAgentAccount(context.Background(), dir); err != nil {
+			return err
+		}
+	}
 	fmt.Fprintf(os.Stderr, "  %s, %s and %s remain\n%s\n", file.LockPath(), file.RunLockPath(), dir, stillValid)
 	return nil
 }

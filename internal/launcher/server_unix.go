@@ -114,6 +114,10 @@ func (s *Server) handle(conn *net.UnixConn) {
 	}
 	_ = conn.SetDeadline(time.Now().Add(requestTimeout))
 	req, channel, err := recvRequest(conn)
+	// The bound covers the request only: a helper may take up to
+	// helperStartTimeout before the answer, and each reply bounds its own
+	// write (respond).
+	_ = conn.SetDeadline(time.Time{})
 	if err != nil {
 		var r *RefusalError
 		if errors.As(err, &r) {
@@ -134,7 +138,7 @@ func (s *Server) handle(conn *net.UnixConn) {
 			return
 		}
 		p := s.Probe()
-		_ = sendMessage(conn, Response{Probe: &p}, nil)
+		respond(conn, Response{Probe: &p})
 		return
 	}
 	if channel == nil {
@@ -227,13 +231,22 @@ func (s *Server) run(conn *net.UnixConn, req HelperRequest, channel *os.File) {
 		s.logExit(cmd.Process.Pid, <-exited)
 		return
 	}
-	_ = conn.SetDeadline(time.Time{})
 	id := newSessionID()
 	s.Log("launcher: session %s: %s for %q, helper %d", id, req.Kind, req.Login, cmd.Process.Pid)
-	_ = sendMessage(conn, Response{Started: &Started{SessionID: id}}, nil)
+	respond(conn, Response{Started: &Started{SessionID: id}})
 	e := <-exited
 	s.logExit(cmd.Process.Pid, e)
-	_ = sendMessage(conn, Response{Exit: &e}, nil)
+	respond(conn, Response{Exit: &e})
+}
+
+// replyTimeout bounds one response write, so an agent that stopped reading
+// never holds a launcher goroutine.
+const replyTimeout = 5 * time.Second
+
+// respond writes one response under its own write deadline.
+func respond(conn *net.UnixConn, r Response) {
+	_ = conn.SetWriteDeadline(time.Now().Add(replyTimeout))
+	_ = sendMessage(conn, r, nil)
 }
 
 // errHelperTimeout is a helper that did not answer within helperStartTimeout.
@@ -279,7 +292,7 @@ func startFailureCode(err error) string {
 }
 
 func (s *Server) refuse(conn *net.UnixConn, code string) {
-	_ = sendMessage(conn, Response{Refused: &Refused{Code: code}}, nil)
+	respond(conn, Response{Refused: &Refused{Code: code}})
 }
 
 // logExit logs a helper's exit; a helper ended by a signal could not clear

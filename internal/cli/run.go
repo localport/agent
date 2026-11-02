@@ -128,7 +128,7 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 	})
 	uploads := runner.uploads
 	// With noMux no session runs, so the launcher is not probed.
-	runner.probed = noMux
+	runner.probed, runner.noMux = noMux, noMux
 	defer func() {
 		for _, s := range runner.served {
 			s.end()

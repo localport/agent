@@ -54,6 +54,16 @@ func createAccount(ctx context.Context, run runner) error {
 	return nil
 }
 
+// deleteAccount deletes the user, then the group, with dscl.
+func deleteAccount(ctx context.Context, run runner) error {
+	for _, path := range []string{"/Users/" + AgentAccount, "/Groups/" + AgentAccount} {
+		if _, err := run(ctx, dsclPath, ".", "-delete", path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // freeSystemID returns the first id in [accountIDFirst, accountIDLimit) that
 // is neither a uid nor a gid in the dscl -list outputs.
 func freeSystemID(uids, gids string) (int, error) {

@@ -67,7 +67,9 @@ type deviceRunner struct {
 	logEvent func(string)
 	probe    sessionProbe
 	probed   bool
-	served   map[identity.Ref]*servedDevice
+	// noMux keeps the launcher unprobed: no session runs.
+	noMux  bool
+	served map[identity.Ref]*servedDevice
 	// configured is the device list the uploader accepts recordings for.
 	configured atomic.Pointer[[]config.LocalDevice]
 }
@@ -106,6 +108,9 @@ func (r *deviceRunner) build(d config.LocalDevice) (spec config.DeviceSpec, ok b
 // tunnel and loops; a changed or added device then starts. Unchanged devices
 // and their sessions are left alone.
 func (r *deviceRunner) reload(ctx context.Context, a *agent.Agent, devices []config.LocalDevice) {
+	// The launcher is probed again on reload: Full Disk Access or the
+	// launcher itself may have changed since the last probe.
+	r.probed = r.noMux
 	next := make(map[identity.Ref]config.LocalDevice, len(devices))
 	for _, d := range devices {
 		next[d.Identity] = d

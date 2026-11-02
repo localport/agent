@@ -32,7 +32,7 @@ const LaunchdPlistPath = "/Library/LaunchDaemons/" + LaunchdLabel + ".plist"
 // The agent's log is in a directory of its own account, since rotating
 // renames files in the directory; the root launcher's is in /var/log.
 const (
-	launchdAgentLogDir = "/var/log/localport"
+	launchdAgentLogDir = AgentLogDir
 	launchdAgentLog    = launchdAgentLogDir + "/device.log"
 	launchdLauncherLog = "/var/log/localport-session.log"
 )

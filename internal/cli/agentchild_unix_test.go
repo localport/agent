@@ -17,10 +17,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/service"
 )
 
@@ -103,6 +105,15 @@ func TestKeyFingerprint(t *testing.T) {
 	}
 }
 
+func statGID(t *testing.T, path string) int {
+	t.Helper()
+	fi, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int(fi.Sys().(*syscall.Stat_t).Gid)
+}
+
 func self() service.Account { return service.Account{UID: os.Getuid(), GID: os.Getgid()} }
 
 func TestChownTreeWalksAndRefusesLinks(t *testing.T) {
@@ -123,6 +134,27 @@ func TestChownTreeWalksAndRefusesLinks(t *testing.T) {
 	}
 	if err := chownTree(root, os.Getuid(), os.Getgid()); err == nil || !strings.Contains(err.Error(), "planted") {
 		t.Fatalf("chownTree over a symlink = %v, want a refusal naming it", err)
+	}
+	// The refusal comes from the first pass, before anything changes: the
+	// tree keeps its group although a sibling sorts before the link.
+	if os.Getuid() != 0 {
+		groups, err := os.Getgroups()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, g := range groups {
+			if g == os.Getgid() {
+				continue
+			}
+			key := filepath.Join(root, "team/device-a/key.pem")
+			if err := chownTree(root, os.Getuid(), g); err == nil {
+				t.Fatal("chownTree over a symlink succeeded")
+			}
+			if st := statGID(t, key); st != os.Getgid() {
+				t.Fatalf("a refused walk changed %s to gid %d", key, st)
+			}
+			break
+		}
 	}
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(root, link); err != nil {
@@ -159,6 +191,52 @@ func TestEnsureIdentityDir(t *testing.T) {
 	}
 	if _, err := ensureIdentityDir(link, self()); err == nil {
 		t.Fatal("ensureIdentityDir followed a symlink")
+	}
+}
+
+// The account stays while the identity directory still holds credentials,
+// so they keep their owner's uid.
+func TestRemoveAgentAccountKeepsAnAccountWithCredentials(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "identity", "team", "client-a"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeAgentAccount(t.Context(), dir); err != nil {
+		t.Fatalf("removeAgentAccount = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "identity", "team", "client-a")); err != nil {
+		t.Fatalf("the credentials went: %v", err)
+	}
+}
+
+// Purge removes the device credentials, the spool and the team directories
+// they leave empty, so an identity directory that held only devices ends
+// empty and removeAgentAccount can take the account; another credential
+// keeps its team directory.
+func TestPurgeStoreLeavesNoEmptyTeamDirectory(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"t1/device-a.gw", "t2/device-b.gw", "t2/client-c", "recordings/0b6f"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := &identity.Store{Root: root, Base: root}
+	if err := purgeStore(store); err != nil {
+		t.Fatalf("purgeStore = %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if !slices.Equal(names, []string{"t2"}) {
+		t.Fatalf("left %q, want only t2 (it holds a client credential)", names)
+	}
+	if _, err := os.Stat(filepath.Join(root, "t2", "client-c")); err != nil {
+		t.Fatalf("the client credential went: %v", err)
 	}
 }
 

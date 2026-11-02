@@ -36,7 +36,12 @@ const (
 // Run serves one session and returns the helper's exit status: 0 after a
 // session ran, 1 when it did not start.
 func Run(log func(string, ...any)) int {
-	closeExtraFDs(controlFD + 1)
+	// From the channel up: the helper keeps using 3 and 4, but the shell it
+	// execs must inherit neither. Those two are marked directly, so a host
+	// whose /dev/fd cannot be listed still keeps them from the shell.
+	unix.CloseOnExec(channelFD)
+	unix.CloseOnExec(controlFD)
+	closeExtraFDs(channelFD)
 	channel := os.NewFile(channelFD, "session-channel")
 	control := os.NewFile(controlFD, "launcher-control")
 	if channel == nil || control == nil {

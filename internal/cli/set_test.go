@@ -46,7 +46,7 @@ func TestReloadAppliesOnlyChangedDevices(t *testing.T) {
 	keep := deviceTunnel(a.Tunnels(), unchanged.Identity)
 
 	store := &identity.Store{Root: t.TempDir()}
-	r := &deviceRunner{parent: ctx, store: store, logEvent: func(string) {}, probed: true, served: map[identity.Ref]*servedDevice{}}
+	r := &deviceRunner{parent: ctx, store: store, logEvent: func(string) {}, probed: true, noMux: true, served: map[identity.Ref]*servedDevice{}}
 	for _, ref := range []identity.Ref{unchanged, changed, removed} {
 		r.served[ref] = &servedDevice{local: config.LocalDevice{Identity: ref}}
 	}
@@ -66,4 +66,16 @@ func TestReloadAppliesOnlyChangedDevices(t *testing.T) {
 	}
 	cancel()
 	<-ran
+}
+
+// A reload probes the launcher again for the devices it starts; with noMux
+// nothing is probed.
+func TestReloadProbesTheLauncherAgain(t *testing.T) {
+	for _, noMux := range []bool{false, true} {
+		r := &deviceRunner{logEvent: func(string) {}, probed: true, noMux: noMux, served: map[identity.Ref]*servedDevice{}}
+		r.reload(context.Background(), nil, nil)
+		if r.probed != noMux {
+			t.Errorf("noMux %v: probed = %v after reload, want %v", noMux, r.probed, noMux)
+		}
+	}
 }

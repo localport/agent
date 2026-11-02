@@ -19,6 +19,24 @@ func groupExists() (bool, error) {
 	return err == nil, err
 }
 
+// deleteAccount deletes the user and then its group with the host's tool:
+// userdel and groupdel, or BusyBox deluser and delgroup.
+func deleteAccount(ctx context.Context, run runner) error {
+	tool, shadow := accountTool(fileExists)
+	if tool == "" {
+		return ErrNoAccountTool
+	}
+	usr, group := deleteCommandsFor(tool, shadow)
+	if _, err := run(ctx, usr[0], usr[1:]...); err != nil {
+		return err
+	}
+	if exists, err := groupExists(); err != nil || !exists {
+		return err
+	}
+	_, err := run(ctx, group[0], group[1:]...)
+	return err
+}
+
 // createAccount creates the group, when missing, and the user with the
 // host's tool.
 func createAccount(ctx context.Context, run runner) error {

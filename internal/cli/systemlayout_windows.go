@@ -12,3 +12,6 @@ import (
 func prepareSystemLayout(context.Context, config.LocalConfigFile, service.Manager, string) error {
 	return nil
 }
+
+// removeAgentAccount is never reached on Windows, which has no agent account.
+func removeAgentAccount(context.Context, string) error { return nil }

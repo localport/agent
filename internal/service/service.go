@@ -167,6 +167,10 @@ func Executable() (string, error) {
 // AgentAccount is the system account the device service runs as.
 const AgentAccount = launcher.AgentAccount
 
+// AgentLogDir is the agent's own log directory under launchd and OpenRC,
+// owned by AgentAccount.
+const AgentLogDir = "/var/log/localport"
+
 // SessionExecutable is the session launcher binary, localport-session,
 // installed beside the agent executable exe.
 func SessionExecutable(exe string) string {
