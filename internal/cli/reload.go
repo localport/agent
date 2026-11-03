@@ -22,12 +22,12 @@ import (
 const reloadSessionWait = 5 * time.Second
 
 // servedDevice is one running device: its config entry, its session server
-// (nil when sessions are off), its jti log, and its renewal and key refresh
-// loops, which run under their own context so a reload can end them.
+// (nil when sessions are off), its sessions lock, and its renewal and key
+// refresh loops, which run under their own context so a reload can end them.
 type servedDevice struct {
 	local     config.LocalDevice
 	sessions  *session.Server
-	jti       *session.JTILog
+	lock      *session.SessionsLock
 	renewer   *identity.Renewer
 	refresher *identity.KeyRefresher
 	cancel    context.CancelFunc
@@ -45,16 +45,14 @@ func (s *servedDevice) start(ctx context.Context) {
 	}
 }
 
-// end stops the device's loops, waits for them and closes its jti log. The
-// device's tunnel has stopped by then.
+// end stops the device's loops, waits for them and releases its sessions
+// lock. The device's tunnel has stopped by then.
 func (s *servedDevice) end() {
 	if s.cancel != nil {
 		s.cancel()
 	}
 	s.loops.Wait()
-	if s.jti != nil {
-		_ = s.jti.Close()
-	}
+	_ = s.lock.Close()
 }
 
 // deviceRunner builds and tracks the served devices of one serveDevices call.
@@ -91,7 +89,7 @@ func (r *deviceRunner) build(d config.LocalDevice) (spec config.DeviceSpec, ok b
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  device %s: sessions disabled: %v\n", d.Identity, err)
 	} else if state != nil {
-		served.refresher, served.jti = state.refresher, state.jti
+		served.refresher, served.lock = state.refresher, state.lock
 		served.sessions, _ = spec.SessionHandler.(*session.Server)
 	}
 	if renews {

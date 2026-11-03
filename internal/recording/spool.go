@@ -80,6 +80,11 @@ type Meta struct {
 	WrappedDEK     []byte    `json:"wrapped_dek"`
 	KeySHA256      []byte    `json:"key_sha256"`
 	Policy         string    `json:"policy"`
+	// Certificate is the SSH user certificate that admitted the session's
+	// connection (wire form). The open sends it; the open that finds no row
+	// creates it from the certificate, so a resumed open after a restart
+	// still has it.
+	Certificate []byte `json:"certificate,omitempty"`
 	// Sealed is the count of segments sealed.
 	Sealed uint32 `json:"sealed"`
 	// Acked is the highest count of segments the server acknowledged, and
@@ -118,6 +123,8 @@ func (m *Meta) validate() error {
 		return fmt.Errorf("%w: key_sha256 is not 32 bytes", ErrMeta)
 	case m.Policy != PolicyBestEffort && m.Policy != PolicyStrict:
 		return fmt.Errorf("%w: policy %q", ErrMeta, m.Policy)
+	case len(m.Certificate) > MaxCertificate:
+		return fmt.Errorf("%w: certificate of %d bytes", ErrMeta, len(m.Certificate))
 	case m.Acked > m.Sealed:
 		return fmt.Errorf("%w: counts acked %d, sealed %d out of order", ErrMeta, m.Acked, m.Sealed)
 	case (m.Acked == 0) != (len(m.AckedChain) == 0) || (m.Acked != 0 && len(m.AckedChain) != 32):

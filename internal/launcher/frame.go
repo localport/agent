@@ -10,12 +10,15 @@ import (
 )
 
 // Frame types on the session channel between the agent and the helper. The
-// agent sends data and resize; the helper sends data and exit, and exit is
-// its last frame.
+// agent sends data, resize and eof (end of the session's input); the helper
+// sends data, stderr (an exec session's standard error without a PTY) and
+// exit, and exit is its last frame.
 const (
 	FrameData   byte = 1
 	FrameResize byte = 2
 	FrameExit   byte = 3
+	FrameStderr byte = 4
+	FrameEOF    byte = 5
 )
 
 // MaxFrameData bounds a data frame's payload.
@@ -39,11 +42,12 @@ var errBadFrame = errors.New("launcher: bad channel frame")
 func WriteFrame(w io.Writer, f Frame) error {
 	var payload []byte
 	switch f.Type {
-	case FrameData:
+	case FrameData, FrameStderr:
 		if len(f.Data) == 0 || len(f.Data) > MaxFrameData {
 			return errBadFrame
 		}
 		payload = f.Data
+	case FrameEOF:
 	case FrameResize:
 		payload = binary.BigEndian.AppendUint16(binary.BigEndian.AppendUint16(nil, f.Cols), f.Rows)
 	case FrameExit:
@@ -81,8 +85,12 @@ func (fr *FrameReader) ReadFrame() (Frame, error) {
 	n := binary.BigEndian.Uint32(hdr[1:])
 	f := Frame{Type: hdr[0]}
 	switch f.Type {
-	case FrameData:
+	case FrameData, FrameStderr:
 		if n == 0 || n > MaxFrameData {
+			return Frame{}, errBadFrame
+		}
+	case FrameEOF:
+		if n != 0 {
 			return Frame{}, errBadFrame
 		}
 	case FrameResize, FrameExit:
@@ -97,7 +105,7 @@ func (fr *FrameReader) ReadFrame() (Frame, error) {
 		return Frame{}, fmt.Errorf("%w: truncated payload", errBadFrame)
 	}
 	switch f.Type {
-	case FrameData:
+	case FrameData, FrameStderr:
 		f.Data = p
 	case FrameResize:
 		f.Cols, f.Rows = binary.BigEndian.Uint16(p), binary.BigEndian.Uint16(p[2:])

@@ -77,8 +77,9 @@ func (t *Tunnel) RecordingClient() (*RecordingClient, error) {
 }
 
 type recordingOpenBody struct {
-	WrappedDEK string `json:"wrapped_dek"`
-	Signature  string `json:"signature"`
+	WrappedDEK  string `json:"wrapped_dek"`
+	Signature   string `json:"signature"`
+	Certificate string `json:"certificate,omitempty"`
 }
 
 type recordingCompleteBody struct {
@@ -92,15 +93,18 @@ type recordingCompleteBody struct {
 }
 
 // Open sends the signed open of recording id. keySHA256 is the SHA-256 of the
-// team key the DEK is wrapped to.
-func (c *RecordingClient) Open(ctx context.Context, id string, wrappedDEK, keySHA256 []byte) (recording.Result, error) {
+// team key the DEK is wrapped to; certificate is the session's SSH user
+// certificate, from which the control plane creates the recording at the first
+// open.
+func (c *RecordingClient) Open(ctx context.Context, id string, wrappedDEK, keySHA256, certificate []byte) (recording.Result, error) {
 	sig, err := recording.Sign(c.signer, recording.OpenDigest(id, wrappedDEK, keySHA256))
 	if err != nil {
 		return recording.Result{}, fmt.Errorf("sign recording open: %w", err)
 	}
 	body, err := json.Marshal(recordingOpenBody{
-		WrappedDEK: base64.RawURLEncoding.EncodeToString(wrappedDEK),
-		Signature:  sig,
+		WrappedDEK:  base64.RawURLEncoding.EncodeToString(wrappedDEK),
+		Signature:   sig,
+		Certificate: base64.RawURLEncoding.EncodeToString(certificate),
 	})
 	if err != nil {
 		return recording.Result{}, err

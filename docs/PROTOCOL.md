@@ -554,8 +554,9 @@ device whose local config enables `terminal`, `files` or `desktop` opens a
 second mux per control session, the session mux; `--no-mux` agents and host
 tunnels open none, and the edge then refuses sessions with the retryable end
 reason `no_session_mux`. Dial-back never carries a session. A second agent
-process on the same device identity cannot hold its `.jti.lock` (see [Stored
-identity](#stored-identity-localport-identity)) and opens no session mux either.
+process on the same device identity cannot hold its `.sessions.lock` (see
+[Stored identity](#stored-identity-localport-identity)) and opens no session mux
+either.
 
 Bind: a new connection over the control connection's carrier, first frame
 `MuxBind` with `purpose: "session"`, authenticated as any `MuxBind`.
@@ -578,10 +579,11 @@ Accept stream: the agent's first request is `POST /v1/session-accept` with no
 body (`END_STREAM` on its headers). The edge answers `200` and holds the
 response open for the life of the mux. Each session is one notice on it:
 
-| Bytes | Meaning                                  |
-| ----- | ---------------------------------------- |
-| 4     | `uint32` big-endian length, always 16    |
-| 16    | session id                               |
+| Bytes | Meaning                                                        |
+| ----- | -------------------------------------------------------------- |
+| 4     | `uint32` big-endian length, always 24                          |
+| 16    | session id: the bytes of the UUID the access row and recording carry |
+| 8     | `uint64` big-endian serial of the SSH user certificate the edge admitted |
 
 A notice of any other length, or the accept stream ending, ends the mux.
 
@@ -593,77 +595,59 @@ whose open waits for a slot, and reads no further notice until an open ends. It
 resets an open whose headers do not arrive within 30 s. The request body is
 agent-to-edge bytes and the response body edge-to-agent bytes. The edge answers
 `404` to an id it is not waiting for on this mux. On `200` the stream carries
-one session:
+one SSH connection (RFC 4253) between the client (browser or OpenSSH, relayed
+unparsed by the edge) and the agent's SSH server:
 
-1. The edge writes the session ticket, `uint32` big-endian length then the
-   ticket bytes, at most 8 KiB. The agent resets a stream whose ticket is
-   longer or does not arrive within 5 s.
-2. The agent answers with its first frame, `uint32` big-endian length then JSON
-   of at most 4 KiB, within 10 s: `{"type":"accept","a_x25519":…,"ct_mlkem":…,"sig":…}`
-   or `{"type":"refused","code":"<code>"}`. A code must match `[a-z_]{1,32}`.
-   The agent checks, in order, and refuses with the first failing code:
+1. Server identity: version `SSH-2.0-localport`; host key the device key of the
+   last acknowledged registration (`ecdsa-sha2-nistp256`), the key whose SPKI
+   SHA-256 the certificate's device option names and the mint response hands
+   the client. Key exchange `mlkem768x25519-sha256`, then `curve25519-sha256`;
+   ciphers `chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com`,
+   `aes128-gcm@openssh.com`; MACs `hmac-sha2-256-etm@openssh.com`,
+   `hmac-sha2-512-etm@openssh.com`. The handshake and userauth must finish
+   within 10 s of the stream's start.
+2. Userauth: `publickey` with an SSH user certificate only, at most 3 attempts.
+   After the client proves possession of the certificate's key, the agent
+   accepts it only when all of these hold; every refusal is a userauth failure
+   and is logged:
 
-   | Check | Code |
-   | ----- | ---- |
-   | a registration was acknowledged (its certificate binds the ticket) | `agent_busy` |
-   | ticket `v` is 1 | `ticket_invalid` |
-   | ticket `kid` known; an unknown one triggers one key fetch (at most 3 s, at most once per 5 minutes) and one retry | `ticket_unknown_key` |
-   | ticket signature, then its fields and client keys parse | `ticket_invalid` |
-   | `iat` at most 30 s ahead of the agent clock, `exp` - `iat` at most 60 s, and `exp` not more than 30 s past | `ticket_expired` |
-   | `device` and `device_spki_sha256` name this device's registered certificate | `ticket_wrong_device` |
-   | the kind is enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) | `kind_disabled` |
-   | the login is listed in the local `logins` | `login_not_allowed` |
-   | this build serves the kind | `kind_unavailable` |
-   | a ticket with `rec` is a `terminal` ticket | `kind_unavailable` |
-   | the held team recording key hashes to `rec.pub_sha256`; a mismatch triggers one key fetch, under the same 5-minute floor, and one retry | `recording_key_mismatch` |
-   | fewer than 8 sessions run, and the agent is not shutting down | `agent_busy` |
-   | the user lookup: the login has an account (`getent`, the account files without it, or the macOS directory), and as a non-root agent it is the agent's own user | `login_not_allowed`; a lookup that fails, times out or has no time left before the first-frame deadline is `agent_busy` |
-   | `terminal` can spawn: as root a `login` at `/bin/login` or `/usr/bin/login` that root owns and no one else can write, with SELinux not enforcing | `kind_unavailable` |
-   | the handshake: the client X25519 key is not a low-order point, and the agent signs the transcript | `ticket_invalid`; a local signing failure is `agent_busy` |
-   | the `jti` was not used before (held until `exp` + 30 s, at most 4096) | `ticket_replayed`; a full or unavailable cache is `agent_busy` |
+   | Check |
+   | ----- |
+   | a registration was acknowledged (its key is the host key) |
+   | a user certificate whose serial is the notice's serial |
+   | signed by a session CA key the agent holds (`ticket_keys.json`); an unknown CA key triggers one key fetch (at most 3 s, at most once per 5 minutes) and one retry |
+   | valid now within 30 s of skew, for the user name as its principal |
+   | exactly one critical option, `device@localport.io`, naming this device's prefix and registered key (`spki_sha256`) |
+   | the kind (`kind@localport.io`) enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) and served by this agent (`terminal`, `ssh`) |
+   | the user name listed in the local `logins` |
+   | a `rec@localport.io`, when present, naming the held team recording key; a mismatch triggers one key fetch, under the same floor, and one retry |
 
-   Nothing before the last check consumes the ticket. The `jti` is written to
-   `session_jti.log` and flushed to disk before `accept` is sent. `agent_busy`
-   and `ticket_unknown_key` are worth one fresh ticket. A Strict recording
-   opens after the `jti` check and before `accept`; when it fails the agent
-   refuses `recording_unavailable` with the ticket spent (see
-   [Session recording](#session-recording)). After a `refused`
-   frame the agent half-closes the stream and reads it to its end for at most
-   2 s before it closes it, so the frame reaches the edge.
-3. After `accept`, both directions carry encrypted records, each a `uint32`
-   big-endian length then the sealed record. The client's first record is
-   `start`. The agent ends a session with an authenticated `close` record and
-   one of these reasons: `idle` (30 minutes without a client `data` or
-   `activity` record), `shutdown` (the control session is ending; sent within
-   2 s), `config_changed` (`localport set` changed the device's entry and the
-   agent reloaded it; the device's other sessions end too), `exited` (the process the session runs ended by itself; terminal),
-   `recording_failed` (a Strict recording could no longer keep the session's
-   output; terminal), `helper_failed` (the session helper's channel ended
-   without an exit; terminal), `launcher_unavailable` (the session launcher
-   could not be reached after the ticket was spent; terminal) or
-   `protocol_error` (a first record that is not `start`, or
-   a malformed or unauthenticated record). After its `close` the agent
-   half-closes the stream and reads it to its end for at most 2 s, and it sends
-   no record after `close`. A client `close` ends the session without an agent
-   `close`.
-
-Records: the first plaintext byte of a record is its type and the rest its
-body. Every kind shares `close` (`0x00`, JSON `{"reason"}`), `start` (`0x01`),
-`data` (`0x02`, raw bytes) and `activity` (`0x03`, empty body); `0x04` to
-`0x0f` are refused, and a kind defines its own types from `0x10`. A
-`terminal` session uses:
-
-| Type | Direction | Body |
-| ---- | --------- | ---- |
-| `start` `0x01` | client to agent | JSON `{"cols","rows","term"}`: `cols` and `rows` integers 1 to 1000, `term` matching `^[a-zA-Z0-9.+-]{1,32}$` (`xterm-256color` when absent). Any other field closes `protocol_error`. The shell runs as the ticket's login, never one the body names. |
-| `data` `0x02` | both | client to agent: terminal input; agent to client: terminal output, at most 16 KiB per record. A record may split a UTF-8 sequence. |
-| `resize` `0x10` | client to agent | JSON `{"cols","rows"}`, the same bounds; the kernel signals the foreground process group. |
-| `exit` `0x11` | agent to client | JSON `{"code"}`: the exit status of the process the agent spawned, or 128 plus the signal number. Sent once, followed by `close {"reason":"exited"}`. As root the spawned process is `login`, whose status is not the shell's on util-linux (it exits 0 after the shell ends). |
-
-Any other type from the client, `0x12` and up included, closes
-`protocol_error`. A process that cannot start sends a one-line reason as
-`data`, then `exit {"code":127}` and `close {"reason":"exited"}`; the ticket
-stays spent.
+   At most 8 connections run at once; a stream past that, or one arriving
+   while the agent shuts down, is closed before the handshake.
+3. Channels: `session` channels only (others are refused `prohibited`); a
+   `terminal` connection has one, an `ssh` connection at most 4 open at once.
+   On a session channel the agent accepts `pty-req` (cols and rows 1 to 1000,
+   term matching `^[a-zA-Z0-9.+-]{1,32}$`), `window-change`, `shell` (with a
+   PTY: the login shell on a terminal; without one, on `ssh` only: the login
+   shell on pipes) and, on `ssh` only, `exec` (a command of at most 2 KiB, run
+   by the login shell with `-c`, on a PTY when one was requested, else on
+   pipes with stdout and stderr apart). It refuses `env`, `subsystem`,
+   `x11-req`, `auth-agent-req@openssh.com`, `signal`, and every global request
+   (`tcpip-forward` included). Each `shell` or `exec` is one launcher request
+   of kind `terminal` or `exec`; a refusal fails the request and writes
+   `localport: <code>` to the channel's stderr (`login_not_allowed`,
+   `kind_disabled`, `agent_busy`, `kind_unavailable`, `launcher_unavailable`).
+   The helper's exit becomes `exit-status`, then the channel closes.
+4. End: the agent closes the connection, after writing
+   `localport: session ended: <reason>` to each open channel's stderr, for
+   `idle` (30 minutes without client channel data or a request),
+   `shutdown` (the control session is ending), `config_changed`
+   (`localport set` changed the device's entry and the agent reloaded it; the
+   device's other sessions end too), `exited` (the channel of a `terminal`
+   connection closed), `recording_failed` (a Strict recording could no longer
+   keep the session's output) and, on one channel, `helper_failed` (the session
+   helper's channel ended without an exit). A client that closes the
+   connection ends it without a reason.
 
 Reconnect: a failed dial or bind, and a mux that drops, are retried for the
 life of the control session with full-jitter backoff from 1 s, doubling to a
@@ -674,23 +658,30 @@ after a reset is logged as a warning, later ones at debug level. The port mux
 is independent of it.
 
 Stop: when the control session ends or the agent stops, the agent first asks its
-session handler to shut down (sessions send their close records, streams past
-their ticket read are refused `agent_busy`, streams still reading it are reset,
-terminal processes are ended: SIGHUP, then SIGKILL at 5 s, and each session
-waits at most 3 s for its recording's final segment to reach the uploader),
+session handler to shut down (connections end with `shutdown`, handshakes in
+progress are aborted, session processes are ended: SIGHUP, then SIGKILL at
+5 s, and each connection waits at most 3 s for its recording's final segment
+to reach the uploader),
 waits for that at most 10 s, then closes the mux connection. The connection is
 never closed before that step.
 
 ## Session recording
 
-A `terminal` ticket may carry `rec`: `{"id","pub_sha256","policy"}`, where
-`id` is a canonical UUID equal to the ticket's `jti`, `pub_sha256` the
-unpadded base64url SHA-256 of the team recording public key (43 characters)
-and `policy` `best_effort` or `strict`. Any other shape is `ticket_invalid`;
-the session checks are in the table under [Session mux](#session-mux). The
-agent records the session's output, resizes and exit, seals it in segments
-and delivers them over its session mux. Code: `internal/recording/`,
-`internal/session/recorder.go`, `internal/tunnel/recording_client.go`.
+A `terminal` or `ssh` certificate may carry `rec@localport.io`:
+`{"policy","pub_sha256"}`, where `pub_sha256` is the unpadded base64url
+SHA-256 of the team recording public key (43 characters) and `policy`
+`best_effort` or `strict`; the userauth checks are in the table under
+[Session mux](#session-mux). The recording id is the connection's session id
+from the notice, so every connection, including repeat connections on one
+certificate, has its own recording. A recorded connection serves one channel
+in its life (a second channel open is refused), so nothing on it runs
+unrecorded. The agent records that channel's output, resizes and exit, seals
+it in segments and delivers them over its session mux. The
+open carries the admitting certificate (`certificate`, base64url, at most
+8 KiB), from which the control plane creates the recording's row; the spool's
+`meta.json` keeps it so a resumed open after a restart sends it again. Code:
+`internal/recording/`, `internal/session/recorder.go`,
+`internal/tunnel/recording_client.go`.
 
 Format: the plaintext is asciicast v3, one JSON line per event (header, then
 `o` output, `r` resize and `x` exit events). A segment holds whole lines and
@@ -810,7 +801,9 @@ body is completed with `incomplete` true, `final` false and reason
 
 Policies:
 
-- Best effort: the open is queued and the session starts at once. When the spool
+- Best effort: the open is sent after userauth and before any channel is
+  served, within 5 s, while the certificate it carries is valid; when it fails
+  the connection runs unrecorded and no spool entry stays. When the spool
   has no room for a segment's hash, or memory is full and the spool refuses the
   segment, recording stops (indices stay contiguous), the recording completes
   `incomplete` with reason `spool_full` or `disk_low`, and the session
@@ -818,10 +811,9 @@ Policies:
   full, recording stops the same way with reason `recording_failed`; terminal
   output never waits for it. An agent without a recording uploader, or whose
   spool has no room for a new recording, runs the session unrecorded.
-- Strict: the open is sent after the `jti` check and before `accept`, within
-  `min(5 s, 10 s from stream start - 3 s)`; with under 1 s left the agent
-  does not try. Any failure, a missing uploader or no spool room for a new
-  recording refuses `recording_unavailable` and spawns no shell. When the
+- Strict: the open is sent after userauth and before any channel is served,
+  within 5 s. Any failure, a missing uploader or no spool room for a new
+  recording closes the connection and spawns no shell. When the
   spool has no room for a segment's hash, or memory is full and the spool
   refuses the segment, the agent seals what it has, completes `incomplete`
   with reason `recording_failed` and ends the session with close reason
@@ -834,9 +826,9 @@ Every session end seals a final segment (the `x` event when the shell
 exited) and completes with `incomplete` false unless recording stopped. The
 session's end waits at most 3 s for the final segment to reach the uploader;
 past that it ends without it, and the recording completes `incomplete` with
-reason `recording_failed` once the stalled handoff returns.
-`recording_key_mismatch` and `recording_unavailable` are worth one fresh
-ticket.
+reason `recording_failed` once the stalled handoff returns. A connection
+refused for its recording key, or closed because its Strict recording did not
+open, is worth one fresh certificate.
 
 ## Remote access (`localport access`)
 
@@ -994,15 +986,13 @@ of backups and configuration management.
                       renew_after only when the credential renews
   .renew.lock         serializes the credential's writers (save, renewal, promotion)
   ticket_keys.json    device only: { keys: [{ kid, public_key }], recording_key },
-                      the session ticket keys the device pins
+                      the session CA keys (SSH user certificate signers) the
+                      device pins
   .keys.lock          serializes ticket_keys.json writers; taken after
                       .renew.lock, never before it
-  session_jti.log     device only: one { jti, until } JSON line per accepted
-                      session ticket; expired lines are dropped at start, and
-                      the file is rewritten when it holds more than twice the
-                      live entries. An unreadable file refuses sessions for
-                      120 s after start, then a fresh log starts
-  .jti.lock           held by the one process that serves the device's sessions
+  .sessions.lock      held by the one process that serves the device's
+                      sessions; taking it removes the session_jti.log and
+                      .jti.lock files older agents left
 ```
 
 Before every read and write, each directory from the base (`LOCALPORT_HOME`,

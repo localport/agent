@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
+	"unicode/utf8"
 )
 
 // Version is the request schema version. A launcher refuses any other.
@@ -73,6 +75,10 @@ type Request struct {
 	Cols   int    `json:"cols,omitempty"`
 	Rows   int    `json:"rows,omitempty"`
 	Term   string `json:"term,omitempty"`
+	// Command is an exec session's command line, run by the login's shell
+	// with -c; empty runs the login shell itself without a terminal. An exec
+	// session has a PTY when Cols and Rows are set, else pipes.
+	Command string `json:"command,omitempty"`
 	// Pipe is the session channel on Windows: the named pipe the agent
 	// created for this session (SessionPipePrefix and 32 hex digits). Unix
 	// passes the channel as a descriptor and refuses the field.
@@ -93,6 +99,8 @@ const (
 	maxDeviceRef    = 128
 	maxLogin        = 256
 	maxPassword     = 256
+	// MaxCommand bounds an exec command line so the request fits MaxMessage.
+	MaxCommand = 2 << 10
 )
 
 // SessionPipePrefix starts the name of every per-session channel pipe.
@@ -104,7 +112,7 @@ var (
 )
 
 // Validate checks the fields of a request for its kind, without the config.
-// A request for a kind phase 10 does not serve fails with
+// A request for a kind this build does not serve (sftp) fails with
 // CodeUnsupportedKind.
 func (r Request) Validate() error {
 	if r.V != Version {
@@ -112,22 +120,42 @@ func (r Request) Validate() error {
 	}
 	switch r.Kind {
 	case KindProbe:
-		if r.Device != "" || r.Login != "" || r.Cols != 0 || r.Rows != 0 || r.Term != "" || r.Pipe != "" || r.HasPassword || len(r.Password) != 0 {
+		if r.Device != "" || r.Login != "" || r.Cols != 0 || r.Rows != 0 || r.Term != "" || r.Command != "" ||
+			r.Pipe != "" || r.HasPassword || len(r.Password) != 0 {
 			return Refusal(CodeBadRequest)
 		}
 		return nil
 	case KindTerminal:
-	case KindExec, KindSFTP:
+		if r.Command != "" {
+			return Refusal(CodeBadRequest)
+		}
+	case KindExec:
+		if len(r.Command) > MaxCommand || !utf8.ValidString(r.Command) || strings.ContainsRune(r.Command, 0) {
+			return Refusal(CodeBadRequest)
+		}
+		if r.Cols == 0 && r.Rows == 0 && r.Term == "" {
+			// No PTY: the size checks below do not apply.
+			return r.validateCommon()
+		}
+	case KindSFTP:
 		return Refusal(CodeUnsupportedKind)
 	default:
 		return Refusal(CodeBadRequest)
 	}
 	switch {
+	case r.Cols < 1 || r.Cols > maxTerminalSize,
+		r.Rows < 1 || r.Rows > maxTerminalSize,
+		!termPattern.MatchString(r.Term):
+		return Refusal(CodeBadRequest)
+	}
+	return r.validateCommon()
+}
+
+// validateCommon checks the fields every session kind shares.
+func (r Request) validateCommon() error {
+	switch {
 	case r.Device == "" || len(r.Device) > maxDeviceRef,
 		r.Login == "" || len(r.Login) > maxLogin,
-		r.Cols < 1 || r.Cols > maxTerminalSize,
-		r.Rows < 1 || r.Rows > maxTerminalSize,
-		!termPattern.MatchString(r.Term),
 		r.Pipe != "" && !pipePattern.MatchString(r.Pipe),
 		r.HasPassword != (len(r.Password) > 0),
 		len(r.Password) > maxPassword:

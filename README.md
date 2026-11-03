@@ -125,7 +125,7 @@ Terminal sessions (Linux and macOS):
 
 Session recording (terminal sessions, set by the team's recording policy):
 
-- A recorded session's ticket names the policy.
+- A recorded session's certificate names the policy; each connection is its own recording.
 - The agent encrypts the recording on the device under a key of its own, wrapped to the team's recording key, and uploads it in segments over the session mux. It never holds the team's private key, so it cannot decrypt other recordings. It clears its copy of a recording's key when the recording ends; copies inside the cipher and the Go runtime stay in process memory until the runtime reuses it.
 - `best_effort`: the session starts at once. When the agent cannot deliver or store the recording, recording stops, the recording is marked incomplete, and the session continues.
 - `strict`: the agent opens the recording before it accepts the session, and refuses the session with the retryable `recording_unavailable`, before any shell starts, when it cannot. A session whose recording can no longer be kept ends with the close reason `recording_failed`.
@@ -172,7 +172,7 @@ make build
 - **Multiplexing.** Each tunnel holds one control connection and one HTTP/2 connection carrying a stream per visitor. If the HTTP/2 connection is unavailable, the agent dials back once per visitor.
 - **Network changes.** The agent watches interfaces and detects wake from sleep. After either, it probes the edge and reconnects within seconds when the old connection is gone.
 - **Remote access.** `localport access` holds one mutual TLS HTTP/2 connection per device and opens a CONNECT stream per forward. The edge checks the certificate and grant before a stream reaches the device.
-- **Sessions.** A device that enables `terminal`, `files` or `desktop` holds a second HTTP/2 connection for browser and CLI sessions. The agent verifies each session ticket itself (signature, expiry, single use, device binding), applies its local `enable` and `logins`, and runs an end-to-end encrypted channel the edge cannot read. At most 8 sessions run at once; a session idle for 30 minutes is closed. A `terminal` session is a login shell for the ticket's login (see Terminal sessions above).
+- **Sessions.** A device that enables `terminal`, `files` or `desktop` holds a second HTTP/2 connection for browser and CLI sessions. Each session is one SSH connection, end to end between the client and the agent's own SSH server (the edge relays bytes it cannot read; the device key is the host key). The agent admits a client only by an SSH user certificate it verifies itself (signed by a session CA key it pins, valid, for this device, for the serial the edge admitted) and applies its local `enable` and `logins`. At most 8 connections run at once; one idle for 30 minutes is closed. A `terminal` connection is one login shell for the certificate's login (see Terminal sessions above); an `ssh` connection also runs commands (`exec`).
 - **TLS 1.3 everywhere.** Tunnel, consumer, and control-plane connections all require TLS 1.3. Private keys are generated on the machine and never leave it.
 
 ## Contributing

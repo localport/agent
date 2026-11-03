@@ -132,7 +132,7 @@
 (allow localport_t sysctl_t (dir (search)))
 (allow localport_t sysctl_net_t (dir (search)))
 (allow localport_t sysctl_net_t (file (getattr read open)))
-; The agent's own state: credentials, keys, jti log, recording spool.
+; The agent's own state: credentials, keys, sessions lock, recording spool.
 (allow localport_t localport_state_t (dir (create getattr setattr search read open write add_name remove_name rename rmdir)))
 (allow localport_t localport_state_t (file (create getattr setattr read write open append lock rename unlink map)))
 ; Requests to the launcher; the session channel fd passes over the connection.

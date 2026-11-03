@@ -140,9 +140,13 @@ func (e *fakeSessionEdge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// noticeSerial is the certificate serial every test notice carries.
+const noticeSerial uint64 = 0x0123456789abcdef
+
 func notice(id [sessionIDLen]byte) []byte {
-	b := binary.BigEndian.AppendUint32(nil, sessionIDLen)
-	return append(b, id[:]...)
+	b := binary.BigEndian.AppendUint32(nil, sessionNoticeLen)
+	b = append(b, id[:]...)
+	return binary.BigEndian.AppendUint64(b, noticeSerial)
 }
 
 func (e *fakeSessionEdge) sendNotice(t *testing.T, b []byte) {
@@ -220,6 +224,9 @@ type streamEchoHandler struct {
 	shutdownCalls atomic.Int32
 	recordingUps  atomic.Int32
 	farewellErr   chan error
+	// lastID and lastSerial are the notice values of the latest Serve.
+	lastID     atomic.Pointer[[16]byte]
+	lastSerial atomic.Uint64
 }
 
 func newStreamEchoHandler() *streamEchoHandler {
@@ -232,7 +239,9 @@ func newStreamEchoHandler() *streamEchoHandler {
 	return h
 }
 
-func (h *streamEchoHandler) Serve(stream net.Conn) {
+func (h *streamEchoHandler) Serve(stream net.Conn, id [16]byte, serial uint64) {
+	h.lastID.Store(&id)
+	h.lastSerial.Store(serial)
 	done := make(chan struct{})
 	h.mu.Lock()
 	h.live[stream] = done
@@ -419,6 +428,9 @@ func TestSessionMuxBindsWithSessionPurposeAndOutlivesTheRunContext(t *testing.T)
 	edge.sendNotice(t, notice([sessionIDLen]byte{1}))
 	s := edge.expectSession(t)
 	h.waitServing(t)
+	if id := h.lastID.Load(); id == nil || *id != [sessionIDLen]byte{1} || h.lastSerial.Load() != noticeSerial {
+		t.Fatalf("Serve got id %v serial %x, want the notice's", id, h.lastSerial.Load())
+	}
 
 	cancel()
 	s.write(t, []byte("ping"))

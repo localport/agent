@@ -26,7 +26,10 @@ import (
 // calls Serve again on the same handler.
 //
 // Serve runs on its own goroutine per stream and must return once the stream
-// fails. The session mux closes stream after Serve returns. Shutdown ends the
+// fails. id is the connection's session id from the edge's notice (the bytes
+// of the UUID its access row and recording carry) and serial the serial of
+// the SSH user certificate the edge admitted for it. The session mux closes
+// stream after Serve returns. Shutdown ends the
 // sessions the handler holds when it is called and must return once ctx ends.
 // It is not terminal: Serve may be called again after Shutdown returns, for
 // the next control session. No stream of the stopping
@@ -39,7 +42,7 @@ import (
 // RecordingClientUp is called each time the mux publishes the recording
 // client of a new conn; it must not block.
 type SessionHandler interface {
-	Serve(stream net.Conn)
+	Serve(stream net.Conn, id [16]byte, serial uint64)
 	Shutdown(ctx context.Context) error
 	LiveSessions() int
 	RecordingClientUp()
@@ -54,6 +57,9 @@ const (
 	// sessionIDHeader carries the hex session id a session stream answers.
 	sessionIDHeader = "Localport-Session-Id"
 	sessionIDLen    = 16
+	// sessionNoticeLen is a notice body: the session id, then the admitted
+	// certificate serial as uint64 big-endian.
+	sessionNoticeLen = sessionIDLen + 8
 	// sessionMuxAuthority is the :authority of every request. The mux conn
 	// reaches exactly one edge, which does not route on it.
 	sessionMuxAuthority = "session-mux.invalid"
@@ -346,18 +352,20 @@ func (m *sessionMux) serve(conn net.Conn) (bool, error) {
 
 	slots := make(chan struct{}, maxSessionOpens)
 	var length [4]byte
-	var id [sessionIDLen]byte
+	var notice [sessionNoticeLen]byte
 	for {
 		if _, err := io.ReadFull(resp.Body, length[:]); err != nil {
 			return true, fmt.Errorf("session accept stream: %w", err)
 		}
-		if n := binary.BigEndian.Uint32(length[:]); n != sessionIDLen {
-			return true, fmt.Errorf("session accept stream: notice length %d, want %d", n, sessionIDLen)
+		if n := binary.BigEndian.Uint32(length[:]); n != sessionNoticeLen {
+			return true, fmt.Errorf("session accept stream: notice length %d, want %d", n, sessionNoticeLen)
 		}
-		if _, err := io.ReadFull(resp.Body, id[:]); err != nil {
+		if _, err := io.ReadFull(resp.Body, notice[:]); err != nil {
 			return true, fmt.Errorf("session accept stream: %w", err)
 		}
-		hexID := hex.EncodeToString(id[:])
+		var id [sessionIDLen]byte
+		copy(id[:], notice[:sessionIDLen])
+		serial := binary.BigEndian.Uint64(notice[sessionIDLen:])
 		select {
 		case slots <- struct{}{}:
 		case <-connCtx.Done():
@@ -367,15 +375,14 @@ func (m *sessionMux) serve(conn net.Conn) (bool, error) {
 		go func() {
 			defer opens.Done()
 			defer func() { <-slots }()
-			m.openSession(connCtx, cc, conn, hexID)
+			m.openSession(connCtx, cc, conn, id, serial)
 		}()
 	}
 }
 
 // openSession opens the session stream for one notice and hands it to the
-// handler. The stream is always opened, so the edge carries every refusal on
-// it.
-func (m *sessionMux) openSession(ctx context.Context, cc *http.ClientConn, conn net.Conn, id string) {
+// handler. The stream is always opened, so the edge sees every refusal on it.
+func (m *sessionMux) openSession(ctx context.Context, cc *http.ClientConn, conn net.Conn, id [sessionIDLen]byte, serial uint64) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	reqBody, bodyWriter := io.Pipe()
 	req, err := newSessionMuxRequest(streamCtx, http.MethodPost, sessionStreamPath, reqBody)
@@ -384,7 +391,7 @@ func (m *sessionMux) openSession(ctx context.Context, cc *http.ClientConn, conn 
 		_ = bodyWriter.CloseWithError(err)
 		return
 	}
-	req.Header.Set(sessionIDHeader, id)
+	req.Header.Set(sessionIDHeader, hex.EncodeToString(id[:]))
 
 	// A stalled open is cancelled at the deadline and frees its slot. A timer
 	// that fired as the headers arrived still counts: the stream is reset.
@@ -416,14 +423,14 @@ func (m *sessionMux) openSession(ctx context.Context, cc *http.ClientConn, conn 
 			slog.String("tunnel", m.label), slog.Int("status", resp.StatusCode))
 		return
 	}
-	if !m.handOver(stream) {
+	if !m.handOver(stream, id, serial) {
 		_ = stream.Close()
 	}
 }
 
 // handOver starts Serve for stream unless stop has begun. The check and the
 // Add are one critical section with stop's, so run's Wait covers every Serve.
-func (m *sessionMux) handOver(stream net.Conn) bool {
+func (m *sessionMux) handOver(stream net.Conn, id [sessionIDLen]byte, serial uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopping {
@@ -433,7 +440,7 @@ func (m *sessionMux) handOver(stream net.Conn) bool {
 	go func() {
 		defer m.served.Done()
 		defer stream.Close()
-		m.handler.Serve(stream)
+		m.handler.Serve(stream, id, serial)
 	}()
 	return true
 }

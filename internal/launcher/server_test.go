@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -269,11 +270,39 @@ func TestRequestValidation(t *testing.T) {
 			t.Errorf("%s: %v, want bad_request", name, r.Validate())
 		}
 	}
-	for _, kind := range []string{KindExec, KindSFTP} {
-		r := ok
-		r.Kind = kind
-		if CodeOf(r.Validate()) != CodeUnsupportedKind {
-			t.Errorf("%s: %v, want unsupported_kind", kind, r.Validate())
+	r := ok
+	r.Kind = KindSFTP
+	if CodeOf(r.Validate()) != CodeUnsupportedKind {
+		t.Errorf("sftp: %v, want unsupported_kind", r.Validate())
+	}
+	if r := ok; r.Validate() != nil || func() bool { r.Command = "id"; return CodeOf(r.Validate()) != CodeBadRequest }() {
+		t.Error("a terminal request with a command was not refused")
+	}
+	// exec: with a PTY (the terminal's fields), or without one (no size and
+	// no term); a command up to MaxCommand bytes of UTF-8 without NUL.
+	execOK := ok
+	execOK.Kind, execOK.Command = KindExec, "uname -a"
+	noPTY := execOK
+	noPTY.Cols, noPTY.Rows, noPTY.Term = 0, 0, ""
+	shellNoPTY := noPTY
+	shellNoPTY.Command = ""
+	for name, r := range map[string]Request{"exec with a pty": execOK, "exec on pipes": noPTY, "login shell on pipes": shellNoPTY} {
+		if err := r.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, edit := range map[string]func(*Request){
+		"command too long":   func(r *Request) { r.Command = strings.Repeat("x", MaxCommand+1) },
+		"command with NUL":   func(r *Request) { r.Command = "id\x00x" },
+		"command not UTF-8":  func(r *Request) { r.Command = "\xff" },
+		"half a size":        func(r *Request) { r.Rows = 0 },
+		"term without size":  func(r *Request) { r.Cols, r.Rows = 0, 0 },
+		"exec without login": func(r *Request) { r.Login = "" },
+	} {
+		r := execOK
+		edit(&r)
+		if CodeOf(r.Validate()) != CodeBadRequest {
+			t.Errorf("exec %s: %v, want bad_request", name, r.Validate())
 		}
 	}
 	if err := (Request{V: Version, Kind: KindProbe, Login: "pi"}).Validate(); CodeOf(err) != CodeBadRequest {
@@ -292,7 +321,8 @@ func TestDecodeRequestIsStrict(t *testing.T) {
 
 func TestFrameRoundTripAndRefusals(t *testing.T) {
 	var buf bytes.Buffer
-	for _, f := range []Frame{{Type: FrameData, Data: []byte("hi")}, {Type: FrameResize, Cols: 120, Rows: 40}, {Type: FrameExit, Code: -1}} {
+	for _, f := range []Frame{{Type: FrameData, Data: []byte("hi")}, {Type: FrameResize, Cols: 120, Rows: 40}, {Type: FrameExit, Code: -1},
+		{Type: FrameStderr, Data: []byte("err")}, {Type: FrameEOF}} {
 		if err := WriteFrame(&buf, f); err != nil {
 			t.Fatal(err)
 		}
@@ -307,6 +337,12 @@ func TestFrameRoundTripAndRefusals(t *testing.T) {
 	if f, err := fr.ReadFrame(); err != nil || f.Code != -1 {
 		t.Fatalf("exit %+v, %v", f, err)
 	}
+	if f, err := fr.ReadFrame(); err != nil || f.Type != FrameStderr || string(f.Data) != "err" {
+		t.Fatalf("stderr %+v, %v", f, err)
+	}
+	if f, err := fr.ReadFrame(); err != nil || f.Type != FrameEOF || len(f.Data) != 0 {
+		t.Fatalf("eof %+v, %v", f, err)
+	}
 	if _, err := fr.ReadFrame(); !errors.Is(err, io.EOF) {
 		t.Fatalf("end = %v, want EOF", err)
 	}
@@ -317,6 +353,8 @@ func TestFrameRoundTripAndRefusals(t *testing.T) {
 		"short resize":     {FrameResize, 0, 0, 0, 2, 0, 1},
 		"zero size resize": {FrameResize, 0, 0, 0, 4, 0, 0, 0, 0},
 		"truncated":        {FrameData, 0, 0, 0, 5, 'a'},
+		"eof with payload": {FrameEOF, 0, 0, 0, 1, 'a'},
+		"empty stderr":     {FrameStderr, 0, 0, 0, 0},
 	} {
 		if _, err := NewFrameReader(bytes.NewReader(raw)).ReadFrame(); !errors.Is(err, errBadFrame) {
 			t.Errorf("%s: %v, want errBadFrame", name, err)

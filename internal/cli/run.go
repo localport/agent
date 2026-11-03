@@ -253,19 +253,19 @@ func deviceSpec(store *identity.Store, d config.LocalDevice, probe sessionProbe,
 }
 
 // deviceSessionState is what serving one device's sessions holds for the run:
-// the refresher that keeps its ticket keys current and its jti log.
+// the refresher that keeps its CA keys current and its sessions lock.
 type deviceSessionState struct {
 	refresher *identity.KeyRefresher
-	jti       *session.JTILog
+	lock      *session.SessionsLock
 }
 
 // deviceSessions sets spec's HintRevoked hook and, when the device enables a
-// session capability, its session server. The server checks tickets against
-// and signs with the certificate of the last acknowledged registration
-// (spec.Credential), never Store.Load, which lags behind a renewed
-// certificate until it is promoted. It returns nil state when no server is
-// set, and an error, leaving sessions off, when the jti log cannot be held,
-// as when another process serves the same identity.
+// session capability, its session server. The server binds certificates to,
+// and uses as SSH host key, the certificate of the last acknowledged
+// registration (spec.Credential), never Store.Load, which lags behind a
+// renewed certificate until it is promoted. It returns nil state when no
+// server is set, and an error, leaving sessions off, when the sessions lock
+// cannot be held, as when another process serves the same identity.
 func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.DeviceSpec, uploads *recording.Uploader, logEvent func(string)) (*deviceSessionState, error) {
 	keys, err := store.TicketKeys(ref)
 	if err != nil {
@@ -281,7 +281,7 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 		spec.HintRevoked = hintRevoked(keys, nil, logEvent)
 		return nil, nil
 	}
-	jti, err := session.OpenJTILog(store.Dir(ref), nil)
+	lock, err := session.LockSessions(store.Dir(ref))
 	if err != nil {
 		spec.HintRevoked = hintRevoked(keys, nil, logEvent)
 		return nil, err
@@ -291,20 +291,19 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 	spec.SessionHandler = session.NewServer(session.ServerConfig{
 		Prefix:       spec.Name,
 		Certificate:  spec.Credential.RegisteredCertificate,
-		Lookup:       keys.Lookup,
+		CAKeys:       keys.CAKeys,
 		RefreshKeys:  refresher.RefreshNow,
 		RecordingKey: keys.RecordingKey,
 		Capabilities: spec.Capabilities,
 		Logins:       spec.Logins,
 		Desktop:      spec.Desktop,
-		JTI:          jti,
 		OnEvent:      logEvent,
 		Uploader:     uploads,
 		Identifier:   ref.Identity,
 		Device:       ref.String(),
 		Launcher:     sessionLauncher,
 	})
-	return &deviceSessionState{refresher: refresher, jti: jti}, nil
+	return &deviceSessionState{refresher: refresher, lock: lock}, nil
 }
 
 // hintRevoked returns the HintRevoked hook of one device: the edge's revoked

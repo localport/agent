@@ -172,6 +172,10 @@ func (k *terminal) handle(f launcher.Frame) error {
 		_, err = k.master.Write(f.Data)
 	case launcher.FrameResize:
 		err = pty.Setsize(k.master, &pty.Winsize{Cols: f.Cols, Rows: f.Rows})
+	case launcher.FrameEOF:
+		// A PTY has no end of input; the line discipline sees ^D if the
+		// client sends one.
+		return nil
 	default:
 		return errors.New("sessionhelper: unexpected frame from the agent")
 	}
@@ -183,6 +187,8 @@ func (k *terminal) handle(f launcher.Frame) error {
 }
 
 func (k *terminal) markEnded() { k.endedOnce.Do(func() { close(k.ended) }) }
+
+func (k *terminal) endedC() <-chan struct{} { return k.ended }
 
 // Wait joins the reader, the SIGKILL step and the waiter. A shell still
 // unreaped terminalReapTimeout after the SIGKILL (uninterruptible sleep) is

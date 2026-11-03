@@ -1,84 +1,85 @@
+// Package session serves remote access sessions on a device. Each session
+// stream from the device's session mux carries one SSH connection: Server
+// runs an x/crypto/ssh server on it with the device key as host key, admits
+// the client by its SSH user certificate (signed by a session CA key, for the
+// serial the edge admitted, for this device, for a login the local config
+// enables), and serves its session channels through the root session
+// launcher: a terminal on a PTY, or a command (exec). It records the
+// connection when the certificate asks for it.
 package session
 
 import (
 	"context"
 	"crypto"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/binary"
-	"encoding/json"
-	"errors"
+	"encoding/hex"
 	"fmt"
-	"io"
 	"net"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/localport/agent/internal/recording"
 )
 
-// Refusal codes of the agent's refused first frame, beside the ticket codes.
-const (
-	CodeTicketReplayed  = "ticket_replayed"
-	CodeKindDisabled    = "kind_disabled"
-	CodeLoginNotAllowed = "login_not_allowed"
-	CodeKindUnavailable = "kind_unavailable"
-	// CodeAgentBusy is retryable: no acknowledged registration, the session
-	// cap, a full or unavailable replay cache, a local handshake failure, or a
-	// server that is shutting down.
-	CodeAgentBusy = "agent_busy"
-	// CodeRecordingKeyMismatch is retryable: the ticket's rec names a team
-	// recording key other than the one the agent holds after one key refresh.
-	CodeRecordingKeyMismatch = "recording_key_mismatch"
-)
-
-// Close reasons the agent sends, beside CodeProtocolError.
+// Reasons a connection ends with, written to its open channels' stderr and
+// recorded; the edge records the stream's end.
 const (
 	CloseIdle     = "idle"
 	CloseShutdown = "shutdown"
 	// CloseConfigChanged ends the sessions of a device whose local config
 	// entry a reload changed or removed.
 	CloseConfigChanged = "config_changed"
-	// CloseExited follows the kind's exit message when the process it serves
-	// ended by itself.
+	// CloseExited: the last channel of a terminal connection closed.
 	CloseExited = "exited"
 )
 
 const (
-	maxSessions    = 8
-	maxTicketBytes = 8 << 10
-	maxFirstFrame  = 4 << 10
-	// firstFrameTimeout bounds the agent's first frame from the stream's
-	// start, as the edge waits for it.
-	firstFrameTimeout = 10 * time.Second
+	maxSessions = 8
+	// maxChannels bounds the session channels of one connection; a terminal
+	// connection has one.
+	maxChannels = 4
+	// handshakeTimeout bounds the SSH key exchange and userauth from the
+	// stream's start.
+	handshakeTimeout  = 10 * time.Second
 	keyRefreshTimeout = 3 * time.Second
 	idleTimeout       = 30 * time.Minute
-	closeWriteTimeout = 2 * time.Second
-	closeDrainTimeout = 2 * time.Second
+	// serverVersion is the SSH identification string.
+	serverVersion = "SSH-2.0-localport"
 )
 
-// ticketReadTimeout bounds the ticket read from the stream's start. A
-// variable so the timeout test runs in milliseconds.
-var ticketReadTimeout = 5 * time.Second
+// Permissions extension keys carrying the admitted identity from userauth to
+// the channel handlers. Nothing else is read from a connection.
+const (
+	permKind    = "kind"
+	permSubject = "subject"
+	permRecPol  = "rec-policy"
+	permRecPub  = "rec-pub"
+	permCert    = "cert"
+)
 
 // ServerConfig is one device's session server configuration. Capabilities,
 // Logins and Desktop are the device's local config; nothing from the network
 // widens them.
 type ServerConfig struct {
-	// Prefix is the device prefix tickets must name.
+	// Prefix is the device prefix certificates must name.
 	Prefix string
 	// Certificate returns the certificate, with its key, of the device's last
-	// acknowledged registration; tickets are bound to it.
+	// acknowledged registration: its key is the SSH host key, and
+	// certificates are bound to its public key.
 	Certificate func() (*tls.Certificate, bool)
-	// Lookup returns a ticket verification key.
-	Lookup Lookup
-	// RefreshKeys fetches the ticket key set and recording key; called once
-	// for an unknown kid and once for a rec naming a key other than the held
-	// one.
+	// CAKeys returns the session CA keys user certificates are signed by.
+	CAKeys func() []ed25519.PublicKey
+	// RefreshKeys fetches the CA key set and recording key; called once for
+	// a certificate of an unknown CA key and once for a rec naming a key
+	// other than the held one.
 	RefreshKeys func(ctx context.Context) error
 	// RecordingKey returns the held team recording public key and its
 	// SHA-256; ok is false when none is held. Nil holds none.
@@ -88,13 +89,11 @@ type ServerConfig struct {
 	Logins       []string
 	// Desktop lists the configured desktop targets: rdp, vnc.
 	Desktop []string
-	// JTI is the device identity's replay cache.
-	JTI *JTILog
 	// OnEvent receives one line per notable failure. Optional.
 	OnEvent func(string)
-	// Uploader delivers the recordings of tickets with rec; nil leaves
-	// recording unavailable: Strict tickets are refused
-	// CodeRecordingUnavailable and Best effort sessions run unrecorded.
+	// Uploader delivers the recordings of certificates with rec; nil leaves
+	// recording unavailable: Strict connections are closed before any
+	// channel and Best effort ones run unrecorded.
 	Uploader *recording.Uploader
 	// Identifier is the device's identity (identity.Ref.Identity), kept in
 	// each recording's spool metadata.
@@ -102,14 +101,14 @@ type ServerConfig struct {
 	// Device names the device's local config entry (identity.Ref.String()),
 	// which the launcher authorizes each session against.
 	Device string
-	// Launcher starts terminal sessions; nil is the launcher socket.
+	// Launcher starts sessions; nil is the launcher socket or pipe.
 	Launcher Launcher
 
-	// clock replaces the wall clock for expiry and idle checks. Tests set it.
+	// clock replaces the wall clock for validity and idle checks. Tests set it.
 	clock clock
 }
 
-// clock is the time source of the expiry and idle checks. NewTimer returns
+// clock is the time source of the validity and idle checks. NewTimer returns
 // the timer's channel and a stop function.
 type clock interface {
 	Now() time.Time
@@ -126,17 +125,14 @@ func (wallClock) NewTimer(d time.Duration) (<-chan time.Time, func() bool) {
 }
 
 // Server serves the session streams of one device. It implements
-// tunnel.SessionHandler: Shutdown sends close {shutdown} to the streams
-// holding a session slot, refuses agent_busy the streams past their ticket
-// read without a slot and those arriving while it runs, resets the streams
-// still reading their ticket, and leaves the server usable for the next
-// control session once it returns.
+// tunnel.SessionHandler: Shutdown ends every connection holding a session
+// slot with CloseShutdown, aborts handshakes in progress, refuses streams
+// arriving while it runs, and leaves the server usable for the next control
+// session once it returns.
 type Server struct {
 	cfg ServerConfig
-	// kinds maps a ticket kind to the kind that serves it, nil when this
-	// build serves none; kindFor in production. Tests replace it before the
-	// first Serve.
-	kinds func(kind string) prepareKind
+	// launcher serves the channels; nil when this build serves none.
+	launcher Launcher
 
 	// mu guards the fields below and every decision on them.
 	mu       sync.Mutex
@@ -150,59 +146,21 @@ type Server struct {
 // handler is one Serve call.
 type handler struct {
 	stream net.Conn
-	// stop is closed by Shutdown, after stopReason is set. reading is set
-	// until the ticket read ends. stopped, stopReason and reading are guarded
-	// by mu; stopReason is read without it once stop is closed, as it is never
-	// written again.
-	stop       chan struct{}
-	stopped    bool
-	stopReason string
-	reading    bool
+	// stop is closed by Shutdown, after stopReason is set. stopped,
+	// stopReason and handshaking are guarded by mu; stopReason is read
+	// without it once stop is closed, as it is never written again.
+	stop        chan struct{}
+	stopped     bool
+	stopReason  string
+	handshaking bool
 }
-
-// kindSession serves the records of one accepted session after its start.
-// Handle is called from the session's reader goroutine only.
-type kindSession interface {
-	// Handle receives every record that is not close or activity. A record read
-	// after the server recorded the session's end never reaches it; one checked
-	// just before may, concurrently with End. An *Error with CodeProtocolError
-	// ends the session with that close reason; any other error ends the
-	// transport.
-	Handle(m Message) error
-	// Ended delivers the close reason, at most once and without blocking the
-	// kind, when the kind ends the session by itself; an empty reason ends it
-	// without an agent close. A nil channel means the kind never does.
-	Ended() <-chan string
-	// End is called exactly once when the session ends for any reason other
-	// than Ended. It may run while Handle is in progress, must make a blocked
-	// Handle return, stops the kind's output and returns without waiting.
-	End()
-	// Wait returns once the kind's goroutines have ended. It is called once,
-	// after Ended delivered or End returned, and before the session's slot is
-	// released.
-	Wait()
-}
-
-// newKind starts a session from its start record body for the ticket's login.
-// Writes go through ch. rec records the session, nil when it is not
-// recorded.
-type newKind func(ch *Channel, start []byte, login string, rec *sessionRecorder) (kindSession, error)
-
-// prepareKind is a kind's check-time step: it runs under the session's slot,
-// before Accept and the spend, and returns the session's constructor. device
-// is the device's config entry (ServerConfig.Device); log writes one line to
-// the server's OnEvent and stays usable after the session ended. An error
-// refuses the ticket unspent with its *Error code (kind_unavailable
-// otherwise); the server logs it.
-type prepareKind func(device, login string, log func(format string, args ...any)) (newKind, error)
 
 // NewServer returns the session server of one device.
 func NewServer(cfg ServerConfig) *Server {
 	if cfg.clock == nil {
 		cfg.clock = wallClock{}
 	}
-	kinds := func(kind string) prepareKind { return kindFor(kind, cfg.Launcher) }
-	return &Server{cfg: cfg, kinds: kinds, handlers: map[*handler]struct{}{}}
+	return &Server{cfg: cfg, launcher: launcherFor(cfg.Launcher), handlers: map[*handler]struct{}{}}
 }
 
 // LiveSessions returns the number of streams holding a session slot.
@@ -226,20 +184,14 @@ func (s *Server) log(format string, args ...any) {
 	}
 }
 
-// refusedFrame is the first frame of a refused stream; the edge maps its code
-// to the session's end reason.
-type refusedFrame struct {
-	Type string `json:"type"`
-	Code string `json:"code"`
-}
-
-// Serve runs one session stream to its end. The caller closes stream after
-// Serve returns.
-func (s *Server) Serve(stream net.Conn) {
-	start := time.Now()
-	_ = stream.SetReadDeadline(start.Add(ticketReadTimeout))
-	_ = stream.SetWriteDeadline(start.Add(firstFrameTimeout))
-	h := &handler{stream: stream, stop: make(chan struct{}), reading: true}
+// Serve runs one SSH connection on stream to its end. id is the connection's
+// session id (its recording id) and serial the certificate serial the edge
+// admitted. A refused stream is closed without a message: an SSH client
+// sees a failed handshake or userauth. The caller closes stream after Serve
+// returns.
+func (s *Server) Serve(stream net.Conn, id [16]byte, serial uint64) {
+	start := s.cfg.clock.Now()
+	h := &handler{stream: stream, stop: make(chan struct{}), handshaking: true}
 	s.register(h)
 	defer s.unregister(h)
 	defer func() {
@@ -248,141 +200,163 @@ func (s *Server) Serve(stream net.Conn) {
 			_ = stream.Close()
 		}
 	}()
-
-	raw, err := readTicket(stream)
-	if err != nil {
-		return
-	}
-	if !s.endTicketRead(h) {
-		return
-	}
-	t, signer, prepare, code := s.check(raw)
-	if code != "" {
-		refuse(stream, code)
-		return
-	}
 	if !s.takeSlot(h) {
-		refuse(stream, CodeAgentBusy)
 		return
 	}
 	defer s.releaseSlot()
-	// Under the slot, so at most maxSessions run at once, and before the
-	// spend, so every refusal leaves the ticket unspent.
-	kind, err := prepare(s.cfg.Device, t.Login, s.log)
+
+	_ = stream.SetDeadline(time.Now().Add(handshakeTimeout))
+	cfg, err := s.serverConfig(serial)
 	if err != nil {
 		s.log("session: %v", err)
-		refuse(stream, errorCode(err, CodeKindUnavailable))
 		return
 	}
-	// Accept runs before the spend so a handshake failure leaves the ticket
-	// unspent: a bad client key is the ticket's fault, a local failure is
-	// retryable.
-	msg, keys, err := Accept(t, signer)
-	if err != nil {
-		s.log("session: accept: %v", err)
-		refuse(stream, errorCode(err, CodeAgentBusy))
-		return
-	}
-	if err := s.cfg.JTI.Spend(t.JTI, time.Unix(t.EXP, 0).Add(jtiHold)); err != nil {
-		code := CodeTicketReplayed
-		if !errors.Is(err, errReplayed) {
-			code = CodeAgentBusy
-			s.log("session: the replay log cannot record the ticket: %v", err)
+	conn, chans, reqs, err := ssh.NewServerConn(stream, cfg)
+	if !s.endHandshake(h) || err != nil {
+		if err != nil {
+			s.log("session: SSH handshake or userauth failed: %v", err)
 		}
-		refuse(stream, code)
+		if conn != nil {
+			_ = conn.Close()
+		}
 		return
 	}
+	defer conn.Close()
+	adm := admissionOf(conn.Permissions)
+	idText := uuidText(id)
+
 	var rec *sessionRecorder
-	if t.Rec != nil && t.Rec.Policy == RecPolicyStrict {
-		// Before the accept frame, so a recording that cannot open refuses the
-		// session before any shell exists.
-		if rec, err = s.startRecording(t, start); err != nil {
-			s.log("session: %v", err)
-			refuse(stream, CodeRecordingUnavailable)
-			return
+	if adm.Rec != nil {
+		rec, err = s.startRecording(idText, adm, start)
+		if err != nil {
+			if adm.Rec.Policy == RecPolicyStrict {
+				// Before any channel, so no shell runs unrecorded.
+				s.log("session: %s: closed: %v", idText, err)
+				return
+			}
+			s.log("session: %s runs unrecorded: %v", idText, err)
 		}
 	}
-	if err := writeFrame(stream, msg); err != nil {
-		rec.abort()
-		return
-	}
-	_ = stream.SetWriteDeadline(time.Time{})
-	if t.Rec != nil && t.Rec.Policy == RecPolicyBestEffort {
-		if rec, err = s.startRecording(t, start); err != nil {
-			s.log("session: the session runs unrecorded: %v", err)
-		}
-	}
-	ch, err := keys.AgentChannel(stream)
-	if err != nil {
-		s.log("session: %v", err)
-		rec.end()
-		return
-	}
-	s.run(h, ch, kind, t.Login, rec)
+	defer rec.end()
+	s.run(h, conn, chans, reqs, adm, rec)
 }
 
-// check verifies the ticket and the local config. It spends nothing. A
-// non-empty code refuses the stream.
-func (s *Server) check(raw []byte) (*Ticket, crypto.Signer, prepareKind, string) {
+// serverConfig is one connection's SSH server configuration. Its callbacks
+// keep no state across connections or attempts: the identity is built in
+// VerifiedPublicKeyCallback, after possession of the certificate's key is
+// proven, and returned as the connection's Permissions.
+func (s *Server) serverConfig(serial uint64) (*ssh.ServerConfig, error) {
 	cert, ok := s.cfg.Certificate()
-	if !ok {
-		return nil, nil, nil, CodeAgentBusy
+	if !ok || len(cert.Certificate) == 0 {
+		return nil, fmt.Errorf("no acknowledged registration to serve sessions with")
 	}
 	signer, ok := cert.PrivateKey.(crypto.Signer)
-	if !ok || len(cert.Certificate) == 0 {
-		return nil, nil, nil, CodeAgentBusy
+	if !ok {
+		return nil, fmt.Errorf("the device key cannot sign")
 	}
 	leaf := cert.Leaf
 	if leaf == nil {
 		var err error
 		if leaf, err = x509.ParseCertificate(cert.Certificate[0]); err != nil {
-			return nil, nil, nil, CodeAgentBusy
+			return nil, fmt.Errorf("device certificate: %w", err)
 		}
+	}
+	hostKey, err := ssh.NewSignerFromSigner(signer)
+	if err != nil {
+		return nil, fmt.Errorf("host key: %w", err)
 	}
 	device := Device{Prefix: s.cfg.Prefix, SPKISHA256: SPKIHash(leaf.RawSubjectPublicKeyInfo)}
-	t, err := VerifyTicket(raw, s.cfg.Lookup, device, s.cfg.clock.Now())
-	if errorCode(err, "") == CodeTicketUnknownKey && s.cfg.RefreshKeys != nil {
+	cfg := &ssh.ServerConfig{
+		Config: ssh.Config{
+			KeyExchanges: []string{ssh.KeyExchangeMLKEM768X25519, ssh.KeyExchangeCurve25519},
+			Ciphers:      []string{ssh.CipherChaCha20Poly1305, ssh.CipherAES256GCM, ssh.CipherAES128GCM},
+			MACs:         []string{ssh.HMACSHA256ETM, ssh.HMACSHA512ETM},
+		},
+		ServerVersion: serverVersion,
+		MaxAuthTries:  3,
+		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if _, ok := key.(*ssh.Certificate); !ok {
+				return nil, refuseCert("a plain key, not a certificate")
+			}
+			return &ssh.Permissions{}, nil
+		},
+		VerifiedPublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey, _ *ssh.Permissions, _ string) (*ssh.Permissions, error) {
+			adm, err := s.admit(key.(*ssh.Certificate), meta.User(), device, serial)
+			if err != nil {
+				s.log("session: userauth refused: %v", err)
+				return nil, err
+			}
+			return adm.permissions(), nil
+		},
+	}
+	cfg.AddHostKey(hostKey)
+	return cfg, nil
+}
+
+// admit verifies cert (refreshing the CA keys once for an unknown CA) and
+// applies the local config: the kind enabled and served by this build, the
+// login enabled, and a recording key that matches.
+func (s *Server) admit(cert *ssh.Certificate, user string, device Device, serial uint64) (*admission, error) {
+	verify := func() (*admission, error) {
+		return verifyCert(cert, user, s.caKeys(), device, serial, s.cfg.clock.Now())
+	}
+	adm, err := verify()
+	if err != nil && s.cfg.RefreshKeys != nil && !signedByCA(cert, s.caKeys()) {
 		ctx, cancel := context.WithTimeout(context.Background(), keyRefreshTimeout)
 		if rerr := s.cfg.RefreshKeys(ctx); rerr != nil {
-			s.log("session: ticket key refresh for an unknown kid: %v", rerr)
+			s.log("session: CA key refresh for an unknown CA key: %v", rerr)
 		}
 		cancel()
-		t, err = VerifyTicket(raw, s.cfg.Lookup, device, s.cfg.clock.Now())
+		adm, err = verify()
 	}
 	if err != nil {
-		// Refusals of a validly signed ticket are logged with their details:
-		// a clock refusal names the difference, which a device without a
-		// real-time clock needs. Unsigned input is not logged, so it cannot
-		// flood the log.
-		if code := errorCode(err, ""); code == CodeTicketExpired || code == CodeTicketWrongDevice {
-			s.log("session: ticket refused: %v", err)
-		}
-		return nil, nil, nil, errorCode(err, CodeTicketInvalid)
+		return nil, err
 	}
-	if !s.kindEnabled(t.Kind) {
-		return nil, nil, nil, CodeKindDisabled
+	switch {
+	case !s.kindEnabled(adm.Kind):
+		return nil, refuseCert("kind %q is not enabled on this device", adm.Kind)
+	case adm.Kind != "terminal" && adm.Kind != "ssh":
+		return nil, refuseCert("kind %q is not served by this agent", adm.Kind)
+	case s.launcher == nil:
+		return nil, refuseCert("this build serves no session")
+	case !slices.Contains(s.cfg.Logins, adm.Login):
+		return nil, refuseCert("login %q is not enabled on this device", adm.Login)
+	case adm.Rec != nil && !s.recordingKeyMatches(adm.Rec.PubSHA256):
+		return nil, refuseCert("the recording key is not the held team key")
 	}
-	if t.Login != "" && !slices.Contains(s.cfg.Logins, t.Login) {
-		return nil, nil, nil, CodeLoginNotAllowed
+	return adm, nil
+}
+
+func (s *Server) caKeys() []ed25519.PublicKey {
+	if s.cfg.CAKeys == nil {
+		return nil
 	}
-	kind := s.kinds(t.Kind)
-	if kind == nil {
-		return nil, nil, nil, CodeKindUnavailable
+	return s.cfg.CAKeys()
+}
+
+// permissions carries a into the connection's Permissions.
+func (a *admission) permissions() *ssh.Permissions {
+	ext := map[string]string{permKind: a.Kind, permSubject: a.Subject, permCert: base64.RawURLEncoding.EncodeToString(a.Cert)}
+	if a.Rec != nil {
+		ext[permRecPol], ext[permRecPub] = a.Rec.Policy, a.Rec.PubSHA256
 	}
-	if t.Rec != nil {
-		if t.Kind != "terminal" {
-			return nil, nil, nil, CodeKindUnavailable
-		}
-		if !s.recordingKeyMatches(t.Rec.PubSHA256) {
-			return nil, nil, nil, CodeRecordingKeyMismatch
-		}
+	return &ssh.Permissions{Extensions: ext}
+}
+
+// admissionOf reads the identity userauth stored; Login is the conn's user,
+// which userauth checked against the certificate's principal.
+func admissionOf(p *ssh.Permissions) *admission {
+	ext := p.Extensions
+	a := &admission{Kind: ext[permKind], Subject: ext[permSubject]}
+	a.Cert, _ = base64.RawURLEncoding.DecodeString(ext[permCert])
+	if pol, ok := ext[permRecPol]; ok {
+		a.Rec = &certRec{Policy: pol, PubSHA256: ext[permRecPub]}
 	}
-	return t, signer, kind, ""
+	return a
 }
 
 // recordingKeyMatches reports whether the held recording key hashes to want
-// (unpadded base64url), refreshing the keys once when it does not. A refresh
-// the key refresher declines leaves the held key, so the mismatch stands.
+// (unpadded base64url), refreshing the keys once when it does not.
 func (s *Server) recordingKeyMatches(want string) bool {
 	if s.heldRecordingKeyIs(want) {
 		return true
@@ -406,9 +380,9 @@ func (s *Server) heldRecordingKeyIs(want string) bool {
 	return ok && base64.RawURLEncoding.EncodeToString(sum[:]) == want
 }
 
-// kindEnabled maps a ticket kind to the capability that enables it: terminal
-// and ssh need terminal, files needs files, rdp and vnc need desktop and
-// their configured target.
+// kindEnabled maps a certificate kind to the capability that enables it:
+// terminal and ssh need terminal, files needs files, rdp and vnc need desktop
+// and their configured target.
 func (s *Server) kindEnabled(kind string) bool {
 	switch kind {
 	case "terminal", "ssh":
@@ -419,14 +393,6 @@ func (s *Server) kindEnabled(kind string) bool {
 		return slices.Contains(s.cfg.Capabilities, "desktop") && slices.Contains(s.cfg.Desktop, kind)
 	}
 	return false
-}
-
-func errorCode(err error, fallback string) string {
-	var e *Error
-	if errors.As(err, &e) {
-		return e.Code
-	}
-	return fallback
 }
 
 func (s *Server) register(h *handler) {
@@ -445,22 +411,21 @@ func (s *Server) unregister(h *handler) {
 	}
 }
 
-// endTicketRead ends h's ticket read, after which Shutdown no longer resets
-// the stream and it is refused agent_busy at takeSlot instead. It reports
-// false when Shutdown reset the stream during the read.
-func (s *Server) endTicketRead(h *handler) bool {
+// endHandshake ends h's handshake, after which Shutdown ends the connection
+// through h.stop. It reports false when Shutdown aborted the handshake.
+func (s *Server) endHandshake(h *handler) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if h.stopped {
 		return false
 	}
-	h.reading = false
-	_ = h.stream.SetReadDeadline(time.Time{})
+	h.handshaking = false
+	_ = h.stream.SetDeadline(time.Time{})
 	return true
 }
 
 // takeSlot takes one of the maxSessions slots unless Shutdown is running or
-// has stopped h. A slotted stream is ended by close {shutdown} from run.
+// has stopped h.
 func (s *Server) takeSlot(h *handler) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -477,17 +442,15 @@ func (s *Server) releaseSlot() {
 	s.sessions--
 }
 
-// Shutdown stops every Serve call and waits for them or ctx. A stream holding
-// a slot gets close {shutdown}; one past its ticket read without a slot, and
-// any stream reaching the slot check while Shutdown runs, is refused
-// agent_busy; one still reading its ticket is reset. Serve calls after it
-// returns are served.
+// Shutdown stops every Serve call and waits for them or ctx. A connection
+// gets CloseShutdown; a handshake in progress is aborted. Serve calls after
+// it returns are served.
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.shutdown(ctx, CloseShutdown)
 }
 
 // ShutdownConfigChanged is Shutdown for a device whose local config entry
-// changed: sessions holding a slot get close {config_changed}.
+// changed: connections end with CloseConfigChanged.
 func (s *Server) ShutdownConfigChanged(ctx context.Context) error {
 	return s.shutdown(ctx, CloseConfigChanged)
 }
@@ -502,9 +465,9 @@ func (s *Server) shutdown(ctx context.Context, reason string) error {
 		h.stopped = true
 		h.stopReason = reason
 		close(h.stop)
-		if h.reading {
-			// Expires the ticket read at once; endTicketRead then ends Serve.
-			_ = h.stream.SetReadDeadline(time.Now())
+		if h.handshaking {
+			// Expires the handshake at once; endHandshake then ends Serve.
+			_ = h.stream.SetDeadline(time.Now())
 		}
 	}
 	var drained chan struct{}
@@ -531,93 +494,65 @@ func (s *Server) shutdown(ctx context.Context, reason string) error {
 	}
 }
 
-// sessionEnd is how the reader ended a session. reason, when set, is the
-// close reason the agent sends.
-type sessionEnd struct {
-	reason string
-}
-
-// session is the state of one accepted session that run shares with its
-// reader goroutine.
-type session struct {
-	ch    *Channel
-	kind  newKind
-	login string
+// conn is the state of one admitted connection that run shares with its
+// channel goroutines.
+type conn struct {
+	s     *Server
+	adm   *admission
 	rec   *sessionRecorder
-	// started receives the kind once the reader handed it over.
-	started      chan kindSession
+	login string
+
 	lastActivity atomic.Int64
 
-	// mu orders the reader's handoff of the kind, and its check before each
-	// Handle, against run's end decision. It is not held while Handle runs.
-	mu    sync.Mutex
-	k     kindSession
-	ended bool
+	mu sync.Mutex
+	// open counts the channels accepted and not yet closed; served counts
+	// every channel accepted. ended is set once the connection's end is
+	// decided; no channel is accepted after it.
+	open     int
+	served   int
+	ended    bool
+	channels map[*channel]struct{}
+	// recStarted is set once a channel started the recording's cast.
+	recStarted bool
+	// allClosed receives once when a terminal connection's channel closed.
+	allClosed chan struct{}
 }
 
-// setKind hands k over unless the end is already recorded; on false the
-// caller ends and joins k itself.
-func (ss *session) setKind(k kindSession) bool {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	if ss.ended {
-		return false
-	}
-	ss.k = k
-	return true
-}
+func (c *conn) active() { c.lastActivity.Store(c.s.cfg.clock.Now().UnixNano()) }
 
-// end records the session's end and returns the kind handed over, nil when
-// there is none. A record read after it is not passed to Handle.
-func (ss *session) end() kindSession {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	ss.ended = true
-	return ss.k
-}
-
-// open reports whether the session's end is not recorded yet.
-func (ss *session) open() bool {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	return !ss.ended
-}
-
-// run serves an accepted session until its first recorded end, then ends the
-// kind (End unless the kind ended the session itself), sends the agent's close
-// when the end has a reason, joins the reader and the kind, and then ends the
-// recording, after the kind's last tap.
-func (s *Server) run(h *handler, ch *Channel, kind newKind, login string, rec *sessionRecorder) {
-	defer rec.end()
-	ss := &session{ch: ch, kind: kind, login: login, rec: rec, started: make(chan kindSession, 1)}
-	ss.lastActivity.Store(s.cfg.clock.Now().UnixNano())
-	ended := make(chan sessionEnd, 1)
-	readerDone := make(chan struct{})
-	go func() {
-		defer close(readerDone)
-		defer func() {
-			if r := recover(); r != nil {
-				s.log("session: reader panic: %v", r)
-				ended <- sessionEnd{}
+// run serves an admitted connection until its first recorded end: the client
+// closing it, the idle timeout, a Shutdown, a failed Strict recording, or the
+// channel of a terminal connection closing. It then writes the reason to
+// every open channel's stderr, closes the connection and joins the channels.
+func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request, adm *admission, rec *sessionRecorder) {
+	c := &conn{s: s, adm: adm, rec: rec, login: sc.User(), channels: map[*channel]struct{}{}, allClosed: make(chan struct{}, 1)}
+	c.active()
+	var wg sync.WaitGroup
+	clientDone := make(chan struct{})
+	wg.Go(func() {
+		defer close(clientDone)
+		c.accept(chans, &wg)
+	})
+	wg.Go(func() {
+		// Global requests: keepalives count as activity; every request is
+		// refused (no forwarding).
+		for r := range reqs {
+			c.active()
+			if r.WantReply {
+				_ = r.Reply(false, nil)
 			}
-		}()
-		ended <- s.read(ss)
-	}()
+		}
+	})
 
 	fire, stopTimer := s.cfg.clock.NewTimer(idleTimeout)
-	var kindEnded <-chan string
 	var reason string
-	selfEnd := false
 wait:
 	for {
 		select {
-		case k := <-ss.started:
-			kindEnded = k.Ended()
-		case reason = <-kindEnded:
-			selfEnd = true
+		case <-clientDone:
 			break wait
-		case e := <-ended:
-			reason = e.reason
+		case <-c.allClosed:
+			reason = CloseExited
 			break wait
 		case <-h.stop:
 			reason = h.stopReason
@@ -626,7 +561,7 @@ wait:
 			reason = CloseRecordingFailed
 			break wait
 		case <-fire:
-			idle := s.cfg.clock.Now().Sub(time.Unix(0, ss.lastActivity.Load()))
+			idle := s.cfg.clock.Now().Sub(time.Unix(0, c.lastActivity.Load()))
 			if idle >= idleTimeout {
 				reason = CloseIdle
 				break wait
@@ -635,147 +570,91 @@ wait:
 		}
 	}
 	stopTimer()
-	k := ss.end()
-	if k != nil && !selfEnd {
-		k.End()
+	c.end(reason)
+	_ = sc.Close()
+	wg.Wait()
+}
+
+// end decides the connection's end and ends every open channel, telling the
+// client why on its stderr when there is a reason.
+func (c *conn) end(reason string) {
+	c.mu.Lock()
+	c.ended = true
+	open := make([]*channel, 0, len(c.channels))
+	for ch := range c.channels {
+		open = append(open, ch)
 	}
-	if reason == "" {
-		// Client close, truncation or a failed write: no agent close.
-		_ = h.stream.Close()
-		<-readerDone
-	} else {
-		s.closeSession(h.stream, ch, reason, readerDone)
-	}
-	if k != nil {
-		k.Wait()
+	c.mu.Unlock()
+	for _, ch := range open {
+		ch.end(reason)
 	}
 }
 
-// read reads records until the session ends. The first must be start.
-func (s *Server) read(ss *session) sessionEnd {
-	m, err := ss.ch.ReadMessage()
-	if err != nil {
-		return endOf(err)
-	}
-	if m.Type != TypeStart {
-		return sessionEnd{reason: CodeProtocolError}
-	}
-	k, err := ss.kind(ss.ch, m.Body, ss.login, ss.rec)
-	if err != nil {
-		return endOf(err)
-	}
-	if !ss.setKind(k) {
-		// run recorded the end while the kind started.
-		k.End()
-		k.Wait()
-		return sessionEnd{}
-	}
-	ss.started <- k
-	active := func() { ss.lastActivity.Store(s.cfg.clock.Now().UnixNano()) }
-	active()
-	for {
-		m, err := ss.ch.ReadMessage()
-		if err != nil {
-			return endOf(err)
-		}
-		switch m.Type {
-		case TypeClose:
-			return sessionEnd{}
-		case TypeActivity:
-			active()
+// accept serves the connection's channel opens: session channels only, at
+// most maxChannels open, and one in all on a terminal or recorded connection.
+func (c *conn) accept(chans <-chan ssh.NewChannel, wg *sync.WaitGroup) {
+	for nc := range chans {
+		if nc.ChannelType() != "session" {
+			_ = nc.Reject(ssh.Prohibited, "only session channels are served")
 			continue
-		case TypeData:
-			active()
 		}
-		if !ss.open() {
-			return sessionEnd{}
+		c.mu.Lock()
+		// A terminal connection, and a recorded one of any kind, serves one
+		// channel in its life: the recording's cast follows one channel, so a
+		// second channel would run unrecorded.
+		single := c.adm.Kind == "terminal" || c.rec != nil
+		if c.ended || c.open >= maxChannels || (single && c.served >= 1) {
+			c.mu.Unlock()
+			_ = nc.Reject(ssh.ResourceShortage, "channel limit reached")
+			continue
 		}
-		if err := k.Handle(m); err != nil {
-			return endOf(err)
+		c.open++
+		c.served++
+		c.mu.Unlock()
+		sch, creqs, err := nc.Accept()
+		if err != nil {
+			c.channelClosed(nil)
+			continue
+		}
+		ch := &channel{c: c, ch: sch, halted: make(chan struct{})}
+		c.mu.Lock()
+		c.channels[ch] = struct{}{}
+		c.mu.Unlock()
+		wg.Go(func() {
+			defer c.channelClosed(ch)
+			ch.serve(creqs)
+		})
+	}
+}
+
+// channelClosed forgets ch; the last channel of a terminal connection ends it.
+func (c *conn) channelClosed(ch *channel) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.channels, ch)
+	c.open--
+	if c.open == 0 && c.adm.Kind == "terminal" && !c.ended {
+		select {
+		case c.allClosed <- struct{}{}:
+		default:
 		}
 	}
 }
 
-// endOf maps a read or kind error to the session's end: a protocol error is
-// answered with close {protocol_error}; anything else ends the transport.
-func endOf(err error) sessionEnd {
-	if errorCode(err, "") == CodeProtocolError {
-		return sessionEnd{reason: CodeProtocolError}
+// claimRecording reports whether the caller's channel is the one whose
+// terminal the recording's cast follows: the first channel that starts.
+func (c *conn) claimRecording() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.rec == nil || c.recStarted {
+		return false
 	}
-	return sessionEnd{}
+	c.recStarted = true
+	return true
 }
 
-// closeSession sends close {reason} within closeWriteTimeout, half-closes
-// the stream and reads it to its end within closeDrainTimeout, so the record
-// reaches the client before the stream is reset.
-func (s *Server) closeSession(stream net.Conn, ch *Channel, reason string, readerDone <-chan struct{}) {
-	_ = stream.SetWriteDeadline(time.Now().Add(closeWriteTimeout))
-	if err := ch.WriteClose(reason); err == nil {
-		if cw, ok := stream.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		}
-	}
-	drain := time.NewTimer(closeDrainTimeout)
-	defer drain.Stop()
-	select {
-	case <-readerDone:
-		// The reader stopped (protocol error, client close, stream end):
-		// drain the rest here.
-		_ = stream.SetReadDeadline(time.Now().Add(closeDrainTimeout))
-		_, _ = io.Copy(io.Discard, stream)
-	case <-drain.C:
-		_ = stream.Close()
-		<-readerDone
-	}
-}
-
-// refuse sends the refused frame and delivers it as closeSession delivers its
-// close record: a half-close, then the stream read to its end within
-// closeDrainTimeout, because the caller's Close resets the stream and drops
-// bytes the edge has not read yet.
-func refuse(stream net.Conn, code string) {
-	if err := writeFrame(stream, refusedFrame{Type: "refused", Code: code}); err != nil {
-		return
-	}
-	if cw, ok := stream.(interface{ CloseWrite() error }); ok {
-		_ = cw.CloseWrite()
-	}
-	// The drain deadline bounds the rest; an expired write deadline would
-	// reset the stream before the frame is out.
-	_ = stream.SetWriteDeadline(time.Time{})
-	_ = stream.SetReadDeadline(time.Now().Add(closeDrainTimeout))
-	_, _ = io.Copy(io.Discard, stream)
-}
-
-// readTicket reads the uint32-prefixed ticket of at most maxTicketBytes.
-func readTicket(r io.Reader) ([]byte, error) {
-	var head [4]byte
-	if _, err := io.ReadFull(r, head[:]); err != nil {
-		return nil, err
-	}
-	n := binary.BigEndian.Uint32(head[:])
-	if n == 0 || n > maxTicketBytes {
-		return nil, fmt.Errorf("ticket of %d bytes", n)
-	}
-	raw := make([]byte, n)
-	if _, err := io.ReadFull(r, raw); err != nil {
-		return nil, err
-	}
-	return raw, nil
-}
-
-// writeFrame writes v as the uint32-prefixed JSON first frame.
-func writeFrame(w io.Writer, v any) error {
-	body, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	if len(body) > maxFirstFrame {
-		return fmt.Errorf("first frame of %d bytes", len(body))
-	}
-	frame := make([]byte, 4+len(body))
-	binary.BigEndian.PutUint32(frame, uint32(len(body)))
-	copy(frame[4:], body)
-	_, err = w.Write(frame)
-	return err
+// uuidText is id in canonical lowercase UUID form.
+func uuidText(id [16]byte) string {
+	h := hex.EncodeToString(id[:])
+	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }

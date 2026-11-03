@@ -36,11 +36,16 @@ type Result struct {
 	Chain    []byte
 }
 
+// MaxCertificate bounds the SSH user certificate an open carries, as the
+// edge reads it from the first WebSocket message.
+const MaxCertificate = 8 << 10
+
 // Client sends recording requests on one session mux conn and signs open and
 // complete with the key of the certificate that conn presented. Errors are
 // ErrNoSessionMux, an error wrapping ErrTransport, or a *Refusal.
 type Client interface {
-	Open(ctx context.Context, id string, wrappedDEK, keySHA256 []byte) (Result, error)
+	// Open sends the open with the session's certificate (Meta.Certificate).
+	Open(ctx context.Context, id string, wrappedDEK, keySHA256, certificate []byte) (Result, error)
 	Complete(ctx context.Context, id string, wrappedDEK []byte, done Completion) (Result, error)
 	// PutSegment sends a live session's segment.
 	PutSegment(ctx context.Context, id string, seg Segment) (Result, error)

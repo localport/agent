@@ -89,10 +89,11 @@ type Uploader struct {
 	mu      sync.Mutex
 	entries map[string]*upload
 	// control counts the uploader's open and complete requests in flight per
-	// device identifier (one session mux each); strict counts Strict opens
-	// waiting or in flight per device identifier. The uploader starts a
-	// control request only when both are zero, so a Strict open never queues
-	// behind one it started later.
+	// device identifier (one session mux each); strict counts the opens a
+	// caller waits on (BeginOpen, and Begin of a Strict recording) waiting or
+	// in flight per device identifier. The uploader starts a control request
+	// only when both are zero, so such an open never queues behind one it
+	// started later.
 	control map[string]int
 	strict  map[string]int
 	stopped bool
@@ -233,6 +234,19 @@ type Handoff struct {
 // now, ahead of any open or complete the uploader has not started on that
 // device, and on failure removes the entry and returns the error.
 func (u *Uploader) Begin(ctx context.Context, m Meta) (*Handoff, error) {
+	return u.begin(ctx, m, m.Policy == PolicyStrict)
+}
+
+// BeginOpen is Begin that sends the open now for either policy: the first
+// open creates the recording's row from m.Certificate, which verifies only
+// within its short validity, so a queued open could come too late. On
+// failure it removes the entry and returns the error; the caller decides
+// whether the session runs unrecorded.
+func (u *Uploader) BeginOpen(ctx context.Context, m Meta) (*Handoff, error) {
+	return u.begin(ctx, m, true)
+}
+
+func (u *Uploader) begin(ctx context.Context, m Meta, openNow bool) (*Handoff, error) {
 	if m.Sealed != 0 || m.Acked != 0 || m.Complete != nil {
 		return nil, fmt.Errorf("%w: begin with segments or completion", ErrHandoff)
 	}
@@ -240,7 +254,7 @@ func (u *Uploader) Begin(ctx context.Context, m Meta) (*Handoff, error) {
 		return nil, err
 	}
 	e := &upload{meta: m, live: true, mem: make(map[uint32]*memSegment), onDisk: make(map[uint32]struct{})}
-	if m.Policy == PolicyStrict {
+	if openNow {
 		if err := u.openStrict(ctx, m); err != nil {
 			if rmErr := u.spool.Remove(m.ID); rmErr != nil {
 				u.log.Error("recording entry not removed", slog.String("recording", m.ID), slog.Any("error", rmErr))
@@ -272,7 +286,7 @@ func (u *Uploader) openStrict(ctx context.Context, m Meta) error {
 	if err != nil {
 		return err
 	}
-	res, err := c.Open(ctx, m.ID, m.WrappedDEK, m.KeySHA256)
+	res, err := c.Open(ctx, m.ID, m.WrappedDEK, m.KeySHA256, m.Certificate)
 	if err != nil {
 		return err
 	}
@@ -624,7 +638,7 @@ func (u *Uploader) startLocked(ctx context.Context, e *upload, now time.Time, re
 	}
 	e.busy = true
 	r := result{e: e, op: o, index: m.Acked}
-	id, identifier, dek, keySHA := m.ID, m.Identifier, m.WrappedDEK, m.KeySHA256
+	id, identifier, dek, keySHA, cert := m.ID, m.Identifier, m.WrappedDEK, m.KeySHA256, m.Certificate
 	var done Completion
 	if m.Complete != nil {
 		done = *m.Complete
@@ -639,7 +653,7 @@ func (u *Uploader) startLocked(ctx context.Context, e *upload, now time.Time, re
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r.res, r.err = u.send(ctx, r.op, identifier, id, dek, keySHA, done, r.index, live, want)
+		r.res, r.err = u.send(ctx, r.op, identifier, id, dek, keySHA, cert, done, r.index, live, want)
 		results <- r
 	}()
 }
@@ -653,7 +667,7 @@ func laterOf(a, b time.Time) time.Time {
 
 // send makes one request. A spooled segment (live nil) is read and checked
 // against want, its persisted hash, before it is sent.
-func (u *Uploader) send(ctx context.Context, o op, identifier, id string, dek, keySHA []byte, done Completion, index uint32, live *Segment, want []byte) (Result, error) {
+func (u *Uploader) send(ctx context.Context, o op, identifier, id string, dek, keySHA, cert []byte, done Completion, index uint32, live *Segment, want []byte) (Result, error) {
 	c, err := u.client(identifier)
 	if err != nil {
 		return Result{}, err
@@ -662,7 +676,7 @@ func (u *Uploader) send(ctx context.Context, o op, identifier, id string, dek, k
 	case opOpen:
 		ctx, cancel := context.WithTimeout(ctx, u.requestTimeout(0))
 		defer cancel()
-		return c.Open(ctx, id, dek, keySHA)
+		return c.Open(ctx, id, dek, keySHA, cert)
 	case opComplete:
 		ctx, cancel := context.WithTimeout(ctx, u.requestTimeout(0))
 		defer cancel()

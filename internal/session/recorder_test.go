@@ -3,21 +3,17 @@ package session
 import (
 	"bytes"
 	"compress/flate"
-	"context"
 	"crypto/hpke"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/localport/agent/internal/launcher"
 	"github.com/localport/agent/internal/recording"
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -267,7 +263,7 @@ func stallRecorder(t *testing.T, policy string) (*sessionRecorder, *stallHandoff
 		<-r.exited
 	})
 	r.start(time.Now(), 80, 24)
-	chunk := bytes.Repeat([]byte("x"), maxTerminalOutput)
+	chunk := bytes.Repeat([]byte("x"), launcher.MaxFrameData/4)
 	for range recording.MaxPlaintext/len(chunk) + 1 {
 		r.output(chunk, nil)
 	}
@@ -507,86 +503,5 @@ func TestRecorderPanicIsAHandoffFailure(t *testing.T) {
 	}
 	if h.done == nil || !h.done.Incomplete || h.done.Reason != recording.ReasonRecordingFailed {
 		t.Fatalf("completion %+v, want incomplete %s", h.done, recording.ReasonRecordingFailed)
-	}
-}
-
-// blockingClient holds every open until its context ends.
-type blockingClient struct{ opened chan struct{} }
-
-func (c *blockingClient) Open(ctx context.Context, _ string, _, _ []byte) (recording.Result, error) {
-	close(c.opened)
-	<-ctx.Done()
-	return recording.Result{}, ctx.Err()
-}
-
-func (c *blockingClient) Complete(context.Context, string, []byte, recording.Completion) (recording.Result, error) {
-	return recording.Result{}, errors.New("unexpected complete")
-}
-
-func (c *blockingClient) PutSegment(context.Context, string, recording.Segment) (recording.Result, error) {
-	return recording.Result{}, errors.New("unexpected segment")
-}
-
-func (c *blockingClient) PutSpooledSegment(context.Context, string, recording.Segment) (recording.Result, error) {
-	return recording.Result{}, errors.New("unexpected segment")
-}
-
-// A Strict open slower than the first-frame budget refuses the session
-// recording_unavailable inside the edge's 10 s, before the accept frame: no
-// kind starts, no spool entry stays, and the ticket is spent.
-func TestServeRefusesAStrictSessionWhoseOpenIsLate(t *testing.T) {
-	root := t.TempDir()
-	spool, _, err := recording.OpenSpool(root, filepath.Join(root, "recordings"), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &blockingClient{opened: make(chan struct{})}
-	up := recording.NewUploader(recording.UploaderConfig{
-		Spool:      spool,
-		Client:     func(string) (recording.Client, error) { return client, nil },
-		Configured: func(string) bool { return true },
-	})
-	priv, err := hpke.MLKEM768X25519().GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	pub := priv.PublicKey().Bytes()
-	sum := sha256.Sum256(pub)
-	ts := newTestKindServer(t, func(cfg *ServerConfig) {
-		cfg.Capabilities = []string{"terminal"}
-		cfg.RecordingKey = func() ([]byte, [sha256.Size]byte, bool) { return pub, sum, true }
-		cfg.Uploader = up
-		cfg.Identifier = "client.device"
-	})
-	terminal := ts.kinds("terminal")
-	ts.kinds = func(string) prepareKind { return terminal }
-	raw := ts.ticket(t, func(p *Ticket) {
-		p.JTI = recJTI
-		p.Rec = testRec(recJTI)
-		p.Rec.PubSHA256 = base64.RawURLEncoding.EncodeToString(sum[:])
-		p.Rec.Policy = RecPolicyStrict
-	})
-	began := time.Now()
-	if got := ts.refusal(t, raw); got != CodeRecordingUnavailable {
-		t.Fatalf("answered %q, want %q", got, CodeRecordingUnavailable)
-	}
-	if took := time.Since(began); took >= firstFrameTimeout-time.Second {
-		t.Fatalf("refused after %v, want inside the first-frame budget", took)
-	}
-	select {
-	case <-client.opened:
-	default:
-		t.Fatal("the Strict open was not sent")
-	}
-	select {
-	case <-ts.made:
-		t.Fatal("a kind started for a refused Strict session")
-	default:
-	}
-	if entries, err := os.ReadDir(filepath.Join(root, "recordings")); err != nil || len(entries) != 0 {
-		t.Fatalf("spool holds %v, %v; want nothing", entries, err)
-	}
-	if !ts.spent(recJTI) {
-		t.Fatal("the ticket is not spent")
 	}
 }

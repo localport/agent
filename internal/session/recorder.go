@@ -14,22 +14,12 @@ import (
 	"github.com/localport/agent/internal/recording"
 )
 
-// CodeRecordingUnavailable is retryable: a Strict recording could not be
-// opened before the accept frame (no uploader, no matching key, a failed or
-// late open), so no shell was spawned.
-const CodeRecordingUnavailable = "recording_unavailable"
-
-// CloseRecordingFailed ends a Strict session whose recording failed: a segment
-// could not be sealed or handed over, the terminal output waited
+// CloseRecordingFailed ends a Strict connection whose recording failed: a
+// segment could not be sealed or handed over, the terminal output waited
 // strictBackpressure for queue space, or the recorder panicked.
 const CloseRecordingFailed = "recording_failed"
 
 const (
-	// strictOpenMargin keeps room for the refusal frame inside the first-frame
-	// deadline; under strictOpenMinimum left the open is not tried.
-	strictOpenMargin  = 3 * time.Second
-	strictOpenMinimum = time.Second
-
 	// recorderQueueBytes bounds the terminal output queued for one recorder:
 	// two segments' worth. Start, resize and exit events always fit.
 	recorderQueueBytes = 2 * recording.MaxPlaintext
@@ -37,7 +27,8 @@ const (
 
 // Recorder timings, variables so tests shorten them.
 var (
-	// strictOpenTimeout caps a Strict open.
+	// strictOpenTimeout caps the open a recorded connection sends before any
+	// channel, for either policy.
 	strictOpenTimeout = 5 * time.Second
 	// strictBackpressure is how long Strict terminal output waits for queue
 	// space before the recording fails and the session ends.
@@ -50,40 +41,35 @@ var (
 // errRecordingUnavailable reports a recording that could not start.
 var errRecordingUnavailable = errcode.New(errcode.RecordingUnavailable)
 
-// startRecording creates t's recording entry and hands it to the uploader;
-// for Strict it also sends the open, bounded by the first-frame deadline of
-// a stream that started at start. The entry exists only when it returns a
-// recorder.
-func (s *Server) startRecording(t *Ticket, start time.Time) (*sessionRecorder, error) {
-	if s.cfg.Uploader == nil {
+// startRecording creates the recording entry of connection id (its session
+// id) and hands it to the uploader with the admitting certificate, from which
+// the first open creates the row, and sends that open, bounded by
+// strictOpenTimeout. The entry exists only when it returns a recorder.
+func (s *Server) startRecording(id string, adm *admission, start time.Time) (*sessionRecorder, error) {
+	if s.cfg.Uploader == nil || s.cfg.RecordingKey == nil {
 		return nil, fmt.Errorf("%w: no uploader", errRecordingUnavailable)
 	}
 	key, sum, ok := s.cfg.RecordingKey()
-	if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != t.Rec.PubSHA256 {
+	if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != adm.Rec.PubSHA256 {
 		return nil, fmt.Errorf("%w: the held recording key changed", errRecordingUnavailable)
 	}
-	ctx := context.Background()
-	strict := t.Rec.Policy == RecPolicyStrict
-	if strict {
-		budget := min(strictOpenTimeout, time.Until(start.Add(firstFrameTimeout-strictOpenMargin)))
-		if budget < strictOpenMinimum {
-			return nil, fmt.Errorf("%w: %v left for the open", errRecordingUnavailable, budget)
-		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, budget)
-		defer cancel()
-	}
-	sealer, err := recording.NewSealer(t.Rec.ID, key)
+	// Both policies open before any channel is served, while the certificate
+	// the open carries is valid; strictOpenTimeout bounds the wait.
+	strict := adm.Rec.Policy == RecPolicyStrict
+	ctx, cancel := context.WithTimeout(context.Background(), strictOpenTimeout)
+	defer cancel()
+	sealer, err := recording.NewSealer(id, key)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errRecordingUnavailable, err)
 	}
-	h, err := s.cfg.Uploader.Begin(ctx, recording.Meta{
-		ID:             t.Rec.ID,
+	h, err := s.cfg.Uploader.BeginOpen(ctx, recording.Meta{
+		ID:             id,
 		Identifier:     s.cfg.Identifier,
 		LastAcceptedAt: start,
 		WrappedDEK:     sealer.WrappedDEK(),
 		KeySHA256:      sum[:],
-		Policy:         t.Rec.Policy,
+		Policy:         adm.Rec.Policy,
+		Certificate:    adm.Cert,
 	})
 	if err != nil {
 		sealer.Discard()

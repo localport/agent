@@ -24,6 +24,9 @@ import (
 
 const testRecordingID = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
 
+// testCertificate stands for the session certificate an open carries.
+var testCertificate = []byte("session certificate bytes")
+
 // recordingRequest is one recording request as the stub edge received it.
 type recordingRequest struct {
 	method string
@@ -165,7 +168,7 @@ func TestRecordingRequestsOnTheWire(t *testing.T) {
 
 	wrapped := []byte("wrapped dek bytes")
 	keySum := bytes.Repeat([]byte{0xaa}, 32)
-	res, err := c.Open(ctx, testRecordingID, wrapped, keySum)
+	res, err := c.Open(ctx, testRecordingID, wrapped, keySum, testCertificate)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -177,11 +180,12 @@ func TestRecordingRequestsOnTheWire(t *testing.T) {
 		t.Fatalf("open request %s %s id %q", r.method, r.path, r.header.Get(recordingIDHeader))
 	}
 	var open map[string]string
-	if err := json.Unmarshal(r.body, &open); err != nil || len(open) != 2 {
+	if err := json.Unmarshal(r.body, &open); err != nil || len(open) != 3 {
 		t.Fatalf("open body %s: %v", r.body, err)
 	}
-	if open["wrapped_dek"] != base64.RawURLEncoding.EncodeToString(wrapped) {
-		t.Fatalf("wrapped_dek = %q", open["wrapped_dek"])
+	if open["wrapped_dek"] != base64.RawURLEncoding.EncodeToString(wrapped) ||
+		open["certificate"] != base64.RawURLEncoding.EncodeToString(testCertificate) {
+		t.Fatalf("wrapped_dek = %q certificate = %q", open["wrapped_dek"], open["certificate"])
 	}
 	if !verifySignature(t, key, recording.OpenDigest(testRecordingID, wrapped, keySum), open["signature"]) {
 		t.Fatal("open signature does not verify against the open digest")
@@ -244,7 +248,7 @@ func TestRecordingSignerFollowsTheConnCertificate(t *testing.T) {
 
 	signedBy := func(c *RecordingClient) map[string]string {
 		t.Helper()
-		if _, err := c.Open(context.Background(), testRecordingID, wrapped, keySum); err != nil {
+		if _, err := c.Open(context.Background(), testRecordingID, wrapped, keySum, testCertificate); err != nil {
 			t.Fatalf("Open: %v", err)
 		}
 		var body map[string]string
@@ -268,7 +272,7 @@ func TestRecordingSignerFollowsTheConnCertificate(t *testing.T) {
 	if _, err := tn.RecordingClient(); !errors.Is(err, recording.ErrNoSessionMux) {
 		t.Fatalf("RecordingClient after stop: %v, want ErrNoSessionMux", err)
 	}
-	if _, err := old.Open(context.Background(), testRecordingID, wrapped, keySum); err == nil {
+	if _, err := old.Open(context.Background(), testRecordingID, wrapped, keySum, testCertificate); err == nil {
 		t.Fatal("Open on a closed conn succeeded")
 	}
 
@@ -391,7 +395,7 @@ func TestRecordingRequestsWaitForAFreeSlot(t *testing.T) {
 		t.Fatalf("first request %s, want the complete", r.path)
 	}
 	go func() {
-		_, err := c.Open(ctx, testRecordingID, []byte("dek"), make([]byte, 32))
+		_, err := c.Open(ctx, testRecordingID, []byte("dek"), make([]byte, 32), nil)
 		results <- err
 	}()
 	rec.expectNone(t)
@@ -415,7 +419,7 @@ func TestRecordingSlotIsReleasedOnCancelAndConnClose(t *testing.T) {
 	rec.expect(t)
 	waitCtx, cancelWait := context.WithCancel(context.Background())
 	go func() {
-		_, err := c.Open(waitCtx, testRecordingID, []byte("dek"), make([]byte, 32))
+		_, err := c.Open(waitCtx, testRecordingID, []byte("dek"), make([]byte, 32), nil)
 		results <- err
 	}()
 	rec.expectNone(t)
@@ -429,7 +433,7 @@ func TestRecordingSlotIsReleasedOnCancelAndConnClose(t *testing.T) {
 	}
 
 	go func() {
-		_, err := c.Open(context.Background(), testRecordingID, []byte("dek"), make([]byte, 32))
+		_, err := c.Open(context.Background(), testRecordingID, []byte("dek"), make([]byte, 32), nil)
 		results <- err
 	}()
 	rec.expect(t)
@@ -444,7 +448,7 @@ func TestRecordingSlotIsReleasedOnCancelAndConnClose(t *testing.T) {
 	}()
 	rec.expect(t)
 	go func() {
-		_, err := c.Open(context.Background(), testRecordingID, []byte("dek"), make([]byte, 32))
+		_, err := c.Open(context.Background(), testRecordingID, []byte("dek"), make([]byte, 32), nil)
 		results <- err
 	}()
 	rec.expectNone(t)

@@ -81,8 +81,7 @@ const (
 	Unsupported     Code = "AG043"
 	MarkedForDelete Code = "AG044"
 
-	JTILogLocked   Code = "AG053"
-	JTIUnavailable Code = "AG054"
+	SessionsLocked Code = "AG053"
 
 	SpoolFull            Code = "AG061"
 	DiskLow              Code = "AG062"
@@ -128,8 +127,7 @@ var registry = []Entry{
 	{Unsupported, "No supported service manager", "this system has no service manager localport can install into (systemd, launchd or the Windows service manager)"},
 	{MarkedForDelete, "Windows service marked for deletion", "the device service is deleted, but Windows keeps it until every handle to it closes"},
 
-	{JTILogLocked, "Session ticket log locked", "session jti log is held by another process"},
-	{JTIUnavailable, "Session ticket log unavailable", "ticket replay cache unavailable"},
+	{SessionsLocked, "Device sessions locked", "another process serves this device's sessions"},
 
 	{SpoolFull, "Recording spool full", "recording: spool is full"},
 	{DiskLow, "Disk space low for recordings", "recording: too little free disk space for the spool"},

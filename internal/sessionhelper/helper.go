@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -58,9 +59,11 @@ func Run(log func(string, ...any)) int {
 		_ = launcher.WriteHelperReply(control, launcher.HelperReply{Refused: code})
 		return 1
 	}
-	if req.Kind != launcher.KindTerminal {
+	if req.Kind != launcher.KindTerminal && req.Kind != launcher.KindExec {
 		return refuse(launcher.CodeUnsupportedKind, errors.New(req.Kind))
 	}
+	// An exec session without a size runs on pipes; every other session on a PTY.
+	usePTY := req.Kind == launcher.KindTerminal || req.Cols > 0
 
 	a, err := lookupAccount(req.Login)
 	if err != nil {
@@ -80,16 +83,25 @@ func Run(log func(string, ...any)) int {
 		return refuse(launcher.CodeAccountRefused, err)
 	}
 
-	master, slave, err := openPTY(uint16(req.Cols), uint16(req.Rows))
-	if err != nil {
-		return refuse(launcher.CodeSpawnFailed, err)
+	var master, slave *os.File
+	pamTTY := "ssh" // PAM_TTY of a session without a terminal, as sshd sets it
+	if usePTY {
+		if master, slave, err = openPTY(uint16(req.Cols), uint16(req.Rows)); err != nil {
+			return refuse(launcher.CodeSpawnFailed, err)
+		}
+		pamTTY = slave.Name()
+	}
+	closePTY := func() {
+		if usePTY {
+			_ = master.Close()
+			_ = slave.Close()
+		}
 	}
 	var pam *pamSession
 	if pamAvailable && !req.AgentAccount {
-		pam, err = openPAM(a.Name, slave.Name())
+		pam, err = openPAM(a.Name, pamTTY)
 		if err != nil {
-			_ = master.Close()
-			_ = slave.Close()
+			closePTY()
 			if errors.Is(err, errPAMAccount) {
 				return refuse(launcher.CodeAccountRefused, err)
 			}
@@ -102,20 +114,31 @@ func Run(log func(string, ...any)) int {
 	}
 	plan := spawnPlan{
 		path: shell,
-		args: []string{"-" + filepath.Base(shell)},
+		args: shellArgs(shell, req),
 		env:  sessionEnv(a, shell, req.Term, loginDefsPath(a.UID), pamEnv),
 		dir:  workDir(a.Home),
 		cred: &syscall.Credential{Uid: a.UID, Gid: a.GID, Groups: a.Groups},
 	}
 	out := &frameWriter{w: channel}
-	k, err := startTerminal(out, master, slave, plan, log)
-	if err != nil {
-		pam.close()
-		_ = master.Close()
-		_ = slave.Close()
-		return refuse(launcher.CodeSpawnFailed, err)
+	var k helperSession
+	var ut *utmpEntry // nil without a PTY; logout is then a no-op
+	if usePTY {
+		t, err := startTerminal(out, master, slave, plan, log)
+		if err != nil {
+			pam.close()
+			closePTY()
+			return refuse(launcher.CodeSpawnFailed, err)
+		}
+		ut = utmpLogin(slave.Name(), a.Name, t.cmd.Process.Pid)
+		k = t
+	} else {
+		p, err := startPipeSession(out, plan, log)
+		if err != nil {
+			pam.close()
+			return refuse(launcher.CodeSpawnFailed, err)
+		}
+		k = p
 	}
-	ut := utmpLogin(slave.Name(), a.Name, k.cmd.Process.Pid)
 	if err := launcher.WriteHelperReply(control, launcher.HelperReply{Started: true}); err != nil {
 		log("sessionhelper: reply started: %v", err)
 		k.finish()
@@ -138,7 +161,7 @@ func Run(log func(string, ...any)) int {
 		}
 	}()
 	select {
-	case <-k.ended:
+	case <-k.endedC():
 	case <-inputDone:
 	}
 	k.finish()
@@ -147,6 +170,25 @@ func Run(log func(string, ...any)) int {
 	pam.close()
 	_ = channel.Close()
 	return 0
+}
+
+// helperSession is a running session: a terminal on a PTY or an exec
+// session on pipes.
+type helperSession interface {
+	handle(f launcher.Frame) error
+	endedC() <-chan struct{}
+	finish()
+	Wait()
+}
+
+// shellArgs is the shell's argv: a login shell ("-sh") for a terminal and
+// for an exec session without a command, else `sh -c command`, as sshd
+// runs a command.
+func shellArgs(shell string, req launcher.HelperRequest) []string {
+	if req.Kind == launcher.KindExec && req.Command != "" {
+		return []string{filepath.Base(shell), "-c", req.Command}
+	}
+	return []string{"-" + filepath.Base(shell)}
 }
 
 // errPAMAccount is an account refusal: by the PAM account stack (expired,
@@ -234,6 +276,11 @@ func sessionEnv(a account, shell, term, path string, pamEnv []string) []string {
 		"TERM": term, "PATH": path,
 	}
 	order := []string{"HOME", "USER", "LOGNAME", "SHELL", "TERM", "PATH"}
+	if term == "" {
+		// A session without a terminal has no TERM, as under sshd.
+		delete(env, "TERM")
+		order = slices.Delete(order, 4, 5)
+	}
 	for _, kv := range pamEnv {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok || k == "" {

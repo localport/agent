@@ -41,6 +41,8 @@ type HelperRequest struct {
 	Cols  int    `json:"cols"`
 	Rows  int    `json:"rows"`
 	Term  string `json:"term"`
+	// Command is an exec session's command line (Request.Command).
+	Command string `json:"command,omitempty"`
 	// AgentAccount runs the session as the agent's own account without PAM
 	// (tier 3 opt-in). Login is then the agent account's name. Unix only.
 	AgentAccount bool `json:"agent_account,omitempty"`
@@ -87,8 +89,8 @@ func authorize(load func() (*config.LocalConfig, error), agentAccount string, re
 	if !slices.Contains(d.Enable, config.CapabilityTerminal) {
 		return HelperRequest{}, Refusal(CodeKindNotEnabled)
 	}
-	h := HelperRequest{Kind: req.Kind, Login: req.Login, Cols: req.Cols, Rows: req.Rows, Term: req.Term, Pipe: req.Pipe,
-		HasPassword: req.HasPassword, Password: req.Password}
+	h := HelperRequest{Kind: req.Kind, Login: req.Login, Cols: req.Cols, Rows: req.Rows, Term: req.Term, Command: req.Command,
+		Pipe: req.Pipe, HasPassword: req.HasPassword, Password: req.Password}
 	switch {
 	case d.RunAsAgent:
 		if agentAccount == "" || req.Login != agentAccount {

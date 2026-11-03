@@ -2,6 +2,16 @@
 
 package session
 
-// kindFor returns the session kind that serves kind, or nil when this build
-// has none. Builds other than Linux, macOS and Windows serve no kind.
-func kindFor(string, Launcher) prepareKind { return nil }
+import (
+	"errors"
+	"os"
+)
+
+// launcherFor returns nil: builds other than Linux, macOS and Windows have no
+// session launcher, so every certificate is refused.
+func launcherFor(Launcher) Launcher { return nil }
+
+// newSessionChannel is never reached without a launcher.
+func newSessionChannel() (ours, theirs *os.File, pipe string, err error) {
+	return nil, nil, "", errors.ErrUnsupported
+}

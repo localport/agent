@@ -10,10 +10,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"io"
 	"math/big"
 	"net"
 	"os"
@@ -21,6 +19,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/identity"
@@ -72,82 +72,84 @@ func TestDeviceSessionsUseTheRegisteredCertificate(t *testing.T) {
 	if err != nil || spec.SessionHandler == nil {
 		t.Fatalf("deviceSessions = %v, %v; want a session server", state, err)
 	}
-	defer state.jti.Close()
+	defer state.lock.Close()
 
-	client, err := session.GenerateClientKeys()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ticket := func(spki []byte, jti string) []byte {
-		now := time.Now().Unix()
-		body, err := json.Marshal(session.Ticket{
-			V: 1, KID: "k1", JTI: jti, IAT: now, EXP: now + 60,
-			Team: "team-1", Tunnel: "tun12345", Device: "gw-01", DeviceSPKISHA256: session.SPKIHash(spki),
-			Edge: "edge-1", Subject: "user:alice", Kind: "terminal", Login: me.Username,
-			ClientX25519: enc.EncodeToString(client.X25519.PublicKey().Bytes()),
-			ClientMLKEM:  enc.EncodeToString(client.MLKEM.EncapsulationKey().Bytes()),
-		})
+	const serial = 77
+	mint := func(spki []byte) ssh.Signer {
+		_, clientKey, _ := ed25519.GenerateKey(rand.Reader)
+		client, err := ssh.NewSignerFromKey(clientKey)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return []byte(enc.EncodeToString(body) + "." + enc.EncodeToString(ed25519.Sign(ticketKey, body)))
+		dev, _ := json.Marshal(map[string]string{"tunnel": "tun12345", "prefix": "gw-01", "spki_sha256": session.SPKIHash(spki)})
+		cert := &ssh.Certificate{
+			Key: client.PublicKey(), Serial: serial, CertType: ssh.UserCert, ValidPrincipals: []string{me.Username},
+			ValidAfter: uint64(time.Now().Add(-time.Minute).Unix()), ValidBefore: uint64(time.Now().Add(time.Minute).Unix()),
+			Permissions: ssh.Permissions{
+				CriticalOptions: map[string]string{"device@localport.io": string(dev)},
+				Extensions:      map[string]string{"kind@localport.io": "terminal", "subject@localport.io": `{"subject":"user:alice"}`},
+			},
+		}
+		ca, _ := ssh.NewSignerFromKey(ticketKey)
+		if err := cert.SignCert(rand.Reader, ca); err != nil {
+			t.Fatal(err)
+		}
+		signer, err := ssh.NewCertSigner(cert, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return signer
 	}
-	spki := renewed.Leaf.RawSubjectPublicKeyInfo
-	raw := ticket(spki, "0190a000-0000-7000-8000-0000000000aa")
-	frame := firstFrame(t, spec.SessionHandler, raw)
-	var msg session.AcceptMessage
-	if err := json.Unmarshal(frame, &msg); err != nil || msg.Type != "accept" {
-		t.Fatalf("renewed: first frame %s, %v; want accept", frame, err)
+	renewedHost, err := ssh.NewPublicKey(renewed.Leaf.PublicKey)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Open verifies the accept signature against the renewed certificate.
-	if _, err := session.Open(raw, spki, &msg, client); err != nil {
-		t.Fatalf("renewed: the accept frame is not signed with the renewed key: %v", err)
+	// The renewed key is the host key, and a certificate bound to it passes.
+	if err := sshHandshake(t, spec.SessionHandler, serial, mint(renewed.Leaf.RawSubjectPublicKeyInfo), me.Username, ssh.FixedHostKey(renewedHost)); err != nil {
+		t.Fatalf("renewed: %v", err)
 	}
 	other := selfSignedDevice(t)
-	if got := firstFrameCode(t, spec.SessionHandler, ticket(other.Leaf.RawSubjectPublicKeyInfo, "0190a000-0000-7000-8000-0000000000ab")); got != session.CodeTicketWrongDevice {
-		t.Errorf("another key: refused %q, want %q", got, session.CodeTicketWrongDevice)
+	if err := sshHandshake(t, spec.SessionHandler, serial, mint(other.Leaf.RawSubjectPublicKeyInfo), me.Username, ssh.FixedHostKey(renewedHost)); err == nil {
+		t.Error("a certificate bound to another device key passed userauth")
 	}
 }
 
-// firstFrameCode serves one stream carrying raw and returns the refusal code
-// of the agent's first frame.
-func firstFrameCode(t *testing.T, h interface{ Serve(net.Conn) }, raw []byte) string {
+// sshHandshake serves one stream and runs an SSH client's handshake and
+// userauth on it.
+func sshHandshake(t *testing.T, h interface {
+	Serve(net.Conn, [16]byte, uint64)
+}, serial uint64, signer ssh.Signer, user string, hostKey ssh.HostKeyCallback) error {
 	t.Helper()
-	frame := firstFrame(t, h, raw)
-	var m struct{ Type, Code string }
-	if err := json.Unmarshal(frame, &m); err != nil || m.Type != "refused" {
-		t.Fatalf("first frame %s, %v; want a refusal", frame, err)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	return m.Code
-}
-
-// firstFrame serves one stream carrying raw, returns the agent's first frame
-// and closes the stream.
-func firstFrame(t *testing.T, h interface{ Serve(net.Conn) }, raw []byte) []byte {
-	t.Helper()
-	agentSide, clientSide := net.Pipe()
-	defer clientSide.Close()
+	defer ln.Close()
 	served := make(chan struct{})
 	go func() {
 		defer close(served)
-		h.Serve(agentSide)
-		agentSide.Close()
+		agentSide, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer agentSide.Close()
+		h.Serve(agentSide, [16]byte{1}, serial)
 	}()
-	_ = clientSide.SetDeadline(time.Now().Add(10 * time.Second))
-	if _, err := clientSide.Write(append(binary.BigEndian.AppendUint32(nil, uint32(len(raw))), raw...)); err != nil {
+	clientSide, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
 		t.Fatal(err)
 	}
-	var head [4]byte
-	if _, err := io.ReadFull(clientSide, head[:]); err != nil {
-		t.Fatal(err)
+	defer func() {
+		_ = clientSide.Close()
+		<-served
+	}()
+	c, _, _, err := ssh.NewClientConn(clientSide, "gw-01", &ssh.ClientConfig{
+		User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: hostKey, Timeout: 10 * time.Second,
+	})
+	if err == nil {
+		_ = c.Close()
 	}
-	frame := make([]byte, binary.BigEndian.Uint32(head[:]))
-	if _, err := io.ReadFull(clientSide, frame); err != nil {
-		t.Fatal(err)
-	}
-	clientSide.Close()
-	<-served
-	return frame
+	return err
 }
 
 func selfSignedDevice(t *testing.T) *tls.Certificate {
@@ -180,11 +182,11 @@ func sessionsStore(t *testing.T) *identity.Store {
 	return store
 }
 
-// A second process on the same identity cannot take .jti.lock and sets no
-// session handler; the revoked-kid hook is still set.
-func TestDeviceSessionsNeedTheJTILog(t *testing.T) {
+// A second process on the same identity cannot take .sessions.lock and sets
+// no session handler; the revoked-kid hook is still set.
+func TestDeviceSessionsNeedTheSessionsLock(t *testing.T) {
 	store := sessionsStore(t)
-	held, err := session.OpenJTILog(store.Dir(sessionsRef), nil)
+	held, err := session.LockSessions(store.Dir(sessionsRef))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,11 +195,11 @@ func TestDeviceSessionsNeedTheJTILog(t *testing.T) {
 		Name: "gw-01", Credential: identity.NewDeviceRegistrar(store, sessionsRef, nil), Capabilities: []string{"terminal"},
 	}
 	state, err := deviceSessions(store, sessionsRef, &spec, nil, nil)
-	if !errors.Is(err, session.ErrJTILogLocked) || state != nil {
-		t.Fatalf("deviceSessions = %v, %v; want ErrJTILogLocked", state, err)
+	if !errors.Is(err, session.ErrSessionsLocked) || state != nil {
+		t.Fatalf("deviceSessions = %v, %v; want ErrSessionsLocked", state, err)
 	}
 	if spec.SessionHandler != nil {
-		t.Fatal("a session handler was set without the jti log")
+		t.Fatal("a session handler was set without the sessions lock")
 	}
 	if spec.HintRevoked == nil {
 		t.Fatal("HintRevoked is not set")

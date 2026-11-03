@@ -190,6 +190,23 @@ func (t *TicketKeys) Lookup(kid string) (ed25519.PublicKey, bool) {
 	return pub, ok
 }
 
+// CAKeys returns the session CA keys that sign SSH user certificates: every
+// held key whose kid is not under a live hint. It reads memory only and is
+// safe for concurrent use.
+func (t *TicketKeys) CAKeys() []ed25519.PublicKey {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	now := t.now()
+	keys := make([]ed25519.PublicKey, 0, len(t.keys))
+	for kid, pub := range t.keys {
+		if s, hinted := t.suspects[kid]; hinted && now.Sub(s.at) < suspectTTL {
+			continue
+		}
+		keys = append(keys, pub)
+	}
+	return keys
+}
+
 // Generation returns the hint generation. Read it before a request whose key
 // set is passed to Replace.
 func (t *TicketKeys) Generation() uint64 {
