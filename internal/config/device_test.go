@@ -6,15 +6,48 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/security"
 )
 
 const testIdentity = "01kpq7x2abcd34/device/tun12345.gw-01"
+
+// Equal sees a change to every field, so a reload restarts a device whose
+// entry changed in any way; a new field fails the count until it has a case.
+func TestLocalDeviceEqualSeesEveryField(t *testing.T) {
+	allowed, err := ports.ParseFlag("22")
+	if err != nil {
+		t.Fatal(err)
+	}
+	edits := map[string]func(*LocalDevice){
+		"Identity":       func(d *LocalDevice) { d.Identity.Identity = "other" },
+		"Host":           func(d *LocalDevice) { d.Host = "10.0.0.2" },
+		"AllowPorts":     func(d *LocalDevice) { d.AllowPorts = allowed },
+		"Enable":         func(d *LocalDevice) { d.Enable = []Capability{CapabilityTerminal} },
+		"Logins":         func(d *LocalDevice) { d.Logins = []string{"ops"} },
+		"PasswordLogins": func(d *LocalDevice) { d.PasswordLogins = []string{"ana@corp"} },
+		"FilesRoot":      func(d *LocalDevice) { d.FilesRoot = "/srv" },
+		"RDP":            func(d *LocalDevice) { d.RDP = "localhost:3389" },
+		"VNC":            func(d *LocalDevice) { d.VNC = "localhost:5900" },
+		"RunAsAgent":     func(d *LocalDevice) { d.RunAsAgent = true },
+	}
+	if n := reflect.TypeFor[LocalDevice]().NumField(); n != len(edits) {
+		t.Fatalf("LocalDevice has %d fields, the test edits %d", n, len(edits))
+	}
+	for name, edit := range edits {
+		var d LocalDevice
+		edit(&d)
+		if d.Equal(LocalDevice{}) {
+			t.Errorf("Equal misses a change to %s", name)
+		}
+	}
+}
 
 func userLocalConfig(t *testing.T) LocalConfigFile {
 	t.Helper()

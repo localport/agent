@@ -7,6 +7,38 @@ import (
 	"testing"
 )
 
+// EventName turns any file name into one an event carries: invalid UTF-8
+// and control bytes escaped, an over-long name cut with a marker. The worst
+// case, path and target at the bound and all quotes, still fits a frame.
+func TestEventNameAlwaysYieldsAnEvent(t *testing.T) {
+	for raw, want := range map[string]string{
+		"/plain/é.txt":  "/plain/é.txt",
+		"/\xff.bin":     `/\xff.bin`,
+		"/a\nb\x7f":     `/a\x0ab\x7f`,
+		"/half\xe2\x82": `/half\xe2\x82`,
+		// A name that spells an escape cannot pass for the escaped byte.
+		`/a\xff`: `/a\x5cxff`,
+	} {
+		if got := EventName(raw); got != want {
+			t.Errorf("EventName(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	long := EventName("/" + strings.Repeat("é", maxEventPath))
+	if len(long) > maxEventPath || !strings.HasSuffix(long, eventTruncated) {
+		t.Fatalf("long name: %d bytes, suffix %q", len(long), long[len(long)-20:])
+	}
+	for _, c := range []string{`"`, `\`, " "} {
+		worst := EventName(strings.Repeat(c, maxEventPath+10))
+		b, err := FileEvent{Op: OpRename, Path: worst, Target: worst, Result: ResultOK}.Marshal()
+		if err != nil || len(b) > MaxFrameEvent {
+			t.Fatalf("worst-case event of %q: %d bytes, %v; want at most %d", c, len(b), err, MaxFrameEvent)
+		}
+		if _, err := ParseFileEvent(b); err != nil {
+			t.Fatalf("worst-case event of %q does not parse: %v", c, err)
+		}
+	}
+}
+
 // Each operation carries its own fields: a path and a result always (exec
 // only a command), a target for rename, symlink and link, bytes for read and
 // write; anything else, an unknown operation or an out-of-bounds field is

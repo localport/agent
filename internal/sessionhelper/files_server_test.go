@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -134,6 +135,45 @@ func TestFilesPutGetAndWritesInPlace(t *testing.T) {
 		{Op: launcher.OpWrite, Path: "/a.txt", Bytes: 5, Result: launcher.ResultOK},
 		{Op: launcher.OpRead, Path: "/a.txt", Bytes: 11, Result: launcher.ResultOK},
 	}
+	if got := h.events.list(t); !slices.Equal(got, want) {
+		t.Fatalf("events %+v, want %+v", got, want)
+	}
+}
+
+// A file whose name an event cannot carry as is (a control byte here; macOS
+// refuses invalid UTF-8 names, Linux takes both) is still logged, escaped.
+func TestFilesLogsANameThatNeedsEscaping(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses control characters in file names")
+	}
+	h := newFilesHarness(t)
+	f, err := h.client.Create("/\x01.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want := []launcher.FileEvent{{Op: launcher.OpWrite, Path: `/\x01.bin`, Bytes: 1, Result: launcher.ResultOK}}
+	if got := h.events.list(t); !slices.Equal(got, want) {
+		t.Fatalf("events %+v, want %+v", got, want)
+	}
+}
+
+// A symlink with an empty target is refused before anything is created, and
+// the server keeps serving.
+func TestFilesRefusesAnEmptySymlinkTarget(t *testing.T) {
+	h := newFilesHarness(t)
+	if err := h.client.Symlink("", "/link"); err == nil {
+		t.Fatal("an empty symlink target accepted")
+	}
+	if err := h.client.Mkdir("/after"); err != nil {
+		t.Fatalf("the server stopped serving: %v", err)
+	}
+	want := []launcher.FileEvent{{Op: launcher.OpMkdir, Path: "/after", Result: launcher.ResultOK}}
 	if got := h.events.list(t); !slices.Equal(got, want) {
 		t.Fatalf("events %+v, want %+v", got, want)
 	}

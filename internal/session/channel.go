@@ -373,7 +373,11 @@ func (ch *channel) readHelper() {
 		}
 		switch f.Type {
 		case launcher.FrameData, launcher.FrameStderr:
-			ch.rec.output(f.Data, ch.halted)
+			// An sftp channel's bytes are the protocol stream, file contents
+			// included; its recording holds the file events only.
+			if ch.kind != launcher.KindSFTP {
+				ch.rec.output(f.Data, ch.halted)
+			}
 			if ch.stopped.Load() {
 				return
 			}

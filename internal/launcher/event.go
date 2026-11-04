@@ -1,9 +1,12 @@
 package launcher
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -105,5 +108,45 @@ func (e FileEvent) Marshal() ([]byte, error) {
 	if err := e.Validate(); err != nil {
 		return nil, err
 	}
-	return json.Marshal(e)
+	// Without HTML escaping a field grows at most 2x in JSON (\" and \\):
+	// EventName leaves no control character to escape.
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(e); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
+}
+
+// eventTruncated ends a name EventName shortened.
+const eventTruncated = "...(truncated)"
+
+// EventName is name as a FileEvent's Path or Target carries it: every byte
+// that is not valid UTF-8, every control character and the backslash
+// written as \xNN, so the escaping is unambiguous, and a result over
+// maxEventPath bytes cut at a rune boundary and ended with eventTruncated. A
+// file name the file system accepts always yields an event.
+func EventName(name string) string {
+	var b strings.Builder
+	for i := 0; i < len(name); {
+		r, size := utf8.DecodeRuneInString(name[i:])
+		switch {
+		case r == utf8.RuneError && size <= 1, r < 0x20, r == 0x7f, r == '\\':
+			fmt.Fprintf(&b, `\x%02x`, name[i])
+			i++
+			continue
+		}
+		b.WriteString(name[i : i+size])
+		i += size
+	}
+	out := b.String()
+	if len(out) <= maxEventPath {
+		return out
+	}
+	cut := maxEventPath - len(eventTruncated)
+	for cut > 0 && !utf8.RuneStart(out[cut]) {
+		cut--
+	}
+	return out[:cut] + eventTruncated
 }

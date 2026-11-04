@@ -2,6 +2,7 @@ package sessionhelper
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -52,12 +53,15 @@ type filesServer struct {
 	events io.Writer
 }
 
-// emit writes one event. An event that fails validation, or a broken event
-// pipe, is dropped: the helper ends the channel when its pipe breaks.
+// emit writes one event, its names escaped and bounded by
+// launcher.EventName so every operation is logged. A broken event pipe drops
+// it: the helper ends the channel when its pipe breaks.
 func (s *filesServer) emit(ev launcher.FileEvent) {
+	ev.Path, ev.Target = launcher.EventName(ev.Path), launcher.EventName(ev.Target)
 	b, err := ev.Marshal()
 	if err != nil {
-		return
+		// Unreachable with escaped names; a programming error, not input.
+		panic(fmt.Sprintf("files event %q: %v", ev.Op, err))
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -90,9 +94,16 @@ func rel(p string) string {
 }
 
 // openRegular opens name with flag and refuses anything that is not a
-// regular file. openNonblock keeps a FIFO from blocking the open, and
-// checkOpened refuses what the platform cannot stat as a disk file.
+// regular file.
 func (s *filesServer) openRegular(name string, flag int, perm fs.FileMode) (*os.File, error) {
+	return s.openChecked(name, flag, perm, false)
+}
+
+// openChecked opens name with flag and refuses anything that is not a
+// regular file, or with dir a directory. openNonblock keeps a FIFO from
+// blocking the open, and checkOpened refuses what the platform cannot stat
+// as a disk file.
+func (s *filesServer) openChecked(name string, flag int, perm fs.FileMode, dir bool) (*os.File, error) {
 	f, err := s.root.OpenFile(name, flag|openNonblock, perm)
 	if err != nil {
 		return nil, err
@@ -106,13 +117,19 @@ func (s *filesServer) openRegular(name string, flag int, perm fs.FileMode) (*os.
 		_ = f.Close()
 		return nil, err
 	}
-	if !fi.Mode().IsRegular() {
+	if dir != fi.IsDir() || (!dir && !fi.Mode().IsRegular()) {
 		_ = f.Close()
 		// EACCES, which the request server answers SSH_FX_PERMISSION_DENIED.
 		return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EACCES}
 	}
-	// O_NONBLOCK has no effect on a regular file's reads and writes.
+	// O_NONBLOCK has no effect on a regular file's or directory's reads.
 	return f, nil
+}
+
+// StatVFS answers statvfs@openssh.com (`df` in sftp) for the root's file
+// system.
+func (s *filesServer) StatVFS(*sftp.Request) (*sftp.StatVFS, error) {
+	return statVFS(s.root.Name())
 }
 
 // Fileread opens a file for reading.
@@ -227,7 +244,11 @@ func (s *filesServer) Filecmd(r *sftp.Request) error {
 		ev.Op = launcher.OpMkdir
 		err = s.root.Mkdir(rel(r.Filepath), createPerm(r, 0o777))
 	case "Symlink":
-		// Filepath is the link's target text, Target the link's path.
+		// Filepath is the link's target text, as the client sent it, Target
+		// the link's path. An empty target creates nothing and has no event.
+		if r.Filepath == "" {
+			return sftp.ErrSSHFxBadMessage
+		}
 		ev.Op, ev.Path, ev.Target = launcher.OpSymlink, r.Target, r.Filepath
 		err = s.root.Symlink(r.Filepath, rel(r.Target))
 	case "Link":
@@ -363,7 +384,7 @@ func (s *filesServer) RealPath(p string) (string, error) {
 }
 
 func (s *filesServer) readDir(name string) ([]fs.FileInfo, error) {
-	d, err := s.root.Open(name)
+	d, err := s.openChecked(name, os.O_RDONLY, 0, true)
 	if err != nil {
 		return nil, err
 	}

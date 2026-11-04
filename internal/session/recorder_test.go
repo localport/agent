@@ -79,11 +79,18 @@ func newTestRecorder(t *testing.T, policy string, h recordingHandoff) (*sessionR
 	return newSessionRecorder(h, sealer, policy == RecPolicyStrict, t.Logf), priv
 }
 
-// decryptRecording opens every segment with the shared parameters and
-// returns the asciicast text.
+// decryptRecording opens every segment of the recording testRecordingID
+// and returns the asciicast text.
 func decryptRecording(t *testing.T, priv hpke.PrivateKey, wrapped []byte, segs []recording.Segment) string {
 	t.Helper()
-	dek, err := hpke.Open(priv, hpke.HKDFSHA256(), hpke.ChaCha20Poly1305(), append([]byte("localport-recording-v1"), testRecordingID...), wrapped)
+	return decryptRecordingID(t, priv, testRecordingID, wrapped, segs)
+}
+
+// decryptRecordingID opens every segment of recording id with the shared
+// parameters and returns the asciicast text.
+func decryptRecordingID(t *testing.T, priv hpke.PrivateKey, id string, wrapped []byte, segs []recording.Segment) string {
+	t.Helper()
+	dek, err := hpke.Open(priv, hpke.HKDFSHA256(), hpke.ChaCha20Poly1305(), append([]byte("localport-recording-v1"), id...), wrapped)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +102,7 @@ func decryptRecording(t *testing.T, priv hpke.PrivateKey, wrapped []byte, segs [
 	for _, s := range segs {
 		nonce := make([]byte, chacha20poly1305.NonceSize)
 		binary.BigEndian.PutUint32(nonce[8:], s.Index)
-		aad := binary.BigEndian.AppendUint32([]byte(testRecordingID), s.Index)
+		aad := binary.BigEndian.AppendUint32([]byte(id), s.Index)
 		f := byte(0)
 		if s.Final {
 			f = 1

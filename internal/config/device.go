@@ -511,7 +511,7 @@ func (d LocalDevice) validateSettings(name, goos string) error {
 func (d LocalDevice) Equal(o LocalDevice) bool {
 	return d.Identity == o.Identity && d.Host == o.Host && d.AllowPorts.String() == o.AllowPorts.String() &&
 		slices.Equal(d.Enable, o.Enable) && slices.Equal(d.Logins, o.Logins) &&
-		d.FilesRoot == o.FilesRoot && d.RDP == o.RDP && d.VNC == o.VNC && d.RunAsAgent == o.RunAsAgent
+		slices.Equal(d.PasswordLogins, o.PasswordLogins) && d.FilesRoot == o.FilesRoot && d.RDP == o.RDP && d.VNC == o.VNC && d.RunAsAgent == o.RunAsAgent
 }
 
 // UsesLogins reports whether d enables a session kind that runs as a login:

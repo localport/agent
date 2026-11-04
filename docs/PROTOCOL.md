@@ -724,7 +724,11 @@ write: one event when the handle closes, with the bytes moved) and `result`
 (`ok`, `no_such_file`, `permission_denied`, `file_exists` or `failure`;
 absent on `exec`). The agent writes the `exec` event from the request when the
 command starts; the SFTP server sends the others to the agent on its own pipe,
-and an event that fails validation ends the channel. Players skip codes
+and an event that fails validation ends the channel. `path` and `target` are
+at most 4 KiB: bytes that are not valid UTF-8, control characters and the
+backslash are written as `\xNN`, and a longer name is cut and ends with `...(truncated)`.
+An `sftp` channel's recording holds its `f` events only, never the protocol
+bytes it carries. Players skip codes
 they do not know, as asciicast v3 requires. A segment holds whole lines and
 is cut at 10 s or 256 KiB of plaintext, whichever comes first. Each recording
 has a random 32-byte DEK, wrapped once with HPKE (ML-KEM-768 with X25519,
@@ -764,7 +768,7 @@ are unpadded base64url.
 
 | Request | Body | `200` answer |
 | ------- | ---- | ------------ |
-| `POST /v1/recording/open` | `{"wrapped_dek","signature","certificate","session_id"}` (`session_id` the canonical UUID of the connection; an id the mux does not carry is `recording_not_found`) | `{"status","segments","chain"}`: the segments the server holds and its chain over them (empty with 0 segments) |
+| `POST /v1/recording/open` | `{"wrapped_dek","signature","certificate","session_id"}` (`session_id` the canonical UUID of the connection; only an open while the mux carries that connection can create the recording, a later one reopens it and a missing recording is `recording_not_found`) | `{"status","segments","chain"}`: the segments the server holds and its chain over them (empty with 0 segments) |
 | `PUT /v1/recording/segment`, headers `Localport-Segment-Index` (decimal, no sign or leading zeros) and `Localport-Segment-Sha256` (unpadded base64url of `h_i`) | the segment object, at least 18 bytes | `{"status","segments"}`; a segment already stored answers `200` like a fresh one |
 | `POST /v1/recording/complete` | `{"segments","final_hash","ended_at","incomplete","final","reason","signature"}` | `{"status","segments"}` |
 

@@ -23,10 +23,12 @@ const (
 	FrameEvent  byte = 6
 )
 
-// MaxFrameData bounds a data frame's payload; MaxFrameEvent an event frame's.
+// MaxFrameData bounds a data frame's payload; MaxFrameEvent an event frame's,
+// which fits a FileEvent whose Path and Target are each maxEventPath bytes
+// doubled by JSON escaping.
 const (
 	MaxFrameData  = 64 << 10
-	MaxFrameEvent = 10 << 10
+	MaxFrameEvent = 20 << 10
 )
 
 // Frame is one decoded channel frame. Data is valid until the next

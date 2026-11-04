@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,9 @@ type fakeLauncher struct {
 	hold       chan struct{}
 	starting   chan struct{}
 	helperDone chan struct{}
+	// badEvent, when set, is the event frame payload an sftp helper sends
+	// in place of a valid file event.
+	badEvent []byte
 }
 
 func newFakeLauncher() *fakeLauncher { return &fakeLauncher{resizes: make(chan [2]uint16, 8)} }
@@ -103,6 +107,9 @@ func (l *fakeLauncher) helper(conn net.Conn, req launcher.Request) {
 	}
 	event := func() {
 		ev, _ := launcher.FileEvent{Op: launcher.OpList, Path: "/", Result: launcher.ResultOK}.Marshal()
+		if l.badEvent != nil {
+			ev = l.badEvent
+		}
 		_ = launcher.WriteFrame(conn, launcher.Frame{Type: launcher.FrameEvent, Data: ev})
 	}
 	if req.Kind == launcher.KindSFTP || req.Command == "event" {
@@ -650,6 +657,32 @@ func TestFilesChannelPolicy(t *testing.T) {
 	}
 }
 
+// A malformed event from an sftp helper, or one naming an exec, ends the
+// channel with helper_failed: the agent validates what it records.
+func TestBadFileEventEndsTheSFTPChannel(t *testing.T) {
+	for name, payload := range map[string][]byte{
+		"malformed":      []byte(`{"op":`),
+		"unknown field":  []byte(`{"op":"list","path":"/","result":"ok","extra":1}`),
+		"exec from sftp": []byte(`{"op":"exec","command":"id"}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newSSHFixture(t, func(c *ServerConfig) { c.Capabilities = []string{"terminal", "files"} })
+			f.launcher.badEvent = payload
+			o := f.defaults()
+			o.kind = "ssh"
+			sess, err := f.connect(t, o).NewSession()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stderr, _ := sess.StderrPipe()
+			if err := sess.RequestSubsystem("sftp"); err != nil {
+				t.Fatal(err)
+			}
+			readFor(t, stderr, "\r\nlocalport: session ended: "+CloseHelperFailed)
+		})
+	}
+}
+
 // A file event from an sftp helper is taken and the channel keeps relaying;
 // one from an exec helper ends the channel with helper_failed.
 func TestFileEventsOnlyFromTheFileServer(t *testing.T) {
@@ -851,13 +884,61 @@ type capturedOpen struct {
 	cert          []byte
 }
 
-// captureClient records each open and answers it, and accepts every segment.
+// captureClient records each open and answers it, and accepts every segment,
+// keeping each recording's wrapped DEK and segments for decryption with priv
+// (set by recordingFixture).
 type captureClient struct {
 	block bool
 	opens chan capturedOpen
+	priv  hpke.PrivateKey
+
+	mu       sync.Mutex
+	wrapped  map[string][]byte
+	segments map[string][]recording.Segment
 }
 
-func (c *captureClient) Open(ctx context.Context, id, sessionID string, _, _, cert []byte) (recording.Result, error) {
+func (c *captureClient) keep(id string, seg recording.Segment) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.segments == nil {
+		c.segments = map[string][]recording.Segment{}
+	}
+	// A retried or spooled segment arrives again under its index.
+	if slices.ContainsFunc(c.segments[id], func(s recording.Segment) bool { return s.Index == seg.Index }) {
+		return
+	}
+	seg.Object = bytes.Clone(seg.Object)
+	c.segments[id] = append(c.segments[id], seg)
+	slices.SortFunc(c.segments[id], func(a, b recording.Segment) int { return int(a.Index) - int(b.Index) })
+}
+
+// plaintext decrypts recording id once its final segment arrived, waiting
+// up to 5 s for it.
+func (c *captureClient) plaintext(t *testing.T, id string) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		segs := slices.Clone(c.segments[id])
+		wrapped := c.wrapped[id]
+		c.mu.Unlock()
+		if n := len(segs); n > 0 && segs[n-1].Final {
+			return decryptRecordingID(t, c.priv, id, wrapped, segs)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recording %s has no final segment", id)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (c *captureClient) Open(ctx context.Context, id, sessionID string, wrappedDEK, _, cert []byte) (recording.Result, error) {
+	c.mu.Lock()
+	if c.wrapped == nil {
+		c.wrapped = map[string][]byte{}
+	}
+	c.wrapped[id] = bytes.Clone(wrappedDEK)
+	c.mu.Unlock()
 	c.opens <- capturedOpen{id: id, sessionID: sessionID, cert: bytes.Clone(cert)}
 	if c.block {
 		<-ctx.Done()
@@ -870,11 +951,13 @@ func (c *captureClient) Complete(context.Context, string, []byte, recording.Comp
 	return recording.Result{Status: "complete"}, nil
 }
 
-func (c *captureClient) PutSegment(_ context.Context, _ string, seg recording.Segment) (recording.Result, error) {
+func (c *captureClient) PutSegment(_ context.Context, id string, seg recording.Segment) (recording.Result, error) {
+	c.keep(id, seg)
 	return recording.Result{Status: "recording", Segments: seg.Index + 1}, nil
 }
 
-func (c *captureClient) PutSpooledSegment(_ context.Context, _ string, seg recording.Segment) (recording.Result, error) {
+func (c *captureClient) PutSpooledSegment(_ context.Context, id string, seg recording.Segment) (recording.Result, error) {
+	c.keep(id, seg)
 	return recording.Result{Status: "recording", Segments: seg.Index + 1}, nil
 }
 
@@ -893,10 +976,15 @@ func recordingFixture(t *testing.T, client *captureClient) (*sshFixture, string,
 		Client:     func(string) (recording.Client, error) { return client, nil },
 		Configured: func(string) bool { return true },
 	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); up.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
 	priv, err := hpke.MLKEM768X25519().GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
+	client.priv = priv
 	pub := priv.PublicKey().Bytes()
 	sum := sha256.Sum256(pub)
 	f := newSSHFixture(t, func(c *ServerConfig) {
@@ -970,6 +1058,40 @@ func TestRecordingOpensOnePerChannel(t *testing.T) {
 				t.Fatalf("spool entries %v, want at most one per channel", entries)
 			}
 		})
+	}
+}
+
+// A recorded sftp channel records its file events only: the protocol bytes
+// it relays, file contents included, never become output events.
+func TestSFTPRecordingHoldsFileEventsOnly(t *testing.T) {
+	client := &captureClient{opens: make(chan capturedOpen, 1)}
+	f, keySum, _ := recordingFixture(t, client)
+	o := f.defaults()
+	o.kind = "ssh"
+	o.rec = &certRec{Policy: RecPolicyBestEffort, PubSHA256: keySum}
+	sess, err := f.connect(t, o).NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, _ := sess.StdinPipe()
+	stdout, _ := sess.StdoutPipe()
+	if err := sess.RequestSubsystem("sftp"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = stdin.Write([]byte("file contents"))
+	readFor(t, stdout, "file contents")
+	_, _ = stdin.Write([]byte("bye"))
+	// The helper exits; the channel closes, which ends the stdout stream.
+	if _, err := io.Copy(io.Discard, stdout); err != nil {
+		t.Fatalf("sftp channel end: %v", err)
+	}
+	open := <-client.opens
+	text := client.plaintext(t, open.id)
+	if strings.Contains(text, "file contents") || strings.Contains(text, `"o"`) {
+		t.Fatalf("the sftp recording holds output events:\n%s", text)
+	}
+	if !strings.Contains(text, `"f"`) {
+		t.Fatalf("the sftp recording holds no file event:\n%s", text)
 	}
 }
 
