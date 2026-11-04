@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strings"
 )
 
@@ -51,6 +52,10 @@ func (r Ref) String() string {
 func (r Ref) dir() string {
 	return r.Team + "/" + string(r.Kind) + "-" + r.Identity
 }
+
+// Path is the Ref's relative path in the platform's separator, the layout of
+// the store and of state kept per credential beside it.
+func (r Ref) Path() string { return filepath.FromSlash(r.dir()) }
 
 // maxRefComponent bounds a path component for path safety. The control plane
 // applies its own, stricter limits.

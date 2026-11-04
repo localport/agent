@@ -102,6 +102,11 @@ type LocalDevice struct {
 	AllowPorts ports.Ceiling
 	Enable     []Capability
 	Logins     []string
+	// PasswordLogins are the Logins (Windows only) whose sessions log on
+	// with the login's password, asked by SSH keyboard-interactive after the
+	// certificate, instead of S4U: Entra ID accounts and sessions that need
+	// network credentials.
+	PasswordLogins []string
 	// FilesRoot is the top of the browsable tree. Empty means the login's home.
 	FilesRoot string
 	// RDP and VNC are desktop targets as HOST:PORT. Empty means none.
@@ -185,10 +190,12 @@ type localDeviceFile struct {
 	AllowPorts string   `yaml:"allow_ports,omitempty"`
 	Enable     []string `yaml:"enable,omitempty"`
 	Logins     []string `yaml:"logins,omitempty"`
-	FilesRoot  string   `yaml:"files_root,omitempty"`
-	RDP        string   `yaml:"rdp,omitempty"`
-	VNC        string   `yaml:"vnc,omitempty"`
-	RunAsAgent bool     `yaml:"run_as_agent,omitempty"`
+	// PasswordLogins is LocalDevice.PasswordLogins.
+	PasswordLogins []string `yaml:"password_logins,omitempty"`
+	FilesRoot      string   `yaml:"files_root,omitempty"`
+	RDP            string   `yaml:"rdp,omitempty"`
+	VNC            string   `yaml:"vnc,omitempty"`
+	RunAsAgent     bool     `yaml:"run_as_agent,omitempty"`
 }
 
 // LoadLocal reads and validates the local config. The directory walk and the
@@ -264,15 +271,16 @@ func decodeLocal(raw []byte, goos string) (*LocalConfig, error) {
 			enable[j] = Capability(c)
 		}
 		cfg.Devices = append(cfg.Devices, LocalDevice{
-			Identity:   ref,
-			Host:       strings.TrimSpace(d.Host),
-			AllowPorts: allowed,
-			Enable:     enable,
-			Logins:     d.Logins,
-			FilesRoot:  d.FilesRoot,
-			RDP:        d.RDP,
-			VNC:        d.VNC,
-			RunAsAgent: d.RunAsAgent,
+			Identity:       ref,
+			Host:           strings.TrimSpace(d.Host),
+			AllowPorts:     allowed,
+			Enable:         enable,
+			Logins:         d.Logins,
+			PasswordLogins: d.PasswordLogins,
+			FilesRoot:      d.FilesRoot,
+			RDP:            d.RDP,
+			VNC:            d.VNC,
+			RunAsAgent:     d.RunAsAgent,
 		})
 	}
 	if err := cfg.validate(goos); err != nil {
@@ -372,15 +380,16 @@ func (c *LocalConfig) marshal() ([]byte, error) {
 			enable[j] = string(c)
 		}
 		lf.Devices[i] = localDeviceFile{
-			Identity:   d.Identity.String(),
-			Host:       d.Host,
-			AllowPorts: d.AllowPorts.String(),
-			Enable:     enable,
-			Logins:     d.Logins,
-			FilesRoot:  d.FilesRoot,
-			RDP:        d.RDP,
-			VNC:        d.VNC,
-			RunAsAgent: d.RunAsAgent,
+			Identity:       d.Identity.String(),
+			Host:           d.Host,
+			AllowPorts:     d.AllowPorts.String(),
+			Enable:         enable,
+			Logins:         d.Logins,
+			PasswordLogins: d.PasswordLogins,
+			FilesRoot:      d.FilesRoot,
+			RDP:            d.RDP,
+			VNC:            d.VNC,
+			RunAsAgent:     d.RunAsAgent,
 		}
 	}
 	raw, err := yaml.Marshal(&lf)
@@ -463,14 +472,12 @@ func (d LocalDevice) validateSettings(name, goos string) error {
 			return fmt.Errorf("device %s: enable lists %s twice", name, c)
 		}
 		// Terminal and files act on the machine running the agent.
-		if c == CapabilityTerminal || c == CapabilityFiles {
-			if d.Host != "" {
-				return fmt.Errorf("device %s: %s: %w", name, c, ErrHostCapability)
-			}
-			if goos == "windows" && c == CapabilityFiles {
-				return fmt.Errorf("device %s: %s is not available on Windows", name, c)
-			}
+		if (c == CapabilityTerminal || c == CapabilityFiles) && d.Host != "" {
+			return fmt.Errorf("device %s: %s: %w", name, c, ErrHostCapability)
 		}
+	}
+	if err := validPasswordLogins(d, goos); err != nil {
+		return fmt.Errorf("device %s: %w", name, err)
 	}
 	if len(d.Logins) > 0 && !d.UsesLogins() {
 		return fmt.Errorf("device %s: %w", name, ErrLoginsWithoutSession)
@@ -532,6 +539,26 @@ func ValidLogin(name string) bool {
 		}
 	}
 	return true
+}
+
+// validPasswordLogins checks password_logins: Windows only, each one of the
+// device's logins and listed once.
+func validPasswordLogins(d LocalDevice, goos string) error {
+	if len(d.PasswordLogins) == 0 {
+		return nil
+	}
+	if goos != "windows" {
+		return errors.New("password_logins is available on Windows only")
+	}
+	for i, l := range d.PasswordLogins {
+		if !slices.Contains(d.Logins, l) {
+			return fmt.Errorf("password login %q is not one of logins", security.SanitizeDisplay(l))
+		}
+		if slices.Contains(d.PasswordLogins[:i], l) {
+			return fmt.Errorf("password login %q is listed twice", security.SanitizeDisplay(l))
+		}
+	}
+	return nil
 }
 
 func validLogins(logins []string) error {

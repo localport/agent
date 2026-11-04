@@ -42,6 +42,14 @@ func (a *App) Run(args []string) error {
 		return runStatus(args[1:])
 	case "access":
 		return runAccess(args[1:])
+	case "ssh":
+		return runSSH(args[1:])
+	case "ssh-config":
+		return runSSHConfig(args[1:])
+	case "ssh-cert":
+		return runSSHCert(args[1:])
+	case "ssh-proxy":
+		return runSSHProxy(args[1:])
 	case "tunnel":
 		// Without this case the flat tunnel form would reject "tunnel" with a
 		// missing --local error.
@@ -74,6 +82,8 @@ Commands:
   service   Install or remove the device service (service install|uninstall)
   status    Show the device service, and to root or group localport the devices
   access    Reach a fleet device's ports through your client certificate
+  ssh       Open an SSH session on a fleet device with the system ssh
+  ssh-config  Print ssh_config lines so ssh, scp, sftp and rsync reach devices
   setup     Redeem a setup token so this MACHINE can reach fleet devices
   login     Sign in as YOURSELF and get a short-lived certificate
   identity  List, renew and remove the credentials on this machine
@@ -99,6 +109,10 @@ Examples:
 
   # Reach a device's ports with your client certificate:
   localport access plc-01-factory.ap.localport.dev -L 5020:502 -L 8080:80
+
+  # SSH to a device, or add it to ~/.ssh/config for scp, sftp and rsync:
+  localport ssh pi@gw-01-factory.eu.localport.dev
+  localport ssh-config gw-01-factory.eu.localport.dev >> ~/.ssh/config
 
   # Or set the machine up once and let the agent obtain and renew for you:
   localport setup <TOKEN>

@@ -122,6 +122,25 @@ func TestLoginsFollowTheMergedDevice(t *testing.T) {
 	}
 }
 
+// --password-logins sets the password logins, a later set keeps them, and a
+// device that drops terminal and files loses them with its logins.
+func TestPasswordLoginsFollowTheMergedDevice(t *testing.T) {
+	admin := invoker{privileged: true, current: "admin", goos: "windows"}
+	fs, flags := parseDeviceFlags(t, "--enable", "terminal", "--logins", "ops,ana@corp", "--password-logins", "ana@corp")
+	var d config.LocalDevice
+	if err := flags.apply(fs, &d, admin); err != nil || !slices.Equal(d.PasswordLogins, []string{"ana@corp"}) {
+		t.Fatalf("--password-logins = %v, %v; want [ana@corp]", d.PasswordLogins, err)
+	}
+	fs, flags = parseDeviceFlags(t, "--allow-ports", "22")
+	if err := flags.apply(fs, &d, admin); err != nil || !slices.Equal(d.PasswordLogins, []string{"ana@corp"}) {
+		t.Fatalf("set keeping terminal = %v, %v; want the stored password logins", d.PasswordLogins, err)
+	}
+	fs, flags = parseDeviceFlags(t, "--enable", "desktop", "--rdp")
+	if err := flags.apply(fs, &d, admin); err != nil || d.PasswordLogins != nil {
+		t.Fatalf("set dropping terminal = %v, %v; want the password logins cleared", d.PasswordLogins, err)
+	}
+}
+
 // terminal and files act on this machine and are refused with --host before
 // any join token is spent.
 func TestTerminalAndFilesAreRefusedWithAHost(t *testing.T) {

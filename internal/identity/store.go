@@ -218,7 +218,7 @@ func (s *Store) StateRoot() (string, bool) {
 	return s.Base, s.BaseChosen
 }
 
-func (s *Store) dir(ref Ref) string { return filepath.Join(s.Root, filepath.FromSlash(ref.dir())) }
+func (s *Store) dir(ref Ref) string { return filepath.Join(s.Root, ref.Path()) }
 
 // Skipped is a credential directory List could not read. `identity list`
 // prints these so they are not mistaken for missing credentials.

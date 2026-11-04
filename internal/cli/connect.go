@@ -487,6 +487,9 @@ func printDeviceSettings(d config.LocalDevice) {
 	}
 	fmt.Fprintf(os.Stderr, "  enable     %s\n", or(strings.Join(enable, ","), "ports only"))
 	fmt.Fprintf(os.Stderr, "  logins     %s\n", or(strings.Join(d.Logins, ","), "none"))
+	if len(d.PasswordLogins) > 0 {
+		fmt.Fprintf(os.Stderr, "  password   %s (asked at each session)\n", strings.Join(d.PasswordLogins, ","))
+	}
 	fmt.Fprintf(os.Stderr, "  target     %s\n", or(d.Host, "this machine"))
 	fmt.Fprintf(os.Stderr, "  ports      %s\n", or(d.AllowPorts.String(), "any the dashboard allows"))
 	if d.FilesRoot != "" {

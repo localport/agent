@@ -53,6 +53,9 @@ func printStatus(ctx context.Context, w io.Writer) error {
 		}
 		fmt.Fprintf(w, "device     %s\n  enable   %s\n  logins   %s\n  run_as_agent %t\n",
 			d.Identity, listOrNone(enable), listOrNone(d.Logins), d.RunAsAgent)
+		if len(d.PasswordLogins) > 0 {
+			fmt.Fprintf(w, "  password_logins %s\n", listOrNone(d.PasswordLogins))
+		}
 	}
 	if asAgentChild {
 		// Root's status runs here as the agent account, which owns the keys.

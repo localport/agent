@@ -70,6 +70,9 @@ type DeviceSpec struct {
 	Capabilities []string
 	Logins       []string
 	Desktop      []string
+	// PasswordLogins are the Logins whose sessions ask for the login's
+	// password (LocalDevice.PasswordLogins); local to the session server.
+	PasswordLogins []string
 	// SessionAuth, RunAsAgent and FullDiskAccess are reported on Register for
 	// display: the launcher's probe and the run_as_agent opt-in.
 	SessionAuth    string

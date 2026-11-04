@@ -99,14 +99,16 @@ func (who invoker) defaultLogin() (string, error) {
 
 // deviceFlags are the capability flags `connect` and `set` share.
 type deviceFlags struct {
-	enable, logins, filesRoot, host, allowPorts *string
-	rdp, vnc                                    string
+	enable, logins, passwordLogins, filesRoot, host, allowPorts *string
+	rdp, vnc                                                    string
 }
 
 func addDeviceFlags(fs *flag.FlagSet) *deviceFlags {
 	f := &deviceFlags{
-		enable:     fs.String("enable", "", "session kinds to allow: terminal, files, desktop (comma-separated)"),
-		logins:     fs.String("logins", "", "accounts a terminal or files session may use (comma-separated)"),
+		enable: fs.String("enable", "", "session kinds to allow: terminal, files, desktop (comma-separated)"),
+		logins: fs.String("logins", "", "accounts a terminal or files session may use (comma-separated)"),
+		passwordLogins: fs.String("password-logins", "",
+			"Windows: logins that sign on with their password, asked at each session, instead of S4U (Entra ID accounts; comma-separated, each one of --logins)"),
 		filesRoot:  fs.String("files-root", "", "top of the tree a files session sees (absolute, existing directory)"),
 		host:       fs.String("host", "", "where port traffic goes, for a device serving another machine (default: this machine)"),
 		allowPorts: fs.String("allow-ports", "", "limit which ports this device serves, e.g. 502,80,8000-8100"),
@@ -136,6 +138,9 @@ func (f *deviceFlags) apply(fs *flag.FlagSet, d *config.LocalDevice, who invoker
 	if given["logins"] {
 		d.Logins = splitList(*f.logins)
 	}
+	if given["password-logins"] {
+		d.PasswordLogins = splitList(*f.passwordLogins)
+	}
 	if given["host"] {
 		d.Host = strings.TrimSpace(*f.host)
 	}
@@ -159,7 +164,7 @@ func (f *deviceFlags) apply(fs *flag.FlagSet, d *config.LocalDevice, who invoker
 		if given["logins"] && len(d.Logins) > 0 {
 			return fmt.Errorf("--logins: %w", config.ErrLoginsWithoutSession)
 		}
-		d.Logins = nil
+		d.Logins, d.PasswordLogins = nil, nil
 	} else if len(d.Logins) == 0 && who.goos != "windows" {
 		login, err := who.defaultLogin()
 		if err != nil {
