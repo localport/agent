@@ -16,6 +16,7 @@ package sessionhelper
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -59,11 +60,12 @@ func Run(log func(string, ...any)) int {
 		_ = launcher.WriteHelperReply(control, launcher.HelperReply{Refused: code})
 		return 1
 	}
-	if req.Kind != launcher.KindTerminal && req.Kind != launcher.KindExec {
+	if req.Kind != launcher.KindTerminal && req.Kind != launcher.KindExec && req.Kind != launcher.KindSFTP {
 		return refuse(launcher.CodeUnsupportedKind, errors.New(req.Kind))
 	}
-	// An exec session without a size runs on pipes; every other session on a PTY.
-	usePTY := req.Kind == launcher.KindTerminal || req.Cols > 0
+	// An exec session without a size, and a file session, run on pipes;
+	// every other session on a PTY.
+	usePTY := req.Kind == launcher.KindTerminal || (req.Kind == launcher.KindExec && req.Cols > 0)
 
 	a, err := lookupAccount(req.Login)
 	if err != nil {
@@ -115,9 +117,22 @@ func Run(log func(string, ...any)) int {
 	plan := spawnPlan{
 		path: shell,
 		args: shellArgs(shell, req),
-		env:  sessionEnv(a, shell, req.Term, loginDefsPath(a.UID), pamEnv),
+		env:  sessionEnv(a, shell, req.Term, loginDefsPath(a.UID), pamEnv, req.Env),
 		dir:  workDir(a.Home),
 		cred: &syscall.Credential{Uid: a.UID, Gid: a.GID, Groups: a.Groups},
+	}
+	if req.Kind == launcher.KindSFTP {
+		// The file server is this binary run as the login, as sshd runs
+		// sftp-server: confined to files_root or the login's home.
+		if plan.path, err = os.Executable(); err != nil {
+			pam.close()
+			return refuse(launcher.CodeSpawnFailed, err)
+		}
+		root := req.Root
+		if root == "" {
+			root = a.Home
+		}
+		plan.args, plan.events = []string{"localport-session", FilesServerMode, root}, true
 	}
 	out := &frameWriter{w: channel}
 	var k helperSession
@@ -268,9 +283,11 @@ func parseLoginDefsPath(defs string, uid uint32) string {
 }
 
 // sessionEnv is the shell's environment: the login's identity, TERM and
-// PATH, then every variable PAM set, which overrides those of the same name.
-// Nothing comes from the launcher's or the agent's environment.
-func sessionEnv(a account, shell, term, path string, pamEnv []string) []string {
+// PATH, then every variable PAM set, which overrides those of the same name,
+// then the client's LANG and LC_* variables (launcher.ValidEnv, checked by
+// Request.Validate), which override a PAM locale. Nothing comes from the
+// launcher's or the agent's environment.
+func sessionEnv(a account, shell, term, path string, pamEnv []string, clientEnv map[string]string) []string {
 	env := map[string]string{
 		"HOME": a.Home, "USER": a.Name, "LOGNAME": a.Name, "SHELL": shell,
 		"TERM": term, "PATH": path,
@@ -290,6 +307,12 @@ func sessionEnv(a account, shell, term, path string, pamEnv []string) []string {
 			order = append(order, k)
 		}
 		env[k] = v
+	}
+	for _, k := range slices.Sorted(maps.Keys(clientEnv)) {
+		if _, seen := env[k]; !seen {
+			order = append(order, k)
+		}
+		env[k] = clientEnv[k]
 	}
 	out := make([]string, 0, len(order))
 	for _, k := range order {

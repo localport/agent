@@ -228,12 +228,15 @@ func TestParseLoginDefsPath(t *testing.T) {
 	}
 }
 
-// PAM's variables come after the login's and override the same name;
-// nothing else is added.
+// PAM's variables come after the login's and override the same name; the
+// client's LANG and LC_* come last and override a PAM locale; nothing else
+// is added.
 func TestSessionEnv(t *testing.T) {
 	a := account{Name: "pi", Home: "/home/pi"}
-	got := sessionEnv(a, "/bin/bash", "xterm", "/usr/bin", []string{"XDG_SESSION_ID=4", "PATH=/pam/bin", "bad", "=x"})
-	want := []string{"HOME=/home/pi", "USER=pi", "LOGNAME=pi", "SHELL=/bin/bash", "TERM=xterm", "PATH=/pam/bin", "XDG_SESSION_ID=4"}
+	got := sessionEnv(a, "/bin/bash", "xterm", "/usr/bin", []string{"XDG_SESSION_ID=4", "PATH=/pam/bin", "LANG=C", "bad", "=x"},
+		map[string]string{"LC_TIME": "de_DE.UTF-8", "LANG": "en_GB.UTF-8"})
+	want := []string{"HOME=/home/pi", "USER=pi", "LOGNAME=pi", "SHELL=/bin/bash", "TERM=xterm", "PATH=/pam/bin", "XDG_SESSION_ID=4",
+		"LANG=en_GB.UTF-8", "LC_TIME=de_DE.UTF-8"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("env %q, want %q", got, want)
 	}

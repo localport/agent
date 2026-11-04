@@ -146,6 +146,28 @@ func TestRecorderRecordsADecryptableSession(t *testing.T) {
 	}
 }
 
+// A files-log event is recorded in order with the output as an "f" event
+// whose data is the event's JSON.
+func TestRecorderRecordsFileEvents(t *testing.T) {
+	h := &fakeHandoff{}
+	r, priv := newTestRecorder(t, RecPolicyBestEffort, h)
+	r.start(time.Now(), 80, 24)
+	event := `{"op":"exec","command":"uname -a"}`
+	r.file([]byte(event), nil)
+	r.output([]byte("Linux\r\n"), nil)
+	r.exit(0)
+	r.end()
+	text := decryptRecording(t, priv, r.sealer.WrappedDEK(), h.segs)
+	lines := bytes.Split(bytes.TrimSuffix([]byte(text), []byte("\n")), []byte("\n"))
+	if len(lines) != 4 {
+		t.Fatalf("asciicast %q: want header, f, o, x", text)
+	}
+	var ev []any
+	if err := json.Unmarshal(lines[1], &ev); err != nil || len(ev) != 3 || ev[1] != "f" || ev[2] != event {
+		t.Fatalf("line %q: want the f event %s", lines[1], event)
+	}
+}
+
 // A session that ends with nothing buffered still seals a final segment:
 // an empty plaintext, the 18-byte object.
 func TestRecorderSealsAnEmptyFinalSegment(t *testing.T) {

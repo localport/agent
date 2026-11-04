@@ -13,8 +13,9 @@ import (
 // never exceeds MaxPlaintext.
 const MaxLine = MaxPlaintext - 128
 
-// Writer encodes a terminal session as asciicast v3 lines. It records
-// output, resize and exit events only; input has no entry point. Event
+// Writer encodes a session channel as asciicast v3 lines. It records
+// output, resize, exit and files-log ("f") events only; input has no entry
+// point. Event
 // times come from the caller, so tests drive it with a fake clock. A Writer
 // is not safe for concurrent use.
 type Writer struct {
@@ -93,6 +94,14 @@ func (w *Writer) Exit(at time.Time, status int) [][]byte {
 		lines = append(lines, l)
 	}
 	return append(lines, eventLine(w.interval(at), 'x', jsonString(strconv.AppendInt(nil, int64(status), 10))))
+}
+
+// File returns the "f" line of one files-log event at at: an asciicast v3
+// extension event whose data is the event's JSON object as a string. The
+// caller passes a validated event (launcher.FileEvent); players that do not
+// know the code skip it, as asciicast v3 requires.
+func (w *Writer) File(at time.Time, event []byte) []byte {
+	return eventLine(w.interval(at), 'f', jsonString(event))
 }
 
 // interval returns the milliseconds to write for an event at at. A clock

@@ -31,7 +31,7 @@ const (
 	dekLen          = chacha20poly1305.KeySize
 	deflateLevel    = 6
 	wrapInfoContext = "localport-recording-v1"
-	openContext     = "localport-recording-open-v1"
+	openContext     = "localport-recording-open-v2"
 	completeContext = "localport-recording-complete-v1"
 )
 
@@ -199,13 +199,15 @@ type Completion struct {
 	Reason     string    `json:"reason"`
 }
 
-// OpenDigest is the digest the device signs for an open:
-// SHA-256(lp(context) || lp(id) || lp(SHA-256(wrapped_dek)) || lp(key_sha256)).
-func OpenDigest(id string, wrappedDEK, keySHA256 []byte) []byte {
+// OpenDigest is the digest the device signs for an open of recording id of
+// connection sessionID: SHA-256(lp(context) || lp(id) || lp(session_id) ||
+// lp(SHA-256(wrapped_dek)) || lp(key_sha256)).
+func OpenDigest(id, sessionID string, wrappedDEK, keySHA256 []byte) []byte {
 	dek := sha256.Sum256(wrappedDEK)
 	var msg []byte
 	msg = lengthPrefixed(msg, []byte(openContext))
 	msg = lengthPrefixed(msg, []byte(id))
+	msg = lengthPrefixed(msg, []byte(sessionID))
 	msg = lengthPrefixed(msg, dek[:])
 	msg = lengthPrefixed(msg, keySHA256)
 	sum := sha256.Sum256(msg)

@@ -1,8 +1,9 @@
 // Command localport-session is the session launcher service and its
 // per-session helper on Windows.
 //
-//	localport-session launcher   the LocalSystem service localport-session
-//	localport-session helper     one session; started only by the launcher
+//	localport-session launcher                          the LocalSystem service localport-session
+//	localport-session helper                            one session; started only by the launcher
+//	localport-session files-server <root> <handle>      one file session as the login; started only by a helper
 //
 // See internal/launcher for the protocol and internal/sessionhelper for the
 // session setup.
@@ -14,6 +15,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -28,6 +30,19 @@ import (
 
 func main() {
 	logger := log.New(os.Stderr, "", 0)
+	// The file server runs as the login: the helper passes the event pipe's
+	// inherited handle as the last argument.
+	if len(os.Args) == 4 && os.Args[1] == sessionhelper.FilesServerMode {
+		h, err := strconv.ParseUint(os.Args[3], 10, 64)
+		if err != nil {
+			os.Exit(2)
+		}
+		if err := sessionhelper.ServeFiles(stdio{}, os.Args[2], os.NewFile(uintptr(h), "file-events")); err != nil {
+			logger.Printf("localport-session: files: %v", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) != 2 {
 		logger.Print("usage: localport-session launcher | helper")
 		os.Exit(2)
@@ -55,6 +70,13 @@ func main() {
 		os.Exit(2)
 	}
 }
+
+// stdio is the file server's connection: standard input and output.
+type stdio struct{}
+
+func (stdio) Read(p []byte) (int, error)  { return os.Stdin.Read(p) }
+func (stdio) Write(p []byte) (int, error) { return os.Stdout.Write(p) }
+func (stdio) Close() error                { return os.Stdout.Close() }
 
 // s4uRefresh is how often the launcher re-checks the domain.
 const s4uRefresh = time.Minute

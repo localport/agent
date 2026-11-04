@@ -41,11 +41,12 @@ var (
 // errRecordingUnavailable reports a recording that could not start.
 var errRecordingUnavailable = errcode.New(errcode.RecordingUnavailable)
 
-// startRecording creates the recording entry of connection id (its session
-// id) and hands it to the uploader with the admitting certificate, from which
-// the first open creates the row, and sends that open, bounded by
-// strictOpenTimeout. The entry exists only when it returns a recorder.
-func (s *Server) startRecording(id string, adm *admission, start time.Time) (*sessionRecorder, error) {
+// startRecording creates the entry of recording id, one session channel of
+// connection sessionID, and hands it to the uploader with the admitting
+// certificate, from which the first open creates the row, and sends that
+// open, bounded by strictOpenTimeout. The entry exists only when it returns a
+// recorder.
+func (s *Server) startRecording(id, sessionID string, adm *admission, start time.Time) (*sessionRecorder, error) {
 	if s.cfg.Uploader == nil || s.cfg.RecordingKey == nil {
 		return nil, fmt.Errorf("%w: no uploader", errRecordingUnavailable)
 	}
@@ -53,8 +54,10 @@ func (s *Server) startRecording(id string, adm *admission, start time.Time) (*se
 	if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != adm.Rec.PubSHA256 {
 		return nil, fmt.Errorf("%w: the held recording key changed", errRecordingUnavailable)
 	}
-	// Both policies open before any channel is served, while the certificate
-	// the open carries is valid; strictOpenTimeout bounds the wait.
+	// Both policies open before the channel's helper starts; the edge attests
+	// the live connection, so the control plane checks the certificate at its
+	// admission however late the channel starts. strictOpenTimeout bounds the
+	// wait.
 	strict := adm.Rec.Policy == RecPolicyStrict
 	ctx, cancel := context.WithTimeout(context.Background(), strictOpenTimeout)
 	defer cancel()
@@ -64,6 +67,7 @@ func (s *Server) startRecording(id string, adm *admission, start time.Time) (*se
 	}
 	h, err := s.cfg.Uploader.BeginOpen(ctx, recording.Meta{
 		ID:             id,
+		SessionID:      sessionID,
 		Identifier:     s.cfg.Identifier,
 		LastAcceptedAt: start,
 		WrappedDEK:     sealer.WrappedDEK(),
@@ -86,8 +90,8 @@ type recordingHandoff interface {
 	Abort() error
 }
 
-// sessionRecorder records one terminal session. The kind's taps (start,
-// output, resize, exit) stamp each event and append it to one ordered queue;
+// sessionRecorder records one session channel. The taps (start, output,
+// resize, exit, file) stamp each event and append it to one ordered queue;
 // the recorder goroutine (run) owns the writer, segmenter and cut timer and
 // makes every handoff and sealing call. Only a Strict output tap on a full
 // queue waits for the spool, at most strictBackpressure. Segments are cut at
@@ -137,6 +141,7 @@ const (
 	evOutput
 	evResize
 	evExit
+	evFile
 )
 
 // recEvent is one tap, stamped when the terminal produced it.
@@ -193,6 +198,17 @@ func (r *sessionRecorder) start(at time.Time, cols, rows uint16) {
 // most strictBackpressure, then fails the recording. The wait also ends when
 // halt closes (the session is ending) or the recording closes.
 func (r *sessionRecorder) output(p []byte, halt <-chan struct{}) {
+	r.tap(evOutput, p, halt)
+}
+
+// file queues one files-log event (a validated launcher.FileEvent in JSON)
+// under the same bounds as output.
+func (r *sessionRecorder) file(event []byte, halt <-chan struct{}) {
+	r.tap(evFile, event, halt)
+}
+
+// tap queues a copy of p as an event of kind, bounded by recorderQueueBytes.
+func (r *sessionRecorder) tap(kind recEventKind, p []byte, halt <-chan struct{}) {
 	if r == nil {
 		return
 	}
@@ -212,7 +228,7 @@ func (r *sessionRecorder) output(p []byte, halt <-chan struct{}) {
 		}
 		if r.queued == 0 || r.queued+len(p) <= recorderQueueBytes {
 			if ev.data == nil {
-				ev = recEvent{kind: evOutput, at: at, data: bytes.Clone(p)}
+				ev = recEvent{kind: kind, at: at, data: bytes.Clone(p)}
 			}
 			r.queue = append(r.queue, ev)
 			r.queued += len(p)
@@ -237,7 +253,7 @@ func (r *sessionRecorder) output(p []byte, halt <-chan struct{}) {
 			return
 		case <-timer.C:
 			r.closeWith(recFail, recording.ReasonRecordingFailed)
-			r.log("session: recording %s stopped (%s): terminal output waited %v for the recording queue", r.sealer.ID(), recording.ReasonRecordingFailed, strictBackpressure)
+			r.log("session: recording %s stopped (%s): channel output waited %v for the recording queue", r.sealer.ID(), recording.ReasonRecordingFailed, strictBackpressure)
 			return
 		}
 	}
@@ -342,7 +358,7 @@ func (r *sessionRecorder) next() (ev recEvent, how recClose, reason string, ok b
 	ev = r.queue[0]
 	r.queue[0] = recEvent{}
 	r.queue = r.queue[1:]
-	if ev.kind == evOutput {
+	if ev.kind == evOutput || ev.kind == evFile {
 		r.queued -= len(ev.data)
 		select {
 		case r.space <- struct{}{}:
@@ -437,6 +453,10 @@ func (r *sessionRecorder) record(st *recorderState, ev recEvent) bool {
 		if st.w != nil && !st.exited {
 			st.exited = true
 			return r.add(st, ev.at, st.w.Exit(ev.at, ev.status)...)
+		}
+	case evFile:
+		if st.w != nil {
+			return r.add(st, ev.at, st.w.File(ev.at, ev.data))
 		}
 	}
 	return true

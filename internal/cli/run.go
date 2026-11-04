@@ -235,16 +235,17 @@ func deviceSpec(store *identity.Store, d config.LocalDevice, probe sessionProbe,
 		logins = []string{launcher.AgentAccount}
 	}
 	spec = config.DeviceSpec{
-		Name:         prefix,
-		Identity:     d.Identity.Identity,
-		Host:         host,
-		Edge:         config.ResolveEdge(m.Meta.Device.Region),
-		AllowPorts:   d.AllowPorts,
-		Credential:   identity.NewDeviceRegistrar(store, d.Identity, logEvent),
-		Capabilities: capabilities,
-		Logins:       logins,
-		Desktop:      desktop,
-		RunAsAgent:   d.RunAsAgent,
+		Name:           prefix,
+		Identity:       d.Identity.Identity,
+		Host:           host,
+		Edge:           config.ResolveEdge(m.Meta.Device.Region),
+		AllowPorts:     d.AllowPorts,
+		Credential:     identity.NewDeviceRegistrar(store, d.Identity, logEvent),
+		Capabilities:   capabilities,
+		Logins:         logins,
+		PasswordLogins: d.PasswordLogins,
+		Desktop:        desktop,
+		RunAsAgent:     d.RunAsAgent,
 	}
 	if d.UsesLogins() {
 		spec.SessionAuth, spec.FullDiskAccess = probe.sessionAuth, probe.fullDiskAccess
@@ -289,19 +290,20 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 	refresher := &identity.KeyRefresher{Store: store, Ref: ref, OnEvent: logEvent}
 	spec.HintRevoked = hintRevoked(keys, refresher, logEvent)
 	spec.SessionHandler = session.NewServer(session.ServerConfig{
-		Prefix:       spec.Name,
-		Certificate:  spec.Credential.RegisteredCertificate,
-		CAKeys:       keys.CAKeys,
-		RefreshKeys:  refresher.RefreshNow,
-		RecordingKey: keys.RecordingKey,
-		Capabilities: spec.Capabilities,
-		Logins:       spec.Logins,
-		Desktop:      spec.Desktop,
-		OnEvent:      logEvent,
-		Uploader:     uploads,
-		Identifier:   ref.Identity,
-		Device:       ref.String(),
-		Launcher:     sessionLauncher,
+		Prefix:         spec.Name,
+		Certificate:    spec.Credential.RegisteredCertificate,
+		CAKeys:         keys.CAKeys,
+		RefreshKeys:    refresher.RefreshNow,
+		RecordingKey:   keys.RecordingKey,
+		Capabilities:   spec.Capabilities,
+		Logins:         spec.Logins,
+		PasswordLogins: spec.PasswordLogins,
+		Desktop:        spec.Desktop,
+		OnEvent:        logEvent,
+		Uploader:       uploads,
+		Identifier:     ref.Identity,
+		Device:         ref.String(),
+		Launcher:       sessionLauncher,
 	})
 	return &deviceSessionState{refresher: refresher, lock: lock}, nil
 }

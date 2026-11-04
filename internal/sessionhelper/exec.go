@@ -5,6 +5,7 @@ package sessionhelper
 import (
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,8 @@ type pipeSession struct {
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr io.ReadCloser
+	// events is the read end of the file server's event pipe, nil otherwise.
+	events *os.File
 
 	ended     chan struct{}
 	endedOnce sync.Once
@@ -70,7 +73,19 @@ func startPipeSession(out *frameWriter, plan spawnPlan, log func(string, ...any)
 	if err != nil {
 		return nil, err
 	}
+	var events *os.File
+	if plan.events {
+		r, w, err := os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		events, cmd.ExtraFiles = r, []*os.File{w}
+		defer w.Close() // the child holds its copy once started
+	}
 	if err := cmd.Start(); err != nil {
+		if events != nil {
+			_ = events.Close()
+		}
 		return nil, err
 	}
 	p := &pipeSession{
@@ -85,6 +100,10 @@ func startPipeSession(out *frameWriter, plan spawnPlan, log func(string, ...any)
 	var readers sync.WaitGroup
 	readers.Go(func() { p.readOutput(stdout, launcher.FrameData) })
 	readers.Go(func() { p.readOutput(stderr, launcher.FrameStderr) })
+	if events != nil {
+		p.events = events
+		readers.Go(func() { p.readEvents(events) })
+	}
 	go func() { readers.Wait(); close(p.readersDone) }()
 	go p.wait()
 	return p, nil
@@ -130,6 +149,32 @@ func (p *pipeSession) readOutput(r io.Reader, typ byte) {
 	}
 }
 
+// readEvents relays the child's event frames: each must be a valid file
+// event, else the session ends. The event pipe is the file server's own
+// account's, so nothing it sends is trusted unchecked.
+func (p *pipeSession) readEvents(r io.Reader) {
+	fr := launcher.NewFrameReader(r)
+	for {
+		f, err := fr.ReadFrame()
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		if err != nil || f.Type != launcher.FrameEvent {
+			p.log("sessionhelper: bad event pipe frame: %v", err)
+			p.finish()
+			return
+		}
+		if _, err := launcher.ParseFileEvent(f.Data); err != nil {
+			p.log("sessionhelper: bad file event: %v", err)
+			p.finish()
+			return
+		}
+		if !p.writeOutput(launcher.FrameEvent, f.Data) {
+			return
+		}
+	}
+}
+
 func (p *pipeSession) writeOutput(typ byte, b []byte) bool {
 	p.outMu.Lock()
 	defer p.outMu.Unlock()
@@ -162,6 +207,9 @@ func (p *pipeSession) wait() {
 	// Unblocks readers held by a child that kept the pipes open.
 	_ = p.stdout.Close()
 	_ = p.stderr.Close()
+	if p.events != nil {
+		_ = p.events.Close()
+	}
 	<-p.readersDone
 	_ = p.cmd.Wait()
 	p.exitCode = exitCode(p.cmd.ProcessState)

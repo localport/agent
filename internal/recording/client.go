@@ -44,8 +44,9 @@ const MaxCertificate = 8 << 10
 // complete with the key of the certificate that conn presented. Errors are
 // ErrNoSessionMux, an error wrapping ErrTransport, or a *Refusal.
 type Client interface {
-	// Open sends the open with the session's certificate (Meta.Certificate).
-	Open(ctx context.Context, id string, wrappedDEK, keySHA256, certificate []byte) (Result, error)
+	// Open sends the open of recording id of connection sessionID with the
+	// connection's certificate (Meta.SessionID, Meta.Certificate).
+	Open(ctx context.Context, id, sessionID string, wrappedDEK, keySHA256, certificate []byte) (Result, error)
 	Complete(ctx context.Context, id string, wrappedDEK []byte, done Completion) (Result, error)
 	// PutSegment sends a live session's segment.
 	PutSegment(ctx context.Context, id string, seg Segment) (Result, error)

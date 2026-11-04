@@ -582,7 +582,7 @@ response open for the life of the mux. Each session is one notice on it:
 | Bytes | Meaning                                                        |
 | ----- | -------------------------------------------------------------- |
 | 4     | `uint32` big-endian length, always 24                          |
-| 16    | session id: the bytes of the UUID the access row and recording carry |
+| 16    | session id: the bytes of the UUID the access row carries and each of the connection's recordings names |
 | 8     | `uint64` big-endian serial of the SSH user certificate the edge admitted |
 
 A notice of any other length, or the accept stream ending, ends the mux.
@@ -618,35 +618,58 @@ unparsed by the edge) and the agent's SSH server:
    | signed by a session CA key the agent holds (`ticket_keys.json`); an unknown CA key triggers one key fetch (at most 3 s, at most once per 5 minutes) and one retry |
    | valid now within 30 s of skew, for the user name as its principal |
    | exactly one critical option, `device@localport.io`, naming this device's prefix and registered key (`spki_sha256`) |
-   | the kind (`kind@localport.io`) enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) and served by this agent (`terminal`, `ssh`) |
+   | the kind (`kind@localport.io`) enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) and served by this agent (`terminal`, `ssh`, `files`) |
    | the user name listed in the local `logins` |
    | a `rec@localport.io`, when present, naming the held team recording key; a mismatch triggers one key fetch, under the same floor, and one retry |
+
+   On Windows, a user name listed in the device's `password_logins` then needs
+   `keyboard-interactive` with one prompt, `Windows password: `, without echo: the
+   certificate step answers partial success and names only that method, so a
+   keyboard-interactive attempt never stands alone. An empty answer, or one
+   over 256 bytes, fails userauth. The agent holds the answer for the
+   connection's life, passes it to each channel's launcher request, which logs
+   the login on with it, and clears it when the connection ends.
 
    At most 8 connections run at once; a stream past that, or one arriving
    while the agent shuts down, is closed before the handshake.
 3. Channels: `session` channels only (others are refused `prohibited`); a
-   `terminal` connection has one, an `ssh` connection at most 4 open at once.
-   On a session channel the agent accepts `pty-req` (cols and rows 1 to 1000,
-   term matching `^[a-zA-Z0-9.+-]{1,32}$`), `window-change`, `shell` (with a
-   PTY: the login shell on a terminal; without one, on `ssh` only: the login
-   shell on pipes) and, on `ssh` only, `exec` (a command of at most 2 KiB, run
-   by the login shell with `-c`, on a PTY when one was requested, else on
-   pipes with stdout and stderr apart). It refuses `env`, `subsystem`,
+   `terminal` connection has one, an `ssh` or `files` connection at most 4
+   open at once. On a session channel of a `terminal` or `ssh` connection the
+   agent accepts `pty-req` (cols and rows 1 to 1000, term matching
+   `^[a-zA-Z0-9.+-]{1,32}$`), `window-change`, `shell` (with a PTY: the login
+   shell on a terminal; without one, on `ssh` only: the login shell on pipes)
+   and, on `ssh` only, `exec` (a command of at most 2 KiB, run by the login
+   shell with `-c`, on Windows as `"%SystemRoot%\System32\cmd.exe" /c
+   "<command>"`, on a PTY when one was requested, else on pipes with stdout
+   and stderr apart). `subsystem` `sftp` is accepted on `ssh` and is the only
+   request a `files` connection accepts. `env` is accepted before `shell`,
+   `exec` or `subsystem` for `LANG` and `LC_[A-Z]{1,24}` only: at most 16 per
+   channel, each value at most 256 bytes of UTF-8 without control characters,
+   names and values together at most 1 KiB; the helper sets them after the
+   login's environment. It refuses every other `env`, other subsystems,
    `x11-req`, `auth-agent-req@openssh.com`, `signal`, and every global request
-   (`tcpip-forward` included). Each `shell` or `exec` is one launcher request
-   of kind `terminal` or `exec`; a refusal fails the request and writes
+   (`tcpip-forward` included). Each `shell`, `exec` or `subsystem` is one
+   launcher request of kind `terminal`, `exec` or `sftp`; an `sftp` request
+   serves the SFTP protocol (version 3) as the login, confined to the
+   device's `files_root` or the login's home, opening only regular files and
+   directories and writing in place at the requested offsets; a refusal fails
+   the request and writes
    `localport: <code>` to the channel's stderr (`login_not_allowed`,
-   `kind_disabled`, `agent_busy`, `kind_unavailable`, `launcher_unavailable`).
-   The helper's exit becomes `exit-status`, then the channel closes.
+   `kind_disabled`, `agent_busy`, `kind_unavailable`, `launcher_unavailable`,
+   `recording_unavailable` for a Strict channel whose recording did not open).
+   The helper's exit becomes `exit-status`, then the channel closes; a Strict
+   channel whose recording fails ends with
+   `localport: session ended: recording_failed`.
 4. End: the agent closes the connection, after writing
    `localport: session ended: <reason>` to each open channel's stderr, for
    `idle` (30 minutes without client channel data or a request),
    `shutdown` (the control session is ending), `config_changed`
    (`localport set` changed the device's entry and the agent reloaded it; the
    device's other sessions end too), `exited` (the channel of a `terminal`
-   connection closed), `recording_failed` (a Strict recording could no longer
-   keep the session's output) and, on one channel, `helper_failed` (the session
-   helper's channel ended without an exit). A client that closes the
+   connection, or the last channel of a `files` connection, closed, a Strict
+   recording failure on it included) and, on one
+   channel, `helper_failed` (the session helper's channel ended without an
+   exit). A client that closes the
    connection ends it without a reason.
 
 Reconnect: a failed dial or bind, and a mux that drops, are retried for the
@@ -660,31 +683,49 @@ is independent of it.
 Stop: when the control session ends or the agent stops, the agent first asks its
 session handler to shut down (connections end with `shutdown`, handshakes in
 progress are aborted, session processes are ended: SIGHUP, then SIGKILL at
-5 s, and each connection waits at most 3 s for its recording's final segment
+5 s, and each channel waits at most 3 s for its recording's final segment
 to reach the uploader),
 waits for that at most 10 s, then closes the mux connection. The connection is
 never closed before that step.
 
 ## Session recording
 
-A `terminal` or `ssh` certificate may carry `rec@localport.io`:
+A `terminal`, `ssh` or `files` certificate may carry `rec@localport.io`:
 `{"policy","pub_sha256"}`, where `pub_sha256` is the unpadded base64url
 SHA-256 of the team recording public key (43 characters) and `policy`
 `best_effort` or `strict`; the userauth checks are in the table under
-[Session mux](#session-mux). The recording id is the connection's session id
-from the notice, so every connection, including repeat connections on one
-certificate, has its own recording. A recorded connection serves one channel
-in its life (a second channel open is refused), so nothing on it runs
-unrecorded. The agent records that channel's output, resizes and exit, seals
-it in segments and delivers them over its session mux. The
-open carries the admitting certificate (`certificate`, base64url, at most
-8 KiB), from which the control plane creates the recording's row; the spool's
-`meta.json` keeps it so a resumed open after a restart sends it again. Code:
+[Session mux](#session-mux). On a recorded connection every `shell`, `exec`
+or `sftp` subsystem opens its own recording before its helper starts: a fresh UUIDv7 recording id,
+and the connection's session id from the notice (`session_id`), so every
+channel of every connection, including multiplexed channels (OpenSSH
+ControlMaster) and repeat connections on one certificate, has its own
+recording. A Strict channel whose open fails within 5 s is refused
+(`recording_unavailable`) and other channels are unaffected; a Best effort one
+runs unrecorded. A recorded `shell` or `exec` writes
+`localport: this session is recorded` to its stderr before any helper
+output; an `sftp` channel, whose client shows no stderr, does not. The agent records the channel's output, resizes and exit,
+seals it in segments and delivers them over its session mux. The open carries
+the admitting certificate (`certificate`, base64url, at most 8 KiB), from
+which the control plane creates the recording's row; the edge forwards the
+open only for a connection its session mux carries and adds when it admitted
+that certificate, so a channel that starts after a short-lived certificate
+expired is still recorded. The spool's `meta.json` keeps the certificate and
+the session id so a resumed open after a restart sends them again. Code:
 `internal/recording/`, `internal/session/recorder.go`,
 `internal/tunnel/recording_client.go`.
 
 Format: the plaintext is asciicast v3, one JSON line per event (header, then
-`o` output, `r` resize and `x` exit events). A segment holds whole lines and
+`o` output, `r` resize, `f` file activity and `x` exit events; an `sftp`
+channel's header has the default size, 80 by 24). An `f` event's data is a
+JSON object string: `op` (`exec`, `read`, `write`, `mkdir`, `rmdir`,
+`remove`, `rename`, `setstat`, `symlink`, `link`, `list`), `path`, `target`
+(rename, symlink, link), `command` (exec, at most 2 KiB), `bytes` (read and
+write: one event when the handle closes, with the bytes moved) and `result`
+(`ok`, `no_such_file`, `permission_denied`, `file_exists` or `failure`;
+absent on `exec`). The agent writes the `exec` event from the request when the
+command starts; the SFTP server sends the others to the agent on its own pipe,
+and an event that fails validation ends the channel. Players skip codes
+they do not know, as asciicast v3 requires. A segment holds whole lines and
 is cut at 10 s or 256 KiB of plaintext, whichever comes first. Each recording
 has a random 32-byte DEK, wrapped once with HPKE (ML-KEM-768 with X25519,
 HKDF-SHA256, ChaCha20-Poly1305, info `localport-recording-v1` followed by
@@ -711,7 +752,7 @@ Signatures: `lp(x)` is a `uint32` big-endian length then `x`. The agent signs
 SHA-256 of these messages with the key of the device certificate the carrying
 session mux presented, as ASN.1 DER in unpadded base64url:
 
-- open: `lp("localport-recording-open-v1") || lp(id) || lp(SHA-256(wrapped_dek)) || lp(key_sha256)`
+- open: `lp("localport-recording-open-v2") || lp(id) || lp(session_id) || lp(SHA-256(wrapped_dek)) || lp(key_sha256)`
 - complete: `lp("localport-recording-complete-v1") || lp(id) || lp(SHA-256(wrapped_dek)) || segments (uint32 BE) || lp(final_hash) || ended_at (uint64 BE, Unix seconds) || incomplete (1 byte) || final (1 byte) || lp(reason)`
 
 The spool and memory hold only unsigned fields; every open and complete is
@@ -723,7 +764,7 @@ are unpadded base64url.
 
 | Request | Body | `200` answer |
 | ------- | ---- | ------------ |
-| `POST /v1/recording/open` | `{"wrapped_dek","signature"}` | `{"status","segments","chain"}`: the segments the server holds and its chain over them (empty with 0 segments) |
+| `POST /v1/recording/open` | `{"wrapped_dek","signature","certificate","session_id"}` (`session_id` the canonical UUID of the connection; an id the mux does not carry is `recording_not_found`) | `{"status","segments","chain"}`: the segments the server holds and its chain over them (empty with 0 segments) |
 | `PUT /v1/recording/segment`, headers `Localport-Segment-Index` (decimal, no sign or leading zeros) and `Localport-Segment-Sha256` (unpadded base64url of `h_i`) | the segment object, at least 18 bytes | `{"status","segments"}`; a segment already stored answers `200` like a fresh one |
 | `POST /v1/recording/complete` | `{"segments","final_hash","ended_at","incomplete","final","reason","signature"}` | `{"status","segments"}` |
 
@@ -801,9 +842,8 @@ body is completed with `incomplete` true, `final` false and reason
 
 Policies:
 
-- Best effort: the open is sent after userauth and before any channel is
-  served, within 5 s, while the certificate it carries is valid; when it fails
-  the connection runs unrecorded and no spool entry stays. When the spool
+- Best effort: the channel's open is sent before its helper starts, within
+  5 s; when it fails the channel runs unrecorded and no spool entry stays. When the spool
   has no room for a segment's hash, or memory is full and the spool refuses the
   segment, recording stops (indices stay contiguous), the recording completes
   `incomplete` with reason `spool_full` or `disk_low`, and the session
@@ -811,24 +851,84 @@ Policies:
   full, recording stops the same way with reason `recording_failed`; terminal
   output never waits for it. An agent without a recording uploader, or whose
   spool has no room for a new recording, runs the session unrecorded.
-- Strict: the open is sent after userauth and before any channel is served,
-  within 5 s. Any failure, a missing uploader or no spool room for a new
-  recording closes the connection and spawns no shell. When the
+- Strict: the channel's open is sent before its helper starts, within 5 s.
+  Any failure, a missing uploader or no spool room for a new recording
+  refuses that channel (`recording_unavailable`) and spawns nothing; other
+  channels are unaffected. When the
   spool has no room for a segment's hash, or memory is full and the spool
   refuses the segment, the agent seals what it has, completes `incomplete`
-  with reason `recording_failed` and ends the session with close reason
+  with reason `recording_failed` and ends that channel with
   `recording_failed`. When the recorder's queue is full, terminal output waits
-  for space at most 5 s (less when the session ends first), then the recording
-  and the session end the same way. A Strict session whose mux drops keeps
+  for space at most 5 s (less when the channel ends first), then the recording
+  and the channel end the same way. A Strict channel whose mux drops keeps
   running while the spool accepts.
 
-Every session end seals a final segment (the `x` event when the shell
+Every channel end seals a final segment (the `x` event when the helper
 exited) and completes with `incomplete` false unless recording stopped. The
-session's end waits at most 3 s for the final segment to reach the uploader;
+channel's end waits at most 3 s for the final segment to reach the uploader;
 past that it ends without it, and the recording completes `incomplete` with
 reason `recording_failed` once the stalled handoff returns. A connection
-refused for its recording key, or closed because its Strict recording did not
-open, is worth one fresh certificate.
+refused for its recording key, or a channel refused because its Strict
+recording did not open, is worth one fresh certificate.
+
+## Native SSH clients (`localport ssh`)
+
+The CLI reaches a device's SSH server with the system OpenSSH client and a
+consumer credential (`localport login` or `localport setup`). Code:
+`internal/cli/ssh.go`, `internal/identity/session.go`.
+
+Mint: `POST /v1/sessions` on the control plane the credential came from, no
+session, body `{"device_host","kind","login","client_ssh_pubkey","cert_chain","timestamp","sig"}`:
+`kind` `ssh`, `client_ssh_pubkey` the client key in authorized_keys form,
+`cert_chain` the credential's certificate PEM, `timestamp` Unix seconds, and
+`sig` standard base64 of the credential key's signature over SHA-256 of
+`"localport-session-request-v1"`, then `device_host`, `kind`, `login`,
+`client_ssh_pubkey`, `cert_chain` and `timestamp` (decimal) each as a 4-byte
+big-endian length and its bytes, then `timestamp / 60` as 8 bytes big-endian;
+the control plane accepts it within a minute of its clock. The answer is
+`{"certificate","url","host_key","device_host"}`: an OpenSSH user certificate
+for the client key, valid 5 minutes, whose one principal is the login; the
+WebSocket URL on the device's edge; and the device host key
+(`ecdsa-sha2-nistp256`). Transport failures, `5xx` and `429` are retried
+within the retry budget.
+
+Files, under the state root (the directory holding `identity/`): the client
+key `ssh/<team>/<kind>-<identity>/<device-host>` (ed25519, OpenSSH format,
+0600, generated on first use, never sent), its certificate beside it as
+`<device-host>-cert.pub`, the edge URL as `<device-host>.url`, and
+`known_hosts`, one line per device host. `ssh-cert` mints only when the stored
+certificate is not for this key and login, or has under 60 s left. It checks
+the answer (a user certificate for the client key and exactly the login,
+not expired, an `ecdsa-sha2-nistp256` host key, a `wss` URL) before writing,
+then replaces the device host's `known_hosts` line with the answer's host key,
+writes the URL and the certificate, each atomically, all under the lock
+`ssh/.lock`, so concurrent connections mint once.
+
+Stream: `ssh-proxy` dials the URL, sends the certificate in SSH wire form as
+the first binary WebSocket message, then carries the SSH connection in binary
+messages of at most 32 KiB each way. The edge's close reason other than
+`client_closed` or `agent_closed` is printed as
+`localport: session ended: <reason>`.
+
+`localport ssh-config <device-host>...` prints, per device:
+
+    Host <device-host>
+      ProxyCommand localport ssh-proxy --identity <ref> %r %h
+      IdentityFile <key>
+      CertificateFile <key>-cert.pub
+      UserKnownHostsFile <state root>/known_hosts
+      HostKeyAlias <device-host>
+      StrictHostKeyChecking yes
+      IdentitiesOnly yes
+    Match host <device-host> exec "localport ssh-cert --identity <ref> %r %h"
+
+ssh runs the `Match exec` while it reads its config, so the certificate is
+fresh before ssh loads it and before the proxy starts; a failed mint leaves
+`ssh-proxy` with no usable certificate, so ssh stops at the proxy and never
+connects to the host name directly. `localport ssh [login@]<device-host>`
+runs the same mint and then the system `ssh` with these options; with an
+OpenSSH client older than 9.9 it prints a one-line notice that the
+connection uses `curve25519-sha256`, not post-quantum key exchange.
 
 ## Remote access (`localport access`)
 

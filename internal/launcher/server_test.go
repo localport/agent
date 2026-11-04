@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -249,6 +251,25 @@ func TestRunAsAgentStartsTheAgentAccount(t *testing.T) {
 	}
 }
 
+// A file session needs files enabled, not terminal, and is confined to the
+// device's files_root; a terminal session needs terminal.
+func TestAuthorizeFileSessions(t *testing.T) {
+	files := Request{V: Version, Kind: KindSFTP, Device: terminalRequest("pi").Device, Login: "pi"}
+	s := &Server{LoadConfig: testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityFiles},
+		Logins: []string{"pi"}, FilesRoot: "/srv/share"})}
+	h, err := s.authorize(files)
+	if err != nil || h.Kind != KindSFTP || h.Root != "/srv/share" {
+		t.Fatalf("authorize = %+v, %v", h, err)
+	}
+	if _, err := s.authorize(terminalRequest("pi")); CodeOf(err) != CodeKindNotEnabled {
+		t.Fatalf("terminal on a files-only device: %v, want kind_not_enabled", err)
+	}
+	s = &Server{LoadConfig: testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityTerminal}, Logins: []string{"pi"}})}
+	if _, err := s.authorize(files); CodeOf(err) != CodeKindNotEnabled {
+		t.Fatalf("files on a terminal-only device: %v, want kind_not_enabled", err)
+	}
+}
+
 func TestRequestValidation(t *testing.T) {
 	ok := terminalRequest("pi")
 	ok.V = Version
@@ -270,10 +291,56 @@ func TestRequestValidation(t *testing.T) {
 			t.Errorf("%s: %v, want bad_request", name, r.Validate())
 		}
 	}
+	// sftp: on pipes, no terminal and no command.
 	r := ok
-	r.Kind = KindSFTP
-	if CodeOf(r.Validate()) != CodeUnsupportedKind {
-		t.Errorf("sftp: %v, want unsupported_kind", r.Validate())
+	r.Kind, r.Cols, r.Rows, r.Term = KindSFTP, 0, 0, ""
+	if err := r.Validate(); err != nil {
+		t.Errorf("sftp: %v", err)
+	}
+	for name, edit := range map[string]func(*Request){
+		"sftp with a terminal": func(r *Request) { r.Cols, r.Rows, r.Term = 80, 24, "xterm" },
+		"sftp with a command":  func(r *Request) { r.Command = "ls" },
+	} {
+		bad := r
+		edit(&bad)
+		if CodeOf(bad.Validate()) != CodeBadRequest {
+			t.Errorf("%s: %v, want bad_request", name, bad.Validate())
+		}
+	}
+	// env: LANG and LC_* within the bounds pass; the launcher refuses
+	// anything else even when the agent sent it.
+	withEnv := ok
+	withEnv.Env = map[string]string{"LANG": "en_GB.UTF-8", "LC_TIME": "C"}
+	if err := withEnv.Validate(); err != nil {
+		t.Errorf("valid env: %v", err)
+	}
+	full := map[string]string{}
+	for i := range MaxEnvVars {
+		full[fmt.Sprintf("LC_V%c", 'A'+i)] = "C"
+	}
+	tooMany := maps.Clone(full)
+	tooMany["LC_OVER"] = "C"
+	big := map[string]string{}
+	for i := range 5 {
+		big[fmt.Sprintf("LC_B%c", 'A'+i)] = strings.Repeat("a", MaxEnvValue)
+	}
+	for name, env := range map[string]map[string]string{
+		"PATH":            {"PATH": "/evil"},
+		"LD_PRELOAD":      {"LD_PRELOAD": "x.so"},
+		"control char":    {"LANG": "C\n"},
+		"value too long":  {"LANG": strings.Repeat("a", MaxEnvValue+1)},
+		"too many":        tooMany,
+		"over 1 KiB":      big,
+		"lower-case name": {"lc_all": "C"},
+	} {
+		r := ok
+		r.Env = env
+		if CodeOf(r.Validate()) != CodeBadRequest {
+			t.Errorf("env %s: %v, want bad_request", name, r.Validate())
+		}
+	}
+	if r := ok; func() bool { r.Env = full; return r.Validate() != nil }() {
+		t.Errorf("%d variables refused", MaxEnvVars)
 	}
 	if r := ok; r.Validate() != nil || func() bool { r.Command = "id"; return CodeOf(r.Validate()) != CodeBadRequest }() {
 		t.Error("a terminal request with a command was not refused")

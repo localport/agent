@@ -34,6 +34,37 @@ func startPipe(t *testing.T, command string) (*pipeSession, *launcher.FrameReade
 	return p, launcher.NewFrameReader(agent)
 }
 
+// The file server's event pipe is descriptor 3: a valid event is relayed as
+// an event frame; an invalid one ends the session without its exit frame.
+func TestPipeSessionRelaysOnlyValidEvents(t *testing.T) {
+	agent, helper, err := launcher.SocketPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+	defer helper.Close()
+	// Frames: type 6, uint32 BE length, JSON (38 bytes valid, 14 invalid).
+	script := `printf '\006\000\000\000\046{"op":"list","path":"/","result":"ok"}' >&3; sleep 0.2; ` +
+		`printf '\006\000\000\000\016{"op":"chmod"}' >&3; sleep 30`
+	plan := spawnPlan{path: "/bin/sh", args: []string{"sh", "-c", script}, env: []string{"PATH=/usr/bin:/bin"}, dir: "/", events: true}
+	p, err := startPipeSession(&frameWriter{w: helper}, plan, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { p.finish(); p.Wait() }()
+	_ = agent.SetDeadline(time.Now().Add(15 * time.Second))
+	fr := launcher.NewFrameReader(agent)
+	f, err := fr.ReadFrame()
+	if err != nil || f.Type != launcher.FrameEvent || string(f.Data) != `{"op":"list","path":"/","result":"ok"}` {
+		t.Fatalf("first frame %+v %q, %v", f, f.Data, err)
+	}
+	select {
+	case <-p.endedC():
+	case <-time.After(10 * time.Second):
+		t.Fatal("an invalid event did not end the session")
+	}
+}
+
 // readToExit collects stdout and stderr frames up to the exit frame.
 func readToExit(t *testing.T, fr *launcher.FrameReader) (stdout, stderr string, code int32) {
 	t.Helper()

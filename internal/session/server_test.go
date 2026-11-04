@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -100,7 +101,16 @@ func (l *fakeLauncher) helper(conn net.Conn, req launcher.Request) {
 		_, _ = io.Copy(io.Discard, conn)
 		return
 	}
-	if req.Kind == launcher.KindExec && req.Command != "cat" && req.Command != "" {
+	event := func() {
+		ev, _ := launcher.FileEvent{Op: launcher.OpList, Path: "/", Result: launcher.ResultOK}.Marshal()
+		_ = launcher.WriteFrame(conn, launcher.Frame{Type: launcher.FrameEvent, Data: ev})
+	}
+	if req.Kind == launcher.KindSFTP || req.Command == "event" {
+		// A file event, then the sftp bytes echo until eof; an exec helper
+		// that sends one breaks the channel protocol.
+		event()
+	}
+	if req.Kind == launcher.KindExec && req.Command != "cat" && req.Command != "" && req.Command != "event" {
 		_ = launcher.WriteFrame(conn, launcher.Frame{Type: launcher.FrameData, Data: []byte(req.Command)})
 		_ = launcher.WriteFrame(conn, launcher.Frame{Type: launcher.FrameStderr, Data: []byte("warn")})
 		exit(3)
@@ -466,7 +476,9 @@ func TestExecOverSSH(t *testing.T) {
 // Every certificate the local config or the notice does not admit fails
 // userauth.
 func TestUserauthRefusals(t *testing.T) {
-	f := newSSHFixture(t, func(c *ServerConfig) { c.Capabilities = []string{"terminal", "files"} })
+	f := newSSHFixture(t, func(c *ServerConfig) {
+		c.Capabilities, c.Desktop = []string{"terminal", "files", "desktop"}, []string{"vnc"}
+	})
 	_, otherCA, _ := ed25519.GenerateKey(rand.Reader)
 	for _, tc := range []struct {
 		name   string
@@ -482,7 +494,7 @@ func TestUserauthRefusals(t *testing.T) {
 		{"unknown critical option", func(o *certOpts) { o.extraCO = true }, 0},
 		{"login not enabled", func(o *certOpts) { o.login = "root" }, 0},
 		{"kind not enabled", func(o *certOpts) { o.kind = "rdp" }, 0},
-		{"kind not served", func(o *certOpts) { o.kind = "files" }, 0},
+		{"kind not served", func(o *certOpts) { o.kind = "vnc" }, 0},
 		{"recording key not held", func(o *certOpts) { o.rec = &certRec{Policy: RecPolicyStrict, PubSHA256: "AAAA"} }, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -573,11 +585,11 @@ func TestChannelPolicy(t *testing.T) {
 			t.Fatalf("%s accepted", req)
 		}
 	}
-	if err := sess.RequestSubsystem("sftp"); err == nil {
-		t.Fatal("the sftp subsystem started")
+	if err := sess.RequestSubsystem("netconf"); err == nil {
+		t.Fatal("a subsystem other than sftp started")
 	}
 	if err := sess.Setenv("PATH", "/evil"); err == nil {
-		t.Fatal("env accepted")
+		t.Fatal("env PATH accepted")
 	}
 	held := []*ssh.Session{sess}
 	for len(held) < maxChannels {
@@ -589,6 +601,181 @@ func TestChannelPolicy(t *testing.T) {
 	}
 	if _, err := client.NewSession(); err == nil {
 		t.Fatalf("channel %d opened", maxChannels+1)
+	}
+}
+
+// The sftp subsystem: an ssh connection serves it beside shells, a files
+// connection serves it only (no pty, shell or exec), a terminal connection
+// never; each becomes one launcher request of kind sftp without a terminal.
+func TestFilesChannelPolicy(t *testing.T) {
+	f := newSSHFixture(t, func(c *ServerConfig) { c.Capabilities = []string{"terminal", "files"} })
+	o := f.defaults()
+	o.kind = "files"
+	client := f.connect(t, o)
+	sess, _ := client.NewSession()
+	if ok, _ := sess.SendRequest("pty-req", true, ssh.Marshal(ptyRequest{Term: "xterm", Cols: 80, Rows: 24})); ok {
+		t.Fatal("pty-req accepted on a files connection")
+	}
+	if err := sess.Shell(); err == nil {
+		t.Fatal("a shell started on a files connection")
+	}
+	sess, _ = client.NewSession()
+	if err := sess.Start("id"); err == nil {
+		t.Fatal("an exec started on a files connection")
+	}
+	sess, _ = client.NewSession()
+	if err := sess.RequestSubsystem("sftp"); err != nil {
+		t.Fatalf("sftp on a files connection: %v", err)
+	}
+	if req := f.launcher.lastRequest(t); req.Kind != launcher.KindSFTP || req.Cols != 0 || req.Term != "" || req.Command != "" {
+		t.Fatalf("launcher request %+v", req)
+	}
+	if n := len(f.launcher.requests); n != 1 {
+		t.Fatalf("launcher requests %d, want only the sftp one", n)
+	}
+
+	o.kind = "ssh"
+	sess, _ = f.connect(t, o).NewSession()
+	if err := sess.RequestSubsystem("sftp"); err != nil {
+		t.Fatalf("sftp on an ssh connection: %v", err)
+	}
+	if req := f.launcher.lastRequest(t); req.Kind != launcher.KindSFTP {
+		t.Fatalf("launcher request %+v", req)
+	}
+
+	o.kind = "terminal"
+	sess, _ = f.connect(t, o).NewSession()
+	if err := sess.RequestSubsystem("sftp"); err == nil {
+		t.Fatal("sftp on a terminal connection")
+	}
+}
+
+// A file event from an sftp helper is taken and the channel keeps relaying;
+// one from an exec helper ends the channel with helper_failed.
+func TestFileEventsOnlyFromTheFileServer(t *testing.T) {
+	f := newSSHFixture(t, func(c *ServerConfig) { c.Capabilities = []string{"terminal", "files"} })
+	o := f.defaults()
+	o.kind = "ssh"
+	client := f.connect(t, o)
+
+	sess, _ := client.NewSession()
+	stdin, _ := sess.StdinPipe()
+	stdout, _ := sess.StdoutPipe()
+	if err := sess.RequestSubsystem("sftp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdin.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(stdout, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("the sftp channel stopped relaying after an event: %q, %v", buf, err)
+	}
+
+	sess, _ = client.NewSession()
+	stderr, _ := sess.StderrPipe()
+	if err := sess.Start("event"); err != nil {
+		t.Fatal(err)
+	}
+	readFor(t, stderr, "\r\nlocalport: session ended: "+CloseHelperFailed+"\r\n")
+}
+
+// A password login answers one keyboard-interactive prompt after its
+// certificate, and every channel's launcher request carries the answer;
+// keyboard-interactive without the certificate step never prompts; a login
+// that is not a password login is never prompted.
+func TestPasswordLogins(t *testing.T) {
+	f := newSSHFixture(t, func(c *ServerConfig) { c.PasswordLogins = []string{testLogin} })
+	o := f.defaults()
+	o.kind = "ssh"
+	signer, _ := f.mint(t, o)
+	prompts := 0
+	answer := func(_, _ string, questions []string, echos []bool) ([]string, error) {
+		prompts++
+		if len(questions) != 1 || questions[0] != passwordPrompt || echos[0] {
+			t.Errorf("prompt %q echo %v", questions, echos)
+		}
+		return []string{"s3cret"}, nil
+	}
+	client, err := f.dial(t, o.serial, signer, func(c *ssh.ClientConfig) {
+		c.Auth = append(c.Auth, ssh.KeyboardInteractive(answer))
+	})
+	if err != nil || prompts != 1 {
+		t.Fatalf("certificate then password: %v, %d prompts", err, prompts)
+	}
+	sess, _ := client.NewSession()
+	if err := sess.Run("ls -l /tmp"); err == nil {
+		t.Fatal("run: want exit status 3")
+	}
+	if req := f.launcher.lastRequest(t); !req.HasPassword || string(req.Password) != "s3cret" {
+		t.Fatalf("launcher request password %v %q", req.HasPassword, req.Password)
+	}
+
+	// Keyboard-interactive alone: the server offers it only after a verified
+	// certificate, so the prompt never runs.
+	prompts = 0
+	if _, err := f.dial(t, o.serial, signer, func(c *ssh.ClientConfig) {
+		c.Auth = []ssh.AuthMethod{ssh.KeyboardInteractive(answer)}
+	}); err == nil || prompts != 0 {
+		t.Fatalf("keyboard-interactive without a certificate: %v, %d prompts", err, prompts)
+	}
+
+	// The certificate alone does not finish a password login.
+	if _, err := f.dial(t, o.serial, signer, nil); err == nil {
+		t.Fatal("a password login authenticated without its password")
+	}
+
+	g := newSSHFixture(t, nil)
+	og := g.defaults()
+	og.kind = "ssh"
+	signer, _ = g.mint(t, og)
+	prompts = 0
+	if _, err := g.dial(t, og.serial, signer, func(c *ssh.ClientConfig) {
+		c.Auth = append(c.Auth, ssh.KeyboardInteractive(answer))
+	}); err != nil || prompts != 0 {
+		t.Fatalf("a login without a password: %v, %d prompts", err, prompts)
+	}
+}
+
+// env requests: LANG and LC_* before the shell or exec reach the launcher
+// request; any other name, a control character, an oversized value, a 17th
+// variable and an env after the exec are refused.
+func TestEnvRequests(t *testing.T) {
+	f := newSSHFixture(t, nil)
+	o := f.defaults()
+	o.kind = "ssh"
+	client := f.connect(t, o)
+	sess, _ := client.NewSession()
+	for name, value := range map[string]string{"LANG": "en_GB.UTF-8", "LC_TIME": "de_DE.UTF-8"} {
+		if err := sess.Setenv(name, value); err != nil {
+			t.Fatalf("env %s refused: %v", name, err)
+		}
+	}
+	for _, kv := range [][2]string{{"PATH", "/evil"}, {"LD_PRELOAD", "x.so"}, {"LC_ALL", "a\nb"}, {"LANGUAGE", "en"},
+		{"LC_CTYPE", strings.Repeat("a", launcher.MaxEnvValue+1)}, {"lc_all", "C"}} {
+		if err := sess.Setenv(kv[0], kv[1]); err == nil {
+			t.Fatalf("env %s=%q accepted", kv[0], kv[1])
+		}
+	}
+	if err := sess.Run("ls -l /tmp"); err == nil {
+		t.Fatal("run: want exit status 3")
+	}
+	req := f.launcher.lastRequest(t)
+	if len(req.Env) != 2 || req.Env["LANG"] != "en_GB.UTF-8" || req.Env["LC_TIME"] != "de_DE.UTF-8" {
+		t.Fatalf("launcher env %v", req.Env)
+	}
+	if ok, _ := sess.SendRequest("env", true, ssh.Marshal(struct{ Name, Value string }{"LANG", "C"})); ok {
+		t.Fatal("env after the exec accepted")
+	}
+
+	many, _ := client.NewSession()
+	for i := range launcher.MaxEnvVars {
+		if err := many.Setenv(fmt.Sprintf("LC_V%c", 'A'+i), "C"); err != nil {
+			t.Fatalf("env %d refused: %v", i+1, err)
+		}
+	}
+	if err := many.Setenv("LC_OVER", "C"); err == nil {
+		t.Fatalf("env %d accepted", launcher.MaxEnvVars+1)
 	}
 }
 
@@ -658,14 +845,20 @@ func TestLauncherRefusalFailsTheRequest(t *testing.T) {
 	readFor(t, stderr, "localport: "+CodeLoginNotAllowed+"\r\n")
 }
 
-// captureClient records each open and answers it.
-type captureClient struct {
-	block bool
-	opens chan []byte
+// capturedOpen is one open a captureClient saw.
+type capturedOpen struct {
+	id, sessionID string
+	cert          []byte
 }
 
-func (c *captureClient) Open(ctx context.Context, _ string, _, _, cert []byte) (recording.Result, error) {
-	c.opens <- bytes.Clone(cert)
+// captureClient records each open and answers it, and accepts every segment.
+type captureClient struct {
+	block bool
+	opens chan capturedOpen
+}
+
+func (c *captureClient) Open(ctx context.Context, id, sessionID string, _, _, cert []byte) (recording.Result, error) {
+	c.opens <- capturedOpen{id: id, sessionID: sessionID, cert: bytes.Clone(cert)}
 	if c.block {
 		<-ctx.Done()
 		return recording.Result{}, ctx.Err()
@@ -677,12 +870,12 @@ func (c *captureClient) Complete(context.Context, string, []byte, recording.Comp
 	return recording.Result{Status: "complete"}, nil
 }
 
-func (c *captureClient) PutSegment(context.Context, string, recording.Segment) (recording.Result, error) {
-	return recording.Result{}, errors.New("unexpected segment")
+func (c *captureClient) PutSegment(_ context.Context, _ string, seg recording.Segment) (recording.Result, error) {
+	return recording.Result{Status: "recording", Segments: seg.Index + 1}, nil
 }
 
-func (c *captureClient) PutSpooledSegment(context.Context, string, recording.Segment) (recording.Result, error) {
-	return recording.Result{}, errors.New("unexpected segment")
+func (c *captureClient) PutSpooledSegment(_ context.Context, _ string, seg recording.Segment) (recording.Result, error) {
+	return recording.Result{Status: "recording", Segments: seg.Index + 1}, nil
 }
 
 // recordingFixture is an ssh fixture with an uploader on a temporary spool
@@ -713,14 +906,14 @@ func recordingFixture(t *testing.T, client *captureClient) (*sshFixture, string,
 	return f, base64.RawURLEncoding.EncodeToString(sum[:]), spoolDir
 }
 
-// A recorded connection, Strict or Best effort, opens its recording with the
-// admitting certificate before any channel (the open must come while the
-// certificate is valid); the recording id is the notice's session id. It
-// serves one channel only, so nothing on it runs unrecorded.
-func TestRecordingOpensWithTheCertificateBeforeChannels(t *testing.T) {
+// On a recorded connection, Strict or Best effort, every session channel
+// opens its own recording with the admitting certificate before its helper
+// starts: a fresh recording id per channel, the notice's session id as the
+// connection. Opening the session channel alone opens nothing.
+func TestRecordingOpensOnePerChannel(t *testing.T) {
 	for _, policy := range []string{RecPolicyStrict, RecPolicyBestEffort} {
 		t.Run(policy, func(t *testing.T) {
-			client := &captureClient{opens: make(chan []byte, 1)}
+			client := &captureClient{opens: make(chan capturedOpen, 2)}
 			f, keySum, spoolDir := recordingFixture(t, client)
 			o := f.defaults()
 			o.kind = "ssh"
@@ -730,63 +923,112 @@ func TestRecordingOpensWithTheCertificateBeforeChannels(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			first, err := c.NewSession()
+			if err != nil {
+				t.Fatalf("first channel: %v", err)
+			}
 			select {
 			case got := <-client.opens:
-				if !bytes.Equal(got, cert.Marshal()) {
-					t.Fatal("the open did not carry the admitting certificate")
+				t.Fatalf("a channel with no shell or exec opened a recording: %+v", got)
+			case <-time.After(100 * time.Millisecond):
+			}
+			second, err := c.NewSession()
+			if err != nil {
+				t.Fatalf("a second channel on a recorded connection: %v", err)
+			}
+			for _, s := range []*ssh.Session{first, second} {
+				var stderr bytes.Buffer
+				s.Stderr = &stderr
+				var exitErr *ssh.ExitError
+				if err := s.Run("ls -l /tmp"); !errors.As(err, &exitErr) || exitErr.ExitStatus() != 3 {
+					t.Fatalf("run on a recorded channel: %v", err)
 				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("no open")
+				if !strings.HasPrefix(stderr.String(), recordedNotice) {
+					t.Fatalf("stderr %q does not open with the recording notice", stderr.String())
+				}
 			}
-			if _, err := c.NewSession(); err != nil {
-				t.Fatalf("session after the open: %v", err)
+			session := uuidText([16]byte{0x01, 0x9a})
+			ids := map[string]bool{}
+			for range 2 {
+				select {
+				case got := <-client.opens:
+					if !bytes.Equal(got.cert, cert.Marshal()) || got.sessionID != session || got.id == session {
+						t.Fatalf("open %+v, want the admitting certificate, session %s and its own id", got, session)
+					}
+					ids[got.id] = true
+				case <-time.After(5 * time.Second):
+					t.Fatal("a channel opened no recording")
+				}
 			}
-			if _, err := c.NewSession(); err == nil {
-				t.Fatal("a second channel opened on a recorded connection")
+			if len(ids) != 2 {
+				t.Fatalf("recording ids %v, want one per channel", ids)
 			}
-			entries, _ := os.ReadDir(spoolDir)
-			if len(entries) != 1 || entries[0].Name() != uuidText([16]byte{0x01, 0x9a}) {
-				t.Fatalf("spool entries %v, want the session id", entries)
+			if len(f.launcher.requests) != 2 {
+				t.Fatalf("launcher requests %d, want 2", len(f.launcher.requests))
+			}
+			if entries, _ := os.ReadDir(spoolDir); len(entries) > 2 {
+				t.Fatalf("spool entries %v, want at most one per channel", entries)
 			}
 		})
 	}
 }
 
-// A Best effort open that fails leaves the connection running unrecorded,
-// with no spool entry.
+// A Best effort open that fails leaves the channel running unrecorded, with
+// no spool entry.
 func TestBestEffortRecordingOpenFailureRunsUnrecorded(t *testing.T) {
 	saved := strictOpenTimeout
 	strictOpenTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { strictOpenTimeout = saved })
-	client := &captureClient{block: true, opens: make(chan []byte, 1)}
+	client := &captureClient{block: true, opens: make(chan capturedOpen, 1)}
 	f, keySum, spoolDir := recordingFixture(t, client)
 	o := f.defaults()
+	o.kind = "ssh"
 	o.rec = &certRec{Policy: RecPolicyBestEffort, PubSHA256: keySum}
 	c := f.connect(t, o)
-	if _, err := c.NewSession(); err != nil {
-		t.Fatalf("session after a failed Best effort open: %v", err)
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatalf("channel: %v", err)
+	}
+	var stderr bytes.Buffer
+	sess.Stderr = &stderr
+	var exitErr *ssh.ExitError
+	if err := sess.Run("ls -l /tmp"); !errors.As(err, &exitErr) || exitErr.ExitStatus() != 3 {
+		t.Fatalf("run after a failed Best effort open: %v", err)
+	}
+	if strings.Contains(stderr.String(), recordedNotice) {
+		t.Fatal("an unrecorded channel shows the recording notice")
 	}
 	if entries, _ := os.ReadDir(spoolDir); len(entries) != 0 {
 		t.Fatalf("spool holds %v", entries)
 	}
 }
 
-// A Strict open that does not answer within strictOpenTimeout closes the
-// connection before any channel, and leaves no spool entry.
-func TestStrictRecordingLateOpenClosesTheConnection(t *testing.T) {
+// A Strict open that does not answer within strictOpenTimeout refuses that
+// channel before its helper starts and leaves no spool entry; the connection
+// stays and its next channel tries its own recording.
+func TestStrictRecordingLateOpenRefusesTheChannel(t *testing.T) {
 	saved := strictOpenTimeout
 	strictOpenTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { strictOpenTimeout = saved })
-	client := &captureClient{block: true, opens: make(chan []byte, 1)}
+	client := &captureClient{block: true, opens: make(chan capturedOpen, 2)}
 	f, keySum, spoolDir := recordingFixture(t, client)
 	o := f.defaults()
+	o.kind = "ssh"
 	o.rec = &certRec{Policy: RecPolicyStrict, PubSHA256: keySum}
-	signer, _ := f.mint(t, o)
-	c, err := f.dial(t, 42, signer, nil)
-	if err == nil {
-		if _, err := c.NewSession(); err == nil {
-			t.Fatal("a channel opened on a connection whose Strict recording did not open")
+	c := f.connect(t, o)
+	for i := range 2 {
+		sess, err := c.NewSession()
+		if err != nil {
+			t.Fatalf("channel %d: %v", i+1, err)
 		}
+		stderr, _ := sess.StderrPipe()
+		if err := sess.Start("ls -l /tmp"); err == nil {
+			t.Fatalf("channel %d ran with its Strict recording not open", i+1)
+		}
+		readFor(t, stderr, "localport: "+CodeRecordingUnavailable+"\r\n")
+	}
+	if len(client.opens) != 2 {
+		t.Fatalf("opens %d, want one per channel", len(client.opens))
 	}
 	if len(f.launcher.requests) != 0 {
 		t.Fatal("a session started")

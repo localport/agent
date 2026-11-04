@@ -1,0 +1,406 @@
+package sessionhelper
+
+import (
+	"errors"
+	"io"
+	"io/fs"
+	"os"
+	"path"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/pkg/sftp"
+
+	"github.com/localport/agent/internal/launcher"
+)
+
+// FilesServerMode is the localport-session mode that runs ServeFiles as the
+// login: `localport-session files-server <root>` with the SFTP protocol on
+// standard input and output and the event pipe on descriptor 3 (Unix) or
+// the handle a fourth argument names (Windows).
+const FilesServerMode = "files-server"
+
+// ServeFiles serves one SFTP session on rwc as the calling process's user,
+// confined to dir: the client sees dir as "/", and every path resolves
+// through an os.Root, so neither "..", an absolute name nor a symlink leaves
+// it. Each operation the files log names is written to events as a
+// FrameEvent (launcher.FileEvent). It returns when the client ends the
+// session.
+func ServeFiles(rwc io.ReadWriteCloser, dir string, events io.Writer) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	s := &filesServer{root: root, events: events}
+	h := sftp.Handlers{FileGet: s, FilePut: s, FileCmd: s, FileList: s}
+	err = sftp.NewRequestServer(rwc, h).Serve()
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
+}
+
+// filesServer implements the request server's handlers over root.
+type filesServer struct {
+	root *os.Root
+	// mu serializes event frames; events is the helper's event pipe.
+	mu     sync.Mutex
+	events io.Writer
+}
+
+// emit writes one event. An event that fails validation, or a broken event
+// pipe, is dropped: the helper ends the channel when its pipe breaks.
+func (s *filesServer) emit(ev launcher.FileEvent) {
+	b, err := ev.Marshal()
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = launcher.WriteFrame(s.events, launcher.Frame{Type: launcher.FrameEvent, Data: b})
+}
+
+// result is the files log's result of err.
+func result(err error) string {
+	switch {
+	case err == nil:
+		return launcher.ResultOK
+	case errors.Is(err, fs.ErrNotExist):
+		return "no_such_file"
+	case errors.Is(err, fs.ErrPermission):
+		return "permission_denied"
+	case errors.Is(err, fs.ErrExist):
+		return "file_exists"
+	}
+	return "failure"
+}
+
+// rel is the root-relative name of a request path. Request paths are clean
+// and absolute ("/" is the root); "" names the root itself.
+func rel(p string) string {
+	p = strings.TrimPrefix(path.Clean("/"+p), "/")
+	if p == "" {
+		return "."
+	}
+	return p
+}
+
+// openRegular opens name with flag and refuses anything that is not a
+// regular file. openNonblock keeps a FIFO from blocking the open, and
+// checkOpened refuses what the platform cannot stat as a disk file.
+func (s *filesServer) openRegular(name string, flag int, perm fs.FileMode) (*os.File, error) {
+	f, err := s.root.OpenFile(name, flag|openNonblock, perm)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkOpened(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		_ = f.Close()
+		// EACCES, which the request server answers SSH_FX_PERMISSION_DENIED.
+		return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EACCES}
+	}
+	// O_NONBLOCK has no effect on a regular file's reads and writes.
+	return f, nil
+}
+
+// Fileread opens a file for reading.
+func (s *filesServer) Fileread(r *sftp.Request) (io.ReaderAt, error) {
+	f, err := s.openRegular(rel(r.Filepath), os.O_RDONLY, 0)
+	if err != nil {
+		s.emit(launcher.FileEvent{Op: launcher.OpRead, Path: r.Filepath, Result: result(err)})
+		return nil, err
+	}
+	return &countedFile{File: f, s: s, op: launcher.OpRead, path: r.Filepath}, nil
+}
+
+// writeFlags maps a request's open flags; append is not passed to the OS:
+// writes go to the offsets the client names (os.File.WriteAt refuses a file
+// opened with O_APPEND), as OpenSSH's sftp-server does.
+func writeFlags(r *sftp.Request, base int) int {
+	pf := r.Pflags()
+	flag := base
+	if pf.Creat {
+		flag |= os.O_CREATE
+	}
+	if pf.Trunc {
+		flag |= os.O_TRUNC
+	}
+	if pf.Excl {
+		flag |= os.O_EXCL
+	}
+	return flag
+}
+
+// createPerm is the mode a new file or directory gets: the client's
+// permissions when it sent them, else 0666 or 0777; the process umask
+// applies.
+func createPerm(r *sftp.Request, def fs.FileMode) fs.FileMode {
+	if r.AttrFlags().Permissions {
+		return r.Attributes().FileMode().Perm()
+	}
+	return def
+}
+
+// Filewrite opens a file for writing.
+func (s *filesServer) Filewrite(r *sftp.Request) (io.WriterAt, error) {
+	return s.openWrite(r, os.O_WRONLY)
+}
+
+// OpenFile opens a file for reading and writing.
+func (s *filesServer) OpenFile(r *sftp.Request) (sftp.WriterAtReaderAt, error) {
+	return s.openWrite(r, os.O_RDWR)
+}
+
+func (s *filesServer) openWrite(r *sftp.Request, base int) (*countedFile, error) {
+	f, err := s.openRegular(rel(r.Filepath), writeFlags(r, base), createPerm(r, 0o666))
+	if err != nil {
+		s.emit(launcher.FileEvent{Op: launcher.OpWrite, Path: r.Filepath, Result: result(err)})
+		return nil, err
+	}
+	return &countedFile{File: f, s: s, op: launcher.OpWrite, path: r.Filepath}, nil
+}
+
+// countedFile counts the bytes read or written through one handle and
+// writes its read or write event when the handle closes.
+type countedFile struct {
+	*os.File
+	s     *filesServer
+	op    string
+	path  string
+	bytes atomic.Int64
+	once  sync.Once
+}
+
+func (c *countedFile) ReadAt(p []byte, off int64) (int, error) {
+	n, err := c.File.ReadAt(p, off)
+	if c.op == launcher.OpRead {
+		c.bytes.Add(int64(n))
+	}
+	return n, err
+}
+
+func (c *countedFile) WriteAt(p []byte, off int64) (int, error) {
+	n, err := c.File.WriteAt(p, off)
+	c.bytes.Add(int64(n))
+	return n, err
+}
+
+func (c *countedFile) Close() error {
+	err := c.File.Close()
+	c.once.Do(func() {
+		c.s.emit(launcher.FileEvent{Op: c.op, Path: c.path, Bytes: c.bytes.Load(), Result: result(err)})
+	})
+	return err
+}
+
+// Filecmd applies setstat, rename, rmdir, remove, mkdir, symlink and link,
+// and writes each one's event.
+func (s *filesServer) Filecmd(r *sftp.Request) error {
+	ev := launcher.FileEvent{Path: r.Filepath}
+	var err error
+	switch r.Method {
+	case "Setstat":
+		ev.Op = launcher.OpSetstat
+		err = s.setstat(r)
+	case "Rename":
+		ev.Op, ev.Target = launcher.OpRename, r.Target
+		err = s.rename(rel(r.Filepath), rel(r.Target))
+	case "Rmdir":
+		ev.Op = launcher.OpRmdir
+		err = s.removeKind(rel(r.Filepath), true)
+	case "Remove":
+		ev.Op = launcher.OpRemove
+		err = s.removeKind(rel(r.Filepath), false)
+	case "Mkdir":
+		ev.Op = launcher.OpMkdir
+		err = s.root.Mkdir(rel(r.Filepath), createPerm(r, 0o777))
+	case "Symlink":
+		// Filepath is the link's target text, Target the link's path.
+		ev.Op, ev.Path, ev.Target = launcher.OpSymlink, r.Target, r.Filepath
+		err = s.root.Symlink(r.Filepath, rel(r.Target))
+	case "Link":
+		ev.Op, ev.Target = launcher.OpLink, r.Target
+		err = s.root.Link(rel(r.Filepath), rel(r.Target))
+	default:
+		return sftp.ErrSSHFxOpUnsupported
+	}
+	ev.Result = result(err)
+	s.emit(ev)
+	return err
+}
+
+// PosixRename renames over an existing target (posix-rename@openssh.com).
+func (s *filesServer) PosixRename(r *sftp.Request) error {
+	err := s.root.Rename(rel(r.Filepath), rel(r.Target))
+	s.emit(launcher.FileEvent{Op: launcher.OpRename, Path: r.Filepath, Target: r.Target, Result: result(err)})
+	return err
+}
+
+// rename is SFTP v3 rename, which never replaces the target: a hard link and
+// an unlink for a regular file, as OpenSSH does, else a rename after
+// checking that the target does not exist.
+func (s *filesServer) rename(from, to string) error {
+	fi, err := s.root.Lstat(from)
+	if err != nil {
+		return err
+	}
+	if fi.Mode().IsRegular() {
+		if err := s.root.Link(from, to); err == nil {
+			return s.root.Remove(from)
+		} else if errors.Is(err, fs.ErrExist) {
+			return err
+		}
+	}
+	if _, err := s.root.Lstat(to); err == nil {
+		return &fs.PathError{Op: "rename", Path: to, Err: fs.ErrExist}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return s.root.Rename(from, to)
+}
+
+// removeKind removes a directory (dir) or anything else, refusing the other
+// kind as the SFTP operations require.
+func (s *filesServer) removeKind(name string, dir bool) error {
+	fi, err := s.root.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() != dir {
+		return &fs.PathError{Op: "remove", Path: name, Err: syscall.EINVAL}
+	}
+	return s.root.Remove(name)
+}
+
+// setstat applies the attributes the request carries: size, permissions,
+// owner and times.
+func (s *filesServer) setstat(r *sftp.Request) error {
+	name, flags, a := rel(r.Filepath), r.AttrFlags(), r.Attributes()
+	if flags.Size {
+		f, err := s.openRegular(name, os.O_WRONLY, 0)
+		if err != nil {
+			return err
+		}
+		err = f.Truncate(int64(a.Size))
+		if cErr := f.Close(); err == nil {
+			err = cErr
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if flags.Permissions {
+		if err := s.root.Chmod(name, a.FileMode().Perm()); err != nil {
+			return err
+		}
+	}
+	if flags.UidGid {
+		if err := s.root.Chown(name, int(a.UID), int(a.GID)); err != nil {
+			return err
+		}
+	}
+	if flags.Acmodtime {
+		if err := s.root.Chtimes(name, a.AccessTime(), a.ModTime()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Filelist answers List (a directory's entries, one event), Stat and
+// Readlink.
+func (s *filesServer) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
+	name := rel(r.Filepath)
+	switch r.Method {
+	case "List":
+		entries, err := s.readDir(name)
+		s.emit(launcher.FileEvent{Op: launcher.OpList, Path: r.Filepath, Result: result(err)})
+		if err != nil {
+			return nil, err
+		}
+		return listerAt(entries), nil
+	case "Stat":
+		fi, err := s.root.Stat(name)
+		if err != nil {
+			return nil, err
+		}
+		return listerAt{fi}, nil
+	case "Readlink":
+		target, err := s.root.Readlink(name)
+		if err != nil {
+			return nil, err
+		}
+		return listerAt{namedInfo(target)}, nil
+	}
+	return nil, sftp.ErrSSHFxOpUnsupported
+}
+
+// Lstat stats a name without following a final symlink.
+func (s *filesServer) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
+	fi, err := s.root.Lstat(rel(r.Filepath))
+	if err != nil {
+		return nil, err
+	}
+	return listerAt{fi}, nil
+}
+
+// RealPath resolves a client path in the virtual namespace ("/" is the
+// root); the request server then confines every operation to it.
+func (s *filesServer) RealPath(p string) (string, error) {
+	return path.Clean("/" + p), nil
+}
+
+func (s *filesServer) readDir(name string) ([]fs.FileInfo, error) {
+	d, err := s.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	entries, err := d.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]fs.FileInfo, 0, len(entries))
+	for _, e := range entries {
+		if fi, err := e.Info(); err == nil {
+			out = append(out, fi)
+		}
+	}
+	return out, nil
+}
+
+// listerAt serves a fixed list of entries.
+type listerAt []fs.FileInfo
+
+func (l listerAt) ListAt(out []fs.FileInfo, off int64) (int, error) {
+	if off >= int64(len(l)) {
+		return 0, io.EOF
+	}
+	n := copy(out, l[off:])
+	if off+int64(n) >= int64(len(l)) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+// namedInfo is the entry of a Readlink answer, which carries only a name.
+type namedInfo string
+
+func (n namedInfo) Name() string     { return string(n) }
+func (namedInfo) Size() int64        { return 0 }
+func (namedInfo) Mode() fs.FileMode  { return 0 }
+func (namedInfo) ModTime() time.Time { return time.Time{} }
+func (namedInfo) IsDir() bool        { return false }
+func (namedInfo) Sys() any           { return nil }

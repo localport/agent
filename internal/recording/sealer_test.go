@@ -21,6 +21,9 @@ import (
 
 const testID = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
 
+// testSessionID is the connection the test recordings belong to.
+const testSessionID = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a60"
+
 // newTestSealer returns a sealer for testID and the team private key its
 // DEK is wrapped to.
 func newTestSealer(t *testing.T) (*Sealer, hpke.PrivateKey) {
@@ -232,7 +235,8 @@ func TestDigestGoldenVectors(t *testing.T) {
 		got  []byte
 		want string
 	}{
-		{"open", OpenDigest(testID, wrapped, keySum), "f3d93812f075c8906cecdac0ba5e3841b1b6b45f48737f0b10360f3133b00fb5"},
+		// The control plane's tests pin the same vector.
+		{"open", OpenDigest(testID, testSessionID, wrapped, keySum), "1fd36cf1ee83db594888e6f756215db9f0da2d54010de28871dd26bd07aa1b80"},
 		{"complete incomplete", CompleteDigest(testID, wrapped, Completion{
 			Segments: 3, FinalHash: bytes.Repeat([]byte{0x11}, 32), EndedAt: ended,
 			Incomplete: true, Reason: ReasonSpoolFull,
@@ -254,7 +258,7 @@ func TestSignVerifies(t *testing.T) {
 	}
 	s, _ := newTestSealer(t)
 	sum := s.KeySHA256()
-	digest := OpenDigest(s.ID(), s.WrappedDEK(), sum[:])
+	digest := OpenDigest(s.ID(), testSessionID, s.WrappedDEK(), sum[:])
 	sig, err := Sign(key, digest)
 	if err != nil {
 		t.Fatal(err)

@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -26,6 +27,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/localport/agent/internal/launcher"
 	"github.com/localport/agent/internal/recording"
 )
 
@@ -87,6 +89,10 @@ type ServerConfig struct {
 	// Capabilities are the enabled config.Capability values.
 	Capabilities []string
 	Logins       []string
+	// PasswordLogins are the Logins that log on with the login's password
+	// (Windows): userauth asks it by keyboard-interactive after the
+	// certificate, and every channel's launcher request carries it.
+	PasswordLogins []string
 	// Desktop lists the configured desktop targets: rdp, vnc.
 	Desktop []string
 	// OnEvent receives one line per notable failure. Optional.
@@ -185,12 +191,11 @@ func (s *Server) log(format string, args ...any) {
 }
 
 // Serve runs one SSH connection on stream to its end. id is the connection's
-// session id (its recording id) and serial the certificate serial the edge
-// admitted. A refused stream is closed without a message: an SSH client
+// session id (the access row id each of its recordings names) and serial the
+// certificate serial the edge admitted. A refused stream is closed without a message: an SSH client
 // sees a failed handshake or userauth. The caller closes stream after Serve
 // returns.
 func (s *Server) Serve(stream net.Conn, id [16]byte, serial uint64) {
-	start := s.cfg.clock.Now()
 	h := &handler{stream: stream, stop: make(chan struct{}), handshaking: true}
 	s.register(h)
 	defer s.unregister(h)
@@ -206,7 +211,9 @@ func (s *Server) Serve(stream net.Conn, id [16]byte, serial uint64) {
 	defer s.releaseSlot()
 
 	_ = stream.SetDeadline(time.Now().Add(handshakeTimeout))
-	cfg, err := s.serverConfig(serial)
+	secret := &connSecret{}
+	defer secret.clear()
+	cfg, err := s.serverConfig(serial, secret)
 	if err != nil {
 		s.log("session: %v", err)
 		return
@@ -222,30 +229,30 @@ func (s *Server) Serve(stream net.Conn, id [16]byte, serial uint64) {
 		return
 	}
 	defer conn.Close()
-	adm := admissionOf(conn.Permissions)
-	idText := uuidText(id)
-
-	var rec *sessionRecorder
-	if adm.Rec != nil {
-		rec, err = s.startRecording(idText, adm, start)
-		if err != nil {
-			if adm.Rec.Policy == RecPolicyStrict {
-				// Before any channel, so no shell runs unrecorded.
-				s.log("session: %s: closed: %v", idText, err)
-				return
-			}
-			s.log("session: %s runs unrecorded: %v", idText, err)
-		}
-	}
-	defer rec.end()
-	s.run(h, conn, chans, reqs, adm, rec)
+	s.run(h, conn, chans, reqs, admissionOf(conn.Permissions), uuidText(id), secret.password)
 }
 
+// connSecret holds one connection's login password (a password login): set
+// by the keyboard-interactive step, copied into each channel's launcher
+// request, zeroed when the connection ends. The copy inside x/crypto's
+// answer strings cannot be zeroed.
+type connSecret struct {
+	password []byte
+}
+
+func (c *connSecret) clear() { clear(c.password) }
+
+// passwordPrompt is the one keyboard-interactive prompt of a password login.
+const passwordPrompt = "Windows password: "
+
 // serverConfig is one connection's SSH server configuration. Its callbacks
-// keep no state across connections or attempts: the identity is built in
+// keep no state across connections: the identity is built in
 // VerifiedPublicKeyCallback, after possession of the certificate's key is
-// proven, and returned as the connection's Permissions.
-func (s *Server) serverConfig(serial uint64) (*ssh.ServerConfig, error) {
+// proven, and returned as the connection's Permissions. For a password login
+// that step is a partial success whose only next method is one
+// keyboard-interactive prompt, so the prompt exists only after a verified
+// certificate; its answer goes to secret.
+func (s *Server) serverConfig(serial uint64, secret *connSecret) (*ssh.ServerConfig, error) {
 	cert, ok := s.cfg.Certificate()
 	if !ok || len(cert.Certificate) == 0 {
 		return nil, fmt.Errorf("no acknowledged registration to serve sessions with")
@@ -286,7 +293,24 @@ func (s *Server) serverConfig(serial uint64) (*ssh.ServerConfig, error) {
 				s.log("session: userauth refused: %v", err)
 				return nil, err
 			}
-			return adm.permissions(), nil
+			perms := adm.permissions()
+			if !slices.Contains(s.cfg.PasswordLogins, meta.User()) {
+				return perms, nil
+			}
+			return nil, &ssh.PartialSuccessError{Next: ssh.ServerAuthCallbacks{
+				KeyboardInteractiveCallback: func(_ ssh.ConnMetadata, client ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+					answers, err := client("", "", []string{passwordPrompt}, []bool{false})
+					if err != nil {
+						return nil, err
+					}
+					if len(answers) != 1 || answers[0] == "" || len(answers[0]) > launcher.MaxPassword {
+						return nil, refuseCert("the password answer is empty or too long")
+					}
+					secret.clear()
+					secret.password = []byte(answers[0])
+					return perms, nil
+				},
+			}}
 		},
 	}
 	cfg.AddHostKey(hostKey)
@@ -315,7 +339,7 @@ func (s *Server) admit(cert *ssh.Certificate, user string, device Device, serial
 	switch {
 	case !s.kindEnabled(adm.Kind):
 		return nil, refuseCert("kind %q is not enabled on this device", adm.Kind)
-	case adm.Kind != "terminal" && adm.Kind != "ssh":
+	case adm.Kind != "terminal" && adm.Kind != "ssh" && adm.Kind != "files":
 		return nil, refuseCert("kind %q is not served by this agent", adm.Kind)
 	case s.launcher == nil:
 		return nil, refuseCert("this build serves no session")
@@ -497,10 +521,15 @@ func (s *Server) shutdown(ctx context.Context, reason string) error {
 // conn is the state of one admitted connection that run shares with its
 // channel goroutines.
 type conn struct {
-	s     *Server
-	adm   *admission
-	rec   *sessionRecorder
-	login string
+	s   *Server
+	adm *admission
+	// sessionID is the connection's session id in UUID text form; each
+	// recorded channel's recording names it.
+	sessionID string
+	login     string
+	// password is a password login's password (connSecret), nil otherwise;
+	// each channel's launcher request gets its own copy.
+	password []byte
 
 	lastActivity atomic.Int64
 
@@ -512,8 +541,6 @@ type conn struct {
 	served   int
 	ended    bool
 	channels map[*channel]struct{}
-	// recStarted is set once a channel started the recording's cast.
-	recStarted bool
 	// allClosed receives once when a terminal connection's channel closed.
 	allClosed chan struct{}
 }
@@ -521,11 +548,13 @@ type conn struct {
 func (c *conn) active() { c.lastActivity.Store(c.s.cfg.clock.Now().UnixNano()) }
 
 // run serves an admitted connection until its first recorded end: the client
-// closing it, the idle timeout, a Shutdown, a failed Strict recording, or the
-// channel of a terminal connection closing. It then writes the reason to
-// every open channel's stderr, closes the connection and joins the channels.
-func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request, adm *admission, rec *sessionRecorder) {
-	c := &conn{s: s, adm: adm, rec: rec, login: sc.User(), channels: map[*channel]struct{}{}, allClosed: make(chan struct{}, 1)}
+// closing it, the idle timeout, a Shutdown, or the channel of a terminal
+// connection closing (a failed Strict recording ends its own channel). It
+// then writes the reason to every open channel's stderr, closes the
+// connection and joins the channels.
+func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request, adm *admission, sessionID string, password []byte) {
+	c := &conn{s: s, adm: adm, sessionID: sessionID, login: sc.User(), password: password,
+		channels: map[*channel]struct{}{}, allClosed: make(chan struct{}, 1)}
 	c.active()
 	var wg sync.WaitGroup
 	clientDone := make(chan struct{})
@@ -556,9 +585,6 @@ wait:
 			break wait
 		case <-h.stop:
 			reason = h.stopReason
-			break wait
-		case <-rec.failedC():
-			reason = CloseRecordingFailed
 			break wait
 		case <-fire:
 			idle := s.cfg.clock.Now().Sub(time.Unix(0, c.lastActivity.Load()))
@@ -591,7 +617,8 @@ func (c *conn) end(reason string) {
 }
 
 // accept serves the connection's channel opens: session channels only, at
-// most maxChannels open, and one in all on a terminal or recorded connection.
+// most maxChannels open, and one in all on a terminal connection. On a
+// recorded connection every channel opens its own recording.
 func (c *conn) accept(chans <-chan ssh.NewChannel, wg *sync.WaitGroup) {
 	for nc := range chans {
 		if nc.ChannelType() != "session" {
@@ -599,10 +626,7 @@ func (c *conn) accept(chans <-chan ssh.NewChannel, wg *sync.WaitGroup) {
 			continue
 		}
 		c.mu.Lock()
-		// A terminal connection, and a recorded one of any kind, serves one
-		// channel in its life: the recording's cast follows one channel, so a
-		// second channel would run unrecorded.
-		single := c.adm.Kind == "terminal" || c.rec != nil
+		single := c.adm.Kind == "terminal"
 		if c.ended || c.open >= maxChannels || (single && c.served >= 1) {
 			c.mu.Unlock()
 			_ = nc.Reject(ssh.ResourceShortage, "channel limit reached")
@@ -627,13 +651,14 @@ func (c *conn) accept(chans <-chan ssh.NewChannel, wg *sync.WaitGroup) {
 	}
 }
 
-// channelClosed forgets ch; the last channel of a terminal connection ends it.
+// channelClosed forgets ch; the last channel of a terminal or files
+// connection ends it.
 func (c *conn) channelClosed(ch *channel) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.channels, ch)
 	c.open--
-	if c.open == 0 && c.adm.Kind == "terminal" && !c.ended {
+	if c.open == 0 && (c.adm.Kind == "terminal" || c.adm.Kind == "files") && !c.ended {
 		select {
 		case c.allClosed <- struct{}{}:
 		default:
@@ -641,16 +666,17 @@ func (c *conn) channelClosed(ch *channel) {
 	}
 }
 
-// claimRecording reports whether the caller's channel is the one whose
-// terminal the recording's cast follows: the first channel that starts.
-func (c *conn) claimRecording() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.rec == nil || c.recStarted {
-		return false
-	}
-	c.recStarted = true
-	return true
+// newRecordingID is a fresh UUIDv7 (RFC 9562 5.7): 48-bit Unix milliseconds,
+// version 7, 74 random bits, variant 10.
+func newRecordingID() [16]byte {
+	var id [16]byte
+	_, _ = rand.Read(id[6:]) // crypto/rand.Read never returns an error
+	ms := uint64(time.Now().UnixMilli())
+	id[0], id[1], id[2] = byte(ms>>40), byte(ms>>32), byte(ms>>24)
+	id[3], id[4], id[5] = byte(ms>>16), byte(ms>>8), byte(ms)
+	id[6] = id[6]&0x0f | 0x70
+	id[8] = id[8]&0x3f | 0x80
+	return id
 }
 
 // uuidText is id in canonical lowercase UUID form.

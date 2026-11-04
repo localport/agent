@@ -79,6 +79,9 @@ type Request struct {
 	// with -c; empty runs the login shell itself without a terminal. An exec
 	// session has a PTY when Cols and Rows are set, else pipes.
 	Command string `json:"command,omitempty"`
+	// Env holds the client's LANG and LC_* variables (SSH env requests,
+	// ValidEnv); the helper sets them after the login's environment.
+	Env map[string]string `json:"env,omitempty"`
 	// Pipe is the session channel on Windows: the named pipe the agent
 	// created for this session (SessionPipePrefix and 32 hex digits). Unix
 	// passes the channel as a descriptor and refuses the field.
@@ -98,10 +101,49 @@ const (
 	maxTerminalSize = 1000
 	maxDeviceRef    = 128
 	maxLogin        = 256
-	maxPassword     = 256
+	MaxPassword     = 256
 	// MaxCommand bounds an exec command line so the request fits MaxMessage.
 	MaxCommand = 2 << 10
+	// MaxEnvVars, MaxEnvValue and MaxEnvBytes bound a request's environment:
+	// at most 16 variables, each value at most 256 bytes, names and values
+	// together at most 1 KiB, so the request with a full command still fits
+	// MaxMessage.
+	MaxEnvVars  = 16
+	MaxEnvValue = 256
+	MaxEnvBytes = 1 << 10
 )
+
+// envNamePattern is the allow-list of client environment variables.
+var envNamePattern = regexp.MustCompile(`^(LANG|LC_[A-Z]{1,24})$`)
+
+// ValidEnvVar reports whether a client may set name to value: LANG or LC_*,
+// a value of at most MaxEnvValue bytes of UTF-8 with no control character.
+func ValidEnvVar(name, value string) bool {
+	if !envNamePattern.MatchString(name) || len(value) > MaxEnvValue || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidEnv reports whether env is within the bounds and every variable valid.
+func ValidEnv(env map[string]string) bool {
+	if len(env) > MaxEnvVars {
+		return false
+	}
+	total := 0
+	for k, v := range env {
+		if !ValidEnvVar(k, v) {
+			return false
+		}
+		total += len(k) + len(v)
+	}
+	return total <= MaxEnvBytes
+}
 
 // SessionPipePrefix starts the name of every per-session channel pipe.
 const SessionPipePrefix = `\\.\pipe\localport-session-`
@@ -112,8 +154,7 @@ var (
 )
 
 // Validate checks the fields of a request for its kind, without the config.
-// A request for a kind this build does not serve (sftp) fails with
-// CodeUnsupportedKind.
+// An sftp request carries no terminal and no command.
 func (r Request) Validate() error {
 	if r.V != Version {
 		return Refusal(CodeBadRequest)
@@ -121,7 +162,7 @@ func (r Request) Validate() error {
 	switch r.Kind {
 	case KindProbe:
 		if r.Device != "" || r.Login != "" || r.Cols != 0 || r.Rows != 0 || r.Term != "" || r.Command != "" ||
-			r.Pipe != "" || r.HasPassword || len(r.Password) != 0 {
+			r.Pipe != "" || r.HasPassword || len(r.Password) != 0 || len(r.Env) != 0 {
 			return Refusal(CodeBadRequest)
 		}
 		return nil
@@ -138,7 +179,11 @@ func (r Request) Validate() error {
 			return r.validateCommon()
 		}
 	case KindSFTP:
-		return Refusal(CodeUnsupportedKind)
+		// The file server runs on pipes: no terminal, no command.
+		if r.Cols != 0 || r.Rows != 0 || r.Term != "" || r.Command != "" {
+			return Refusal(CodeBadRequest)
+		}
+		return r.validateCommon()
 	default:
 		return Refusal(CodeBadRequest)
 	}
@@ -158,7 +203,8 @@ func (r Request) validateCommon() error {
 		r.Login == "" || len(r.Login) > maxLogin,
 		r.Pipe != "" && !pipePattern.MatchString(r.Pipe),
 		r.HasPassword != (len(r.Password) > 0),
-		len(r.Password) > maxPassword:
+		len(r.Password) > MaxPassword,
+		!ValidEnv(r.Env):
 		return Refusal(CodeBadRequest)
 	}
 	return nil
@@ -279,7 +325,7 @@ func writeSecret(w io.Writer, secret []byte) error {
 	return err
 }
 
-// readSecret reads one writeSecret trailer of 1 to maxPassword bytes into a
+// readSecret reads one writeSecret trailer of 1 to MaxPassword bytes into a
 // buffer the caller owns and must clear.
 func readSecret(r io.Reader) ([]byte, error) {
 	var hdr [4]byte
@@ -287,7 +333,7 @@ func readSecret(r io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	n := binary.BigEndian.Uint32(hdr[:])
-	if n == 0 || n > maxPassword {
+	if n == 0 || n > MaxPassword {
 		return nil, Refusal(CodeBadRequest)
 	}
 	secret := make([]byte, n)

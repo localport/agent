@@ -40,6 +40,9 @@ type spawnPlan struct {
 	env  []string
 	dir  string
 	cred *syscall.Credential
+	// events gives a pipe session descriptor 3, an event pipe whose
+	// FrameEvent frames the helper validates and relays (the file server).
+	events bool
 }
 
 // frameWriter serializes the frames the helper writes to the channel.

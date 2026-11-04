@@ -22,6 +22,7 @@ import (
 func spooledMeta(id, identifier string) recording.Meta {
 	return recording.Meta{
 		ID:             id,
+		SessionID:      "33333333-3333-4333-8333-333333333333",
 		Identifier:     identifier,
 		LastAcceptedAt: time.Now(),
 		WrappedDEK:     bytes.Repeat([]byte{1}, 100),

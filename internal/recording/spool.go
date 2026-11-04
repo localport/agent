@@ -71,6 +71,9 @@ var (
 // mux when each request is sent.
 type Meta struct {
 	ID string `json:"id"`
+	// SessionID is the session id of the connection the recording belongs to
+	// (the edge's notice); a connection has one recording per session channel.
+	SessionID string `json:"session_id"`
 	// Identifier is the local device identity the ticket was for. The
 	// uploader keys the device's session mux on it.
 	Identifier string `json:"identifier"`
@@ -113,6 +116,8 @@ func (m *Meta) validate() error {
 	switch {
 	case !validID(m.ID):
 		return fmt.Errorf("%w: id %q is not a canonical UUID", ErrMeta, m.ID)
+	case !validID(m.SessionID):
+		return fmt.Errorf("%w: session id %q is not a canonical UUID", ErrMeta, m.SessionID)
 	case m.Identifier == "":
 		return fmt.Errorf("%w: device identity missing", ErrMeta)
 	case m.LastAcceptedAt.IsZero():

@@ -42,6 +42,20 @@ func parseEvent(t *testing.T, line []byte) (int64, string, string) {
 	return ms, code, data
 }
 
+// A files-log event is an "f" line whose data is the event's JSON as a
+// string, timed like every other event.
+func TestWriterFileEvent(t *testing.T) {
+	w := NewWriter(testStart, 80, 24)
+	event := `{"op":"read","path":"/srv/\"a\"","bytes":12,"result":"ok"}`
+	ms, code, data := parseEvent(t, w.File(testStart.Add(1500*time.Millisecond), []byte(event)))
+	if ms != 1500 || code != "f" || data != event {
+		t.Fatalf("File = %d %q %q, want 1500 f %q", ms, code, data, event)
+	}
+	if ms, _, _ := parseEvent(t, w.Resize(testStart.Add(2*time.Second), 100, 30)); ms != 500 {
+		t.Fatalf("the event after a file event is at +%d ms, want +500", ms)
+	}
+}
+
 func TestWriterHeader(t *testing.T) {
 	w := NewWriter(testStart, 120, 40)
 	want := `{"version":3,"term":{"cols":120,"rows":40},"timestamp":1767225600}` + "\n"

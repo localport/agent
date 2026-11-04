@@ -4,9 +4,12 @@
 // per session that the launcher starts with its control channel on standard
 // input and output. It opens the agent's session channel pipe, logs the
 // login on (S4U, or LogonUser when the request carries a password), loads
-// the login's profile, starts its shell in a pseudoconsole as the login, and
-// relays the pseudoconsole over the channel's frames. The shell and every
-// process attached to the pseudoconsole end when it closes.
+// the login's profile, and starts cmd.exe as the login with the login's
+// environment and the client's LANG and LC_* (exec_windows.go): a terminal,
+// or an exec with a terminal, in a pseudoconsole; an exec without one on
+// pipes in a kill-on-close job. It relays the session over the channel's
+// frames. Every process of the session ends when the pseudoconsole or the
+// job closes.
 package sessionhelper
 
 import (
@@ -14,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 	"unsafe"
@@ -47,7 +49,7 @@ func Run(log func(string, ...any)) int {
 		_ = launcher.WriteHelperReply(os.Stdout, launcher.HelperReply{Refused: code})
 		return 1
 	}
-	if req.Kind != launcher.KindTerminal {
+	if req.Kind != launcher.KindTerminal && req.Kind != launcher.KindExec && req.Kind != launcher.KindSFTP {
 		return refuse(launcher.CodeUnsupportedKind, errors.New(req.Kind))
 	}
 	if err := enablePrivileges(helperPrivileges...); err != nil {
@@ -88,7 +90,36 @@ func Run(log func(string, ...any)) int {
 	}
 	defer unload()
 
-	k, err := startConsole(token, uint16(req.Cols), uint16(req.Rows))
+	shell, err := shellPath()
+	if err != nil {
+		return refuse(launcher.CodeSpawnFailed, err)
+	}
+	env, err := environment(token, req.Env)
+	if err != nil {
+		return refuse(launcher.CodeSpawnFailed, err)
+	}
+	// A terminal, and an exec with a terminal, run in a pseudoconsole; an
+	// exec without one, and the file server, run on pipes.
+	app, cmdLine := shell, commandLine(shell, req.Command)
+	if req.Kind == launcher.KindSFTP {
+		if app, cmdLine, err = filesServerCommand(token, req.Root); err != nil {
+			return refuse(launcher.CodeSpawnFailed, err)
+		}
+	}
+	if req.Kind == launcher.KindSFTP || (req.Kind == launcher.KindExec && req.Cols == 0) {
+		p, err := startPiped(token, app, cmdLine, env, req.Kind == launcher.KindSFTP)
+		if err != nil {
+			return refuse(launcher.CodeSpawnFailed, err)
+		}
+		if err := launcher.WriteHelperReply(os.Stdout, launcher.HelperReply{Started: true}); err != nil {
+			log("sessionhelper: reply started: %v", err)
+			p.close()
+		}
+		_ = os.Stdout.Close()
+		p.relay(channel, log)
+		return 0
+	}
+	k, err := startConsole(token, uint16(req.Cols), uint16(req.Rows), shell, cmdLine, env)
 	if err != nil {
 		return refuse(launcher.CodeSpawnFailed, err)
 	}
@@ -115,10 +146,10 @@ type console struct {
 	closed bool
 }
 
-// startConsole starts %SystemRoot%\System32\cmd.exe as token's user in a
-// new pseudoconsole of cols by rows, in the user's profile directory with
-// the user's environment.
-func startConsole(token windows.Token, cols, rows uint16) (*console, error) {
+// startConsole starts cmdLine of shell (%SystemRoot%\System32\cmd.exe) as
+// token's user in a new pseudoconsole of cols by rows, in the user's profile
+// directory with env (environment).
+func startConsole(token windows.Token, cols, rows uint16, shell, cmdLine string, env []uint16) (*console, error) {
 	var inRead, inWrite, outRead, outWrite windows.Handle
 	if err := windows.CreatePipe(&inRead, &inWrite, nil, 0); err != nil {
 		return nil, fmt.Errorf("console input pipe: %w", err)
@@ -138,7 +169,7 @@ func startConsole(token windows.Token, cols, rows uint16) (*console, error) {
 		k.output.Close()
 		return nil, fmt.Errorf("CreatePseudoConsole: %w", err)
 	}
-	if err := k.spawn(token); err != nil {
+	if err := k.spawn(token, shell, cmdLine, env); err != nil {
 		windows.ClosePseudoConsole(k.pc)
 		k.input.Close()
 		k.output.Close()
@@ -147,7 +178,7 @@ func startConsole(token windows.Token, cols, rows uint16) (*console, error) {
 	return k, nil
 }
 
-func (k *console) spawn(token windows.Token) error {
+func (k *console) spawn(token windows.Token, shell, cmdLine string, env []uint16) error {
 	attrs, err := windows.NewProcThreadAttributeList(1)
 	if err != nil {
 		return err
@@ -157,24 +188,15 @@ func (k *console) spawn(token windows.Token) error {
 	if err := attrs.Update(windows.PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, *(*unsafe.Pointer)(unsafe.Pointer(&k.pc)), unsafe.Sizeof(k.pc)); err != nil {
 		return fmt.Errorf("pseudoconsole attribute: %w", err)
 	}
-	var env *uint16
-	if err := windows.CreateEnvironmentBlock(&env, token, false); err != nil {
-		return fmt.Errorf("CreateEnvironmentBlock: %w", err)
-	}
-	defer windows.DestroyEnvironmentBlock(env)
 	dir, err := token.GetUserProfileDirectory()
 	if err != nil {
 		return fmt.Errorf("profile directory: %w", err)
 	}
-	sysRoot, err := windows.GetSystemWindowsDirectory()
+	app, err := windows.UTF16PtrFromString(shell)
 	if err != nil {
 		return err
 	}
-	app, err := windows.UTF16PtrFromString(filepath.Join(sysRoot, "System32", "cmd.exe"))
-	if err != nil {
-		return err
-	}
-	cmdLine, err := windows.UTF16PtrFromString("cmd.exe")
+	line, err := windows.UTF16PtrFromString(cmdLine)
 	if err != nil {
 		return err
 	}
@@ -193,8 +215,8 @@ func (k *console) spawn(token windows.Token) error {
 	si.StartupInfo.Cb = uint32(unsafe.Sizeof(si))
 	si.StartupInfo.Desktop = desktop
 	var pi windows.ProcessInformation
-	if err := windows.CreateProcessAsUser(token, app, cmdLine, nil, nil, false,
-		windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT, env, wd, &si.StartupInfo, &pi); err != nil {
+	if err := windows.CreateProcessAsUser(token, app, line, nil, nil, false,
+		windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT, &env[0], wd, &si.StartupInfo, &pi); err != nil {
 		return fmt.Errorf("CreateProcessAsUser: %w", err)
 	}
 	windows.CloseHandle(pi.Thread)

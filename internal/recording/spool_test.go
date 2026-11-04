@@ -36,6 +36,7 @@ func spoolDir(t *testing.T) string {
 func testMeta(id string) Meta {
 	return Meta{
 		ID:             id,
+		SessionID:      testSessionID,
 		Identifier:     "device-1",
 		LastAcceptedAt: time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC),
 		WrappedDEK:     bytes.Repeat([]byte{1}, 100),

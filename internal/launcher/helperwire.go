@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -43,6 +44,11 @@ type HelperRequest struct {
 	Term  string `json:"term"`
 	// Command is an exec session's command line (Request.Command).
 	Command string `json:"command,omitempty"`
+	// Env is the client's LANG and LC_* variables (Request.Env).
+	Env map[string]string `json:"env,omitempty"`
+	// Root is the directory an sftp session is confined to, the device's
+	// files_root; empty confines it to the login's home.
+	Root string `json:"root,omitempty"`
 	// AgentAccount runs the session as the agent's own account without PAM
 	// (tier 3 opt-in). Login is then the agent account's name. Unix only.
 	AgentAccount bool `json:"agent_account,omitempty"`
@@ -86,11 +92,19 @@ func authorize(load func() (*config.LocalConfig, error), agentAccount string, re
 		return HelperRequest{}, Refusal(CodeDeviceUnknown)
 	}
 	d := cfg.Devices[i]
-	if !slices.Contains(d.Enable, config.CapabilityTerminal) {
+	// A file session needs files enabled, every other session terminal.
+	need := config.CapabilityTerminal
+	if req.Kind == KindSFTP {
+		need = config.CapabilityFiles
+	}
+	if !slices.Contains(d.Enable, need) {
 		return HelperRequest{}, Refusal(CodeKindNotEnabled)
 	}
 	h := HelperRequest{Kind: req.Kind, Login: req.Login, Cols: req.Cols, Rows: req.Rows, Term: req.Term, Command: req.Command,
-		Pipe: req.Pipe, HasPassword: req.HasPassword, Password: req.Password}
+		Env: req.Env, Pipe: req.Pipe, HasPassword: req.HasPassword, Password: req.Password}
+	if req.Kind == KindSFTP {
+		h.Root = d.FilesRoot
+	}
 	switch {
 	case d.RunAsAgent:
 		if agentAccount == "" || req.Login != agentAccount {
@@ -139,6 +153,12 @@ func ReadHelperRequest(control io.Reader) (HelperRequest, error) {
 	var req HelperRequest
 	if err := decodeStrict(body, &req); err != nil {
 		return HelperRequest{}, err
+	}
+	if !ValidEnv(req.Env) {
+		return HelperRequest{}, errors.New("bad helper request environment")
+	}
+	if req.Root != "" && (req.Kind != KindSFTP || !filepath.IsAbs(req.Root)) {
+		return HelperRequest{}, errors.New("bad helper request root")
 	}
 	if req.HasPassword {
 		if req.Password, err = readSecret(control); err != nil {

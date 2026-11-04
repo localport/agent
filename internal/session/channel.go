@@ -1,9 +1,11 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"regexp"
 	"sync"
@@ -25,6 +27,9 @@ const (
 	CodeKindDisabled         = "kind_disabled"
 	CodeAgentBusy            = "agent_busy"
 	CodeKindUnavailable      = "kind_unavailable"
+	// CodeRecordingUnavailable: a Strict channel whose recording could not
+	// open is refused before its helper starts.
+	CodeRecordingUnavailable = "recording_unavailable"
 )
 
 const (
@@ -33,6 +38,9 @@ const (
 	// defaultCols and defaultRows size the recording's cast of a channel
 	// without a PTY.
 	defaultCols, defaultRows = 80, 24
+	// recordedNotice opens the stderr of every recorded shell or exec, the
+	// native client's counterpart of the browser's recording notice.
+	recordedNotice = "localport: this session is recorded\r\n"
 	// maxClientRead bounds one read of client bytes into one data frame.
 	maxClientRead = 16 << 10
 	// startTimeout bounds the launcher's start of a channel's session.
@@ -70,8 +78,13 @@ type channel struct {
 
 	pty     *ptyRequest
 	started bool
-	// recording is set when this channel's output is the recording's cast.
-	recording bool
+	// kind is the launcher kind start ran (terminal, exec or sftp).
+	kind string
+	// env holds the client's accepted env requests (launcher.ValidEnv).
+	env map[string]string
+	// rec is this channel's recording on a recorded connection, nil
+	// otherwise; set by start before the relay goroutines, ended by serve.
+	rec *sessionRecorder
 
 	// mu orders start's hand-off of helper, session, started and readerDone
 	// against end, which may run on another goroutine while the launcher
@@ -105,12 +118,46 @@ func (ch *channel) serve(reqs <-chan *ssh.Request) {
 		<-ch.readerDone
 	}
 	_ = ch.session.Close()
+	// After the reader's last tap.
+	ch.rec.end()
 }
 
-// handle applies one channel request and reports whether it succeeded. Agent
-// forwarding, X11, subsystems, signals and env are refused.
+// handle applies one channel request and reports whether it succeeded. env
+// is accepted for LANG and LC_* only, before the shell or exec, within the
+// launcher's bounds. A files connection serves the sftp subsystem only; an
+// ssh connection serves it beside shells and commands. Agent forwarding,
+// X11, other subsystems and signals are refused.
 func (ch *channel) handle(req *ssh.Request) bool {
+	files := ch.c.adm.Kind == "files"
 	switch req.Type {
+	case "subsystem":
+		var s struct{ Name string }
+		if ch.started || ssh.Unmarshal(req.Payload, &s) != nil || s.Name != "sftp" ||
+			(ch.c.adm.Kind != "ssh" && !files) {
+			return false
+		}
+		return ch.start(launcher.KindSFTP, "")
+	case "pty-req", "shell", "exec":
+		if files {
+			return false
+		}
+	}
+	switch req.Type {
+	case "env":
+		var e struct{ Name, Value string }
+		if ch.started || ssh.Unmarshal(req.Payload, &e) != nil {
+			return false
+		}
+		next := maps.Clone(ch.env)
+		if next == nil {
+			next = map[string]string{}
+		}
+		next[e.Name] = e.Value
+		if !launcher.ValidEnv(next) {
+			return false
+		}
+		ch.env = next
+		return true
 	case "pty-req":
 		var p ptyRequest
 		if ch.started || ch.pty != nil || ssh.Unmarshal(req.Payload, &p) != nil || !validSize(p.Cols, p.Rows) || !termPattern.MatchString(p.Term) {
@@ -125,8 +172,8 @@ func (ch *channel) handle(req *ssh.Request) bool {
 		}
 		ch.pty.Cols, ch.pty.Rows = w.Cols, w.Rows
 		if ch.started {
-			if ch.writeFrame(launcher.Frame{Type: launcher.FrameResize, Cols: uint16(w.Cols), Rows: uint16(w.Rows)}) == nil && ch.recording {
-				ch.c.rec.resize(uint16(w.Cols), uint16(w.Rows))
+			if ch.writeFrame(launcher.Frame{Type: launcher.FrameResize, Cols: uint16(w.Cols), Rows: uint16(w.Rows)}) == nil {
+				ch.rec.resize(uint16(w.Cols), uint16(w.Rows))
 			}
 		}
 		return true
@@ -154,19 +201,29 @@ func validSize(cols, rows uint32) bool {
 	return cols >= 1 && cols <= maxTerminalSize && rows >= 1 && rows <= maxTerminalSize
 }
 
-// start asks the launcher for the channel's session and starts the relay. A
-// refusal is written to the channel's stderr and fails the request.
+// start opens the channel's recording on a recorded connection, asks the
+// launcher for the channel's session and starts the relay. A refusal is
+// written to the channel's stderr and fails the request.
 func (ch *channel) start(kind, command string) bool {
 	s := ch.c.s
-	req := launcher.Request{Kind: kind, Device: s.cfg.Device, Login: ch.c.login, Command: command}
+	req := launcher.Request{Kind: kind, Device: s.cfg.Device, Login: ch.c.login, Command: command, Env: ch.env}
+	if len(ch.c.password) > 0 {
+		// The launcher client zeroes its copy once sent.
+		req.HasPassword, req.Password = true, bytes.Clone(ch.c.password)
+	}
 	cols, rows := uint16(defaultCols), uint16(defaultRows)
-	if ch.pty != nil {
+	if ch.pty != nil && kind != launcher.KindSFTP {
 		req.Cols, req.Rows, req.Term = int(ch.pty.Cols), int(ch.pty.Rows), ch.pty.Term
 		cols, rows = uint16(ch.pty.Cols), uint16(ch.pty.Rows)
+	}
+	rec, ok := ch.openRecording()
+	if !ok {
+		return false
 	}
 	ours, theirs, pipe, err := newSessionChannel()
 	if err != nil {
 		s.log("session: session channel: %v", err)
+		rec.abort()
 		ch.refuse(CodeKindUnavailable)
 		return false
 	}
@@ -179,6 +236,7 @@ func (ch *channel) start(kind, command string) bool {
 	}
 	if err != nil {
 		_ = ours.Close()
+		rec.abort()
 		s.log("session: %s for %q did not start: %v", kind, ch.c.login, err)
 		ch.refuse(refusalReason(err))
 		return false
@@ -191,18 +249,63 @@ func (ch *channel) start(kind, command string) bool {
 		ch.mu.Unlock()
 		_ = ours.Close()
 		_ = sess.Close()
+		rec.abort()
 		return false
 	}
-	ch.helper, ch.session, ch.started = ours, sess, true
+	ch.helper, ch.session, ch.started, ch.rec, ch.kind = ours, sess, true, rec, kind
 	ch.readerDone = make(chan struct{})
 	ch.mu.Unlock()
-	if ch.c.claimRecording() {
-		ch.recording = true
-		ch.c.rec.start(time.Now(), cols, rows)
+	rec.start(time.Now(), cols, rows)
+	if kind == launcher.KindExec {
+		// The command line is the files log's exec entry; "" is the login
+		// shell on pipes. Validated by the exec request's bound.
+		if ev, err := (launcher.FileEvent{Op: launcher.OpExec, Command: command}).Marshal(); err == nil {
+			rec.file(ev, ch.halted)
+		}
+	}
+	if rec != nil {
+		if kind != launcher.KindSFTP {
+			// Written before the helper's output is relayed, so it is the
+			// first line the user sees; an sftp client shows no stderr.
+			_, _ = ch.ch.Stderr().Write([]byte(recordedNotice))
+		}
+		go ch.watchRecording(rec)
 	}
 	go ch.readHelper()
 	go ch.readClient()
 	return true
+}
+
+// openRecording opens this channel's own recording when the connection's
+// certificate names one: a fresh recording id, the connection's session id.
+// A Strict channel whose recording cannot open is refused (false), so no
+// helper runs unrecorded; a Best effort one runs unrecorded (nil, true).
+func (ch *channel) openRecording() (*sessionRecorder, bool) {
+	c := ch.c
+	if c.adm.Rec == nil {
+		return nil, true
+	}
+	id := uuidText(newRecordingID())
+	rec, err := c.s.startRecording(id, c.sessionID, c.adm, c.s.cfg.clock.Now())
+	if err == nil {
+		return rec, true
+	}
+	if c.adm.Rec.Policy == RecPolicyStrict {
+		c.s.log("session: %s: channel refused: %v", c.sessionID, err)
+		ch.refuse(CodeRecordingUnavailable)
+		return nil, false
+	}
+	c.s.log("session: %s: channel runs unrecorded: %v", c.sessionID, err)
+	return nil, true
+}
+
+// watchRecording ends the channel when its Strict recording fails.
+func (ch *channel) watchRecording(rec *sessionRecorder) {
+	select {
+	case <-rec.failedC():
+		ch.end(CloseRecordingFailed)
+	case <-ch.halted:
+	}
 }
 
 // refuse tells the client why its request failed.
@@ -270,9 +373,7 @@ func (ch *channel) readHelper() {
 		}
 		switch f.Type {
 		case launcher.FrameData, launcher.FrameStderr:
-			if ch.recording {
-				ch.c.rec.output(f.Data, ch.halted)
-			}
+			ch.rec.output(f.Data, ch.halted)
 			if ch.stopped.Load() {
 				return
 			}
@@ -283,10 +384,19 @@ func (ch *channel) readHelper() {
 			if _, err := w.Write(f.Data); err != nil {
 				return
 			}
-		case launcher.FrameExit:
-			if ch.recording {
-				ch.c.rec.exit(int(f.Code))
+		case launcher.FrameEvent:
+			// Only an sftp helper reports file operations; a malformed or
+			// misplaced event ends the channel.
+			ev, err := launcher.ParseFileEvent(f.Data)
+			if ch.kind != launcher.KindSFTP || err != nil || ev.Op == launcher.OpExec {
+				ch.c.s.log("session: a bad file event from the helper")
+				ch.end(CloseHelperFailed)
+				return
 			}
+			line, _ := ev.Marshal()
+			ch.rec.file(line, ch.halted)
+		case launcher.FrameExit:
+			ch.rec.exit(int(f.Code))
 			if !ch.stopped.Swap(true) {
 				_, _ = ch.ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(f.Code)}))
 				_ = ch.ch.CloseWrite()

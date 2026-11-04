@@ -286,7 +286,7 @@ func (u *Uploader) openStrict(ctx context.Context, m Meta) error {
 	if err != nil {
 		return err
 	}
-	res, err := c.Open(ctx, m.ID, m.WrappedDEK, m.KeySHA256, m.Certificate)
+	res, err := c.Open(ctx, m.ID, m.SessionID, m.WrappedDEK, m.KeySHA256, m.Certificate)
 	if err != nil {
 		return err
 	}
@@ -638,7 +638,7 @@ func (u *Uploader) startLocked(ctx context.Context, e *upload, now time.Time, re
 	}
 	e.busy = true
 	r := result{e: e, op: o, index: m.Acked}
-	id, identifier, dek, keySHA, cert := m.ID, m.Identifier, m.WrappedDEK, m.KeySHA256, m.Certificate
+	id, sessionID, identifier, dek, keySHA, cert := m.ID, m.SessionID, m.Identifier, m.WrappedDEK, m.KeySHA256, m.Certificate
 	var done Completion
 	if m.Complete != nil {
 		done = *m.Complete
@@ -653,7 +653,7 @@ func (u *Uploader) startLocked(ctx context.Context, e *upload, now time.Time, re
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r.res, r.err = u.send(ctx, r.op, identifier, id, dek, keySHA, cert, done, r.index, live, want)
+		r.res, r.err = u.send(ctx, r.op, identifier, id, sessionID, dek, keySHA, cert, done, r.index, live, want)
 		results <- r
 	}()
 }
@@ -667,7 +667,7 @@ func laterOf(a, b time.Time) time.Time {
 
 // send makes one request. A spooled segment (live nil) is read and checked
 // against want, its persisted hash, before it is sent.
-func (u *Uploader) send(ctx context.Context, o op, identifier, id string, dek, keySHA, cert []byte, done Completion, index uint32, live *Segment, want []byte) (Result, error) {
+func (u *Uploader) send(ctx context.Context, o op, identifier, id, sessionID string, dek, keySHA, cert []byte, done Completion, index uint32, live *Segment, want []byte) (Result, error) {
 	c, err := u.client(identifier)
 	if err != nil {
 		return Result{}, err
@@ -676,7 +676,7 @@ func (u *Uploader) send(ctx context.Context, o op, identifier, id string, dek, k
 	case opOpen:
 		ctx, cancel := context.WithTimeout(ctx, u.requestTimeout(0))
 		defer cancel()
-		return c.Open(ctx, id, dek, keySHA, cert)
+		return c.Open(ctx, id, sessionID, dek, keySHA, cert)
 	case opComplete:
 		ctx, cancel := context.WithTimeout(ctx, u.requestTimeout(0))
 		defer cancel()

@@ -89,13 +89,13 @@ func TestRecordingUploaderResumesAfterRenewal(t *testing.T) {
 	up, stopUploader := runRecordingUploader(t, tn, spool, nil)
 	wrapped, keySum := []byte("wrapped dek"), bytes.Repeat([]byte{0xaa}, 32)
 	h, err := up.Begin(context.Background(), recording.Meta{
-		ID: testRecordingID, Identifier: "device-1",
+		ID: testRecordingID, SessionID: testSessionID, Identifier: "device-1",
 		LastAcceptedAt: time.Now(), WrappedDEK: wrapped, KeySHA256: keySum, Policy: recording.PolicyBestEffort,
 	})
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	openDigest := recording.OpenDigest(testRecordingID, wrapped, keySum)
+	openDigest := recording.OpenDigest(testRecordingID, testSessionID, wrapped, keySum)
 	if !verifySignature(t, oldKey, openDigest, signatureOf(t, rec.expect(t))) {
 		t.Fatal("the first open was not signed with the presented key")
 	}

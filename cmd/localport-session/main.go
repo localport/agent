@@ -3,8 +3,9 @@
 // Command localport-session is the root session launcher and its
 // per-session helper.
 //
-//	localport-session launcher   the daemon the service manager starts
-//	localport-session helper     one session; started only by the launcher
+//	localport-session launcher                  the daemon the service manager starts
+//	localport-session helper                    one session; started only by the launcher
+//	localport-session files-server <root>       one file session as the login; started only by a helper
 //
 // See internal/launcher for the protocol and internal/sessionhelper for the
 // session setup.
@@ -40,6 +41,18 @@ func main() {
 		logger.Print("usage: localport-session launcher [--log-file <path>] | helper")
 		os.Exit(2)
 	}
+	// The file server runs as the login, not as root: the helper starts it
+	// with the event pipe on descriptor 3.
+	if os.Args[1] == sessionhelper.FilesServerMode {
+		if len(os.Args) != 3 {
+			os.Exit(2)
+		}
+		if err := sessionhelper.ServeFiles(stdio{}, os.Args[2], os.NewFile(3, "file-events")); err != nil {
+			logger.Printf("localport-session: files: %v", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if os.Geteuid() != 0 {
 		logger.Print("localport-session: must run as root")
 		os.Exit(1)
@@ -73,6 +86,13 @@ func main() {
 		os.Exit(2)
 	}
 }
+
+// stdio is the file server's connection: standard input and output.
+type stdio struct{}
+
+func (stdio) Read(p []byte) (int, error)  { return os.Stdin.Read(p) }
+func (stdio) Write(p []byte) (int, error) { return os.Stdout.Write(p) }
+func (stdio) Close() error                { return os.Stdout.Close() }
 
 func runLauncher(logger *log.Logger) error {
 	uid, gid, err := sessionhelper.LookupIDs(agentAccount)

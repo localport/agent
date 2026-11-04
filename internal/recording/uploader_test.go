@@ -115,7 +115,7 @@ func (f *fakeEdge) do(ctx context.Context, c *edgeCall) (Result, error) {
 	}
 }
 
-func (f *fakeEdge) Open(ctx context.Context, id string, _, _, _ []byte) (Result, error) {
+func (f *fakeEdge) Open(ctx context.Context, id, _ string, _, _, _ []byte) (Result, error) {
 	return f.do(ctx, &edgeCall{op: "open", id: id})
 }
 

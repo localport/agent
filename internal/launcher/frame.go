@@ -11,18 +11,23 @@ import (
 
 // Frame types on the session channel between the agent and the helper. The
 // agent sends data, resize and eof (end of the session's input); the helper
-// sends data, stderr (an exec session's standard error without a PTY) and
-// exit, and exit is its last frame.
+// sends data, stderr (an exec session's standard error without a PTY), event
+// (one file operation of an sftp session, a FileEvent in JSON) and exit, and
+// exit is its last frame.
 const (
 	FrameData   byte = 1
 	FrameResize byte = 2
 	FrameExit   byte = 3
 	FrameStderr byte = 4
 	FrameEOF    byte = 5
+	FrameEvent  byte = 6
 )
 
-// MaxFrameData bounds a data frame's payload.
-const MaxFrameData = 64 << 10
+// MaxFrameData bounds a data frame's payload; MaxFrameEvent an event frame's.
+const (
+	MaxFrameData  = 64 << 10
+	MaxFrameEvent = 10 << 10
+)
 
 // Frame is one decoded channel frame. Data is valid until the next
 // ReadFrame on the same reader.
@@ -44,6 +49,11 @@ func WriteFrame(w io.Writer, f Frame) error {
 	switch f.Type {
 	case FrameData, FrameStderr:
 		if len(f.Data) == 0 || len(f.Data) > MaxFrameData {
+			return errBadFrame
+		}
+		payload = f.Data
+	case FrameEvent:
+		if len(f.Data) == 0 || len(f.Data) > MaxFrameEvent {
 			return errBadFrame
 		}
 		payload = f.Data
@@ -89,6 +99,10 @@ func (fr *FrameReader) ReadFrame() (Frame, error) {
 		if n == 0 || n > MaxFrameData {
 			return Frame{}, errBadFrame
 		}
+	case FrameEvent:
+		if n == 0 || n > MaxFrameEvent {
+			return Frame{}, errBadFrame
+		}
 	case FrameEOF:
 		if n != 0 {
 			return Frame{}, errBadFrame
@@ -105,7 +119,7 @@ func (fr *FrameReader) ReadFrame() (Frame, error) {
 		return Frame{}, fmt.Errorf("%w: truncated payload", errBadFrame)
 	}
 	switch f.Type {
-	case FrameData, FrameStderr:
+	case FrameData, FrameStderr, FrameEvent:
 		f.Data = p
 	case FrameResize:
 		f.Cols, f.Rows = binary.BigEndian.Uint16(p), binary.BigEndian.Uint16(p[2:])

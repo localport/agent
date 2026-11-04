@@ -20,14 +20,14 @@ func TestValidatePipeAndPassword(t *testing.T) {
 		{"no pipe", func(*Request) {}, true},
 		{"session pipe", func(r *Request) { r.Pipe = pipe }, true},
 		{"password", func(r *Request) {
-			r.Pipe, r.HasPassword, r.Password = pipe, true, []byte(strings.Repeat("p", maxPassword))
+			r.Pipe, r.HasPassword, r.Password = pipe, true, []byte(strings.Repeat("p", MaxPassword))
 		}, true},
 		{"password without its flag", func(r *Request) { r.Password = []byte("p") }, false},
 		{"flag without a password", func(r *Request) { r.HasPassword = true }, false},
 		{"other pipe", func(r *Request) { r.Pipe = `\\.\pipe\localport-session` }, false},
 		{"upper-case hex", func(r *Request) { r.Pipe = SessionPipePrefix + strings.Repeat("AB", 16) }, false},
 		{"remote pipe", func(r *Request) { r.Pipe = `\\host\pipe\localport-session-` + strings.Repeat("ab", 16) }, false},
-		{"long password", func(r *Request) { r.HasPassword, r.Password = true, []byte(strings.Repeat("p", maxPassword+1)) }, false},
+		{"long password", func(r *Request) { r.HasPassword, r.Password = true, []byte(strings.Repeat("p", MaxPassword+1)) }, false},
 		{"probe with pipe", func(r *Request) { *r = Request{V: Version, Kind: KindProbe, Pipe: pipe} }, false},
 		{"probe with password", func(r *Request) { *r = Request{V: Version, Kind: KindProbe, Password: []byte("x")} }, false},
 	} {
