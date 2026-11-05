@@ -72,7 +72,7 @@ var (
 type Meta struct {
 	ID string `json:"id"`
 	// SessionID is the session id of the connection the recording belongs to
-	// (the edge's notice); a connection has one recording per session channel.
+	// (the edge's notice); a connection has one recording per session channel, plus one for its port forwards.
 	SessionID string `json:"session_id"`
 	// Identifier is the local device identity the ticket was for. The
 	// uploader keys the device's session mux on it.

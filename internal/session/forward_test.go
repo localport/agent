@@ -186,6 +186,36 @@ func TestForwardRefusals(t *testing.T) {
 	}
 }
 
+// Where unix socket forwards are not served (Windows), a direct-streamlocal
+// channel is refused prohibited and a streamlocal-forward request false,
+// before reaching the helper; TCP forwards still work.
+func TestStreamLocalRefusedWhereUnsupported(t *testing.T) {
+	old := unixForwardSupported
+	unixForwardSupported = false
+	t.Cleanup(func() { unixForwardSupported = old })
+	f := forwardFixture(t, nil)
+	client := f.connect(t, f.forwardOpts(true, true))
+	path := filepath.Join(t.TempDir(), "s")
+	_, err := client.Dial("unix", path)
+	var oce *ssh.OpenChannelError
+	if !errors.As(err, &oce) || oce.Reason != ssh.Prohibited {
+		t.Fatalf("direct-streamlocal: %v, want prohibited", err)
+	}
+	ok, _, err := client.SendRequest(reqStreamLocalForward, true, ssh.Marshal(struct{ Path string }{path}))
+	if err != nil || ok {
+		t.Fatalf("streamlocal-forward: %v, %v; want false", ok, err)
+	}
+	if n := forwardRequests(f.launcher); n != 0 {
+		t.Fatalf("a refused unix forward reached the launcher %d times", n)
+	}
+	tcp := echoServer(t, "tcp", "127.0.0.1:0")
+	c, err := client.Dial("tcp", tcp.Addr().String())
+	if err != nil {
+		t.Fatalf("a TCP forward where unix is unsupported: %v", err)
+	}
+	_ = c.Close()
+}
+
 // Remote forwards bind on loopback as the login; the bound port of a port 0
 // request comes back; cancel closes the listener; a unix socket listener is
 // served too.
@@ -209,6 +239,7 @@ func TestRemoteForward(t *testing.T) {
 			go func() { _, _ = io.Copy(c, c); _ = c.Close() }()
 		}
 	}()
+	assertLoopbackOnly(t, port)
 	loopback := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	c, err := net.Dial("tcp", loopback)
 	if err != nil {
@@ -393,4 +424,28 @@ func TestStrictForwardRecordingFailureEndsTheConnection(t *testing.T) {
 	_ = client.Close()
 	wg.Wait()
 	rec.end()
+}
+
+// assertLoopbackOnly fails when port accepts on a non-loopback address of
+// this host, which a wildcard bind would; a loopback dial cannot tell them
+// apart. A host with no such address logs that and checks nothing.
+func assertLoopbackOnly(t *testing.T, port int) {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range addrs {
+		ip, ok := a.(*net.IPNet)
+		if !ok || ip.IP.IsLoopback() || ip.IP.To4() == nil || ip.IP.IsLinkLocalUnicast() {
+			continue
+		}
+		c, err := net.DialTimeout("tcp", net.JoinHostPort(ip.IP.String(), strconv.Itoa(port)), time.Second)
+		if err == nil {
+			_ = c.Close()
+			t.Fatalf("port %d accepts on %s: the listener is not loopback only", port, ip.IP)
+		}
+		return
+	}
+	t.Log("no non-loopback IPv4 address on this host: the loopback-only bind is not checked")
 }

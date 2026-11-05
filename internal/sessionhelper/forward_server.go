@@ -49,11 +49,15 @@ type forwardServer struct {
 	log  func(string, ...any)
 	ctx  context.Context
 
-	mu           sync.Mutex
-	lastAgentID  uint32
+	mu          sync.Mutex
+	lastAgentID uint32
+	dialing     int
+	listeners   map[uint32]net.Listener
+
+	// amu serializes allocating an accepted id with sending it, so ids reach
+	// the agent in increasing order, which it requires.
+	amu          sync.Mutex
 	nextAccepted uint32
-	dialing      int
-	listeners    map[uint32]net.Listener
 }
 
 // ServeForwards serves the agent's dial, listen and close requests on peer
@@ -223,15 +227,16 @@ func (s *forwardServer) accept(id uint32, ln net.Listener) {
 			_ = conn.Close()
 			continue
 		}
-		s.mu.Lock()
-		aid := s.nextAccepted
-		s.nextAccepted += 2
-		s.mu.Unlock()
-		m := launcher.FwdMsg{Type: launcher.FwdAccepted, ListenerID: id, ID: aid}
+		m := launcher.FwdMsg{Type: launcher.FwdAccepted, ListenerID: id}
 		if a, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
 			m.Host, m.Port = a.IP.String(), uint16(a.Port)
 		}
-		if err := s.peer.send(m, conn); err != nil {
+		s.amu.Lock()
+		m.ID = s.nextAccepted
+		s.nextAccepted += 2
+		err = s.peer.send(m, conn)
+		s.amu.Unlock()
+		if err != nil {
 			_ = conn.Close()
 			return
 		}

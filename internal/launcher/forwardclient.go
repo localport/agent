@@ -122,6 +122,11 @@ func (c *ForwardClient) Close() error { return c.t.Close() }
 func (c *ForwardClient) send(m FwdMsg) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	return c.sendLocked(m)
+}
+
+// sendLocked writes m; the caller holds wmu.
+func (c *ForwardClient) sendLocked(m FwdMsg) error {
 	b, err := AppendForwardMsg(c.buf[:0], m)
 	if err != nil {
 		return err
@@ -166,10 +171,14 @@ func (c *ForwardClient) CloseListener(id uint32) {
 
 // request sends m with a fresh even id and waits for its answer, ctx or the
 // helper's end. An answer arriving after ctx ended is closed by the reader.
+// The id is allocated under wmu so ids go out in increasing order, which the
+// helper requires; lock order is wmu, then mu.
 func (c *ForwardClient) request(ctx context.Context, m FwdMsg, l *forwardListener) (forwardReply, error) {
+	c.wmu.Lock()
 	c.mu.Lock()
 	if c.failed {
 		c.mu.Unlock()
+		c.wmu.Unlock()
 		return forwardReply{}, ErrForwardHelperFailed
 	}
 	c.nextID += 2
@@ -177,7 +186,9 @@ func (c *ForwardClient) request(ctx context.Context, m FwdMsg, l *forwardListene
 	p := &pendingForward{listen: m.Type == FwdListen, reply: make(chan forwardReply, 1), listener: l}
 	c.pending[m.ID] = p
 	c.mu.Unlock()
-	if err := c.send(m); err != nil {
+	err := c.sendLocked(m)
+	c.wmu.Unlock()
+	if err != nil {
 		c.abandon(m.ID)
 		if errors.Is(err, errBadForward) {
 			return forwardReply{}, &ForwardRefusal{Code: FwdCodeInvalid}

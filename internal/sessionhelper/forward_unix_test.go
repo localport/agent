@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -118,6 +119,80 @@ func TestForwardServerDialPassesSockets(t *testing.T) {
 	_ = conn.Close()
 }
 
+// TestForwardServerConcurrentDials checks that dials issued at once reach
+// the server with increasing ids: an id sent out of order ends the server.
+func TestForwardServerConcurrentDials(t *testing.T) {
+	client := forwardPair(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	echo(t, ln)
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+	for range 20 {
+		var wg sync.WaitGroup
+		errs := make(chan error, 16)
+		for range 16 {
+			wg.Go(func() {
+				conn, err := client.Dial(ctx(t), launcher.FwdTCP, "127.0.0.1", port, "")
+				if err != nil {
+					errs <- err
+					return
+				}
+				_ = conn.Close()
+			})
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Fatalf("concurrent dial: %v", err)
+		}
+	}
+}
+
+// TestForwardServerConcurrentAccepts checks that connections accepted at
+// once by several listeners reach the client with increasing ids: an id
+// received out of order ends the client.
+func TestForwardServerConcurrentAccepts(t *testing.T) {
+	client := forwardPair(t)
+	const listeners, perListener = 4, 16
+	accepted := make(chan struct{}, listeners*perListener)
+	var ports []uint16
+	for range listeners {
+		_, port, err := client.Listen(ctx(t), launcher.FwdTCP, 0, false, "", func(a launcher.Accepted) {
+			_ = a.Conn.Close()
+			accepted <- struct{}{}
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ports = append(ports, port)
+	}
+	var wg sync.WaitGroup
+	for _, port := range ports {
+		for range perListener {
+			wg.Go(func() {
+				c, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
+				if err == nil {
+					_, _ = c.Read(make([]byte, 1))
+					_ = c.Close()
+				}
+			})
+		}
+	}
+	for i := range listeners * perListener {
+		select {
+		case <-accepted:
+		case <-client.Done():
+			t.Fatalf("the client ended after %d accepted connections", i)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%d of %d connections accepted", i, listeners*perListener)
+		}
+	}
+	wg.Wait()
+}
+
 // shortTempDir is a directory whose socket paths fit sun_path on macOS.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
@@ -139,7 +214,7 @@ func TestForwardServerListenLoopback(t *testing.T) {
 	if port == 0 {
 		t.Fatal("no bound port for a port 0 listen")
 	}
-	// Bound on loopback only: the listener's address is 127.0.0.1.
+	assertLoopbackOnly(t, int(port))
 	c, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
 	if err != nil {
 		t.Fatal(err)
@@ -252,4 +327,28 @@ func TestForwardServerEndClosesListeners(t *testing.T) {
 	if _, err := client.Dial(ctx(t), launcher.FwdTCP, "127.0.0.1", 1, ""); !errors.Is(err, launcher.ErrForwardHelperFailed) {
 		t.Fatalf("dial after the end: %v", err)
 	}
+}
+
+// assertLoopbackOnly fails when port accepts on a non-loopback address of
+// this host, which a wildcard bind would; a loopback dial cannot tell them
+// apart. A host with no such address logs that and checks nothing.
+func assertLoopbackOnly(t *testing.T, port int) {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range addrs {
+		ip, ok := a.(*net.IPNet)
+		if !ok || ip.IP.IsLoopback() || ip.IP.To4() == nil || ip.IP.IsLinkLocalUnicast() {
+			continue
+		}
+		c, err := net.DialTimeout("tcp", net.JoinHostPort(ip.IP.String(), strconv.Itoa(port)), time.Second)
+		if err == nil {
+			_ = c.Close()
+			t.Fatalf("port %d accepts on %s: the listener is not loopback only", port, ip.IP)
+		}
+		return
+	}
+	t.Log("no non-loopback IPv4 address on this host: the loopback-only bind is not checked")
 }

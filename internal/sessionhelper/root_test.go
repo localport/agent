@@ -3,12 +3,18 @@
 package sessionhelper
 
 import (
+	"errors"
 	"log"
+	"net"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -21,7 +27,118 @@ func TestMain(m *testing.M) {
 	if len(os.Args) == 2 && os.Args[1] == "helper" {
 		os.Exit(Run(log.New(os.Stderr, "", 0).Printf))
 	}
+	if len(os.Args) == 2 && os.Args[1] == ForwardServerMode {
+		if err := RunForwardServer(log.New(os.Stderr, "", 0).Printf); err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	os.Exit(m.Run())
+}
+
+// TestRootHelperForwardsAsTheLogin starts a forward helper as the launcher
+// does, as root, for LOCALPORT_TEST_LOGIN, then dials and listens through
+// it: the listener's socket file belongs to the login, so the forward
+// server runs with the login's credentials, not root's.
+func TestRootHelperForwardsAsTheLogin(t *testing.T) {
+	login := os.Getenv("LOCALPORT_TEST_LOGIN")
+	switch {
+	case os.Geteuid() != 0:
+		t.Skip("needs root")
+	case login == "":
+		t.Skip("set LOCALPORT_TEST_LOGIN to a test account")
+	}
+	u, err := user.Lookup(login)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The forward server is this binary run as the login, which cannot
+	// reach the go-build directory: run a copy the login can execute.
+	dir, err := os.MkdirTemp("/tmp", "lpfwroot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o1777); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyExe := filepath.Join(dir, "localport-session")
+	if err := os.WriteFile(copyExe, bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	agentEnd, helperEnd, err := launcher.SocketPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ours, theirs, err := launcher.SocketPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ours.Close()
+	cmd := &exec.Cmd{Path: copyExe, Args: []string{"localport-session", "helper"}, Env: []string{}, Dir: "/", Stderr: os.Stderr, ExtraFiles: []*os.File{helperEnd, theirs}}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	helperEnd.Close()
+	theirs.Close()
+	if err := launcher.WriteHelperRequest(ours, launcher.HelperRequest{Kind: launcher.KindForward, Login: login}); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := launcher.ReadHelperReply(ours)
+	if err != nil || !reply.Started {
+		t.Fatalf("helper reply %+v, %v", reply, err)
+	}
+	client, err := launcher.NewForwardClient(agentEnd, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	echo(t, ln)
+	conn, err := client.Dial(ctx(t), launcher.FwdTCP, "127.0.0.1", uint16(ln.Addr().(*net.TCPAddr).Port), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, conn)
+	_ = conn.Close()
+
+	path := filepath.Join(dir, "r.sock")
+	if _, _, err := client.Listen(ctx(t), launcher.FwdUnix, 0, false, path, func(a launcher.Accepted) { _ = a.Conn.Close() }, nil); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner := strconv.FormatUint(uint64(fi.Sys().(*syscall.Stat_t).Uid), 10); owner != u.Uid {
+		t.Fatalf("socket owner uid %s, want the login's %s", owner, u.Uid)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("socket mode %o, want 600", perm)
+	}
+
+	_ = client.Close()
+	<-client.Done()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("helper exit: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("socket file after the helper's end: %v", err)
+	}
 }
 
 // TestRootHelperRunsAPAMSession starts the helper as the launcher does, as
