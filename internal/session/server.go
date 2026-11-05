@@ -65,6 +65,10 @@ const (
 	permRecPol  = "rec-policy"
 	permRecPub  = "rec-pub"
 	permCert    = "cert"
+	// permFwdLocal and permFwdRemote are present when the certificate
+	// permits that forward direction.
+	permFwdLocal  = "fwd-local"
+	permFwdRemote = "fwd-remote"
 )
 
 // ServerConfig is one device's session server configuration. Capabilities,
@@ -144,6 +148,9 @@ type Server struct {
 	mu       sync.Mutex
 	closing  int // Shutdown calls in progress
 	sessions int // slots taken, at most maxSessions
+	// forwards counts the forward channels of every connection, at most
+	// maxDeviceForwards.
+	forwards int
 	handlers map[*handler]struct{}
 	// drained is closed when handlers becomes empty while Shutdown waits.
 	drained chan struct{}
@@ -364,6 +371,12 @@ func (a *admission) permissions() *ssh.Permissions {
 	if a.Rec != nil {
 		ext[permRecPol], ext[permRecPub] = a.Rec.Policy, a.Rec.PubSHA256
 	}
+	if a.ForwardLocal {
+		ext[permFwdLocal] = ""
+	}
+	if a.ForwardRemote {
+		ext[permFwdRemote] = ""
+	}
 	return &ssh.Permissions{Extensions: ext}
 }
 
@@ -376,6 +389,8 @@ func admissionOf(p *ssh.Permissions) *admission {
 	if pol, ok := ext[permRecPol]; ok {
 		a.Rec = &certRec{Policy: pol, PubSHA256: ext[permRecPub]}
 	}
+	_, a.ForwardLocal = ext[permFwdLocal]
+	_, a.ForwardRemote = ext[permFwdRemote]
 	return a
 }
 
@@ -533,6 +548,12 @@ type conn struct {
 
 	lastActivity atomic.Int64
 
+	// fwd serves the connection's port forwards.
+	fwd *forwarder
+	// failed receives the reason of a failure that ends the connection (a
+	// Strict forwards recording that failed).
+	failed chan string
+
 	mu sync.Mutex
 	// open counts the channels accepted and not yet closed; served counts
 	// every channel accepted. ended is set once the connection's end is
@@ -547,28 +568,40 @@ type conn struct {
 
 func (c *conn) active() { c.lastActivity.Store(c.s.cfg.clock.Now().UnixNano()) }
 
+// fail ends the connection with reason unless its end is already decided.
+func (c *conn) fail(reason string) {
+	select {
+	case c.failed <- reason:
+	default:
+	}
+}
+
 // run serves an admitted connection until its first recorded end: the client
-// closing it, the idle timeout, a Shutdown, or the channel of a terminal
-// connection closing (a failed Strict recording ends its own channel). It
-// then writes the reason to every open channel's stderr, closes the
-// connection and joins the channels.
+// closing it, the idle timeout, a Shutdown, the channel of a terminal
+// connection closing (a failed Strict recording ends its own channel), or a
+// failed Strict forwards recording. It then writes the reason to every open
+// channel's stderr, ends the forwards, closes the connection and joins the
+// channels and forwards.
 func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request, adm *admission, sessionID string, password []byte) {
 	c := &conn{s: s, adm: adm, sessionID: sessionID, login: sc.User(), password: password,
-		channels: map[*channel]struct{}{}, allClosed: make(chan struct{}, 1)}
-	c.active()
+		channels: map[*channel]struct{}{}, allClosed: make(chan struct{}, 1), failed: make(chan string, 1)}
 	var wg sync.WaitGroup
+	c.fwd = newForwarder(c, sc, &wg)
+	c.active()
 	clientDone := make(chan struct{})
 	wg.Go(func() {
 		defer close(clientDone)
 		c.accept(chans, &wg)
 	})
 	wg.Go(func() {
-		// Global requests: keepalives count as activity; every request is
-		// refused (no forwarding).
+		// Global requests, answered in order: keepalives count as activity;
+		// the remote forwarding requests are served when allowed, every
+		// other request is refused.
 		for r := range reqs {
 			c.active()
+			ok, payload := c.fwd.globalRequest(r)
 			if r.WantReply {
-				_ = r.Reply(false, nil)
+				_ = r.Reply(ok, payload)
 			}
 		}
 	})
@@ -586,6 +619,8 @@ wait:
 		case <-h.stop:
 			reason = h.stopReason
 			break wait
+		case reason = <-c.failed:
+			break wait
 		case <-fire:
 			idle := s.cfg.clock.Now().Sub(time.Unix(0, c.lastActivity.Load()))
 			if idle >= idleTimeout {
@@ -599,6 +634,8 @@ wait:
 	c.end(reason)
 	_ = sc.Close()
 	wg.Wait()
+	// After every forward recorded its close.
+	c.fwd.finish()
 }
 
 // end decides the connection's end and ends every open channel, telling the
@@ -614,15 +651,22 @@ func (c *conn) end(reason string) {
 	for _, ch := range open {
 		ch.end(reason)
 	}
+	c.fwd.end()
 }
 
-// accept serves the connection's channel opens: session channels only, at
-// most maxChannels open, and one in all on a terminal connection. On a
-// recorded connection every channel opens its own recording.
+// accept serves the connection's channel opens: session channels, at most
+// maxChannels open and one in all on a terminal connection, and the local
+// port forwarding channels (forward.go, their own bounds). On a recorded
+// connection every session channel opens its own recording.
 func (c *conn) accept(chans <-chan ssh.NewChannel, wg *sync.WaitGroup) {
 	for nc := range chans {
-		if nc.ChannelType() != "session" {
-			_ = nc.Reject(ssh.Prohibited, "only session channels are served")
+		switch nc.ChannelType() {
+		case "session":
+		case chanDirectTCPIP, chanDirectStreamLocal:
+			c.fwd.local(nc)
+			continue
+		default:
+			_ = nc.Reject(ssh.Prohibited, "only session and port forwarding channels are served")
 			continue
 		}
 		c.mu.Lock()

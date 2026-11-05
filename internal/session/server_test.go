@@ -56,6 +56,9 @@ type fakeLauncher struct {
 	// badEvent, when set, is the event frame payload an sftp helper sends
 	// in place of a valid file event.
 	badEvent []byte
+	// forward, when set, serves a forward request's channel (the real
+	// forward server, in-process).
+	forward func(conn net.Conn)
 }
 
 func newFakeLauncher() *fakeLauncher { return &fakeLauncher{resizes: make(chan [2]uint16, 8)} }
@@ -77,6 +80,10 @@ func (l *fakeLauncher) Start(_ context.Context, req launcher.Request, channel *o
 	if hold != nil {
 		l.starting <- struct{}{}
 		<-hold
+	}
+	if req.Kind == launcher.KindForward && l.forward != nil {
+		go l.forward(conn)
+		return &launcher.Session{}, nil
 	}
 	go func() {
 		l.helper(conn, req)
@@ -210,6 +217,8 @@ type certOpts struct {
 	extraCO bool
 	rec     *certRec
 	signer  ed25519.PrivateKey
+	// fwdLocal and fwdRemote add the forwarding extensions.
+	fwdLocal, fwdRemote bool
 }
 
 func (f *sshFixture) defaults() certOpts {
@@ -236,6 +245,12 @@ func (f *sshFixture) mint(t *testing.T, o certOpts) (ssh.Signer, *ssh.Certificat
 	}
 	if o.extraCO {
 		cert.CriticalOptions["force-command"] = "/bin/true"
+	}
+	if o.fwdLocal {
+		cert.Extensions[extForwardLocal] = ""
+	}
+	if o.fwdRemote {
+		cert.Extensions[extForwardRemote] = ""
 	}
 	if o.rec != nil {
 		raw, _ := json.Marshal(o.rec)

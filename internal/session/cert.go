@@ -22,6 +22,8 @@ const (
 	extKind          = "kind@localport.io"
 	extSubject       = "subject@localport.io"
 	extRec           = "rec@localport.io"
+	extForwardLocal  = "port-forwarding-local@localport.io"
+	extForwardRemote = "port-forwarding-remote@localport.io"
 	desktopPrincipal = "localport-desktop"
 )
 
@@ -65,6 +67,10 @@ type admission struct {
 	Subject string
 	Rec     *certRec
 	Cert    []byte
+	// ForwardLocal and ForwardRemote are the certificate's forwarding
+	// extensions, honoured on an ssh connection only.
+	ForwardLocal  bool
+	ForwardRemote bool
 }
 
 // errCertRefused is every certificate refusal; the detail goes to the log
@@ -115,6 +121,8 @@ func verifyCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, dev
 		return nil, refuseCert("for device %q, not this device", d.Prefix)
 	}
 	a := &admission{Kind: cert.Extensions[extKind], Login: user, Cert: cert.Marshal()}
+	_, a.ForwardLocal = cert.Extensions[extForwardLocal]
+	_, a.ForwardRemote = cert.Extensions[extForwardRemote]
 	var s struct {
 		Subject string `json:"subject"`
 		UserID  string `json:"user_id,omitempty"`

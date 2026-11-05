@@ -142,6 +142,7 @@ const (
 	evResize
 	evExit
 	evFile
+	evForward
 )
 
 // recEvent is one tap, stamped when the terminal produced it.
@@ -205,6 +206,12 @@ func (r *sessionRecorder) output(p []byte, halt <-chan struct{}) {
 // under the same bounds as output.
 func (r *sessionRecorder) file(event []byte, halt <-chan struct{}) {
 	r.tap(evFile, event, halt)
+}
+
+// forward queues one port forward event (a forwardEvent in JSON) under the
+// same bounds as output.
+func (r *sessionRecorder) forward(event []byte, halt <-chan struct{}) {
+	r.tap(evForward, event, halt)
 }
 
 // tap queues a copy of p as an event of kind, bounded by recorderQueueBytes.
@@ -358,7 +365,7 @@ func (r *sessionRecorder) next() (ev recEvent, how recClose, reason string, ok b
 	ev = r.queue[0]
 	r.queue[0] = recEvent{}
 	r.queue = r.queue[1:]
-	if ev.kind == evOutput || ev.kind == evFile {
+	if ev.kind == evOutput || ev.kind == evFile || ev.kind == evForward {
 		r.queued -= len(ev.data)
 		select {
 		case r.space <- struct{}{}:
@@ -457,6 +464,10 @@ func (r *sessionRecorder) record(st *recorderState, ev recEvent) bool {
 	case evFile:
 		if st.w != nil {
 			return r.add(st, ev.at, st.w.File(ev.at, ev.data))
+		}
+	case evForward:
+		if st.w != nil {
+			return r.add(st, ev.at, st.w.Forward(ev.at, ev.data))
 		}
 	}
 	return true

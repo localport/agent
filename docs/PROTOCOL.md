@@ -632,9 +632,10 @@ unparsed by the edge) and the agent's SSH server:
 
    At most 8 connections run at once; a stream past that, or one arriving
    while the agent shuts down, is closed before the handshake.
-3. Channels: `session` channels only (others are refused `prohibited`); a
-   `terminal` connection has one, an `ssh` or `files` connection at most 4
-   open at once. On a session channel of a `terminal` or `ssh` connection the
+3. Channels: `session` channels, and on an `ssh` connection the port
+   forwarding channels below (others are refused `prohibited`); a `terminal`
+   connection has one session channel, an `ssh` or `files` connection at
+   most 4 open at once. On a session channel of a `terminal` or `ssh` connection the
    agent accepts `pty-req` (cols and rows 1 to 1000, term matching
    `^[a-zA-Z0-9.+-]{1,32}$`), `window-change`, `shell` (with a PTY: the login
    shell on a terminal; without one, on `ssh` only: the login shell on pipes)
@@ -648,7 +649,7 @@ unparsed by the edge) and the agent's SSH server:
    names and values together at most 1 KiB; the helper sets them after the
    login's environment. It refuses every other `env`, other subsystems,
    `x11-req`, `auth-agent-req@openssh.com`, `signal`, and every global request
-   (`tcpip-forward` included). Each `shell`, `exec` or `subsystem` is one
+   other than the port forwarding requests below. Each `shell`, `exec` or `subsystem` is one
    launcher request of kind `terminal`, `exec` or `sftp`; an `sftp` request
    serves the SFTP protocol (version 3) as the login, confined to the
    device's `files_root` or the login's home, opening only regular files and
@@ -660,6 +661,44 @@ unparsed by the edge) and the agent's SSH server:
    The helper's exit becomes `exit-status`, then the channel closes; a Strict
    channel whose recording fails ends with
    `localport: session ended: recording_failed`.
+
+   Port forwarding (RFC 4254 section 7, OpenSSH PROTOCOL section 2.4) is
+   served on an `ssh` connection only, when the device's config enables
+   `forwarding` and the certificate carries the direction's flag extension:
+   `port-forwarding-local@localport.io` for local forwards,
+   `port-forwarding-remote@localport.io` for remote forwards. Otherwise a
+   forwarding channel is refused `prohibited` and a forwarding global request
+   is answered false.
+
+   | Direction | Requests | Platforms |
+   | --------- | -------- | --------- |
+   | local | channel `direct-tcpip`, any destination | all |
+   | local | channel `direct-streamlocal@openssh.com`, an absolute path of at most 104 bytes | Linux, macOS |
+   | remote | global `tcpip-forward`, `cancel-tcpip-forward`: bound on `127.0.0.1` (on `::1` when the client names `::1`) whatever address the client names; port 0 answers the bound port; each accepted connection opens a `forwarded-tcpip` channel | all |
+   | remote | global `streamlocal-forward@openssh.com`, `cancel-streamlocal-forward@openssh.com`: socket created with mask 0177, an existing path refused; each accepted connection opens a `forwarded-streamlocal@openssh.com` channel | Linux, macOS |
+
+   A local forward whose dial fails is refused `connect failed` with the
+   helper's code (`connection_refused`, `unreachable`, `permission_denied`,
+   `address_in_use`, `path_exists`, `unsupported`, `invalid`, `limit`) as its
+   message. One connection holds at most 32 forward channels (local and
+   forwarded together) and 8 remote listeners; the device's connections
+   together hold at most 64 forward channels. Past a limit a channel is
+   refused `resource shortage` and a listen is answered false. Session
+   channels keep their own limit of 4.
+
+   Every dial and listen runs in the connection's networking helper: a
+   launcher request of kind `forward` at the first allowed forward starts it
+   as the login, and it ends with the connection. On Linux and macOS it
+   passes each connected socket back to the agent, which relays the socket
+   and the channel directly; on Windows each forward's bytes ride the
+   helper's pipe with a 64 KiB credit window per forward and direction. When
+   the helper exits, the connection's forwards end and later forwarding
+   requests on it are refused (`helper_failed`); the connection continues.
+   Forwarded data counts as activity for the idle timer. A recorded
+   connection writes an asciicast event `p` at each listen, cancel, forward
+   open and forward close (direction, kind, address, result, bytes in and
+   out), never the forwarded bytes; under Strict a `p` event the recorder
+   cannot take ends the connection `recording_failed`.
 4. End: the agent closes the connection, after writing
    `localport: session ended: <reason>` to each open channel's stderr, for
    `idle` (30 minutes without client channel data or a request),
@@ -667,7 +706,8 @@ unparsed by the edge) and the agent's SSH server:
    (`localport set` changed the device's entry and the agent reloaded it; the
    device's other sessions end too), `exited` (the channel of a `terminal`
    connection, or the last channel of a `files` connection, closed, a Strict
-   recording failure on it included) and, on one
+   recording failure on it included), `recording_failed` (a Strict
+   connection's port forwarding events could not be recorded) and, on one
    channel, `helper_failed` (the session helper's channel ended without an
    exit). A client that closes the
    connection ends it without a reason.

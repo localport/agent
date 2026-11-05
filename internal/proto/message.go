@@ -91,7 +91,7 @@ type RegisterPayload struct {
 	// RegisterAck so the edge can replace the stale session on reconnect.
 	ResumeSessionID string `json:"resume_session_id,omitempty"`
 
-	// Capabilities (terminal, files, desktop), Logins and Desktop (rdp, vnc)
+	// Capabilities (terminal, files, desktop, forwarding), Logins and Desktop (rdp, vnc)
 	// are what a device enabled in its local config. The agent enforces them;
 	// the API's session mint also refuses a kind whose capability or desktop
 	// protocol is not listed.
