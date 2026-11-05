@@ -28,8 +28,9 @@ const FilesServerMode = "files-server"
 // confined to dir: the client sees dir as "/", and every path resolves
 // through an os.Root, so neither "..", an absolute name nor a symlink leaves
 // it. Each operation the files log names is written to events as a
-// FrameEvent (launcher.FileEvent). It returns when the client ends the
-// session.
+// FrameEvent (launcher.FileEvent); a request refused as malformed before it
+// acts (a symlink with an empty target) changes nothing and has no event. It
+// returns when the client ends the session.
 func ServeFiles(rwc io.ReadWriteCloser, dir string, events io.Writer) error {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -54,7 +55,8 @@ type filesServer struct {
 }
 
 // emit writes one event, its names escaped and bounded by
-// launcher.EventName so every operation is logged. A broken event pipe drops
+// launcher.EventName so no file name keeps an operation out of the log. A
+// broken event pipe drops
 // it: the helper ends the channel when its pipe breaks.
 func (s *filesServer) emit(ev launcher.FileEvent) {
 	ev.Path, ev.Target = launcher.EventName(ev.Path), launcher.EventName(ev.Target)

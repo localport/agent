@@ -49,7 +49,7 @@ func Run(log func(string, ...any)) int {
 		_ = launcher.WriteHelperReply(os.Stdout, launcher.HelperReply{Refused: code})
 		return 1
 	}
-	if req.Kind != launcher.KindTerminal && req.Kind != launcher.KindExec && req.Kind != launcher.KindSFTP {
+	if req.Kind != launcher.KindTerminal && req.Kind != launcher.KindExec && req.Kind != launcher.KindSFTP && req.Kind != launcher.KindForward {
 		return refuse(launcher.CodeUnsupportedKind, errors.New(req.Kind))
 	}
 	if err := enablePrivileges(helperPrivileges...); err != nil {
@@ -99,14 +99,19 @@ func Run(log func(string, ...any)) int {
 		return refuse(launcher.CodeSpawnFailed, err)
 	}
 	// A terminal, and an exec with a terminal, run in a pseudoconsole; an
-	// exec without one, and the file server, run on pipes.
+	// exec without one, the file server and the forward server run on pipes.
 	app, cmdLine := shell, commandLine(shell, req.Command)
-	if req.Kind == launcher.KindSFTP {
+	switch req.Kind {
+	case launcher.KindSFTP:
 		if app, cmdLine, err = filesServerCommand(token, req.Root); err != nil {
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
+	case launcher.KindForward:
+		if app, cmdLine, err = forwardServerCommand(); err != nil {
+			return refuse(launcher.CodeSpawnFailed, err)
+		}
 	}
-	if req.Kind == launcher.KindSFTP || (req.Kind == launcher.KindExec && req.Cols == 0) {
+	if req.Kind == launcher.KindSFTP || req.Kind == launcher.KindForward || (req.Kind == launcher.KindExec && req.Cols == 0) {
 		p, err := startPiped(token, app, cmdLine, env, req.Kind == launcher.KindSFTP)
 		if err != nil {
 			return refuse(launcher.CodeSpawnFailed, err)

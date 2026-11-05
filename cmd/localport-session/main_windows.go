@@ -4,6 +4,7 @@
 //	localport-session launcher                          the LocalSystem service localport-session
 //	localport-session helper                            one session; started only by the launcher
 //	localport-session files-server <root> <handle>      one file session as the login; started only by a helper
+//	localport-session forward-server                    one connection's port forwards as the login; started only by a helper
 //
 // See internal/launcher for the protocol and internal/sessionhelper for the
 // session setup.
@@ -39,6 +40,14 @@ func main() {
 		}
 		if err := sessionhelper.ServeFiles(stdio{}, os.Args[2], os.NewFile(uintptr(h), "file-events")); err != nil {
 			logger.Printf("localport-session: files: %v", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	// The forward server runs as the login on the helper's pipes.
+	if len(os.Args) == 2 && os.Args[1] == sessionhelper.ForwardServerMode {
+		if err := sessionhelper.RunForwardServer(logger.Printf); err != nil {
+			logger.Printf("localport-session: forward: %v", err)
 			os.Exit(1)
 		}
 		os.Exit(0)

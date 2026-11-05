@@ -270,6 +270,36 @@ func TestAuthorizeFileSessions(t *testing.T) {
 	}
 }
 
+// A forward request (the networking helper) needs forwarding enabled;
+// terminal alone does not admit it, and it carries no terminal, command or
+// environment.
+func TestAuthorizeForwardRequests(t *testing.T) {
+	fwd := Request{V: Version, Kind: KindForward, Device: terminalRequest("pi").Device, Login: "pi"}
+	if err := fwd.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	s := &Server{LoadConfig: testConfig(t, config.LocalDevice{
+		Enable: []config.Capability{config.CapabilityTerminal, config.CapabilityForwarding}, Logins: []string{"pi"}})}
+	if h, err := s.authorize(fwd); err != nil || h.Kind != KindForward || h.Login != "pi" {
+		t.Fatalf("authorize = %+v, %v", h, err)
+	}
+	s = &Server{LoadConfig: testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityTerminal}, Logins: []string{"pi"}})}
+	if _, err := s.authorize(fwd); CodeOf(err) != CodeKindNotEnabled {
+		t.Fatalf("forward on a terminal-only device: %v, want kind_not_enabled", err)
+	}
+	for name, edit := range map[string]func(*Request){
+		"terminal": func(r *Request) { r.Cols, r.Rows, r.Term = 80, 24, "xterm" },
+		"command":  func(r *Request) { r.Command = "id" },
+		"env":      func(r *Request) { r.Env = map[string]string{"LANG": "C"} },
+	} {
+		r := fwd
+		edit(&r)
+		if CodeOf(r.Validate()) != CodeBadRequest {
+			t.Errorf("forward with %s: %v, want bad_request", name, r.Validate())
+		}
+	}
+}
+
 func TestRequestValidation(t *testing.T) {
 	ok := terminalRequest("pi")
 	ok.V = Version

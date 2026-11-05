@@ -92,10 +92,14 @@ func authorize(load func() (*config.LocalConfig, error), agentAccount string, re
 		return HelperRequest{}, Refusal(CodeDeviceUnknown)
 	}
 	d := cfg.Devices[i]
-	// A file session needs files enabled, every other session terminal.
+	// A file session needs files enabled, a networking helper forwarding,
+	// every other session terminal.
 	need := config.CapabilityTerminal
-	if req.Kind == KindSFTP {
+	switch req.Kind {
+	case KindSFTP:
 		need = config.CapabilityFiles
+	case KindForward:
+		need = config.CapabilityForwarding
 	}
 	if !slices.Contains(d.Enable, need) {
 		return HelperRequest{}, Refusal(CodeKindNotEnabled)

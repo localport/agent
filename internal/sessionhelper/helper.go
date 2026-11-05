@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -60,7 +61,7 @@ func Run(log func(string, ...any)) int {
 		_ = launcher.WriteHelperReply(control, launcher.HelperReply{Refused: code})
 		return 1
 	}
-	if req.Kind != launcher.KindTerminal && req.Kind != launcher.KindExec && req.Kind != launcher.KindSFTP {
+	if req.Kind != launcher.KindTerminal && req.Kind != launcher.KindExec && req.Kind != launcher.KindSFTP && req.Kind != launcher.KindForward {
 		return refuse(launcher.CodeUnsupportedKind, errors.New(req.Kind))
 	}
 	// An exec session without a size, and a file session, run on pipes;
@@ -134,6 +135,23 @@ func Run(log func(string, ...any)) int {
 		}
 		plan.args, plan.events = []string{"localport-session", FilesServerMode, root}, true
 	}
+	if req.Kind == launcher.KindForward {
+		// The forward server takes the channel itself: it passes connected
+		// sockets to the agent as descriptors, so nothing is relayed here.
+		cmd, err := startForwardServer(channel, plan)
+		if err != nil {
+			pam.close()
+			return refuse(launcher.CodeSpawnFailed, err)
+		}
+		_ = channel.Close()
+		if err := launcher.WriteHelperReply(control, launcher.HelperReply{Started: true}); err != nil {
+			log("sessionhelper: reply started: %v", err)
+		}
+		_ = control.Close()
+		_ = cmd.Wait()
+		pam.close()
+		return 0
+	}
 	out := &frameWriter{w: channel}
 	var k helperSession
 	var ut *utmpEntry // nil without a PTY; logout is then a no-op
@@ -194,6 +212,29 @@ type helperSession interface {
 	endedC() <-chan struct{}
 	finish()
 	Wait()
+}
+
+// startForwardServer starts the forward server as plan's user with channel on
+// its descriptor 3; the server dials and listens as that user and passes
+// each connected socket to the agent over channel.
+func startForwardServer(channel *os.File, plan spawnPlan) (*exec.Cmd, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	cmd := &exec.Cmd{
+		Path:        exe,
+		Args:        []string{"localport-session", ForwardServerMode},
+		Env:         plan.env,
+		Dir:         plan.dir,
+		Stderr:      os.Stderr,
+		ExtraFiles:  []*os.File{channel},
+		SysProcAttr: &syscall.SysProcAttr{Setsid: true, Credential: plan.cred},
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmd, nil
 }
 
 // shellArgs is the shell's argv: a login shell ("-sh") for a terminal and

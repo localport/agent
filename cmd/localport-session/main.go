@@ -6,6 +6,7 @@
 //	localport-session launcher                  the daemon the service manager starts
 //	localport-session helper                    one session; started only by the launcher
 //	localport-session files-server <root>       one file session as the login; started only by a helper
+//	localport-session forward-server            one connection's port forwards as the login; started only by a helper
 //
 // See internal/launcher for the protocol and internal/sessionhelper for the
 // session setup.
@@ -49,6 +50,18 @@ func main() {
 		}
 		if err := sessionhelper.ServeFiles(stdio{}, os.Args[2], os.NewFile(3, "file-events")); err != nil {
 			logger.Printf("localport-session: files: %v", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	// The forward server runs as the login with the forward channel on
+	// descriptor 3.
+	if os.Args[1] == sessionhelper.ForwardServerMode {
+		if len(os.Args) != 2 {
+			os.Exit(2)
+		}
+		if err := sessionhelper.RunForwardServer(logger.Printf); err != nil {
+			logger.Printf("localport-session: forward: %v", err)
 			os.Exit(1)
 		}
 		os.Exit(0)

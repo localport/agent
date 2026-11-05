@@ -24,12 +24,13 @@ terminal sessions, AG06x recordings, AG07x network.
 | AG012 | Untrusted credential path | A credential file or directory is a link, has the wrong owner, or is writable by others. Fix the path the message names. On Linux and macOS: owned by the account running the agent, mode 0700 for directories and 0600 for files. On Windows: owned by that account, SYSTEM or Administrators; a file grants access to no one else, and a directory grants write access to no one else. Under the machine-wide config directory the device service's account `NT SERVICE\localport-device` is allowed too. |
 | AG021 | Devices already running | Another localport process (the device service, `localport run` or `connect --foreground`) serves these devices. Stop it, or let it serve them. |
 | AG022 | Fleet token retired | Create the device in the dashboard and run the command it shows. |
-| AG023 | Terminal or files with a host | Terminal and files act on the machine running the agent. Remove the host, or remove terminal and files. |
+| AG023 | Terminal, files or forwarding with a host | Terminal, files and forwarding act on the machine running the agent. Remove the host, or remove terminal, files and forwarding. |
 | AG024 | Logins without terminal or files | Logins apply only to terminal and files. Enable one of them, or remove the logins. |
 | AG025 | Terminal or files without logins | Name at least one login with `--logins`. |
 | AG026 | Desktop without target | Give desktop a target with `--rdp` or `--vnc`. |
 | AG027 | Files root missing | The files root must be an existing directory. Mount or create it, or change it with `localport set`. |
 | AG029 | Logins with run_as_agent | A device with `run_as_agent: true` runs terminal and files sessions as the agent account `localport`, so it lists no logins. Remove `--logins`, or drop `--run-as-agent` on a host with usable logins. |
+| AG030 | Forwarding without terminal | SSH port forwarding rides an `ssh` connection, so it needs terminal on the same device. Enable both, for example `--enable terminal,forwarding`. |
 | AG028 | Invalid local config | The local config failed validation; the message names the field. Every command that reads it refuses the same way, `localport set` included, so correct `agent.yaml` by hand: in `$LOCALPORT_HOME` (or `~/.localport`), or as root in the machine-wide config directory. |
 | AG031 | No enrolled device | The machine-wide config lists no device. Enrol one with `sudo localport connect <join-token>`. |
 | AG032 | No device can start | Every enrolled device's credential is missing or unreadable; the lines above name each one. Create a new join command in the dashboard for each device and run it. |

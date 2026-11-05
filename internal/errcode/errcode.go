@@ -68,6 +68,7 @@ const (
 	FilesRootMissing     Code = "AG027"
 	InvalidLocalConfig   Code = "AG028"
 	RunAsAgentLogins     Code = "AG029"
+	ForwardingTerminal   Code = "AG030"
 
 	NoDevice         Code = "AG031"
 	NoDeviceStarts   Code = "AG032"
@@ -107,13 +108,14 @@ var registry = []Entry{
 
 	{RunLocked, "Devices already running", "localport is already running the devices of this config"},
 	{FleetTokenRetired, "Fleet token retired", "fleet tokens are retired: create the device in the dashboard and run the command it shows"},
-	{HostCapability, "Terminal or files with a host", "terminal and files act on this machine only and cannot be enabled with a host"},
+	{HostCapability, "Terminal, files or forwarding with a host", "terminal, files and forwarding act on this machine only and cannot be enabled with a host"},
 	{LoginsWithoutSession, "Logins without terminal or files", "logins apply only to a device that enables terminal or files"},
 	{SessionWithoutLogins, "Terminal or files without logins", "terminal and files need at least one login"},
 	{DesktopWithoutTarget, "Desktop without target", "desktop needs an rdp or vnc target"},
 	{FilesRootMissing, "Files root missing", "files root is not an existing directory"},
 	{InvalidLocalConfig, "Invalid local config", "invalid local config"},
 	{RunAsAgentLogins, "Logins with run_as_agent", "a device that runs sessions as the agent account names no logins"},
+	{ForwardingTerminal, "Forwarding without terminal", "forwarding rides an ssh connection and needs terminal enabled"},
 
 	{NoDevice, "No enrolled device", "no enrolled device"},
 	{NoDeviceStarts, "No device can start", "no enrolled device can start: every device's credential is missing or unreadable (see above)"},

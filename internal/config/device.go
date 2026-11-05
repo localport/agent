@@ -28,9 +28,13 @@ import (
 // Every device enrols with its own credential.
 var ErrFleetTokenRetired = errcode.New(errcode.FleetTokenRetired)
 
-// ErrHostCapability refuses terminal or files on a device with a host: they
-// act on the machine running the agent only.
+// ErrHostCapability refuses terminal, files or forwarding on a device with a
+// host: they act on the machine running the agent only.
 var ErrHostCapability = errcode.New(errcode.HostCapability)
+
+// ErrForwardingWithoutTerminal refuses forwarding on a device that does not
+// enable terminal: forwarding rides an ssh connection.
+var ErrForwardingWithoutTerminal = errcode.New(errcode.ForwardingTerminal)
 
 // ErrLoginsWithoutSession refuses logins on a device that enables neither
 // terminal nor files, the only sessions that use them.
@@ -72,6 +76,9 @@ const (
 	CapabilityTerminal Capability = "terminal"
 	CapabilityFiles    Capability = "files"
 	CapabilityDesktop  Capability = "desktop"
+	// CapabilityForwarding allows SSH port forwarding on the device's ssh
+	// connections; it needs terminal, as forwarding rides an ssh connection.
+	CapabilityForwarding Capability = "forwarding"
 )
 
 // Default desktop targets, used when --rdp or --vnc is given without a value.
@@ -464,17 +471,20 @@ func (d LocalDevice) validateSettings(name, goos string) error {
 	}
 	for i, c := range d.Enable {
 		switch c {
-		case CapabilityTerminal, CapabilityFiles, CapabilityDesktop:
+		case CapabilityTerminal, CapabilityFiles, CapabilityDesktop, CapabilityForwarding:
 		default:
-			return fmt.Errorf("device %s: enable %q is not one of terminal, files, desktop", name, c)
+			return fmt.Errorf("device %s: enable %q is not one of terminal, files, desktop, forwarding", name, c)
 		}
 		if slices.Contains(d.Enable[:i], c) {
 			return fmt.Errorf("device %s: enable lists %s twice", name, c)
 		}
-		// Terminal and files act on the machine running the agent.
-		if (c == CapabilityTerminal || c == CapabilityFiles) && d.Host != "" {
+		// Terminal, files and forwarding act on the machine running the agent.
+		if (c == CapabilityTerminal || c == CapabilityFiles || c == CapabilityForwarding) && d.Host != "" {
 			return fmt.Errorf("device %s: %s: %w", name, c, ErrHostCapability)
 		}
+	}
+	if slices.Contains(d.Enable, CapabilityForwarding) && !slices.Contains(d.Enable, CapabilityTerminal) {
+		return fmt.Errorf("device %s: %w", name, ErrForwardingWithoutTerminal)
 	}
 	if err := validPasswordLogins(d, goos); err != nil {
 		return fmt.Errorf("device %s: %w", name, err)

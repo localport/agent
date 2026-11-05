@@ -41,6 +41,10 @@ const (
 	KindExec     = "exec"
 	KindSFTP     = "sftp"
 	KindProbe    = "probe"
+	// KindForward starts one connection's networking helper: the forward
+	// server, run as the login, dials and listens for its port forwards
+	// (forwardwire.go).
+	KindForward = "forward"
 )
 
 // Refusal codes. The agent maps each to a session error code.
@@ -178,9 +182,10 @@ func (r Request) Validate() error {
 			// No PTY: the size checks below do not apply.
 			return r.validateCommon()
 		}
-	case KindSFTP:
-		// The file server runs on pipes: no terminal, no command.
-		if r.Cols != 0 || r.Rows != 0 || r.Term != "" || r.Command != "" {
+	case KindSFTP, KindForward:
+		// The file server and the forward server run on pipes: no terminal,
+		// no command; the forward server takes no client environment.
+		if r.Cols != 0 || r.Rows != 0 || r.Term != "" || r.Command != "" || (r.Kind == KindForward && len(r.Env) != 0) {
 			return Refusal(CodeBadRequest)
 		}
 		return r.validateCommon()

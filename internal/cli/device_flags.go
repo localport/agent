@@ -105,7 +105,7 @@ type deviceFlags struct {
 
 func addDeviceFlags(fs *flag.FlagSet) *deviceFlags {
 	f := &deviceFlags{
-		enable: fs.String("enable", "", "session kinds to allow: terminal, files, desktop (comma-separated)"),
+		enable: fs.String("enable", "", "session kinds to allow: terminal, files, desktop, forwarding (comma-separated; forwarding needs terminal)"),
 		logins: fs.String("logins", "", "accounts a terminal or files session may use (comma-separated)"),
 		passwordLogins: fs.String("password-logins", "",
 			"Windows: logins that sign on with their password, asked at each session, instead of S4U (Entra ID accounts; comma-separated, each one of --logins)"),
