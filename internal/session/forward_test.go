@@ -399,7 +399,8 @@ func TestStrictForwardRecordingFailureEndsTheConnection(t *testing.T) {
 	h := &fakeHandoff{}
 	rec, _ := newTestRecorder(t, RecPolicyStrict, h)
 	s := NewServer(ServerConfig{})
-	c := &conn{s: s, adm: &admission{Kind: "ssh"}, failed: make(chan string, 1), channels: map[*channel]struct{}{}}
+	c := &conn{s: s, failed: make(chan string, 1), channels: map[*channel]struct{}{}}
+	c.adm.Store(&connAdmission{admission: &admission{Kind: "ssh"}})
 	var wg sync.WaitGroup
 	c.fwd = newForwarder(c, nil, &wg)
 	ours, theirs, err := launcher.SocketPair()
@@ -424,6 +425,25 @@ func TestStrictForwardRecordingFailureEndsTheConnection(t *testing.T) {
 	_ = client.Close()
 	wg.Wait()
 	rec.end()
+}
+
+// A relayed connection registered after a resume disallowed its direction is
+// refused, so a forward in flight across the admission swap never outlives
+// it; the allowed direction still registers.
+func TestTrackRefusesADirectionTheAdmissionDisallows(t *testing.T) {
+	s := NewServer(ServerConfig{Capabilities: []string{"forwarding"}})
+	c := &conn{s: s, failed: make(chan string, 1), channels: map[*channel]struct{}{}}
+	c.adm.Store(&connAdmission{admission: &admission{Kind: "ssh", ForwardRemote: true}})
+	var wg sync.WaitGroup
+	c.fwd = newForwarder(c, nil, &wg)
+	local, _ := tcpPair(t)
+	remote, _ := tcpPair(t)
+	if c.fwd.track(local.(launcher.ForwardConn), false) {
+		t.Fatal("a local forward registered under an admission without forward_local")
+	}
+	if !c.fwd.track(remote.(launcher.ForwardConn), true) {
+		t.Fatal("a remote forward the admission allows was refused")
+	}
 }
 
 // assertLoopbackOnly fails when port accepts on a non-loopback address of

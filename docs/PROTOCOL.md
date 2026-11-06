@@ -582,7 +582,7 @@ response open for the life of the mux. Each session is one notice on it:
 | Bytes | Meaning                                                        |
 | ----- | -------------------------------------------------------------- |
 | 4     | `uint32` big-endian length, always 24                          |
-| 16    | session id: the bytes of the UUID the access row carries and each of the connection's recordings names |
+| 16    | session id: the bytes of the UUID the stream's access row carries, which each recording of a channel opened while the stream carries the connection names |
 | 8     | `uint64` big-endian serial of the SSH user certificate the edge admitted |
 
 A notice of any other length, or the accept stream ending, ends the mux.
@@ -765,8 +765,15 @@ relays them like any bytes.
   serial the notice's), and binds the connection to the certificate's key. It
   admits a resume only for a live handle, with a resume certificate (critical
   options exactly `device@localport.io` and `resume@localport.io`, the latter
-  naming the original serial in lowercase hex) for the same subject, kind and
-  key, and only then checks the proof, before it resends anything.
+  naming the original serial in lowercase hex) for the same subject, kind,
+  login and key that passes the local checks a hello does (kind and login
+  enabled, recording key held, table above), and only then checks the proof,
+  before it resends anything.
+  An installed resume runs the connection under the resume certificate and
+  the resume stream's session id: later recordings name that id and carry
+  that certificate, and its forwarding extensions apply from then on, so a
+  direction it no longer allows ends that direction's listeners and
+  forwarded connections.
 - Statuses: 0 ok, 1 `resume_refused`, 2 `resume_busy` (another resume of the
   handle runs; retry), 3 `resume_lost` (no such connection, or a position
   outside the send buffer). Three failed proofs end the connection
@@ -803,7 +810,7 @@ SHA-256 of the team recording public key (43 characters) and `policy`
 `best_effort` or `strict`; the userauth checks are in the table under
 [Session mux](#session-mux). On a recorded connection every `shell`, `exec`
 or `sftp` subsystem opens its own recording before its helper starts: a fresh UUIDv7 recording id,
-and the connection's session id from the notice (`session_id`), so every
+and the session id from the notice (`session_id`) of the stream the connection runs on (a resume's, after a resume), so every
 channel of every connection, including multiplexed channels (OpenSSH
 ControlMaster) and repeat connections on one certificate, has its own
 recording. A Strict channel whose open fails within 5 s is refused
@@ -875,7 +882,7 @@ are unpadded base64url.
 
 | Request | Body | `200` answer |
 | ------- | ---- | ------------ |
-| `POST /v1/recording/open` | `{"wrapped_dek","signature","certificate","session_id"}` (`session_id` the canonical UUID of the connection; only an open while the mux carries that connection can create the recording, a later one reopens it and a missing recording is `recording_not_found`) | `{"status","segments","chain"}`: the segments the server holds and its chain over them (empty with 0 segments) |
+| `POST /v1/recording/open` | `{"wrapped_dek","signature","certificate","session_id"}` (`session_id` the canonical UUID of the stream the connection runs on, a resume stream's after a resume; only an open while the mux carries that stream can create the recording, a later one reopens it and a missing recording is `recording_not_found`) | `{"status","segments","chain"}`: the segments the server holds and its chain over them (empty with 0 segments) |
 | `PUT /v1/recording/segment`, headers `Localport-Segment-Index` (decimal, no sign or leading zeros) and `Localport-Segment-Sha256` (unpadded base64url of `h_i`) | the segment object, at least 18 bytes | `{"status","segments"}`; a segment already stored answers `200` like a fresh one |
 | `POST /v1/recording/complete` | `{"segments","final_hash","ended_at","incomplete","final","reason","signature"}` | `{"status","segments"}` |
 

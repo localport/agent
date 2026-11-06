@@ -222,13 +222,20 @@ type resumeConn struct {
 	client *ssh.Client
 	stream net.Conn
 	ended  <-chan AttachEnd
+	// resumeCert is the certificate of the last resume.
+	resumeCert []byte
 }
 
 // connectResumable runs a first connect with serial 42 (resume option "2a").
 func (f *sshFixture) connectResumable(t *testing.T) *resumeConn {
 	t.Helper()
+	return f.connectResumableAs(t, f.defaults())
+}
+
+// connectResumableAs is connectResumable with the certificate options o.
+func (f *sshFixture) connectResumableAs(t *testing.T, o certOpts) *resumeConn {
+	t.Helper()
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	o := f.defaults()
 	o.key = key
 	signer, _ := f.mint(t, o)
 	rc := &resumeConn{f: f, key: key}
@@ -256,6 +263,9 @@ func (f *sshFixture) connectResumable(t *testing.T) *resumeConn {
 	return rc
 }
 
+// streamID is the session id the fixture's notice gives the stream of serial.
+func streamID(serial uint64) [16]byte { return [16]byte{0x01, 0x9b, byte(serial)} }
+
 // serveStream serves one stream with the notice serial and returns its
 // client side.
 func (f *sshFixture) serveStream(t *testing.T, serial uint64) net.Conn {
@@ -265,7 +275,7 @@ func (f *sshFixture) serveStream(t *testing.T, serial uint64) net.Conn {
 	go func() {
 		defer close(done)
 		defer srvSide.Close()
-		f.srv.Serve(srvSide, [16]byte{0x01, 0x9b}, serial)
+		f.srv.Serve(srvSide, streamID(serial), serial)
 	}()
 	t.Cleanup(func() {
 		_ = cliSide.Close()
@@ -298,7 +308,8 @@ func (rc *resumeConn) resume(t *testing.T, edit func(*certOpts)) error {
 	if edit != nil {
 		edit(&o)
 	}
-	signer, _ := rc.f.mint(t, o)
+	signer, cert := rc.f.mint(t, o)
+	rc.resumeCert = cert.Marshal()
 	stream := rc.f.serveStream(t, 77)
 	pos, err := rc.cr.Resume(stream, signer)
 	if err != nil {
@@ -375,12 +386,21 @@ func TestResumeRefusals(t *testing.T) {
 		{"another original serial", func(o *certOpts) { o.resumes = "2b" }},
 		{"a fresh certificate", func(o *certOpts) { o.resumes = "" }},
 		{"another kind", func(o *certOpts) { o.kind = "files" }},
+		{"another login", func(o *certOpts) { o.login = "ops" }},
+		// The device holds no recording key: a first connect would refuse it.
+		{"a recording key not held", func(o *certOpts) {
+			o.rec = &certRec{Policy: RecPolicyStrict, PubSHA256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+		}},
 		{"another key", func(o *certOpts) { o.key = otherKey }},
 		{"another notice serial", func(o *certOpts) { o.serial = 78 }},
 		{"expired", func(o *certOpts) { o.before = time.Now().Add(-time.Minute) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newSSHFixture(t, func(c *ServerConfig) { c.Capabilities = []string{"terminal", "files"} })
+			// Both logins are enabled, so only the resume check refuses ops.
+			f := newSSHFixture(t, func(c *ServerConfig) {
+				c.Capabilities = []string{"terminal", "files"}
+				c.Logins = []string{testLogin, "ops"}
+			})
 			rc := f.connectResumable(t)
 			rc.cut(t)
 			key := rc.cr.key

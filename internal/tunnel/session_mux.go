@@ -26,8 +26,9 @@ import (
 // calls Serve again on the same handler.
 //
 // Serve runs on its own goroutine per stream and must return once the stream
-// fails. id is the connection's session id from the edge's notice (the bytes
-// of the UUID its access row and recording carry) and serial the serial of
+// fails. id is the stream's session id from the edge's notice (the bytes of
+// the UUID its access row carries and the recordings of channels opened on
+// it name) and serial the serial of
 // the SSH user certificate the edge admitted for it. The session mux closes
 // stream after Serve returns. Shutdown ends the
 // sessions the handler holds when it is called and must return once ctx ends.

@@ -128,12 +128,14 @@ func (ch *channel) serve(reqs <-chan *ssh.Request) {
 // ssh connection serves it beside shells and commands. Agent forwarding,
 // X11, other subsystems and signals are refused.
 func (ch *channel) handle(req *ssh.Request) bool {
-	files := ch.c.adm.Kind == "files"
+	// The kind is the same under every admission of a connection.
+	kind := ch.c.adm.Load().Kind
+	files := kind == "files"
 	switch req.Type {
 	case "subsystem":
 		var s struct{ Name string }
 		if ch.started || ssh.Unmarshal(req.Payload, &s) != nil || s.Name != "sftp" ||
-			(ch.c.adm.Kind != "ssh" && !files) {
+			(kind != "ssh" && !files) {
 			return false
 		}
 		return ch.start(launcher.KindSFTP, "")
@@ -185,10 +187,10 @@ func (ch *channel) handle(req *ssh.Request) bool {
 			return ch.start(launcher.KindTerminal, "")
 		}
 		// A shell without a terminal is a command session of the login shell.
-		return ch.c.adm.Kind == "ssh" && ch.start(launcher.KindExec, "")
+		return kind == "ssh" && ch.start(launcher.KindExec, "")
 	case "exec":
 		var e struct{ Command string }
-		if ch.started || ch.c.adm.Kind != "ssh" || ssh.Unmarshal(req.Payload, &e) != nil ||
+		if ch.started || kind != "ssh" || ssh.Unmarshal(req.Payload, &e) != nil ||
 			len(e.Command) > launcher.MaxCommand {
 			return false
 		}
@@ -276,26 +278,28 @@ func (ch *channel) start(kind, command string) bool {
 	return true
 }
 
-// openRecording opens this channel's own recording when the connection's
-// certificate names one: a fresh recording id, the connection's session id.
+// openRecording opens this channel's own recording when the certificate the
+// connection runs under names one: a fresh recording id and that admission's
+// session id.
 // A Strict channel whose recording cannot open is refused (false), so no
 // helper runs unrecorded; a Best effort one runs unrecorded (nil, true).
 func (ch *channel) openRecording() (*sessionRecorder, bool) {
 	c := ch.c
-	if c.adm.Rec == nil {
+	a := c.adm.Load()
+	if a.Rec == nil {
 		return nil, true
 	}
 	id := uuidText(newRecordingID())
-	rec, err := c.s.startRecording(id, c.sessionID, c.adm, c.s.cfg.clock.Now())
+	rec, err := c.s.startRecording(id, a.sessionID, a.admission, c.s.cfg.clock.Now())
 	if err == nil {
 		return rec, true
 	}
-	if c.adm.Rec.Policy == RecPolicyStrict {
-		c.s.log("session: %s: channel refused: %v", c.sessionID, err)
+	if a.Rec.Policy == RecPolicyStrict {
+		c.s.log("session: %s: channel refused: %v", a.sessionID, err)
 		ch.refuse(CodeRecordingUnavailable)
 		return nil, false
 	}
-	c.s.log("session: %s: channel runs unrecorded: %v", c.sessionID, err)
+	c.s.log("session: %s: channel runs unrecorded: %v", a.sessionID, err)
 	return nil, true
 }
 

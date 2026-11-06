@@ -186,6 +186,9 @@ type resumable struct {
 	token   []byte
 	subject string
 	kind    string
+	// login is the first connect's principal, the SSH user; every resume
+	// certificate must name it.
+	login string
 	// certKey is the certificate key the first connect bound the connection
 	// to; userauth and every resume must present it.
 	certKey []byte
@@ -213,8 +216,11 @@ type resumable struct {
 	// its last stream handler ended, cleared only by an installed stream.
 	deadline time.Time
 	timer    *struct{}
-	// mark queues a marker on every recording of the connection; set by run.
-	mark func(label string)
+	// conn is the connection run serves; set by run.
+	conn *conn
+	// admitted is the last installed resume's admission, set before its
+	// stream is installed; run starts under it when a resume came first.
+	admitted *connAdmission
 }
 
 // endWith ends the connection with reason unless an end is already queued.
@@ -296,7 +302,7 @@ func (s *Server) Serve(stream net.Conn, id [16]byte, serial uint64) {
 		s.serveNew(h, stream, hello, id, serial)
 		return
 	}
-	s.serveResume(h, stream, resume, serial)
+	s.serveResume(h, stream, resume, id, serial)
 }
 
 // hostIdentity is the device's SSH host key and the Device certificates must
@@ -398,7 +404,7 @@ func (s *Server) serveNew(h *handler, stream net.Conn, hello *helloMsg, id [16]b
 	_ = stream.SetDeadline(time.Time{})
 
 	e := &resumable{rc: NewResumableConn(), handle: string(handle), token: token, subject: adm.Subject, kind: adm.Kind,
-		certKey: cert.Key.Marshal(), serial: serial, ended: make(chan string, 1)}
+		login: adm.Login, certKey: cert.Key.Marshal(), serial: serial, ended: make(chan string, 1)}
 	ch := &handler{stop: make(chan struct{}), handshaking: true, abort: func() { e.rc.End(errConnEnded) }}
 	if !s.addConn(e, ch) {
 		return
@@ -412,7 +418,7 @@ func (s *Server) serveNew(h *handler, stream net.Conn, hello *helloMsg, id [16]b
 // serveResume runs a resume: the handle's connection, a resume certificate
 // for its original serial, subject and key signed by that key, a fresh
 // host-key-signed reply, then the token proof, before any byte is resent.
-func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, serial uint64) {
+func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]byte, serial uint64) {
 	refuse := func(status uint32, format string, args ...any) {
 		s.log("session: resume refused: "+format, args...)
 		_ = writePrelude(stream, resumeReplyMsg{Status: status})
@@ -445,11 +451,17 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, serial u
 	case err != nil:
 		refuse(statusRefused, "%v", err)
 		return
-	case adm.Subject != e.subject || adm.Kind != e.kind || !bytes.Equal(cert.Key.Marshal(), e.certKey):
-		refuse(statusRefused, "the resume certificate is for another subject, kind or key")
+	case adm.Subject != e.subject || adm.Kind != e.kind || adm.Login != e.login || !bytes.Equal(cert.Key.Marshal(), e.certKey):
+		refuse(statusRefused, "the resume certificate is for another subject, kind, login or key")
 		return
 	case !verifyPrelude(cert.Key, clientSigContext, transcript(m.noSig()), m.Sig):
 		refuse(statusRefused, "the resume signature does not verify with the certificate's key")
+		return
+	}
+	// The connection runs under this admission once installed, so it meets
+	// the local config as a first connect's does.
+	if err := s.localRefusal(adm); err != nil {
+		refuse(statusRefused, "%v", err)
 		return
 	}
 	// A resume for a live stream detaches it first, which settles positions.
@@ -494,6 +506,10 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, serial u
 		return
 	}
 	_ = stream.SetDeadline(time.Time{})
+	// The connection continues under the resume certificate and this stream's
+	// session id, which the edge attests for recordings, before any byte of
+	// the stream is read.
+	s.readmit(e, &connAdmission{admission: adm, sessionID: uuidText(id)})
 	// Installed while this resume still holds its claim, so no other resume
 	// runs between the positions it signed and the stream taking over. An
 	// expired or removed connection's conn has ended and refuses the stream.
@@ -515,13 +531,30 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, serial u
 	_ = writePrelude(stream, proofReplyMsg{Status: statusOK})
 	s.unclaim(e)
 	claimed = false
-	s.mu.Lock()
-	mark := e.mark
-	s.mu.Unlock()
-	if mark != nil {
-		mark(markerAttach)
-	}
+	s.mark(e, markerAttach)
 	s.runStream(e, run)
+}
+
+// readmit records a verified resume's admission on e and applies it to the
+// connection run serves, if it started.
+func (s *Server) readmit(e *resumable, a *connAdmission) {
+	s.mu.Lock()
+	e.admitted = a
+	c := e.conn
+	s.mu.Unlock()
+	if c != nil {
+		c.readmit(a)
+	}
+}
+
+// mark queues label on every recording of e's connection, if run started.
+func (s *Server) mark(e *resumable, label string) {
+	s.mu.Lock()
+	c := e.conn
+	s.mu.Unlock()
+	if c != nil {
+		c.markRecordings(label)
+	}
 }
 
 // serveStream installs a first connect's stream as e's stream and runs it.
@@ -534,14 +567,8 @@ func (s *Server) serveStream(e *resumable, stream net.Conn, peerReceived uint64)
 // runStream runs an installed stream; a stream lost without a closeTag marks
 // every recording `detach`. The detach timer is release's.
 func (s *Server) runStream(e *resumable, run func() AttachEnd) {
-	if run() != Detached {
-		return
-	}
-	s.mu.Lock()
-	mark := e.mark
-	s.mu.Unlock()
-	if mark != nil {
-		mark(markerDetach)
+	if run() == Detached {
+		s.mark(e, markerDetach)
 	}
 }
 
@@ -836,19 +863,29 @@ func (s *Server) admit(cert *ssh.Certificate, user string, device Device, serial
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case !s.kindEnabled(adm.Kind):
-		return nil, refuseCert("kind %q is not enabled on this device", adm.Kind)
-	case adm.Kind != "terminal" && adm.Kind != "ssh" && adm.Kind != "files":
-		return nil, refuseCert("kind %q is not served by this agent", adm.Kind)
-	case s.launcher == nil:
-		return nil, refuseCert("this build serves no session")
-	case !slices.Contains(s.cfg.Logins, adm.Login):
-		return nil, refuseCert("login %q is not enabled on this device", adm.Login)
-	case adm.Rec != nil && !s.recordingKeyMatches(adm.Rec.PubSHA256):
-		return nil, refuseCert("the recording key is not the held team key")
+	if err := s.localRefusal(adm); err != nil {
+		return nil, err
 	}
 	return adm, nil
+}
+
+// localRefusal applies the local config to a verified admission, fresh or
+// resume: the kind enabled and served by this build, the login enabled, and
+// a recording key that matches (refreshing the keys once on a mismatch).
+func (s *Server) localRefusal(adm *admission) error {
+	switch {
+	case !s.kindEnabled(adm.Kind):
+		return refuseCert("kind %q is not enabled on this device", adm.Kind)
+	case adm.Kind != "terminal" && adm.Kind != "ssh" && adm.Kind != "files":
+		return refuseCert("kind %q is not served by this agent", adm.Kind)
+	case s.launcher == nil:
+		return refuseCert("this build serves no session")
+	case !slices.Contains(s.cfg.Logins, adm.Login):
+		return refuseCert("login %q is not enabled on this device", adm.Login)
+	case adm.Rec != nil && !s.recordingKeyMatches(adm.Rec.PubSHA256):
+		return refuseCert("the recording key is not the held team key")
+	}
+	return nil
 }
 
 // withCARefresh runs verify, and once more after a CA key refresh when it
@@ -1044,12 +1081,12 @@ func (s *Server) shutdown(ctx context.Context, reason string) error {
 // conn is the state of one admitted connection that run shares with its
 // channel goroutines.
 type conn struct {
-	s   *Server
-	adm *admission
-	// sessionID is the connection's session id in UUID text form; each
-	// recorded channel's recording names it.
-	sessionID string
-	login     string
+	s *Server
+	// adm is the admission the connection runs under: the first connect's,
+	// replaced by each installed resume's (readmit). A reader loads it once
+	// per decision.
+	adm   atomic.Pointer[connAdmission]
+	login string
 	// password is a password login's password (connSecret), nil otherwise;
 	// each channel's launcher request gets its own copy.
 	password []byte
@@ -1074,7 +1111,26 @@ type conn struct {
 	allClosed chan struct{}
 }
 
+// connAdmission is a certificate's admission with the session id of the
+// stream it admitted, in UUID text form; each recording a channel opens
+// names that id, which the edge attests together with the certificate.
+type connAdmission struct {
+	*admission
+	sessionID string
+}
+
 func (c *conn) active() { c.lastActivity.Store(c.s.cfg.clock.Now().UnixNano()) }
+
+// readmit runs the connection under a resume's admission from now on and
+// ends the forwards it no longer allows. Channels already open keep their
+// recordings.
+func (c *conn) readmit(a *connAdmission) {
+	c.mu.Lock()
+	c.adm.Store(a)
+	conns, listeners, client := c.fwd.disallowedLocked()
+	c.mu.Unlock()
+	c.fwd.closeDisallowed(conns, listeners, client)
+}
 
 // fail ends the connection with reason unless its end is already decided.
 func (c *conn) fail(reason string) {
@@ -1093,12 +1149,18 @@ func (c *conn) fail(reason string) {
 // ends the forwards, closes the connection and joins the channels and
 // forwards.
 func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request, adm *admission, sessionID string, password []byte, e *resumable) {
-	c := &conn{s: s, adm: adm, sessionID: sessionID, login: sc.User(), password: password,
+	c := &conn{s: s, login: sc.User(), password: password,
 		channels: map[*channel]struct{}{}, allClosed: make(chan struct{}, 1), failed: make(chan string, 1)}
 	var wg sync.WaitGroup
 	c.fwd = newForwarder(c, sc, &wg)
 	s.mu.Lock()
-	e.mark = c.markRecordings
+	if e.admitted != nil {
+		// A resume installed before the SSH handshake ended.
+		c.adm.Store(e.admitted)
+	} else {
+		c.adm.Store(&connAdmission{admission: adm, sessionID: sessionID})
+	}
+	e.conn = c
 	s.mu.Unlock()
 	c.active()
 	clientDone := make(chan struct{})
@@ -1204,7 +1266,7 @@ func (c *conn) accept(chans <-chan ssh.NewChannel, wg *sync.WaitGroup) {
 			continue
 		}
 		c.mu.Lock()
-		single := c.adm.Kind == "terminal"
+		single := c.adm.Load().Kind == "terminal"
 		if c.ended || c.open >= maxChannels || (single && c.served >= 1) {
 			c.mu.Unlock()
 			_ = nc.Reject(ssh.ResourceShortage, "channel limit reached")
@@ -1236,7 +1298,7 @@ func (c *conn) channelClosed(ch *channel) {
 	defer c.mu.Unlock()
 	delete(c.channels, ch)
 	c.open--
-	if c.open == 0 && (c.adm.Kind == "terminal" || c.adm.Kind == "files") && !c.ended {
+	if kind := c.adm.Load().Kind; c.open == 0 && (kind == "terminal" || kind == "files") && !c.ended {
 		select {
 		case c.allClosed <- struct{}{}:
 		default:

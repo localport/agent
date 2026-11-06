@@ -11,12 +11,17 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/localport/agent/internal/launcher"
 )
+
+// beforeListenerRegistration, when set by a test, runs in listen once the
+// helper bound listener l and before l is registered.
+var beforeListenerRegistration atomic.Pointer[func(*forwarder, *remoteListener)]
 
 // Port forwarding on an ssh connection (RFC 4254 7; OpenSSH PROTOCOL 2.4 for
 // unix sockets). A forward needs the device's forwarding capability and the
@@ -117,20 +122,21 @@ type forwarder struct {
 	failed    bool
 	open      int
 	listeners map[string]*remoteListener
-	conns     map[launcher.ForwardConn]struct{}
+	// conns are the relayed connections, each true for the remote direction.
+	conns map[launcher.ForwardConn]bool
 }
 
 func newForwarder(c *conn, sc *ssh.ServerConn, wg *sync.WaitGroup) *forwarder {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &forwarder{c: c, sc: sc, wg: wg, stop: make(chan struct{}), ctx: ctx, cancel: cancel,
-		listeners: map[string]*remoteListener{}, conns: map[launcher.ForwardConn]struct{}{}}
+		listeners: map[string]*remoteListener{}, conns: map[launcher.ForwardConn]bool{}}
 }
 
 // allowed reports whether the connection may forward in the local or remote
 // direction: an ssh connection, the device's forwarding capability, and the
-// certificate's extension.
+// extension of the certificate the connection runs under.
 func (f *forwarder) allowed(remote bool) bool {
-	a := f.c.adm
+	a := f.c.adm.Load()
 	if a.Kind != "ssh" || !slices.Contains(f.c.s.cfg.Capabilities, "forwarding") {
 		return false
 	}
@@ -192,15 +198,15 @@ func (f *forwarder) ensure() (*launcher.ForwardClient, error) {
 		return nil, err
 	}
 	var rec *sessionRecorder
-	if c.adm.Rec != nil {
+	if a := c.adm.Load(); a.Rec != nil {
 		var err error
-		rec, err = s.startRecording(uuidText(newRecordingID()), c.sessionID, c.adm, s.cfg.clock.Now())
+		rec, err = s.startRecording(uuidText(newRecordingID()), a.sessionID, a.admission, s.cfg.clock.Now())
 		if err != nil {
-			if c.adm.Rec.Policy == RecPolicyStrict {
-				s.log("session: %s: forwarding refused: %v", c.sessionID, err)
+			if a.Rec.Policy == RecPolicyStrict {
+				s.log("session: %s: forwarding refused: %v", a.sessionID, err)
 				return fail(errForwardRecording)
 			}
-			s.log("session: %s: forwards run unrecorded: %v", c.sessionID, err)
+			s.log("session: %s: forwards run unrecorded: %v", a.sessionID, err)
 		}
 	}
 	ours, theirs, pipe, err := newSessionChannel()
@@ -267,23 +273,64 @@ func (f *forwarder) watch(client *launcher.ForwardClient, rec *sessionRecorder) 
 	}
 	c.mu.Unlock()
 	if !ended {
-		c.s.log("session: %s: the forward helper ended; forwarding stops", c.sessionID)
+		c.s.log("session: %s: the forward helper ended; forwarding stops", c.adm.Load().sessionID)
 	}
 	for _, fc := range conns {
 		_ = fc.Close()
 	}
 }
 
-// track registers a relayed connection, so the helper's end closes it;
-// false when the helper already ended.
-func (f *forwarder) track(fc launcher.ForwardConn) bool {
+// track registers a relayed connection of the remote or local direction, so
+// the helper's end or a resume that disallows the direction closes it; false
+// when the helper already ended or the direction is no longer allowed.
+func (f *forwarder) track(fc launcher.ForwardConn, remote bool) bool {
 	f.c.mu.Lock()
 	defer f.c.mu.Unlock()
-	if f.failed || f.c.ended {
+	if f.failed || f.c.ended || !f.allowed(remote) {
 		return false
 	}
-	f.conns[fc] = struct{}{}
+	f.conns[fc] = remote
 	return true
+}
+
+// disallowedLocked removes and returns what the connection's admission no
+// longer allows: the relayed connections of a disallowed direction and, for
+// remote, every listener, with the helper client that serves them. c.mu
+// held; the admission is stored under the same lock, so a track or listen
+// registration either sees it or is returned here.
+func (f *forwarder) disallowedLocked() ([]launcher.ForwardConn, []*remoteListener, *launcher.ForwardClient) {
+	local, remote := f.allowed(false), f.allowed(true)
+	var conns []launcher.ForwardConn
+	for fc, isRemote := range f.conns {
+		if (isRemote && !remote) || (!isRemote && !local) {
+			conns = append(conns, fc)
+			delete(f.conns, fc)
+		}
+	}
+	var listeners []*remoteListener
+	if !remote {
+		seen := map[*remoteListener]struct{}{}
+		for k, l := range f.listeners {
+			delete(f.listeners, k)
+			if _, dup := seen[l]; !dup {
+				seen[l] = struct{}{}
+				listeners = append(listeners, l)
+			}
+		}
+	}
+	return conns, listeners, f.client
+}
+
+// closeDisallowed closes what disallowedLocked returned and records each
+// listener's end; each relay records its own close.
+func (f *forwarder) closeDisallowed(conns []launcher.ForwardConn, listeners []*remoteListener, client *launcher.ForwardClient) {
+	for _, fc := range conns {
+		_ = fc.Close()
+	}
+	for _, l := range listeners {
+		client.CloseListener(l.id)
+		f.record(forwardEvent{Op: "unlisten", Dir: "remote", Kind: l.kind, Addr: f.listenerAddr(l, uint16(l.port))})
+	}
 }
 
 func (f *forwarder) untrack(fc launcher.ForwardConn) {
@@ -424,7 +471,7 @@ func (f *forwarder) local(nc ssh.NewChannel) {
 // each way.
 func (f *forwarder) relayAndRecord(ch ssh.Channel, fc launcher.ForwardConn, closeEv forwardEvent) {
 	var in, out int64
-	if f.track(fc) {
+	if f.track(fc, closeEv.Dir == "remote") {
 		in, out = f.c.relay(ch, fc)
 		f.untrack(fc)
 	} else {
@@ -520,17 +567,26 @@ func (f *forwarder) listen(r *ssh.Request) (bool, []byte) {
 		// Cancelled by the bound port, which the reply told the client.
 		l.keys = []string{tcpListenerKey(l.addr, l.port)}
 	}
+	if hook := beforeListenerRegistration.Load(); hook != nil {
+		(*hook)(f, l)
+	}
 	c.mu.Lock()
+	// A resume may have disallowed remote forwarding since the request was
+	// checked.
+	denied := !f.allowed(true)
 	full = c.ended || f.countListeners() >= maxRemoteListeners
-	if !full {
+	if !full && !denied {
 		for _, k := range l.keys {
 			f.listeners[k] = l
 		}
 	}
 	c.mu.Unlock()
-	if full {
+	if full || denied {
 		client.CloseListener(id)
 		ev.Result = launcher.FwdCodeName(launcher.FwdCodeLimit)
+		if denied {
+			ev.Result = launcher.FwdCodeName(launcher.FwdCodePermissionDenied)
+		}
 		f.record(ev)
 		return false, nil
 	}
