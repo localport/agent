@@ -105,11 +105,11 @@ func TestDeviceSessionsUseTheRegisteredCertificate(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The renewed key is the host key, and a certificate bound to it passes.
-	if err := sshHandshake(t, spec.SessionHandler, serial, mint(renewed.Leaf.RawSubjectPublicKeyInfo), me.Username, ssh.FixedHostKey(renewedHost)); err != nil {
+	if err := sshHandshake(t, spec.SessionHandler, serial, mint(renewed.Leaf.RawSubjectPublicKeyInfo), me.Username, renewedHost); err != nil {
 		t.Fatalf("renewed: %v", err)
 	}
 	other := selfSignedDevice(t)
-	if err := sshHandshake(t, spec.SessionHandler, serial, mint(other.Leaf.RawSubjectPublicKeyInfo), me.Username, ssh.FixedHostKey(renewedHost)); err == nil {
+	if err := sshHandshake(t, spec.SessionHandler, serial, mint(other.Leaf.RawSubjectPublicKeyInfo), me.Username, renewedHost); err == nil {
 		t.Error("a certificate bound to another device key passed userauth")
 	}
 }
@@ -118,7 +118,7 @@ func TestDeviceSessionsUseTheRegisteredCertificate(t *testing.T) {
 // userauth on it.
 func sshHandshake(t *testing.T, h interface {
 	Serve(net.Conn, [16]byte, uint64)
-}, serial uint64, signer ssh.Signer, user string, hostKey ssh.HostKeyCallback) error {
+}, serial uint64, signer ssh.Signer, user string, hostKey ssh.PublicKey) error {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -143,12 +143,25 @@ func sshHandshake(t *testing.T, h interface {
 		_ = clientSide.Close()
 		<-served
 	}()
-	c, _, _, err := ssh.NewClientConn(clientSide, "gw-01", &ssh.ClientConfig{
-		User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: hostKey, Timeout: 10 * time.Second,
+	_ = clientSide.SetDeadline(time.Now().Add(10 * time.Second))
+	cr, err := session.Hello(clientSide, signer, hostKey)
+	if err != nil {
+		return err
+	}
+	attached := make(chan struct{})
+	go func() {
+		defer close(attached)
+		cr.Conn.Attach(clientSide, 0)
+	}()
+	c, _, _, err := ssh.NewClientConn(cr.Conn, "gw-01", &ssh.ClientConfig{
+		User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.FixedHostKey(hostKey), Timeout: 10 * time.Second,
 	})
 	if err == nil {
 		_ = c.Close()
+	} else {
+		cr.Conn.End(err)
 	}
+	<-attached
 	return err
 }
 

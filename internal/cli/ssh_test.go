@@ -9,8 +9,6 @@ import (
 	"crypto/rsa"
 	"errors"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 
@@ -286,54 +283,5 @@ func TestOpensshBeforePQ(t *testing.T) {
 		if _, got := opensshBeforePQ(out); got != want {
 			t.Errorf("opensshBeforePQ(%q) = %v, want %v", out, got, want)
 		}
-	}
-}
-
-// ssh-proxy sends the certificate in wire form first, relays bytes both
-// ways, and reports an edge close reason other than a normal end.
-func TestSSHProxyRelaysAndReportsTheCloseReason(t *testing.T) {
-	for reason, wantErr := range map[string]bool{"agent_closed": false, "kicked": true} {
-		t.Run(reason, func(t *testing.T) {
-			target := newSSHTarget(t)
-			now := time.Now()
-			m := newFakeMint(t, now)
-			if err := target.ensureCert(context.Background(), "pi", m.mint, now); err != nil {
-				t.Fatal(err)
-			}
-			raw, _ := os.ReadFile(target.files().cert)
-			cert, _ := parseUserCertificate(raw)
-			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				ws, err := websocket.Accept(w, r, nil)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				ctx := r.Context()
-				if typ, first, err := ws.Read(ctx); err != nil || typ != websocket.MessageBinary || string(first) != string(cert.Marshal()) {
-					t.Errorf("first message = %v, %v; want the certificate", typ, err)
-				}
-				typ, msg, err := ws.Read(ctx)
-				if err != nil || typ != websocket.MessageBinary {
-					t.Errorf("relay read = %v, %v", typ, err)
-				}
-				_ = ws.Write(ctx, websocket.MessageBinary, append([]byte("echo:"), msg...))
-				_ = ws.Close(4000, reason)
-			}))
-			defer srv.Close()
-			if err := os.WriteFile(target.files().url, []byte("wss"+strings.TrimPrefix(srv.URL, "https")+"/v1/session\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			inR, inW, _ := os.Pipe()
-			defer inW.Close()
-			var out strings.Builder
-			go func() { _, _ = inW.Write([]byte("hello")) }()
-			err := target.proxy(context.Background(), inR, &out, &websocket.DialOptions{HTTPClient: srv.Client()})
-			if out.String() != "echo:hello" {
-				t.Errorf("relayed %q, want echo:hello", out.String())
-			}
-			if wantErr != (err != nil) || (err != nil && !strings.Contains(err.Error(), reason)) {
-				t.Fatalf("proxy = %v; want an error naming %s: %v", err, reason, wantErr)
-			}
-		})
 	}
 }

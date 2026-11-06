@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -19,6 +20,7 @@ import (
 // compact JSON.
 const (
 	optionDevice     = "device@localport.io"
+	optionResume     = "resume@localport.io"
 	extKind          = "kind@localport.io"
 	extSubject       = "subject@localport.io"
 	extRec           = "rec@localport.io"
@@ -84,9 +86,28 @@ func refuseCert(format string, args ...any) error {
 // verifyCert checks a user certificate whose key possession userauth proved:
 // a user certificate signed by one of cas, with exactly the serial the edge
 // admitted, valid at now within certSkew, for principal user, with no
-// critical option but the device option, which must name device. It returns
-// the certificate's claims; the caller applies the local config.
+// critical option but the device option, which must name device. A resume
+// certificate is refused (its resume option is unknown here). It returns the
+// certificate's claims; the caller applies the local config.
 func verifyCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, device Device, serial uint64, now time.Time) (*admission, error) {
+	return checkCert(cert, user, cas, device, serial, now, []string{optionDevice})
+}
+
+// verifyResumeCert checks a resume certificate in a resume prelude: as
+// verifyCert for its one principal, with the critical options exactly the
+// device option and optionResume, which must name original, the serial of the
+// connection it resumes.
+func verifyResumeCert(cert *ssh.Certificate, cas []ed25519.PublicKey, device Device, serial, original uint64, now time.Time) (*admission, error) {
+	if len(cert.ValidPrincipals) != 1 {
+		return nil, refuseCert("want one principal")
+	}
+	if cert.CriticalOptions[optionResume] != strconv.FormatUint(original, 16) {
+		return nil, refuseCert("resumes another connection")
+	}
+	return checkCert(cert, cert.ValidPrincipals[0], cas, device, serial, now, []string{optionDevice, optionResume})
+}
+
+func checkCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, device Device, serial uint64, now time.Time, options []string) (*admission, error) {
 	if cert.CertType != ssh.UserCert {
 		return nil, refuseCert("not a user certificate")
 	}
@@ -101,7 +122,7 @@ func verifyCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, dev
 		return nil, refuseCert("outside its validity window (%v to %v, now %v)", after.UTC(), before.UTC(), now.UTC())
 	}
 	checker := ssh.CertChecker{
-		SupportedCriticalOptions: []string{optionDevice},
+		SupportedCriticalOptions: options,
 		// The window was checked above with the skew; CheckCert sees a time
 		// inside it, and checks the signature, the principal and the options.
 		Clock: func() time.Time { return clampInto(now, after, before) },

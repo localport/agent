@@ -202,6 +202,15 @@ func newSSHFixture(t *testing.T, edit func(*ServerConfig)) *sshFixture {
 	}
 	f.cfg = &cfg
 	f.srv = NewServer(cfg)
+	// A connection outlives its Serve call; every one ends before the test's
+	// directories and fakes go away (registered after edit's TempDir).
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := f.srv.Shutdown(ctx); err != nil {
+			t.Errorf("connections still running at the end of the test: %v", err)
+		}
+	})
 	return f
 }
 
@@ -219,6 +228,11 @@ type certOpts struct {
 	signer  ed25519.PrivateKey
 	// fwdLocal and fwdRemote add the forwarding extensions.
 	fwdLocal, fwdRemote bool
+	// subject replaces user:ana; resumes adds the resume option.
+	subject string
+	resumes string
+	// key signs instead of a fresh client key.
+	key ed25519.PrivateKey
 }
 
 func (f *sshFixture) defaults() certOpts {
@@ -229,10 +243,17 @@ func (f *sshFixture) defaults() certOpts {
 // mint signs a certificate for a fresh client key and returns its signer.
 func (f *sshFixture) mint(t *testing.T, o certOpts) (ssh.Signer, *ssh.Certificate) {
 	t.Helper()
-	_, clientKey, _ := ed25519.GenerateKey(rand.Reader)
+	clientKey := o.key
+	if clientKey == nil {
+		_, clientKey, _ = ed25519.GenerateKey(rand.Reader)
+	}
 	client, err := ssh.NewSignerFromKey(clientKey)
 	if err != nil {
 		t.Fatal(err)
+	}
+	subject := o.subject
+	if subject == "" {
+		subject = "user:ana"
 	}
 	dev, _ := json.Marshal(map[string]string{"tunnel": "abc123", "prefix": o.prefix, "spki_sha256": o.spki})
 	cert := &ssh.Certificate{
@@ -240,8 +261,11 @@ func (f *sshFixture) mint(t *testing.T, o certOpts) (ssh.Signer, *ssh.Certificat
 		ValidPrincipals: []string{o.login}, ValidAfter: uint64(o.after.Unix()), ValidBefore: uint64(o.before.Unix()),
 		Permissions: ssh.Permissions{
 			CriticalOptions: map[string]string{optionDevice: string(dev)},
-			Extensions:      map[string]string{extKind: o.kind, extSubject: `{"subject":"user:ana"}`, "permit-pty": ""},
+			Extensions:      map[string]string{extKind: o.kind, extSubject: `{"subject":"` + subject + `"}`, "permit-pty": ""},
 		},
+	}
+	if o.resumes != "" {
+		cert.CriticalOptions[optionResume] = o.resumes
 	}
 	if o.extraCO {
 		cert.CriticalOptions["force-command"] = "/bin/true"
@@ -298,12 +322,29 @@ func (f *sshFixture) dial(t *testing.T, serial uint64, signer ssh.Signer, edit f
 	if edit != nil {
 		edit(cfg)
 	}
-	c, chans, reqs, err := ssh.NewClientConn(cliSide, "gw-01", cfg)
+	_ = cliSide.SetDeadline(time.Now().Add(5 * time.Second))
+	cr, err := Hello(cliSide, signer, f.hostKey)
 	if err != nil {
 		return nil, err
 	}
+	_ = cliSide.SetDeadline(time.Time{})
+	go cr.Conn.Attach(cliSide, 0)
+	c, chans, reqs, err := ssh.NewClientConn(cr.Conn, "gw-01", cfg)
+	if err != nil {
+		cr.Conn.End(err)
+		return nil, err
+	}
 	client := ssh.NewClient(c, chans, reqs)
-	t.Cleanup(func() { _ = client.Close() })
+	// A deliberate close: the closeTag leaves before the stream is cut, so
+	// the agent ends the connection instead of detaching it.
+	t.Cleanup(func() {
+		_ = client.Close()
+		select {
+		case <-cr.Conn.Done():
+		case <-time.After(5 * time.Second):
+			t.Error("the client's close did not flush")
+		}
+	})
 	return client, nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -27,6 +29,7 @@ import (
 
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/security"
+	"github.com/localport/agent/internal/session"
 )
 
 const (
@@ -43,10 +46,6 @@ const (
 	// offers mlkem768x25519-sha256, the device's post-quantum key exchange.
 	sshPQMinMajor, sshPQMinMinor = 9, 9
 )
-
-// sshNormalEnds are the edge close reasons of a session that ended because
-// one side closed it; ssh-proxy reports any other reason.
-var sshNormalEnds = []string{"client_closed", "agent_closed"}
 
 // sessionMinter asks the control plane for a session certificate.
 type sessionMinter func(ctx context.Context, req identity.SessionRequest) (*identity.SessionCertificate, error)
@@ -337,10 +336,101 @@ func knownHostsHasAlias(data []byte, alias string) bool {
 	return false
 }
 
-// proxy carries one SSH connection between in and out and the device: it
-// dials the edge URL of the last mint, sends the certificate in wire form as
-// the first binary message, then relays bytes in binary messages.
-func (t sshTarget) proxy(ctx context.Context, in io.Reader, out io.Writer, opts *websocket.DialOptions) error {
+// sshResumableEnds are the edge close reasons after which ssh-proxy resumes
+// the connection on a new stream; a stream that ends without a close frame
+// (a network loss) resumes too. Any other reason (revocation, lock, kick,
+// wrong_host, a refusal, a reason added later) ends the session.
+var sshResumableEnds = []string{"closed", "edge_shutdown", "edge_lost", "device_offline", "agent_closed",
+	"no_session_mux", "edge_full", "wrong_edge"}
+
+const (
+	// sshResumeWindow is how long a dropped connection may take to resume,
+	// the agent's detach timeout.
+	sshResumeWindow = 5 * time.Minute
+	// sshResumeBackoffMax caps the wait between resume attempts.
+	sshResumeBackoffMax = 15 * time.Second
+)
+
+// sessionStream is one session WebSocket as a byte stream; closeReason is
+// the edge's close reason once a read ended on a close frame, "" otherwise.
+type sessionStream struct {
+	net.Conn
+	ws *websocket.Conn
+
+	mu     sync.Mutex
+	reason string
+	closed bool
+}
+
+func (s *sessionStream) Read(p []byte) (int, error) {
+	n, err := s.Conn.Read(p)
+	if err != nil {
+		var ce websocket.CloseError
+		if errors.As(err, &ce) {
+			s.mu.Lock()
+			if !s.closed {
+				s.reason, s.closed = ce.Reason, true
+			}
+			s.mu.Unlock()
+		}
+	}
+	return n, err
+}
+
+// closeReason is the base close reason ("reason" of "reason:code") and
+// whether a close frame arrived.
+func (s *sessionStream) closeReason() (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	base, _, _ := strings.Cut(s.reason, ":")
+	return base, s.closed
+}
+
+// dialSession opens a session WebSocket and sends the certificate in wire
+// form as its first binary message.
+func dialSession(ctx context.Context, rawURL string, certWire []byte, opts *websocket.DialOptions) (*sessionStream, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, sshDialTimeout)
+	defer cancel()
+	ws, _, err := websocket.Dial(dialCtx, rawURL, opts)
+	if err != nil {
+		return nil, fmt.Errorf("connect to the edge: %w", err)
+	}
+	if err := ws.Write(dialCtx, websocket.MessageBinary, certWire); err != nil {
+		_ = ws.CloseNow()
+		return nil, fmt.Errorf("send the session certificate: %w", err)
+	}
+	return &sessionStream{Conn: websocket.NetConn(ctx, ws, websocket.MessageBinary), ws: ws}, nil
+}
+
+// knownHostKey reads alias's host key from known_hosts.
+func knownHostKey(path, alias string) (ssh.PublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	for line := range bytes.Lines(data) {
+		if knownHostsLineAlias(line) != alias {
+			continue
+		}
+		_, rest, _ := bytes.Cut(bytes.TrimSpace(line), []byte(" "))
+		key, _, _, _, err := ssh.ParseAuthorizedKey(rest)
+		if err != nil {
+			return nil, fmt.Errorf("known_hosts entry for %s: %w", alias, err)
+		}
+		return key, nil
+	}
+	return nil, fmt.Errorf("known_hosts holds no entry for %s", alias)
+}
+
+// proxy carries one SSH connection between in and out and the device over a
+// resumable connection (agent/docs/PROTOCOL.md "Resumable connections"). It
+// dials the edge URL of the last mint with that certificate, runs the
+// prelude against the host key known_hosts holds now (kept in memory, so a
+// later mint cannot change the pin), then relays. When the stream drops for
+// a resumable reason it mints a resume certificate (never written to the
+// certificate file, which OpenSSH and later runs keep using) and resumes on a
+// new stream within sshResumeWindow. The end of in is a deliberate close.
+func (t sshTarget) proxy(ctx context.Context, in io.Reader, out io.Writer, opts *websocket.DialOptions, mint sessionMinter) error {
 	f := t.files()
 	rawURL, err := os.ReadFile(f.url)
 	if err != nil {
@@ -354,33 +444,120 @@ func (t sshTarget) proxy(ctx context.Context, in io.Reader, out io.Writer, opts 
 	if err != nil {
 		return fmt.Errorf("session certificate %s: %w", f.cert, err)
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, sshDialTimeout)
-	defer cancel()
-	ws, _, err := websocket.Dial(dialCtx, strings.TrimSpace(string(rawURL)), opts)
+	key, err := loadOrCreateClientKey(f.key)
 	if err != nil {
-		return fmt.Errorf("connect to the edge: %w", err)
+		return err
 	}
-	defer func() { _ = ws.CloseNow() }()
-	if err := ws.Write(dialCtx, websocket.MessageBinary, cert.Marshal()); err != nil {
-		return fmt.Errorf("send the session certificate: %w", err)
+	certSigner, err := ssh.NewCertSigner(cert, key)
+	if err != nil {
+		return fmt.Errorf("session certificate %s: %w", f.cert, err)
 	}
-	conn := websocket.NetConn(ctx, ws, websocket.MessageBinary)
-	go func() {
-		_, _ = io.Copy(conn, in)
-		_ = conn.Close()
-	}()
-	_, err = io.Copy(out, conn)
-	var closed websocket.CloseError
-	if errors.As(err, &closed) {
-		if slices.Contains(sshNormalEnds, closed.Reason) {
-			return nil
+	hostKey, err := knownHostKey(f.knownHosts, t.host)
+	if err != nil {
+		return fmt.Errorf("device host key: %w", err)
+	}
+	stream, err := dialSession(ctx, strings.TrimSpace(string(rawURL)), cert.Marshal(), opts)
+	if err != nil {
+		return err
+	}
+	_ = stream.SetDeadline(time.Now().Add(sshDialTimeout))
+	cr, err := session.Hello(stream, certSigner, hostKey)
+	if err != nil {
+		_ = stream.Close()
+		if reason, ok := stream.closeReason(); ok {
+			return fmt.Errorf("session ended: %s", security.SanitizeDisplay(reason))
 		}
-		return fmt.Errorf("session ended: %s", security.SanitizeDisplay(closed.Reason))
+		return fmt.Errorf("session prelude: %w", err)
 	}
-	if err != nil {
-		return fmt.Errorf("session stream: %w", err)
+	_ = stream.SetDeadline(time.Time{})
+
+	go func() {
+		_, _ = io.Copy(cr.Conn, in)
+		_ = cr.Conn.Close()
+	}()
+	copied := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(out, cr.Conn)
+		copied <- err
+	}()
+	var pos uint64
+	for cr.Conn.Attach(stream, pos) == session.Detached {
+		if reason, closed := stream.closeReason(); closed && !slices.Contains(sshResumableEnds, reason) {
+			cr.Conn.End(errSessionEnded)
+			<-copied
+			return fmt.Errorf("session ended: %s", security.SanitizeDisplay(reason))
+		}
+		if stream, pos, err = t.resume(ctx, cr, cert, key, mint, opts); err != nil {
+			cr.Conn.End(errSessionEnded)
+			<-copied
+			return err
+		}
 	}
-	return nil
+	err = <-copied
+	if err == nil || errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	if errors.Is(err, session.ErrResumeLost) {
+		return errors.New("session ended: resume_lost")
+	}
+	return fmt.Errorf("session stream: %w", err)
+}
+
+var errSessionEnded = errors.New("ssh-proxy: session ended")
+
+// resume mints a resume certificate for original and resumes cr on a new
+// stream, retrying with backoff within sshResumeWindow. A mint refusal or a
+// final agent refusal ends the session.
+func (t sshTarget) resume(ctx context.Context, cr *session.ClientResumable, original *ssh.Certificate, key ssh.Signer, mint sessionMinter, opts *websocket.DialOptions) (*sessionStream, uint64, error) {
+	deadline := time.Now().Add(sshResumeWindow)
+	login := original.ValidPrincipals[0]
+	backoff := 500 * time.Millisecond
+	for {
+		resp, err := mint(ctx, identity.SessionRequest{
+			DeviceHost:        t.host,
+			Kind:              sshSessionKind,
+			Login:             login,
+			ClientSSHPubKey:   strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key.PublicKey()))),
+			ResumeCertificate: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(original))),
+		})
+		if err != nil {
+			return nil, 0, fmt.Errorf("resume the session: %w", err)
+		}
+		resumeCert, _, edgeURL, err := checkSessionCertificate(resp, key.PublicKey(), login, time.Now())
+		if err != nil {
+			return nil, 0, fmt.Errorf("resume the session: %w", err)
+		}
+		signer, err := ssh.NewCertSigner(resumeCert, key)
+		if err != nil {
+			return nil, 0, fmt.Errorf("resume the session: %w", err)
+		}
+		stream, err := dialSession(ctx, edgeURL, resumeCert.Marshal(), opts)
+		if err == nil {
+			_ = stream.SetDeadline(time.Now().Add(sshDialTimeout))
+			var pos uint64
+			if pos, err = cr.Resume(stream, signer); err == nil {
+				_ = stream.SetDeadline(time.Time{})
+				return stream, pos, nil
+			}
+			_ = stream.Close()
+			var refused *session.ResumeError
+			if errors.As(err, &refused) && !refused.Retryable() {
+				return nil, 0, fmt.Errorf("session ended: %s", refused.Code)
+			}
+			if reason, closed := stream.closeReason(); closed && !slices.Contains(sshResumableEnds, reason) {
+				return nil, 0, fmt.Errorf("session ended: %s", security.SanitizeDisplay(reason))
+			}
+		}
+		if time.Now().Add(backoff).After(deadline) {
+			return nil, 0, fmt.Errorf("session ended: not resumed within %s: %w", sshResumeWindow, err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff = min(2*backoff, sshResumeBackoffMax)
+	}
 }
 
 // sshConfigOptions are the client options of a target, shared by the
@@ -539,7 +716,7 @@ func runSSHProxy(args []string) error {
 	if err != nil {
 		return err
 	}
-	return t.proxy(context.Background(), os.Stdin, os.Stdout, nil)
+	return t.proxy(context.Background(), os.Stdin, os.Stdout, nil, t.mintWithAPI)
 }
 
 // runSSHConfig is `localport ssh-config`: it prints an ssh_config block per

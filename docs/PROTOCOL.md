@@ -595,8 +595,11 @@ whose open waits for a slot, and reads no further notice until an open ends. It
 resets an open whose headers do not arrive within 30 s. The request body is
 agent-to-edge bytes and the response body edge-to-agent bytes. The edge answers
 `404` to an id it is not waiting for on this mux. On `200` the stream carries
-one SSH connection (RFC 4253) between the client (browser or OpenSSH, relayed
-unparsed by the edge) and the agent's SSH server:
+the resume prelude, then frames that carry one SSH connection (RFC 4253)
+between the client (browser or `ssh-proxy`, relayed unparsed by the edge) and
+the agent's SSH server (see [Resumable connections](#resumable-connections)).
+A first connect starts a connection; a resume moves a detached one onto the
+stream:
 
 1. Server identity: version `SSH-2.0-localport`; host key the device key of the
    last acknowledged registration (`ecdsa-sha2-nistp256`), the key whose SPKI
@@ -604,8 +607,9 @@ unparsed by the edge) and the agent's SSH server:
    the client. Key exchange `mlkem768x25519-sha256`, then `curve25519-sha256`;
    ciphers `chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com`,
    `aes128-gcm@openssh.com`; MACs `hmac-sha2-256-etm@openssh.com`,
-   `hmac-sha2-512-etm@openssh.com`. The handshake and userauth must finish
-   within 10 s of the stream's start.
+   `hmac-sha2-512-etm@openssh.com`. The prelude must finish within 10 s of
+   the stream's start, and the handshake and userauth within 10 s of the
+   connection's start.
 2. Userauth: `publickey` with an SSH user certificate only, at most 3 attempts.
    After the client proves possession of the certificate's key, the agent
    accepts it only when all of these hold; every refusal is a userauth failure
@@ -614,6 +618,7 @@ unparsed by the edge) and the agent's SSH server:
    | Check |
    | ----- |
    | a registration was acknowledged (its key is the host key) |
+   | a user certificate for the key the first connect's prelude bound the connection to |
    | a user certificate whose serial is the notice's serial |
    | signed by a session CA key the agent holds (`ticket_keys.json`); an unknown CA key triggers one key fetch (at most 3 s, at most once per 5 minutes) and one retry |
    | valid now within 30 s of skew, for the user name as its principal |
@@ -630,8 +635,9 @@ unparsed by the edge) and the agent's SSH server:
    connection's life, passes it to each channel's launcher request, which logs
    the login on with it, and clears it when the connection ends.
 
-   At most 8 connections run at once; a stream past that, or one arriving
-   while the agent shuts down, is closed before the handshake.
+   At most 8 connections run at once, detached ones included; a first connect
+   past that, or one arriving while the agent shuts down, is refused in the
+   prelude.
 3. Channels: `session` channels, and on an `ssh` connection the port
    forwarding channels below (others are refused `prohibited`); a `terminal`
    connection has one session channel, an `ssh` or `files` connection at
@@ -727,6 +733,61 @@ progress are aborted, session processes are ended: SIGHUP, then SIGKILL at
 to reach the uploader),
 waits for that at most 10 s, then closes the mux connection. The connection is
 never closed before that step.
+
+## Resumable connections
+
+A session connection survives a lost stream (network drop, edge restart,
+fleet re-pin) for 5 minutes: the layer runs below SSH, so every channel and
+forward carries on. Code: `agent/internal/session/resume.go`,
+`resume_prelude.go`; the browser's copy is `web/wasm/sshclient/client` (the
+two pin one wire vector, `TestResumeWireVector`). A connection does not
+survive an agent restart.
+
+Prelude messages are a 4-byte big-endian length (at most 16 KiB) and the x/crypto
+SSH wire encoding of one message (`sshtype` 160 to 165, version 1). The edge
+relays them like any bytes.
+
+| Step | Sender | Message |
+| --- | --- | --- |
+| first connect | client | hello: version, fresh X25519 key, the certificate the edge admitted, the client's signature (its certificate key) |
+| | agent | hello reply: status, fresh X25519 key, a random 16-byte handle, its host key, its host-key signature |
+| resume | client | resume: version, handle, fresh X25519 key, bytes received, the resume certificate, the client's signature |
+| | agent | resume reply: status, fresh X25519 key, bytes received, its host-key signature |
+| | client | proof: `HMAC-SHA256(token, transcript)`, sent only after it verified the reply under the pinned host key |
+| | agent | proof reply: status |
+
+- Signatures cover SHA-256 of the messages so far with their signature fields
+  empty, prefixed by `localport-resume-client-v1` or `localport-resume-agent-v1`
+  and a zero byte. The token is HKDF-SHA256 over the first connect's X25519
+  shared secret, salted with its transcript, info `localport-resume-v1`; it
+  never crosses the wire, so a relay cannot resume.
+- The agent admits a hello as userauth admits a certificate (table above,
+  serial the notice's), and binds the connection to the certificate's key. It
+  admits a resume only for a live handle, with a resume certificate (critical
+  options exactly `device@localport.io` and `resume@localport.io`, the latter
+  naming the original serial in lowercase hex) for the same subject, kind and
+  key, and only then checks the proof, before it resends anything.
+- Statuses: 0 ok, 1 `resume_refused`, 2 `resume_busy` (another resume of the
+  handle runs; retry), 3 `resume_lost` (no such connection, or a position
+  outside the send buffer). Three failed proofs end the connection
+  `resume_refused`. A resume of a handle whose stream is still attached
+  detaches that stream first.
+
+After the prelude each side sends frames `uvarint ack | uvarint len | data`:
+`ack` is the count of bytes received since its last ack, `data` at most
+128 KiB. A side keeps every byte it wrote until it is acked, at most 2 MiB; a
+write blocks while the buffer is full. A resume resends from the position the
+peer reported. A deliberate close (the SSH layer closes the connection, or
+`ssh-proxy`'s input ends) sends what is buffered, then the ack value
+`0xffffffffffffffff` (closeTag): the peer ends the connection instead of
+waiting. The closing side keeps reading until the peer closes the stream, at
+most 2 s.
+
+On the agent a stream that ends without a closeTag detaches the connection:
+it keeps its session slot, channels and helpers, and every recording gets an
+asciicast marker `detach` (then `attach` on a resume). Detached for 5 minutes
+it ends `detach_timeout`. Shutdown, a config change, the idle timeout and a
+handler panic end detached connections as attached ones.
 
 ## Session recording
 
@@ -949,10 +1010,16 @@ writes the URL and the certificate, each atomically, all under the lock
 `ssh/.lock`, so concurrent connections mint once.
 
 Stream: `ssh-proxy` dials the URL, sends the certificate in SSH wire form as
-the first binary WebSocket message, then carries the SSH connection in binary
-messages of at most 32 KiB each way. The edge's close reason other than
-`client_closed` or `agent_closed` is printed as
-`localport: session ended: <reason>`.
+the first binary WebSocket message, runs the first connect's prelude with the
+host key `known_hosts` holds at start, then carries the SSH connection in
+frames (see [Resumable connections](#resumable-connections)). The end of its
+input is a deliberate close. A stream lost without the agent's close, with no
+close frame or a reason in `sshResumableEnds` (`closed`, `edge_shutdown`,
+`edge_lost`, `device_offline`, `agent_closed`, `no_session_mux`, `edge_full`,
+`wrong_edge`), is resumed within 5 minutes: a mint with `resume_certificate`
+(never written to the certificate file), a new WebSocket with the resume
+certificate first, then the resume prelude. Any other close reason, or a final
+refusal, is printed as `localport: session ended: <reason>`.
 
 `localport ssh-config <device-host>...` prints, per device:
 

@@ -70,3 +70,16 @@ func TestMintSessionRefusesADeviceCredential(t *testing.T) {
 		t.Fatalf("MintSession = %v, want ErrDeviceCredential", err)
 	}
 }
+
+// The control plane's tests pin the same resume vector.
+func TestSessionRequestDigestResumeVector(t *testing.T) {
+	got := sessionRequestDigest(mintSessionBody{
+		DeviceHost: "gw-01-factory.eu.localport.dev", Kind: "ssh", Login: "pi",
+		ClientSSHPubKey: "ssh-ed25519 AAAA", CertChain: "PEM", Timestamp: 1700000000,
+		ResumeCertificate: "ssh-ed25519-cert-v01@openssh.com BBBB",
+	})
+	const want = "2ab76ce66e8c7bf670d149e4b69fac143113ff6bebc779bfa4c74791b2c824bd"
+	if hex.EncodeToString(got) != want {
+		t.Fatalf("digest = %x, want %s", got, want)
+	}
+}

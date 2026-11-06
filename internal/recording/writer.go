@@ -14,7 +14,7 @@ import (
 const MaxLine = MaxPlaintext - 128
 
 // Writer encodes a session channel as asciicast v3 lines. It records
-// output, resize, exit, files-log ("f") and port forward ("p") events only;
+// output, resize, exit, marker, files-log ("f") and port forward ("p") events only;
 // input has no entry point. Event
 // times come from the caller, so tests drive it with a fake clock. A Writer
 // is not safe for concurrent use.
@@ -109,6 +109,12 @@ func (w *Writer) File(at time.Time, event []byte) []byte {
 // caller passes a validated event; forwarded bytes are never recorded.
 func (w *Writer) Forward(at time.Time, event []byte) []byte {
 	return eventLine(w.interval(at), 'p', jsonString(event))
+}
+
+// Marker returns the "m" line of an asciicast v3 marker labelled label: the
+// session recorder marks a connection's detach and attach with it.
+func (w *Writer) Marker(at time.Time, label string) []byte {
+	return eventLine(w.interval(at), 'm', jsonString([]byte(label)))
 }
 
 // interval returns the milliseconds to write for an event at at. A clock

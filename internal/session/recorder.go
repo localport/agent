@@ -143,6 +143,8 @@ const (
 	evExit
 	evFile
 	evForward
+	// evMarker carries its label in data: a connection detach or attach.
+	evMarker
 )
 
 // recEvent is one tap, stamped when the terminal produced it.
@@ -272,6 +274,17 @@ func (r *sessionRecorder) resize(cols, rows uint16) {
 
 func (r *sessionRecorder) exit(status int) {
 	r.enqueue(recEvent{kind: evExit, at: time.Now(), status: status})
+}
+
+// Marker labels of a resumable connection's stream changes.
+const (
+	markerDetach = "detach"
+	markerAttach = "attach"
+)
+
+// marker queues an asciicast marker; it always fits, like resize.
+func (r *sessionRecorder) marker(label string) {
+	r.enqueue(recEvent{kind: evMarker, at: time.Now(), data: []byte(label)})
 }
 
 // enqueue appends an event that always fits. A resize queued right after
@@ -468,6 +481,10 @@ func (r *sessionRecorder) record(st *recorderState, ev recEvent) bool {
 	case evForward:
 		if st.w != nil {
 			return r.add(st, ev.at, st.w.Forward(ev.at, ev.data))
+		}
+	case evMarker:
+		if st.w != nil {
+			return r.add(st, ev.at, st.w.Marker(ev.at, string(ev.data)))
 		}
 	}
 	return true
