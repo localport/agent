@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 const (
 	optionDevice     = "device@localport.io"
 	optionResume     = "resume@localport.io"
+	optionFiles      = "files@localport.io"
 	extKind          = "kind@localport.io"
 	extSubject       = "subject@localport.io"
 	extRec           = "rec@localport.io"
@@ -73,6 +75,41 @@ type admission struct {
 	// extensions, honoured on an ssh connection only.
 	ForwardLocal  bool
 	ForwardRemote bool
+	// Files is the files@localport.io restriction of a files or ssh
+	// certificate: the SFTP directions its channels may use. Zero for every
+	// other kind, which serves no SFTP.
+	Files filesAccess
+}
+
+// filesAccess is a files@localport.io value: whether SFTP may read file
+// contents (Download) and change the file system (Upload).
+type filesAccess struct {
+	Download bool
+	Upload   bool
+}
+
+// covers reports whether a allows everything b allows.
+func (a filesAccess) covers(b filesAccess) bool {
+	return (a.Download || !b.Download) && (a.Upload || !b.Upload)
+}
+
+// carriesFiles reports whether certificates of kind carry optionFiles.
+func carriesFiles(kind string) bool { return kind == "files" || kind == "ssh" }
+
+// parseFilesAccess parses an optionFiles value: "", "download", "upload" or
+// "download,upload", nothing else.
+func parseFilesAccess(v string) (filesAccess, bool) {
+	switch v {
+	case "":
+		return filesAccess{}, true
+	case "download":
+		return filesAccess{Download: true}, true
+	case "upload":
+		return filesAccess{Upload: true}, true
+	case "download,upload":
+		return filesAccess{Download: true, Upload: true}, true
+	}
+	return filesAccess{}, false
 }
 
 // errCertRefused is every certificate refusal; the detail goes to the log
@@ -85,18 +122,19 @@ func refuseCert(format string, args ...any) error {
 
 // verifyCert checks a user certificate whose key possession userauth proved:
 // a user certificate signed by one of cas, with exactly the serial the edge
-// admitted, valid at now within certSkew, for principal user, with no
-// critical option but the device option, which must name device. A resume
-// certificate is refused (its resume option is unknown here). It returns the
-// certificate's claims; the caller applies the local config.
+// admitted, valid at now within certSkew, for principal user, with exactly
+// the critical options the device option (which must name device) and, for a
+// files or ssh certificate, optionFiles. A resume certificate is refused (its
+// resume option is unknown here). It returns the certificate's claims; the
+// caller applies the local config.
 func verifyCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, device Device, serial uint64, now time.Time) (*admission, error) {
 	return checkCert(cert, user, cas, device, serial, now, []string{optionDevice})
 }
 
 // verifyResumeCert checks a resume certificate in a resume prelude: as
-// verifyCert for its one principal, with the critical options exactly the
-// device option and optionResume, which must name original, the serial of the
-// connection it resumes.
+// verifyCert for its one principal, with optionResume beside verifyCert's
+// critical options, which must name original, the serial of the connection it
+// resumes.
 func verifyResumeCert(cert *ssh.Certificate, cas []ed25519.PublicKey, device Device, serial, original uint64, now time.Time) (*admission, error) {
 	if len(cert.ValidPrincipals) != 1 {
 		return nil, refuseCert("want one principal")
@@ -113,6 +151,16 @@ func checkCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, devi
 	}
 	if cert.Serial != serial {
 		return nil, refuseCert("serial %x is not the admitted serial %x", cert.Serial, serial)
+	}
+	kind := cert.Extensions[extKind]
+	if carriesFiles(kind) {
+		options = append(slices.Clone(options), optionFiles)
+	}
+	// CheckCert refuses an option outside the list; the count refuses a
+	// missing one, so a files or ssh certificate without its restriction
+	// never admits unrestricted SFTP.
+	if len(cert.CriticalOptions) != len(options) {
+		return nil, refuseCert("want exactly the critical options %v", options)
 	}
 	if !signedByCA(cert, cas) {
 		return nil, refuseCert("not signed by a session CA key")
@@ -141,9 +189,16 @@ func checkCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, devi
 	if d.Prefix != device.Prefix || d.SPKISHA256 != device.SPKISHA256 {
 		return nil, refuseCert("for device %q, not this device", d.Prefix)
 	}
-	a := &admission{Kind: cert.Extensions[extKind], Login: user, Cert: cert.Marshal()}
+	a := &admission{Kind: kind, Login: user, Cert: cert.Marshal()}
 	_, a.ForwardLocal = cert.Extensions[extForwardLocal]
 	_, a.ForwardRemote = cert.Extensions[extForwardRemote]
+	if carriesFiles(kind) {
+		files, ok := parseFilesAccess(cert.CriticalOptions[optionFiles])
+		if !ok {
+			return nil, refuseCert("files option malformed")
+		}
+		a.Files = files
+	}
 	var s struct {
 		Subject string `json:"subject"`
 		UserID  string `json:"user_id,omitempty"`

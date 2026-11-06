@@ -622,7 +622,7 @@ stream:
    | a user certificate whose serial is the notice's serial |
    | signed by a session CA key the agent holds (`ticket_keys.json`); an unknown CA key triggers one key fetch (at most 3 s, at most once per 5 minutes) and one retry |
    | valid now within 30 s of skew, for the user name as its principal |
-   | exactly one critical option, `device@localport.io`, naming this device's prefix and registered key (`spki_sha256`) |
+   | exactly the critical options `device@localport.io`, naming this device's prefix and registered key (`spki_sha256`), and for a `files` or `ssh` certificate `files@localport.io`: the file directions its SFTP channels may use, one of `""`, `download`, `upload`, `download,upload` (any other value, or a `files` or `ssh` certificate without it, is refused) |
    | the kind (`kind@localport.io`) enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) and served by this agent (`terminal`, `ssh`, `files`) |
    | the user name listed in the local `logins` |
    | a `rec@localport.io`, when present, naming the held team recording key; a mismatch triggers one key fetch, under the same floor, and one retry |
@@ -659,7 +659,15 @@ stream:
    launcher request of kind `terminal`, `exec` or `sftp`; an `sftp` request
    serves the SFTP protocol (version 3) as the login, confined to the
    device's `files_root` or the login's home, opening only regular files and
-   directories and writing in place at the requested offsets; a refusal fails
+   directories and writing in place at the requested offsets. The request
+   carries the certificate's `files@localport.io` access (`files_download`,
+   `files_upload`; only an `sftp` request may): without download an open for
+   reading is refused `SSH_FX_PERMISSION_DENIED`, a read-write open needs both
+   directions, and without upload every change (open for writing,
+   setstat, rename, posix-rename, remove, mkdir, rmdir, symlink, link) is, as
+   OpenSSH `sftp-server -R`; listing, stat, readlink and realpath are always
+   served, and each refusal is a file event with result `permission_denied`.
+   A shell or exec on an `ssh` connection is not restricted by it. A refusal fails
    the request and writes
    `localport: <code>` to the channel's stderr (`login_not_allowed`,
    `kind_disabled`, `agent_busy`, `kind_unavailable`, `launcher_unavailable`,
@@ -764,8 +772,8 @@ relays them like any bytes.
 - The agent admits a hello as userauth admits a certificate (table above,
   serial the notice's), and binds the connection to the certificate's key. It
   admits a resume only for a live handle, with a resume certificate (critical
-  options exactly `device@localport.io` and `resume@localport.io`, the latter
-  naming the original serial in lowercase hex) for the same subject, kind,
+  options exactly those of the table above plus `resume@localport.io`, naming
+  the original serial in lowercase hex) for the same subject, kind,
   login and key that passes the local checks a hello does (kind and login
   enabled, recording key held, table above), and only then checks the proof,
   before it resends anything.
@@ -773,7 +781,9 @@ relays them like any bytes.
   the resume stream's session id: later recordings name that id and carry
   that certificate, and its forwarding extensions apply from then on, so a
   direction it no longer allows ends that direction's listeners and
-  forwarded connections.
+  forwarded connections; an SFTP channel started with a file direction its
+  `files@localport.io` no longer allows ends `files_narrowed`, written to
+  its recording as an asciicast marker of that label.
 - Statuses: 0 ok, 1 `resume_refused`, 2 `resume_busy` (another resume of the
   handle runs; retry), 3 `resume_lost` (no such connection, or a position
   outside the send buffer). Three failed proofs end the connection

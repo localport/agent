@@ -64,6 +64,12 @@ func (e *eventSink) list(t *testing.T) []launcher.FileEvent {
 
 func newFilesHarness(t *testing.T) *filesHarness {
 	t.Helper()
+	return newFilesHarnessWith(t, FilesAccess{Download: true, Upload: true})
+}
+
+// newFilesHarnessWith serves a temporary root with access.
+func newFilesHarnessWith(t *testing.T, access FilesAccess) *filesHarness {
+	t.Helper()
 	base := t.TempDir()
 	dir := filepath.Join(base, "root")
 	if err := os.Mkdir(dir, 0o755); err != nil {
@@ -74,7 +80,7 @@ func newFilesHarness(t *testing.T) *filesHarness {
 	}
 	serverSide, clientSide := net.Pipe()
 	h := &filesHarness{dir: dir, events: &eventSink{}, done: make(chan error, 1)}
-	go func() { h.done <- ServeFiles(serverSide, dir, h.events) }()
+	go func() { h.done <- ServeFiles(serverSide, dir, access, h.events) }()
 	c, err := sftp.NewClientPipe(clientSide, clientSide)
 	if err != nil {
 		t.Fatal(err)
@@ -272,5 +278,142 @@ func TestFilesRefusesADirectoryAsAFile(t *testing.T) {
 	}
 	if _, err := h.client.Open("/dir"); !errors.Is(err, fs.ErrPermission) {
 		t.Errorf("open /dir: %v, want permission denied", err)
+	}
+}
+
+// isDenied reports whether err is the SFTP permission-denied status, which
+// the client returns as os.ErrPermission.
+func isDenied(err error) bool {
+	return errors.Is(err, os.ErrPermission)
+}
+
+// Without Upload the server behaves as sftp-server -R: every request that
+// changes the file system is refused permission denied and logged with that
+// result, and nothing changes; listing and stat still work. Without Download
+// a read open is refused the same way, and a read-write open needs both.
+func TestFilesAccess(t *testing.T) {
+	seed := func(h *filesHarness) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(h.dir, "a"), []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(h.dir, "d"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writes := map[string]func(c *sftp.Client) error{
+		"create": func(c *sftp.Client) error { _, err := c.Create("/new"); return err },
+		"open for write": func(c *sftp.Client) error {
+			_, err := c.OpenFile("/a", os.O_WRONLY)
+			return err
+		},
+		"rename":       func(c *sftp.Client) error { return c.Rename("/a", "/b") },
+		"posix-rename": func(c *sftp.Client) error { return c.PosixRename("/a", "/b") },
+		"remove":       func(c *sftp.Client) error { return c.Remove("/a") },
+		"mkdir":        func(c *sftp.Client) error { return c.Mkdir("/e") },
+		"rmdir":        func(c *sftp.Client) error { return c.RemoveDirectory("/d") },
+		"chmod":        func(c *sftp.Client) error { return c.Chmod("/a", 0o600) },
+		"symlink":      func(c *sftp.Client) error { return c.Symlink("a", "/l") },
+		"link":         func(c *sftp.Client) error { return c.Link("/a", "/h") },
+	}
+
+	t.Run("download only", func(t *testing.T) {
+		h := newFilesHarnessWith(t, FilesAccess{Download: true})
+		seed(h)
+		for name, op := range writes {
+			if err := op(h.client); !isDenied(err) {
+				t.Fatalf("%s without upload: %v, want permission denied", name, err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(h.dir, "a")); err != nil {
+			t.Fatalf("a refused write changed the file: %v", err)
+		}
+		if entries, err := os.ReadDir(h.dir); err != nil || len(entries) != 2 {
+			t.Fatalf("a refused write changed the root: %v %v", entries, err)
+		}
+		if _, err := h.client.OpenFile("/a", os.O_RDWR); !isDenied(err) {
+			t.Fatalf("read-write open without upload: %v", err)
+		}
+		f, err := h.client.Open("/a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := io.ReadAll(f)
+		_ = f.Close()
+		if err != nil || string(b) != "data" {
+			t.Fatalf("download: %q %v", b, err)
+		}
+		if _, err := h.client.ReadDir("/"); err != nil {
+			t.Fatalf("listing: %v", err)
+		}
+		denied := 0
+		for _, ev := range h.events.list(t) {
+			if ev.Result == "permission_denied" {
+				denied++
+			}
+		}
+		// Each write, the read-write open, and the rmdir the client's Remove
+		// falls back to after its refused remove.
+		if want := len(writes) + 2; denied != want {
+			t.Fatalf("%d permission_denied events, want %d", denied, want)
+		}
+	})
+
+	t.Run("upload only", func(t *testing.T) {
+		h := newFilesHarnessWith(t, FilesAccess{Upload: true})
+		seed(h)
+		if _, err := h.client.Open("/a"); !isDenied(err) {
+			t.Fatalf("read open without download: %v, want permission denied", err)
+		}
+		if _, err := h.client.OpenFile("/a", os.O_RDWR); !isDenied(err) {
+			t.Fatalf("read-write open without download: %v, want permission denied", err)
+		}
+		// Write-only, as OpenSSH sftp put and scp open (the client's Create
+		// opens read-write, which needs download too).
+		f, err := h.client.OpenFile("/new", os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write([]byte("up")); err != nil {
+			t.Fatal(err)
+		}
+		_ = f.Close()
+		if b, _ := os.ReadFile(filepath.Join(h.dir, "new")); string(b) != "up" {
+			t.Fatalf("upload wrote %q", b)
+		}
+		if err := h.client.PosixRename("/new", "/a"); err != nil {
+			t.Fatalf("posix-rename with upload: %v", err)
+		}
+		if _, err := h.client.Stat("/a"); err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+	})
+
+	t.Run("none", func(t *testing.T) {
+		h := newFilesHarnessWith(t, FilesAccess{})
+		seed(h)
+		if _, err := h.client.Open("/a"); !isDenied(err) {
+			t.Fatalf("read open: %v", err)
+		}
+		if err := h.client.Mkdir("/e"); !isDenied(err) {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if entries, err := h.client.ReadDir("/"); err != nil || len(entries) != 2 {
+			t.Fatalf("listing with no access: %v %v", entries, err)
+		}
+	})
+}
+
+// The access argument has exactly four spellings.
+func TestParseFilesAccess(t *testing.T) {
+	for _, a := range []FilesAccess{{}, {Download: true}, {Upload: true}, {Download: true, Upload: true}} {
+		if got, ok := ParseFilesAccess(a.Arg()); !ok || got != a {
+			t.Fatalf("%+v: %+v %v", a, got, ok)
+		}
+	}
+	for _, bad := range []string{"", "upload,download", "read", "Download", "download, upload"} {
+		if _, ok := ParseFilesAccess(bad); ok {
+			t.Fatalf("%q parsed", bad)
+		}
 	}
 }

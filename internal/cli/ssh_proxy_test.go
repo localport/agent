@@ -124,7 +124,7 @@ func (e *proxyEdge) mint(_ context.Context, req identity.SessionRequest) (*ident
 		Key: pub, Serial: serial, CertType: ssh.UserCert, ValidPrincipals: []string{req.Login},
 		ValidAfter: uint64(time.Now().Add(-30 * time.Second).Unix()), ValidBefore: uint64(time.Now().Add(5 * time.Minute).Unix()),
 		Permissions: ssh.Permissions{
-			CriticalOptions: map[string]string{"device@localport.io": string(dev)},
+			CriticalOptions: map[string]string{"device@localport.io": string(dev), "files@localport.io": "download,upload"},
 			Extensions:      map[string]string{"kind@localport.io": "ssh", "subject@localport.io": `{"subject":"user:ana"}`},
 		},
 	}

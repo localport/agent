@@ -133,7 +133,8 @@ func Run(log func(string, ...any)) int {
 		if root == "" {
 			root = a.Home
 		}
-		plan.args, plan.events = []string{"localport-session", FilesServerMode, root}, true
+		access := FilesAccess{Download: req.FilesDownload, Upload: req.FilesUpload}
+		plan.args, plan.events = []string{"localport-session", FilesServerMode, access.Arg(), root}, true
 	}
 	if req.Kind == launcher.KindForward {
 		// The forward server takes the channel itself: it passes connected

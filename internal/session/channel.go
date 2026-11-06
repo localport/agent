@@ -23,10 +23,14 @@ const (
 	CloseHelperFailed = "helper_failed"
 	// CloseLauncherUnavailable: the launcher could not be reached.
 	CloseLauncherUnavailable = "launcher_unavailable"
-	CodeLoginNotAllowed      = "login_not_allowed"
-	CodeKindDisabled         = "kind_disabled"
-	CodeAgentBusy            = "agent_busy"
-	CodeKindUnavailable      = "kind_unavailable"
+	// CloseFilesNarrowed: a resume admitted the connection under a
+	// certificate whose files@localport.io no longer allows what this SFTP
+	// channel's file server was started with.
+	CloseFilesNarrowed  = "files_narrowed"
+	CodeLoginNotAllowed = "login_not_allowed"
+	CodeKindDisabled    = "kind_disabled"
+	CodeAgentBusy       = "agent_busy"
+	CodeKindUnavailable = "kind_unavailable"
 	// CodeRecordingUnavailable: a Strict channel whose recording could not
 	// open is refused before its helper starts.
 	CodeRecordingUnavailable = "recording_unavailable"
@@ -92,6 +96,8 @@ type channel struct {
 	mu      sync.Mutex
 	helper  *os.File
 	session *launcher.Session
+	// files is the access an sftp channel's file server was started with.
+	files filesAccess
 	// wmu serializes frame writes to the helper.
 	wmu sync.Mutex
 
@@ -209,6 +215,11 @@ func validSize(cols, rows uint32) bool {
 func (ch *channel) start(kind, command string) bool {
 	s := ch.c.s
 	req := launcher.Request{Kind: kind, Device: s.cfg.Device, Login: ch.c.login, Command: command, Env: ch.env}
+	var files filesAccess
+	if kind == launcher.KindSFTP {
+		files = ch.c.adm.Load().Files
+		req.FilesDownload, req.FilesUpload = files.Download, files.Upload
+	}
 	if len(ch.c.password) > 0 {
 		// The launcher client zeroes its copy once sent.
 		req.HasPassword, req.Password = true, bytes.Clone(ch.c.password)
@@ -247,13 +258,21 @@ func (ch *channel) start(kind, command string) bool {
 	// disconnect, idle, Shutdown): it found no helper to close, so the new
 	// session is ended here and never relayed.
 	ch.mu.Lock()
-	if ch.stopped.Load() {
+	// A resume that narrowed the file access while the server started either
+	// finds ch.files set (conn.readmit ends the channel) or is seen here: the
+	// admission is stored before readmit reads ch.files under ch.mu.
+	narrowed := kind == launcher.KindSFTP && !ch.c.adm.Load().Files.covers(files)
+	if ch.stopped.Load() || narrowed {
 		ch.mu.Unlock()
 		_ = ours.Close()
 		_ = sess.Close()
 		rec.abort()
+		if narrowed {
+			ch.refuse(CloseFilesNarrowed)
+		}
 		return false
 	}
+	ch.files = files
 	ch.helper, ch.session, ch.started, ch.rec, ch.kind = ours, sess, true, rec, kind
 	ch.readerDone = make(chan struct{})
 	ch.mu.Unlock()

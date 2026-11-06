@@ -33,12 +33,16 @@ func main() {
 	logger := log.New(os.Stderr, "", 0)
 	// The file server runs as the login: the helper passes the event pipe's
 	// inherited handle as the last argument.
-	if len(os.Args) == 4 && os.Args[1] == sessionhelper.FilesServerMode {
-		h, err := strconv.ParseUint(os.Args[3], 10, 64)
+	if len(os.Args) == 5 && os.Args[1] == sessionhelper.FilesServerMode {
+		access, ok := sessionhelper.ParseFilesAccess(os.Args[2])
+		if !ok {
+			os.Exit(2)
+		}
+		h, err := strconv.ParseUint(os.Args[4], 10, 64)
 		if err != nil {
 			os.Exit(2)
 		}
-		if err := sessionhelper.ServeFiles(stdio{}, os.Args[2], os.NewFile(uintptr(h), "file-events")); err != nil {
+		if err := sessionhelper.ServeFiles(stdio{}, os.Args[3], access, os.NewFile(uintptr(h), "file-events")); err != nil {
 			logger.Printf("localport-session: files: %v", err)
 			os.Exit(1)
 		}

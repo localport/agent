@@ -94,6 +94,11 @@ type Request struct {
 	// the login's password for a full logon (LogonUser) instead of S4U.
 	// Unix refuses it.
 	HasPassword bool `json:"password,omitempty"`
+	// FilesDownload and FilesUpload are an sftp session's access, from the
+	// certificate's files@localport.io option: reading file contents and
+	// changing the file system. Only an sftp request carries them.
+	FilesDownload bool `json:"files_download,omitempty"`
+	FilesUpload   bool `json:"files_upload,omitempty"`
 	// Password travels outside JSON, as a raw length-prefixed trailer
 	// (writeSecret, readSecret), so no encoder buffer ever holds it; each
 	// hop zeroes its copy once used and nothing stores it.
@@ -160,7 +165,7 @@ var (
 // Validate checks the fields of a request for its kind, without the config.
 // An sftp request carries no terminal and no command.
 func (r Request) Validate() error {
-	if r.V != Version {
+	if r.V != Version || r.Kind != KindSFTP && (r.FilesDownload || r.FilesUpload) {
 		return Refusal(CodeBadRequest)
 	}
 	switch r.Kind {

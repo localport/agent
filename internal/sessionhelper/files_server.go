@@ -19,10 +19,44 @@ import (
 )
 
 // FilesServerMode is the localport-session mode that runs ServeFiles as the
-// login: `localport-session files-server <root>` with the SFTP protocol on
-// standard input and output and the event pipe on descriptor 3 (Unix) or
-// the handle a fourth argument names (Windows).
+// login: `localport-session files-server <access> <root>` with the SFTP
+// protocol on standard input and output and the event pipe on descriptor 3
+// (Unix) or the handle a fifth argument names (Windows). access is
+// FilesAccess.Arg.
 const FilesServerMode = "files-server"
+
+// FilesAccess is what an SFTP session may do beyond listing: read file
+// contents (Download) and change the file system (Upload: create, write,
+// setstat, rename, remove, mkdir, rmdir, symlink, link). Without Upload the
+// server behaves as OpenSSH's sftp-server -R.
+type FilesAccess struct {
+	Download bool
+	Upload   bool
+}
+
+// Arg is the FilesServerMode access argument: "none", "download", "upload"
+// or "download,upload".
+func (a FilesAccess) Arg() string {
+	switch {
+	case a.Download && a.Upload:
+		return "download,upload"
+	case a.Download:
+		return "download"
+	case a.Upload:
+		return "upload"
+	}
+	return "none"
+}
+
+// ParseFilesAccess parses Arg output; any other value is refused.
+func ParseFilesAccess(v string) (FilesAccess, bool) {
+	for _, a := range []FilesAccess{{}, {Download: true}, {Upload: true}, {Download: true, Upload: true}} {
+		if a.Arg() == v {
+			return a, true
+		}
+	}
+	return FilesAccess{}, false
+}
 
 // ServeFiles serves one SFTP session on rwc as the calling process's user,
 // confined to dir: the client sees dir as "/", and every path resolves
@@ -30,14 +64,15 @@ const FilesServerMode = "files-server"
 // it. Each operation the files log names is written to events as a
 // FrameEvent (launcher.FileEvent); a request refused as malformed before it
 // acts (a symlink with an empty target) changes nothing and has no event. It
-// returns when the client ends the session.
-func ServeFiles(rwc io.ReadWriteCloser, dir string, events io.Writer) error {
+// returns when the client ends the session. A request access does not allow
+// is refused with permission denied and writes its event with that result.
+func ServeFiles(rwc io.ReadWriteCloser, dir string, access FilesAccess, events io.Writer) error {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	s := &filesServer{root: root, events: events}
+	s := &filesServer{root: root, access: access, events: events}
 	h := sftp.Handlers{FileGet: s, FilePut: s, FileCmd: s, FileList: s}
 	err = sftp.NewRequestServer(rwc, h).Serve()
 	if errors.Is(err, io.EOF) {
@@ -48,7 +83,8 @@ func ServeFiles(rwc io.ReadWriteCloser, dir string, events io.Writer) error {
 
 // filesServer implements the request server's handlers over root.
 type filesServer struct {
-	root *os.Root
+	root   *os.Root
+	access FilesAccess
 	// mu serializes event frames; events is the helper's event pipe.
 	mu     sync.Mutex
 	events io.Writer
@@ -134,8 +170,20 @@ func (s *filesServer) StatVFS(*sftp.Request) (*sftp.StatVFS, error) {
 	return statVFS(s.root.Name())
 }
 
+// denied writes ev's event with a permission refusal and returns it as the
+// EACCES path error the request server answers SSH_FX_PERMISSION_DENIED.
+func (s *filesServer) denied(ev launcher.FileEvent) error {
+	err := &fs.PathError{Op: ev.Op, Path: ev.Path, Err: syscall.EACCES}
+	ev.Result = result(err)
+	s.emit(ev)
+	return err
+}
+
 // Fileread opens a file for reading.
 func (s *filesServer) Fileread(r *sftp.Request) (io.ReaderAt, error) {
+	if !s.access.Download {
+		return nil, s.denied(launcher.FileEvent{Op: launcher.OpRead, Path: r.Filepath})
+	}
 	f, err := s.openRegular(rel(r.Filepath), os.O_RDONLY, 0)
 	if err != nil {
 		s.emit(launcher.FileEvent{Op: launcher.OpRead, Path: r.Filepath, Result: result(err)})
@@ -183,6 +231,10 @@ func (s *filesServer) OpenFile(r *sftp.Request) (sftp.WriterAtReaderAt, error) {
 }
 
 func (s *filesServer) openWrite(r *sftp.Request, base int) (*countedFile, error) {
+	// A read-write handle reads contents too, so it needs both directions.
+	if !s.access.Upload || base == os.O_RDWR && !s.access.Download {
+		return nil, s.denied(launcher.FileEvent{Op: launcher.OpWrite, Path: r.Filepath})
+	}
 	f, err := s.openRegular(rel(r.Filepath), writeFlags(r, base), createPerm(r, 0o666))
 	if err != nil {
 		s.emit(launcher.FileEvent{Op: launcher.OpWrite, Path: r.Filepath, Result: result(err)})
@@ -225,26 +277,27 @@ func (c *countedFile) Close() error {
 }
 
 // Filecmd applies setstat, rename, rmdir, remove, mkdir, symlink and link,
-// and writes each one's event.
+// and writes each one's event. Each one changes the file system, so each
+// needs Upload.
 func (s *filesServer) Filecmd(r *sftp.Request) error {
 	ev := launcher.FileEvent{Path: r.Filepath}
-	var err error
+	var apply func() error
 	switch r.Method {
 	case "Setstat":
 		ev.Op = launcher.OpSetstat
-		err = s.setstat(r)
+		apply = func() error { return s.setstat(r) }
 	case "Rename":
 		ev.Op, ev.Target = launcher.OpRename, r.Target
-		err = s.rename(rel(r.Filepath), rel(r.Target))
+		apply = func() error { return s.rename(rel(r.Filepath), rel(r.Target)) }
 	case "Rmdir":
 		ev.Op = launcher.OpRmdir
-		err = s.removeKind(rel(r.Filepath), true)
+		apply = func() error { return s.removeKind(rel(r.Filepath), true) }
 	case "Remove":
 		ev.Op = launcher.OpRemove
-		err = s.removeKind(rel(r.Filepath), false)
+		apply = func() error { return s.removeKind(rel(r.Filepath), false) }
 	case "Mkdir":
 		ev.Op = launcher.OpMkdir
-		err = s.root.Mkdir(rel(r.Filepath), createPerm(r, 0o777))
+		apply = func() error { return s.root.Mkdir(rel(r.Filepath), createPerm(r, 0o777)) }
 	case "Symlink":
 		// Filepath is the link's target text, as the client sent it, Target
 		// the link's path. An empty target creates nothing and has no event.
@@ -252,13 +305,17 @@ func (s *filesServer) Filecmd(r *sftp.Request) error {
 			return sftp.ErrSSHFxBadMessage
 		}
 		ev.Op, ev.Path, ev.Target = launcher.OpSymlink, r.Target, r.Filepath
-		err = s.root.Symlink(r.Filepath, rel(r.Target))
+		apply = func() error { return s.root.Symlink(r.Filepath, rel(r.Target)) }
 	case "Link":
 		ev.Op, ev.Target = launcher.OpLink, r.Target
-		err = s.root.Link(rel(r.Filepath), rel(r.Target))
+		apply = func() error { return s.root.Link(rel(r.Filepath), rel(r.Target)) }
 	default:
 		return sftp.ErrSSHFxOpUnsupported
 	}
+	if !s.access.Upload {
+		return s.denied(ev)
+	}
+	err := apply()
 	ev.Result = result(err)
 	s.emit(ev)
 	return err
@@ -266,6 +323,9 @@ func (s *filesServer) Filecmd(r *sftp.Request) error {
 
 // PosixRename renames over an existing target (posix-rename@openssh.com).
 func (s *filesServer) PosixRename(r *sftp.Request) error {
+	if !s.access.Upload {
+		return s.denied(launcher.FileEvent{Op: launcher.OpRename, Path: r.Filepath, Target: r.Target})
+	}
 	err := s.root.Rename(rel(r.Filepath), rel(r.Target))
 	s.emit(launcher.FileEvent{Op: launcher.OpRename, Path: r.Filepath, Target: r.Target, Result: result(err)})
 	return err

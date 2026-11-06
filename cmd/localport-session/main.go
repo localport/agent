@@ -45,10 +45,14 @@ func main() {
 	// The file server runs as the login, not as root: the helper starts it
 	// with the event pipe on descriptor 3.
 	if os.Args[1] == sessionhelper.FilesServerMode {
-		if len(os.Args) != 3 {
+		if len(os.Args) != 4 {
 			os.Exit(2)
 		}
-		if err := sessionhelper.ServeFiles(stdio{}, os.Args[2], os.NewFile(3, "file-events")); err != nil {
+		access, ok := sessionhelper.ParseFilesAccess(os.Args[2])
+		if !ok {
+			os.Exit(2)
+		}
+		if err := sessionhelper.ServeFiles(stdio{}, os.Args[3], access, os.NewFile(3, "file-events")); err != nil {
 			logger.Printf("localport-session: files: %v", err)
 			os.Exit(1)
 		}

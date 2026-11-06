@@ -233,6 +233,11 @@ type certOpts struct {
 	resumes string
 	// key signs instead of a fresh client key.
 	key ed25519.PrivateKey
+	// files replaces the files option of a files or ssh certificate (default
+	// "download,upload") and adds it to any other kind; noFiles leaves the
+	// option out.
+	files   *string
+	noFiles bool
 }
 
 func (f *sshFixture) defaults() certOpts {
@@ -269,6 +274,12 @@ func (f *sshFixture) mint(t *testing.T, o certOpts) (ssh.Signer, *ssh.Certificat
 	}
 	if o.extraCO {
 		cert.CriticalOptions["force-command"] = "/bin/true"
+	}
+	if carriesFiles(o.kind) && !o.noFiles || o.files != nil {
+		cert.CriticalOptions[optionFiles] = "download,upload"
+		if o.files != nil {
+			cert.CriticalOptions[optionFiles] = *o.files
+		}
 	}
 	if o.fwdLocal {
 		cert.Extensions[extForwardLocal] = ""
@@ -559,6 +570,9 @@ func TestUserauthRefusals(t *testing.T) {
 		{"kind not enabled", func(o *certOpts) { o.kind = "rdp" }, 0},
 		{"kind not served", func(o *certOpts) { o.kind = "vnc" }, 0},
 		{"recording key not held", func(o *certOpts) { o.rec = &certRec{Policy: RecPolicyStrict, PubSHA256: "AAAA"} }, 0},
+		{"files certificate without its files option", func(o *certOpts) { o.kind, o.noFiles = "files", true }, 0},
+		{"files option malformed", func(o *certOpts) { o.kind, o.files = "files", new("upload,download") }, 0},
+		{"terminal certificate with a files option", func(o *certOpts) { o.files = new("download") }, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o := f.defaults()
@@ -690,7 +704,8 @@ func TestFilesChannelPolicy(t *testing.T) {
 	if err := sess.RequestSubsystem("sftp"); err != nil {
 		t.Fatalf("sftp on a files connection: %v", err)
 	}
-	if req := f.launcher.lastRequest(t); req.Kind != launcher.KindSFTP || req.Cols != 0 || req.Term != "" || req.Command != "" {
+	if req := f.launcher.lastRequest(t); req.Kind != launcher.KindSFTP || req.Cols != 0 || req.Term != "" || req.Command != "" ||
+		!req.FilesDownload || !req.FilesUpload {
 		t.Fatalf("launcher request %+v", req)
 	}
 	if n := len(f.launcher.requests); n != 1 {
@@ -705,6 +720,17 @@ func TestFilesChannelPolicy(t *testing.T) {
 	if req := f.launcher.lastRequest(t); req.Kind != launcher.KindSFTP {
 		t.Fatalf("launcher request %+v", req)
 	}
+
+	// The certificate's files option is the access the file server gets.
+	o.kind, o.files = "ssh", new("download")
+	sess, _ = f.connect(t, o).NewSession()
+	if err := sess.RequestSubsystem("sftp"); err != nil {
+		t.Fatalf("sftp with download only: %v", err)
+	}
+	if req := f.launcher.lastRequest(t); !req.FilesDownload || req.FilesUpload {
+		t.Fatalf("download-only launcher request %+v", req)
+	}
+	o.files = nil
 
 	o.kind = "terminal"
 	sess, _ = f.connect(t, o).NewSession()

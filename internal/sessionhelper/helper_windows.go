@@ -103,7 +103,7 @@ func Run(log func(string, ...any)) int {
 	app, cmdLine := shell, commandLine(shell, req.Command)
 	switch req.Kind {
 	case launcher.KindSFTP:
-		if app, cmdLine, err = filesServerCommand(token, req.Root); err != nil {
+		if app, cmdLine, err = filesServerCommand(token, req.Root, FilesAccess{Download: req.FilesDownload, Upload: req.FilesUpload}); err != nil {
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
 	case launcher.KindForward:

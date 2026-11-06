@@ -74,6 +74,10 @@ const (
 	// permits that forward direction.
 	permFwdLocal  = "fwd-local"
 	permFwdRemote = "fwd-remote"
+	// permFilesDownload and permFilesUpload are present when the
+	// certificate's files@localport.io option permits that SFTP direction.
+	permFilesDownload = "files-download"
+	permFilesUpload   = "files-upload"
 )
 
 // ServerConfig is one device's session server configuration. Capabilities,
@@ -922,6 +926,12 @@ func (a *admission) permissions() *ssh.Permissions {
 	if a.ForwardRemote {
 		ext[permFwdRemote] = ""
 	}
+	if a.Files.Download {
+		ext[permFilesDownload] = ""
+	}
+	if a.Files.Upload {
+		ext[permFilesUpload] = ""
+	}
 	return &ssh.Permissions{Extensions: ext}
 }
 
@@ -936,6 +946,8 @@ func admissionOf(p *ssh.Permissions) *admission {
 	}
 	_, a.ForwardLocal = ext[permFwdLocal]
 	_, a.ForwardRemote = ext[permFwdRemote]
+	_, a.Files.Download = ext[permFilesDownload]
+	_, a.Files.Upload = ext[permFilesUpload]
 	return a
 }
 
@@ -1128,8 +1140,25 @@ func (c *conn) readmit(a *connAdmission) {
 	c.mu.Lock()
 	c.adm.Store(a)
 	conns, listeners, client := c.fwd.disallowedLocked()
+	channels := slices.Collect(maps.Keys(c.channels))
 	c.mu.Unlock()
 	c.fwd.closeDisallowed(conns, listeners, client)
+	// An SFTP channel's file server holds the access it started with; one the
+	// new admission no longer covers ends (a channel starting now sees the new
+	// admission at its hand-off instead). Its recording gets the reason as a
+	// marker before the end.
+	for _, ch := range channels {
+		ch.mu.Lock()
+		narrowed := ch.kind == launcher.KindSFTP && !a.Files.covers(ch.files)
+		rec := ch.rec
+		ch.mu.Unlock()
+		if narrowed {
+			if rec != nil {
+				rec.marker(CloseFilesNarrowed)
+			}
+			ch.end(CloseFilesNarrowed)
+		}
+	}
 }
 
 // fail ends the connection with reason unless its end is already decided.

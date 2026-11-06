@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,5 +222,130 @@ func TestAChannelAfterAResumeRecordsUnderTheResumeStream(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the channel opened no recording")
+	}
+}
+
+// A resume whose certificate narrows the files option ends the SFTP channels
+// started with more access; a channel started afterwards gets the narrowed
+// access, and a resume that keeps it leaves that channel running. An ssh
+// connection, which outlives its channels (a files connection ends with its
+// last channel).
+func TestAResumeNarrowingFilesEndsSFTPChannels(t *testing.T) {
+	f := newSSHFixture(t, func(c *ServerConfig) { c.Capabilities = []string{"terminal", "files"} })
+	o := f.defaults()
+	o.kind = "ssh"
+	rc := f.connectResumableAs(t, o)
+	openSFTP := func() io.Reader {
+		t.Helper()
+		sess, err := rc.client.NewSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := sess.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sess.RequestSubsystem("sftp"); err != nil {
+			t.Fatalf("sftp: %v", err)
+		}
+		return out
+	}
+	full := openSFTP()
+	rc.cut(t)
+	downloadOnly := func(o *certOpts) { o.kind, o.files = "ssh", new("download") }
+	if err := rc.resume(t, downloadOnly); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if !closedWithin(full, 5*time.Second) {
+		t.Fatal("an SFTP channel started with upload stays open after a resume without it")
+	}
+	narrow := openSFTP()
+	if req := f.launcher.lastRequest(t); !req.FilesDownload || req.FilesUpload {
+		t.Fatalf("a channel after the narrowing resume: %+v", req)
+	}
+	rc.cut(t)
+	if err := rc.resume(t, downloadOnly); err != nil {
+		t.Fatalf("second resume: %v", err)
+	}
+	if closedWithin(narrow, 300*time.Millisecond) {
+		t.Fatal("a resume with the same access ended an SFTP channel")
+	}
+}
+
+// The recording of an SFTP channel a narrowing resume ends states why it
+// ended.
+func TestAResumeNarrowingFilesMarksTheEndedChannelsRecording(t *testing.T) {
+	client := &captureClient{opens: make(chan capturedOpen, 1)}
+	f, keySum, _ := recordingFixture(t, client)
+	rec := &certRec{Policy: RecPolicyBestEffort, PubSHA256: keySum}
+	o := f.defaults()
+	o.kind, o.rec = "ssh", rec
+	rc := f.connectResumableAs(t, o)
+	sess, err := rc.client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.RequestSubsystem("sftp"); err != nil {
+		t.Fatalf("sftp: %v", err)
+	}
+	rc.cut(t)
+	if err := rc.resume(t, func(o *certOpts) { o.kind, o.rec, o.files = "ssh", rec, new("download") }); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if !closedWithin(out, 5*time.Second) {
+		t.Fatal("an SFTP channel started with upload stays open after a resume without it")
+	}
+	open := <-client.opens
+	if text := client.plaintext(t, open.id); !strings.Contains(text, `"`+CloseFilesNarrowed+`"`) {
+		t.Fatalf("the ended channel's recording does not state %s:\n%s", CloseFilesNarrowed, text)
+	}
+}
+
+// A resume that narrows the files option while the launcher starts an SFTP
+// server finds no file server to end yet (readmit skips a channel not handed
+// off), so the hand-off itself refuses the channel and closes the server
+// started with the old access.
+func TestAResumeNarrowingFilesDuringLauncherStartRefusesTheChannel(t *testing.T) {
+	f := newSSHFixture(t, func(c *ServerConfig) { c.Capabilities = []string{"terminal", "files"} })
+	f.launcher.hold, f.launcher.starting = make(chan struct{}), make(chan struct{}, 1)
+	f.launcher.helperDone = make(chan struct{}, 1)
+	o := f.defaults()
+	o.kind = "ssh"
+	rc := f.connectResumableAs(t, o)
+	sess, err := rc.client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	subsystem := make(chan error, 1)
+	go func() { subsystem <- sess.RequestSubsystem("sftp") }()
+	select {
+	case <-f.launcher.starting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the launcher was not asked")
+	}
+	if req := f.launcher.lastRequest(t); !req.FilesDownload || !req.FilesUpload {
+		t.Fatalf("the server starts with %+v, want both directions", req)
+	}
+	rc.cut(t)
+	if err := rc.resume(t, func(o *certOpts) { o.kind, o.files = "ssh", new("download") }); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	close(f.launcher.hold)
+	select {
+	case err := <-subsystem:
+		if err == nil {
+			t.Fatal("an SFTP server started with upload was handed off after a resume without it")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sftp request got no answer")
+	}
+	select {
+	case <-f.launcher.helperDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the file server started with the old access was never ended")
 	}
 }

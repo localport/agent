@@ -49,6 +49,10 @@ type HelperRequest struct {
 	// Root is the directory an sftp session is confined to, the device's
 	// files_root; empty confines it to the login's home.
 	Root string `json:"root,omitempty"`
+	// FilesDownload and FilesUpload are an sftp session's access
+	// (Request.FilesDownload, Request.FilesUpload).
+	FilesDownload bool `json:"files_download,omitempty"`
+	FilesUpload   bool `json:"files_upload,omitempty"`
 	// AgentAccount runs the session as the agent's own account without PAM
 	// (tier 3 opt-in). Login is then the agent account's name. Unix only.
 	AgentAccount bool `json:"agent_account,omitempty"`
@@ -107,7 +111,7 @@ func authorize(load func() (*config.LocalConfig, error), agentAccount string, re
 	h := HelperRequest{Kind: req.Kind, Login: req.Login, Cols: req.Cols, Rows: req.Rows, Term: req.Term, Command: req.Command,
 		Env: req.Env, Pipe: req.Pipe, HasPassword: req.HasPassword, Password: req.Password}
 	if req.Kind == KindSFTP {
-		h.Root = d.FilesRoot
+		h.Root, h.FilesDownload, h.FilesUpload = d.FilesRoot, req.FilesDownload, req.FilesUpload
 	}
 	switch {
 	case d.RunAsAgent:

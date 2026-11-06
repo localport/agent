@@ -39,6 +39,25 @@ func TestValidatePipeAndPassword(t *testing.T) {
 	}
 }
 
+// Only an sftp request carries the file access; any other kind with either
+// flag is refused.
+func TestValidateFilesAccess(t *testing.T) {
+	sftp := Request{V: Version, Kind: KindSFTP, Device: "d", Login: "alice", FilesDownload: true, FilesUpload: true}
+	if err := sftp.Validate(); err != nil {
+		t.Fatalf("sftp with access: %v", err)
+	}
+	for _, r := range []Request{
+		{V: Version, Kind: KindTerminal, Device: "d", Login: "alice", Cols: 80, Rows: 24, Term: "xterm", FilesDownload: true},
+		{V: Version, Kind: KindExec, Device: "d", Login: "alice", Command: "id", FilesUpload: true},
+		{V: Version, Kind: KindForward, Device: "d", Login: "alice", FilesUpload: true},
+		{V: Version, Kind: KindProbe, FilesDownload: true},
+	} {
+		if err := r.Validate(); err == nil {
+			t.Errorf("%s with file access: accepted", r.Kind)
+		}
+	}
+}
+
 // The password travels as a raw trailer: the JSON message never carries it,
 // and the reader gets it back intact.
 func TestHelperRequestPasswordTrailer(t *testing.T) {
