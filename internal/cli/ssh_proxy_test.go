@@ -9,15 +9,19 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -152,6 +156,12 @@ func (e *proxyEdge) state() (mints []identity.SessionRequest, streams []*websock
 // pair and connects an x/crypto SSH client, as OpenSSH would, on the other.
 func startProxy(t *testing.T, e *proxyEdge) (*ssh.Client, <-chan error) {
 	t.Helper()
+	return startProxyWith(t, e, e.mint)
+}
+
+// startProxyWith is startProxy with mint answering ssh-proxy's resume mints.
+func startProxyWith(t *testing.T, e *proxyEdge, mint sessionMinter) (*ssh.Client, <-chan error) {
+	t.Helper()
 	target := newSSHTarget(t)
 	if err := target.ensureCert(context.Background(), "pi", e.mint, time.Now()); err != nil {
 		t.Fatal(err)
@@ -171,7 +181,7 @@ func startProxy(t *testing.T, e *proxyEdge) (*ssh.Client, <-chan error) {
 	done := make(chan error, 1)
 	go func() {
 		defer proxySide.Close()
-		done <- target.proxy(context.Background(), proxySide, proxySide, &websocket.DialOptions{HTTPClient: e.http.Client()}, e.mint)
+		done <- target.proxy(context.Background(), proxySide, proxySide, &websocket.DialOptions{HTTPClient: e.http.Client()}, mint)
 	}()
 	f := target.files()
 	key, _ := loadOrCreateClientKey(f.key)
@@ -288,5 +298,52 @@ func TestSSHResumableEndsMatchTheProtocolDoc(t *testing.T) {
 	slices.Sort(want)
 	if !slices.Equal(named, want) {
 		t.Fatalf("PROTOCOL.md lists %v, the code %v", named, want)
+	}
+}
+
+// A resume mint with no answer, a rate limit or a 5xx is retried within the
+// window; any other answer, or a local failure, ends the session.
+func TestResumeMintRetryable(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"no answer", &url.Error{Op: "Post", URL: "https://api", Err: errors.New("connection refused")}, true},
+		{"rate limited", &identity.APIError{Status: http.StatusTooManyRequests}, true},
+		{"SE032", &identity.APIError{Status: http.StatusServiceUnavailable}, true},
+		{"SE036", &identity.APIError{Status: http.StatusForbidden}, false},
+		{"local", errors.New("credential expired"), false},
+	} {
+		if got := resumeMintRetryable(fmt.Errorf("wrapped: %w", c.err)); got != c.want {
+			t.Errorf("%s: retryable = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// ssh-proxy keeps resuming while the mint gets no answer and resumes once it
+// answers again.
+func TestSSHProxyRetriesAResumeMintWithNoAnswer(t *testing.T) {
+	e := newProxyEdge(t)
+	var failing atomic.Int32
+	failing.Store(2)
+	mint := e.mint
+	flaky := func(ctx context.Context, req identity.SessionRequest) (*identity.SessionCertificate, error) {
+		if req.ResumeCertificate != "" && failing.Add(-1) >= 0 {
+			return nil, &url.Error{Op: "Post", URL: "https://api", Err: errors.New("network is unreachable")}
+		}
+		return mint(ctx, req)
+	}
+	client, done := startProxyWith(t, e, flaky)
+	defer client.Close()
+	_, streams := e.state()
+	_ = streams[0].CloseNow()
+	if !alive(client) {
+		t.Fatal("the connection did not resume after the mint answered again")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("ssh-proxy ended: %v", err)
+	default:
 	}
 }

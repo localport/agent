@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -505,6 +506,19 @@ func (t sshTarget) proxy(ctx context.Context, in io.Reader, out io.Writer, opts 
 
 var errSessionEnded = errors.New("ssh-proxy: session ended")
 
+// resumeMintRetryable reports whether a resume mint may succeed later: no
+// answer (the network is still down), a rate limit, or a server-side
+// unavailability such as SE032 during a re-pin. Any other answer is final.
+func resumeMintRetryable(err error) bool {
+	var api *identity.APIError
+	if errors.As(err, &api) {
+		return api.Status == http.StatusTooManyRequests || api.Status >= 500
+	}
+	var transport *url.Error
+	var netErr net.Error
+	return errors.As(err, &transport) || errors.As(err, &netErr)
+}
+
 // resume mints a resume certificate for original and resumes cr on a new
 // stream, retrying with backoff within sshResumeWindow. A mint refusal or a
 // final agent refusal ends the session.
@@ -521,7 +535,19 @@ func (t sshTarget) resume(ctx context.Context, cr *session.ClientResumable, orig
 			ResumeCertificate: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(original))),
 		})
 		if err != nil {
-			return nil, 0, fmt.Errorf("resume the session: %w", err)
+			if !resumeMintRetryable(err) {
+				return nil, 0, fmt.Errorf("resume the session: %w", err)
+			}
+			if time.Now().Add(backoff).After(deadline) {
+				return nil, 0, fmt.Errorf("session ended: not resumed within %s: %w", sshResumeWindow, err)
+			}
+			select {
+			case <-ctx.Done():
+				return nil, 0, ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff = min(2*backoff, sshResumeBackoffMax)
+			continue
 		}
 		resumeCert, _, edgeURL, err := checkSessionCertificate(resp, key.PublicKey(), login, time.Now())
 		if err != nil {

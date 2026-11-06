@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -160,15 +161,43 @@ func TestResumeFromOutsideTheBufferEndsTheConn(t *testing.T) {
 type manualClock struct {
 	mu     sync.Mutex
 	detach []chan time.Time
+	// armed is each recorded detach timer's duration, in order.
+	armed []time.Duration
+	// offset moves Now ahead of the wall clock (advance).
+	offset time.Duration
 }
 
-func (c *manualClock) Now() time.Time { return time.Now() }
+// lastArmed is the duration of the last detach timer armed.
+func (c *manualClock) lastArmed() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.armed) == 0 {
+		return 0
+	}
+	return c.armed[len(c.armed)-1]
+}
 
+func (c *manualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Now().Add(c.offset)
+}
+
+// advance moves Now ahead by d; no timer fires.
+func (c *manualClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.offset += d
+	c.mu.Unlock()
+}
+
+// NewTimer records every detach timer (at most detachTimeout, the time left
+// of a detach deadline included); the idle timer never fires.
 func (c *manualClock) NewTimer(d time.Duration) (<-chan time.Time, func() bool) {
 	ch := make(chan time.Time, 1)
-	if d == detachTimeout {
+	if d <= detachTimeout {
 		c.mu.Lock()
 		c.detach = append(c.detach, ch)
+		c.armed = append(c.armed, d)
 		c.mu.Unlock()
 	}
 	return ch, func() bool { return true }
@@ -273,11 +302,19 @@ func (rc *resumeConn) resume(t *testing.T, edit func(*certOpts)) error {
 	stream := rc.f.serveStream(t, 77)
 	pos, err := rc.cr.Resume(stream, signer)
 	if err != nil {
+		// The client reads the refusal before the server's endAttempt ran:
+		// wait for it, so the next resume never meets this attempt's claim.
+		// A busy answer means another claim is held on purpose.
+		if resumeCode(err) != CloseResumeBusy {
+			noClaim(t, rc.f.srv)
+		}
 		return err
 	}
 	_ = stream.SetDeadline(time.Time{})
 	rc.stream = stream
-	rc.ended = attachAsync(rc.cr.Conn, stream, pos)
+	// The client's close of a resumed stream sends no FIN, so a test can
+	// leave the agent's end half open (TestResumeTakesOverAHalfOpenResumedStream).
+	rc.ended = attachAsync(rc.cr.Conn, noFIN{stream}, pos)
 	return nil
 }
 
@@ -462,5 +499,435 @@ func TestUserauthMustPresentTheHelloKey(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("userauth with another key than the hello's succeeded")
+	}
+}
+
+// noFIN is a stream whose Close only fails its reads and writes: the peer sees
+// no close, as when a network loss leaves the edge's stream half open.
+type noFIN struct{ net.Conn }
+
+func (n noFIN) Close() error { return n.SetDeadline(time.Now()) }
+
+// A resume while the previous resumed stream is still attached on the agent
+// (half open) detaches that stream and takes over; it is never busy.
+func TestResumeTakesOverAHalfOpenResumedStream(t *testing.T) {
+	f := newSSHFixture(t, nil)
+	rc := f.connectResumable(t)
+	rc.cut(t)
+	if err := rc.resume(t, nil); err != nil {
+		t.Fatalf("first resume: %v", err)
+	}
+	if !rc.alive() {
+		t.Fatal("the resumed connection does not answer")
+	}
+	// The client's stream fails without a FIN: the agent's end of the
+	// resumed stream stays attached, half open.
+	_ = rc.stream.SetDeadline(time.Now())
+	if e := waitEnd(t, rc.ended); e != Detached {
+		t.Fatalf("client detach ended %v", e)
+	}
+	if err := rc.resume(t, nil); err != nil || !rc.alive() {
+		t.Fatalf("resume over a half-open resumed stream = %v, want it to take over", err)
+	}
+}
+
+// A resume in progress holds the detach timer (it cannot fire); the resume's
+// end, failed here, arms it again, and its fire ends the connection.
+func TestARunningResumeHoldsTheDetachTimer(t *testing.T) {
+	clock := &manualClock{}
+	f := newSSHFixture(t, func(c *ServerConfig) { c.clock = clock })
+	rc := f.connectResumable(t)
+	rc.cut(t)
+	e := onlyConn(t, f.srv)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.srv.mu.Lock()
+		armed := e.stopTimer != nil
+		f.srv.mu.Unlock()
+		if armed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the lost stream armed no detach timer")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got, status := f.srv.beginResume(e.handle); got != e || status != statusOK {
+		t.Fatalf("beginResume = %v, %d", got, status)
+	}
+	clock.fireDetach()
+	time.Sleep(50 * time.Millisecond)
+	if f.srv.LiveSessions() != 1 {
+		t.Fatal("the detach timer fired while a resume held the connection")
+	}
+	f.srv.endAttempt(e, true)
+	clock.fireDetach()
+	for f.srv.LiveSessions() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the failed resume left the expired connection running")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := rc.resume(t, nil); resumeCode(err) != CloseResumeLost {
+		t.Fatalf("resume after the expiry = %v, want %s", err, CloseResumeLost)
+	}
+}
+
+// onlyConn returns the server's one resumable connection.
+func onlyConn(t *testing.T, s *Server) *resumable {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.conns) != 1 {
+		t.Fatalf("%d connections, want 1", len(s.conns))
+	}
+	for _, e := range s.conns {
+		return e
+	}
+	return nil
+}
+
+// A taken-over resume's end does not clear the claim of the resume that took
+// its stream: a third resume meanwhile is still busy.
+func TestATakenOverResumeLeavesTheNextResumesClaim(t *testing.T) {
+	f := newSSHFixture(t, nil)
+	rc := f.connectResumable(t)
+	rc.cut(t)
+	// Resume A on its own stream, so the test knows when its Serve returns.
+	o := f.defaults()
+	o.key, o.serial, o.resumes = rc.key, 77, "2a"
+	signer, _ := f.mint(t, o)
+	srvSide, cliSide := tcpPair(t)
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		defer srvSide.Close()
+		f.srv.Serve(srvSide, [16]byte{0x01, 0x9c}, 77)
+	}()
+	t.Cleanup(func() { _ = cliSide.Close() })
+	pos, err := rc.cr.Resume(cliSide, signer)
+	if err != nil {
+		t.Fatalf("resume A: %v", err)
+	}
+	rc.stream, rc.ended = cliSide, attachAsync(rc.cr.Conn, noFIN{cliSide}, pos)
+	if !rc.alive() {
+		t.Fatal("resume A does not answer")
+	}
+	e := onlyConn(t, f.srv)
+	// Resume B has claimed the handle and detaches A's stream.
+	f.srv.mu.Lock()
+	e.resuming = true
+	f.srv.mu.Unlock()
+	e.rc.Detach()
+	select {
+	case <-served:
+	case <-time.After(10 * time.Second):
+		t.Fatal("resume A's Serve did not return")
+	}
+	f.srv.mu.Lock()
+	claimed := e.resuming
+	e.resuming = false
+	f.srv.mu.Unlock()
+	if !claimed {
+		t.Fatal("resume A's end cleared resume B's claim: a third resume would not be busy")
+	}
+}
+
+// Through serveResume: a verified resume keeps its claim until its stream is
+// installed, so a second resume up to and at the install is busy; then a
+// lost stream re-arms the detach timer and it ends the connection.
+func TestAResumeKeepsItsClaimUntilItsStreamIsInstalled(t *testing.T) {
+	clock := &manualClock{}
+	f := newSSHFixture(t, func(c *ServerConfig) { c.clock = clock })
+	rc := f.connectResumable(t)
+	rc.cut(t)
+	var second atomic.Uint32
+	second.Store(99)
+	hook := func(e *resumable) {
+		_, status := f.srv.beginResume(e.handle)
+		second.Store(status)
+	}
+	afterResumeInstall.Store(&hook)
+	t.Cleanup(func() { afterResumeInstall.Store(nil) })
+	if err := rc.resume(t, nil); err != nil || !rc.alive() {
+		t.Fatalf("resume: %v", err)
+	}
+	if got := second.Load(); got != statusBusy {
+		t.Fatalf("a second resume at the install = %d, want busy (%d)", got, statusBusy)
+	}
+	afterResumeInstall.Store(nil)
+	rc.cut(t)
+	deadline := time.Now().Add(5 * time.Second)
+	for f.srv.LiveSessions() != 0 {
+		clock.fireDetach()
+		if time.Now().After(deadline) {
+			t.Fatal("the resumed connection's lost stream armed no detach timer")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// Install takes an attached stream over: the old stream's run returns
+// Detached and the new one carries the bytes.
+func TestInstallTakesOverAnAttachedStream(t *testing.T) {
+	a, b := NewResumableConn(), NewResumableConn()
+	s1a, s1b := tcpPair(t)
+	endA1 := attachAsync(a, s1a, 0)
+	// b leaves its first stream without a FIN, so a's stays attached and only
+	// a's next Install can take it over.
+	endB1 := attachAsync(b, noFIN{s1b}, 0)
+	if _, err := a.Write([]byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 3)
+	if _, err := io.ReadFull(b, buf); err != nil || string(buf) != "one" {
+		t.Fatalf("first stream read %q, %v", buf, err)
+	}
+	s2a, s2b := tcpPair(t)
+	b.Detach()
+	if e := waitEnd(t, endB1); e != Detached {
+		t.Fatalf("b's first stream ended %v", e)
+	}
+	endB2 := attachAsync(b, s2b, a.Received())
+	// a's first stream is still attached: Install takes it over.
+	endA2 := attachAsync(a, s2a, b.Received())
+	if e := waitEnd(t, endA1); e != Detached {
+		t.Fatalf("a's taken-over stream ended %v, want Detached", e)
+	}
+	if _, err := a.Write([]byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(b, buf); err != nil || string(buf) != "two" {
+		t.Fatalf("second stream read %q, %v", buf, err)
+	}
+	_ = a.Close()
+	waitEnd(t, endA2)
+	waitEnd(t, endB2)
+}
+
+// expire drops the conn, so a write blocked on a full send buffer of a
+// detached connection returns and run's end is not stuck behind it.
+func TestExpireUnblocksABlockedWrite(t *testing.T) {
+	e := &resumable{rc: NewResumableConn(), ended: make(chan string, 1)}
+	if _, err := e.rc.Write(make([]byte, resumeSendBuffer)); err != nil {
+		t.Fatal(err)
+	}
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := e.rc.Write([]byte("stderr: the session ended"))
+		wrote <- err
+	}()
+	select {
+	case err := <-wrote:
+		t.Fatalf("the write did not block on a full buffer: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	e.expire()
+	select {
+	case err := <-wrote:
+		if err == nil {
+			t.Fatal("the blocked write succeeded after expire")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("expire left the write blocked")
+	}
+	if reason := <-e.ended; reason != CloseDetachTimeout {
+		t.Fatalf("queued end %q, want %s", reason, CloseDetachTimeout)
+	}
+}
+
+// A resume naming a position outside the agent's send buffer ends the
+// connection resume_lost only once its proof verifies: the same message
+// with a bad proof (a relay replaying an old resume) leaves it resumable.
+func TestALostPositionEndsTheConnectionOnlyAfterTheProof(t *testing.T) {
+	f := newSSHFixture(t, nil)
+	rc := f.connectResumable(t)
+	if !rc.alive() {
+		t.Fatal("the connection does not answer")
+	}
+	rc.cut(t)
+	// Claim fewer received bytes than the client acked: the agent trimmed them.
+	rc.cr.Conn.mu.Lock()
+	real := rc.cr.Conn.received
+	rc.cr.Conn.received = 0
+	rc.cr.Conn.mu.Unlock()
+	if real == 0 {
+		t.Fatal("no bytes were received to lose")
+	}
+	token := rc.cr.token
+	rc.cr.token = bytes.Repeat([]byte{9}, len(token))
+	if err := rc.resume(t, nil); resumeCode(err) != CloseResumeRefused {
+		t.Fatalf("lost position with a bad proof = %v, want %s", err, CloseResumeRefused)
+	}
+	rc.cr.token = token
+	rc.cr.Conn.mu.Lock()
+	rc.cr.Conn.received = real
+	rc.cr.Conn.mu.Unlock()
+	if err := rc.resume(t, nil); err != nil || !rc.alive() {
+		t.Fatalf("the connection did not survive a replayed lost position: %v", err)
+	}
+	rc.cut(t)
+	rc.cr.Conn.mu.Lock()
+	rc.cr.Conn.received = 0
+	rc.cr.Conn.mu.Unlock()
+	if err := rc.resume(t, nil); resumeCode(err) != CloseResumeLost {
+		t.Fatalf("lost position with a good proof = %v, want %s", err, CloseResumeLost)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for f.srv.LiveSessions() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("a lost position with a good proof left the connection running")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// onlyDeadline returns the connection's detach deadline once it is set.
+func onlyDeadline(t *testing.T, s *Server, e *resumable) time.Time {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		d := e.deadline
+		s.mu.Unlock()
+		if !d.IsZero() {
+			return d
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the lost stream set no detach deadline")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The detach deadline is absolute: a refused resume (the handle is not
+// secret) does not move it, and a resume that reaches the install clears it.
+func TestARefusedResumeDoesNotMoveTheDetachDeadline(t *testing.T) {
+	clock := &manualClock{}
+	f := newSSHFixture(t, func(c *ServerConfig) { c.clock = clock })
+	rc := f.connectResumable(t)
+	rc.cut(t)
+	e := onlyConn(t, f.srv)
+	first := onlyDeadline(t, f.srv, e)
+	clock.advance(time.Minute)
+	if err := rc.resume(t, func(o *certOpts) { o.subject = "user:bob" }); resumeCode(err) != CloseResumeRefused {
+		t.Fatalf("refused resume = %v", err)
+	}
+	settled(t, f.srv, e)
+	if got := onlyDeadline(t, f.srv, e); !got.Equal(first) {
+		t.Fatalf("a refused resume moved the deadline by %v", got.Sub(first))
+	}
+	// The timer re-armed at the attempt's end runs for the time left, a
+	// minute short of a full window.
+	if armed := clock.lastArmed(); armed > detachTimeout-time.Minute+time.Second {
+		t.Fatalf("the timer re-armed after a refused resume runs %v, want at most the %v left", armed, detachTimeout-time.Minute)
+	}
+	if err := rc.resume(t, nil); err != nil || !rc.alive() {
+		t.Fatalf("resume: %v", err)
+	}
+	f.srv.mu.Lock()
+	cleared := e.deadline.IsZero()
+	f.srv.mu.Unlock()
+	if !cleared {
+		t.Fatal("an installed resume left the detach deadline set")
+	}
+}
+
+// A deadline that passes while a resume attempt runs is not cut into the
+// attempt; the attempt's failure ends the connection at once.
+func TestADeadlinePassedDuringAnAttemptEndsTheConnectionAfterIt(t *testing.T) {
+	clock := &manualClock{}
+	f := newSSHFixture(t, func(c *ServerConfig) { c.clock = clock })
+	rc := f.connectResumable(t)
+	rc.cut(t)
+	e := onlyConn(t, f.srv)
+	onlyDeadline(t, f.srv, e)
+	if _, status := f.srv.beginResume(e.handle); status != statusOK {
+		t.Fatalf("beginResume = %d", status)
+	}
+	clock.advance(detachTimeout + time.Second)
+	clock.fireDetach()
+	time.Sleep(50 * time.Millisecond)
+	if f.srv.LiveSessions() != 1 {
+		t.Fatal("the deadline expired the connection while an attempt ran")
+	}
+	// A second resume during the attempt is busy.
+	if _, status := f.srv.beginResume(e.handle); status != statusBusy {
+		t.Fatalf("a second resume during the attempt = %d, want busy", status)
+	}
+	f.srv.endAttempt(e, true)
+	deadline := time.Now().Add(5 * time.Second)
+	for f.srv.LiveSessions() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the failed attempt left a connection past its deadline running")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// settled waits until the server's end of every resume attempt on e ran:
+// no stream handler holds e and no claim is left.
+func settled(t *testing.T, s *Server, e *resumable) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		done := e.running == 0 && !e.resuming
+		s.mu.Unlock()
+		if done {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the resume attempt's end never ran on the server")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// noClaim waits until no connection on s holds a resume claim: every
+// attempt's end ran on the server.
+func noClaim(t *testing.T, s *Server) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		held := false
+		for _, e := range s.conns {
+			held = held || e.resuming
+		}
+		s.mu.Unlock()
+		if !held {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a refused resume's claim was never released on the server")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A resume after the deadline passed, before the detach timer fired, is
+// lost: the claim checks the deadline itself.
+func TestAResumeAfterThePassedDeadlineIsLost(t *testing.T) {
+	clock := &manualClock{}
+	f := newSSHFixture(t, func(c *ServerConfig) { c.clock = clock })
+	rc := f.connectResumable(t)
+	rc.cut(t)
+	e := onlyConn(t, f.srv)
+	onlyDeadline(t, f.srv, e)
+	clock.advance(detachTimeout + time.Second)
+	// A certificate valid at the agent's advanced clock: without the claim's
+	// deadline check this resume would be installed.
+	now := clock.Now()
+	valid := func(o *certOpts) { o.after, o.before = now.Add(-30*time.Second), now.Add(time.Minute) }
+	if err := rc.resume(t, valid); resumeCode(err) != CloseResumeLost {
+		t.Fatalf("resume past the deadline = %v, want %s", err, CloseResumeLost)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for f.srv.LiveSessions() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the connection past its deadline kept running")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

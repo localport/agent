@@ -20,8 +20,8 @@ import (
 const (
 	resumeMaxFrame   = 128 << 10
 	resumeSendBuffer = 2 << 20
-	// resumeRecvBuffer bounds the bytes received and not yet read; the reader
-	// stops reading the stream while it is full.
+	// The reader reads no further frame while resumeRecvBuffer bytes wait to
+	// be read, so at most resumeRecvBuffer-1+resumeMaxFrame bytes wait.
 	resumeRecvBuffer = 128 << 10
 	// closeTag in the ack position is a deliberate close: the sender wrote
 	// everything it had and the conn is over, so the peer ends instead of
@@ -124,30 +124,48 @@ func (c *ResumableConn) Attached() bool {
 	return c.att != nil
 }
 
-// Attach runs the conn over stream until the stream ends and reports how;
-// it closes stream before returning. peerReceived is the position the peer
-// reported in the prelude, and the peer was told Received(): both were
-// exchanged while the conn was detached. A position outside the send buffer
-// ends the conn with ErrResumeLost and sends closeTag. A conn that already
-// has a stream refuses the second one (Detached) without touching the first.
+// Attach is Install then the stream's run: it runs the conn over stream
+// until the stream ends and reports how, closing stream before it returns.
 func (c *ResumableConn) Attach(stream net.Conn, peerReceived uint64) AttachEnd {
+	run, end := c.Install(stream, peerReceived)
+	if run == nil {
+		return end
+	}
+	return run()
+}
+
+// Install makes stream the conn's stream in one critical section: a stream
+// still attached is detached first, and Install waits under the conn lock
+// until its run is done, so the newest stream always takes over and no two
+// run at once. peerReceived is the position the peer reported in the
+// prelude, and the peer was told Received(). A position outside the send
+// buffer ends the conn with ErrResumeLost and sends closeTag; an ended conn
+// refuses the stream; both close stream and return a nil run and Ended. The
+// caller must call a non-nil run, once: it serves the stream until it ends
+// (see Attach).
+func (c *ResumableConn) Install(stream net.Conn, peerReceived uint64) (run func() AttachEnd, end AttachEnd) {
 	c.mu.Lock()
+	for c.att != nil && c.ended == nil {
+		old := c.att
+		old.broken = true
+		_ = old.stream.Close()
+		c.cond.Broadcast()
+		for c.att == old {
+			c.cond.Wait()
+		}
+	}
 	switch {
 	case c.ended != nil:
 		c.mu.Unlock()
 		_ = stream.Close()
-		return Ended
-	case c.att != nil:
-		c.mu.Unlock()
-		_ = stream.Close()
-		return Detached
+		return nil, Ended
 	case peerReceived < c.sendStart || peerReceived > c.sendEnd():
 		c.ended = ErrResumeLost
 		c.cond.Broadcast()
 		c.mu.Unlock()
 		_, _ = stream.Write(binary.AppendUvarint(nil, closeTag))
 		_ = stream.Close()
-		return Ended
+		return nil, Ended
 	}
 	c.trimLocked(peerReceived - c.sendStart)
 	c.sent = peerReceived
@@ -155,7 +173,12 @@ func (c *ResumableConn) Attach(stream net.Conn, peerReceived uint64) AttachEnd {
 	att := &attachment{stream: stream, done: make(chan struct{})}
 	c.att = att
 	c.mu.Unlock()
+	return func() AttachEnd { return c.run(att) }, Detached
+}
 
+// run serves att's stream until it ends; see Attach.
+func (c *ResumableConn) run(att *attachment) AttachEnd {
+	stream := att.stream
 	read := make(chan struct{})
 	go func() {
 		defer close(read)

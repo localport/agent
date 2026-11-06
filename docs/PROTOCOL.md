@@ -785,9 +785,15 @@ most 2 s.
 
 On the agent a stream that ends without a closeTag detaches the connection:
 it keeps its session slot, channels and helpers, and every recording gets an
-asciicast marker `detach` (then `attach` on a resume). Detached for 5 minutes
-it ends `detach_timeout`. Shutdown, a config change, the idle timeout and a
-handler panic end detached connections as attached ones.
+asciicast marker `detach` (then `attach` on a resume). The detach deadline is
+fixed when the connection's last stream ends, 5 minutes later, and only an
+installed resume clears it: a refused or failed resume attempt never moves
+it (the handle is not secret). An attempt in progress is not cut off; a
+deadline that passed meanwhile ends the connection `detach_timeout` when the
+attempt ends. Attempts on one connection run one at a time: a resume
+arriving while another attempt runs is `resume_busy`, and one arriving after
+the deadline with no attempt running is `resume_lost`. Shutdown, a config change, the idle timeout and a handler panic
+end detached connections as attached ones.
 
 ## Session recording
 

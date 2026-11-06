@@ -195,13 +195,24 @@ type resumable struct {
 	// refused or lost.
 	ended chan string
 
-	// streamGen counts attaches; a detach timer runs only for the latest one.
-	streamGen int
-	resuming  bool
-	failures  int
-	expired   bool
-	removed   bool
+	// running counts the Serve calls working on the connection: a first
+	// connect's stream and each resume from its claim to its end. The detach
+	// timer runs only while it is zero (the Teleport connEntry model).
+	running int
+	// resuming is one resume's claim, held from beginResume until its stream
+	// is installed or it failed: positions are in the signed prelude, so a
+	// second resume meanwhile answers resume_busy.
+	resuming bool
+	failures int
+	expired  bool
+	removed  bool
+	// stopTimer stops the armed detach timer; timer names it, so a fire that
+	// raced a stop or a re-arm is ignored.
 	stopTimer func()
+	// deadline is when a detached connection ends detach_timeout: set when
+	// its last stream handler ended, cleared only by an installed stream.
+	deadline time.Time
+	timer    *struct{}
 	// mark queues a marker on every recording of the connection; set by run.
 	mark func(label string)
 }
@@ -218,6 +229,10 @@ var (
 	errConnEnded        = errors.New("session: connection ended")
 	errHandshakeTimeout = errors.New("session: SSH handshake timed out")
 )
+
+// afterResumeInstall, when set by a test, runs in serveResume once the
+// stream is installed and before the resume's claim is released.
+var afterResumeInstall atomic.Pointer[func(*resumable)]
 
 // detachTimeout bounds how long a connection waits detached for a resume.
 const detachTimeout = 5 * time.Minute
@@ -390,7 +405,8 @@ func (s *Server) serveNew(h *handler, stream net.Conn, hello *helloMsg, id [16]b
 	}
 	started = true
 	go s.serveConn(ch, e, id, serial, cert.Key)
-	s.attach(e, stream, 0)
+	defer s.release(e)
+	s.serveStream(e, stream, 0)
 }
 
 // serveResume runs a resume: the handle's connection, a resume certificate
@@ -411,7 +427,12 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, serial u
 		refuse(status, "the connection is gone, resuming or shutting down")
 		return
 	}
-	defer s.endResume(e)
+	// The hold ends with this call. The claim ends at the install (unclaim)
+	// or, for a failed resume, together with the hold in one critical section
+	// (endAttempt), so no other resume can hold in between and the detach
+	// deadline is checked after every attempt.
+	claimed := true
+	defer func() { s.endAttempt(e, claimed) }()
 	cert, err := parsePreludeCert(m.Cert)
 	if err != nil {
 		refuse(statusRefused, "%v", err)
@@ -432,12 +453,10 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, serial u
 		return
 	}
 	// A resume for a live stream detaches it first, which settles positions.
+	// A position outside the buffer ends the connection only once the proof
+	// shows the client sent it, not on a replayed message.
 	e.rc.Detach()
-	if !e.rc.CanResumeFrom(m.Position) {
-		refuse(statusLost, "position %d is outside the send buffer", m.Position)
-		e.endWith(CloseResumeLost)
-		return
-	}
+	lost := !e.rc.CanResumeFrom(m.Position)
 	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		refuse(statusRefused, "%v", err)
@@ -464,77 +483,156 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, serial u
 		}
 		return
 	}
+	if lost {
+		s.log("session: resume refused: position %d is outside the send buffer", m.Position)
+		_ = writePrelude(stream, proofReplyMsg{Status: statusLost})
+		e.endWith(CloseResumeLost)
+		e.rc.End(ErrResumeLost)
+		return
+	}
 	if !s.endHandshake(h) {
 		return
 	}
 	_ = stream.SetDeadline(time.Time{})
-	mark, ok := s.resumed(e)
-	if !ok {
+	// Installed while this resume still holds its claim, so no other resume
+	// runs between the positions it signed and the stream taking over. An
+	// expired or removed connection's conn has ended and refuses the stream.
+	run, _ := e.rc.Install(stream, m.Position)
+	if run == nil {
 		_ = writePrelude(stream, proofReplyMsg{Status: statusLost})
 		return
 	}
-	if err := writePrelude(stream, proofReplyMsg{Status: statusOK}); err != nil {
-		return
+	// The connection is attached again: its detach deadline is gone, and the
+	// next lost stream starts a full one (release).
+	s.mu.Lock()
+	e.deadline = time.Time{}
+	s.mu.Unlock()
+	if hook := afterResumeInstall.Load(); hook != nil {
+		(*hook)(e)
 	}
+	// A failed write ends the stream at once; run still runs it, so its end
+	// detaches the connection as any lost stream.
+	_ = writePrelude(stream, proofReplyMsg{Status: statusOK})
+	s.unclaim(e)
+	claimed = false
+	s.mu.Lock()
+	mark := e.mark
+	s.mu.Unlock()
 	if mark != nil {
 		mark(markerAttach)
 	}
-	s.attach(e, stream, m.Position)
+	s.runStream(e, run)
 }
 
-// attach runs stream as e's stream and, when it ends Detached and no newer
-// stream took over, starts the detach timer.
-func (s *Server) attach(e *resumable, stream net.Conn, peerReceived uint64) {
-	s.mu.Lock()
-	e.streamGen++
-	gen := e.streamGen
-	e.stopTimerLocked()
-	s.mu.Unlock()
-	if e.rc.Attach(stream, peerReceived) != Detached {
+// serveStream installs a first connect's stream as e's stream and runs it.
+func (s *Server) serveStream(e *resumable, stream net.Conn, peerReceived uint64) {
+	if run, _ := e.rc.Install(stream, peerReceived); run != nil {
+		s.runStream(e, run)
+	}
+}
+
+// runStream runs an installed stream; a stream lost without a closeTag marks
+// every recording `detach`. The detach timer is release's.
+func (s *Server) runStream(e *resumable, run func() AttachEnd) {
+	if run() != Detached {
 		return
 	}
 	s.mu.Lock()
-	if e.streamGen != gen || e.removed {
-		s.mu.Unlock()
-		return
-	}
-	fire, stop := s.cfg.clock.NewTimer(detachTimeout)
-	cancel := make(chan struct{})
-	e.stopTimer = func() {
-		stop()
-		close(cancel)
-	}
 	mark := e.mark
 	s.mu.Unlock()
-	go func() {
-		select {
-		case <-fire:
-			s.mu.Lock()
-			live := e.streamGen == gen && !e.removed && !e.resuming
-			if live {
-				e.expired = true
-			}
-			s.mu.Unlock()
-			if live {
-				e.endWith(CloseDetachTimeout)
-			}
-		case <-cancel:
-		}
-	}()
 	if mark != nil {
 		mark(markerDetach)
 	}
 }
 
+// release ends one Serve call's work on e. The last one, unless e is gone,
+// fixes the detach deadline if none is set (the connection's stream just
+// ended) and arms the timer for the time left; with none left it expires e
+// at once. The deadline is absolute: a resume attempt pauses the expiry while
+// it runs but never moves the deadline, which only an installed stream clears
+// (the handle is not secret, so an attempt must not buy time).
+func (s *Server) release(e *resumable) {
+	s.mu.Lock()
+	expire := s.releaseLocked(e)
+	s.mu.Unlock()
+	if expire {
+		e.expire()
+	}
+}
+
+// endAttempt ends a resume attempt: its claim, when it still holds one (a
+// failed resume), and its hold, in one critical section with the deadline
+// check (releaseLocked).
+func (s *Server) endAttempt(e *resumable, claimed bool) {
+	s.mu.Lock()
+	if claimed {
+		e.resuming = false
+	}
+	expire := s.releaseLocked(e)
+	s.mu.Unlock()
+	if expire {
+		e.expire()
+	}
+}
+
+// releaseLocked is release under s.mu; true means e expired and the caller
+// calls e.expire once s.mu is released.
+func (s *Server) releaseLocked(e *resumable) bool {
+	e.running--
+	if e.running > 0 || e.removed || e.expired {
+		return false
+	}
+	now := s.cfg.clock.Now()
+	if e.deadline.IsZero() {
+		e.deadline = now.Add(detachTimeout)
+	}
+	left := e.deadline.Sub(now)
+	if left <= 0 {
+		e.expired = true
+		return true
+	}
+	fire, stop := s.cfg.clock.NewTimer(left)
+	cancel := make(chan struct{})
+	timer := &struct{}{}
+	e.timer = timer
+	e.stopTimer = func() {
+		stop()
+		close(cancel)
+	}
+	go func() {
+		select {
+		case <-fire:
+			s.mu.Lock()
+			expire := e.timer == timer && e.running == 0 && !e.removed && !e.expired
+			if expire {
+				e.expired = true
+				e.stopTimer, e.timer = nil, nil
+			}
+			s.mu.Unlock()
+			if expire {
+				e.expire()
+			}
+		case <-cancel:
+		}
+	}()
+	return false
+}
+
+// holdLocked starts one Serve call's work on e: the detach timer stops.
+func (e *resumable) holdLocked() {
+	e.running++
+	e.stopTimerLocked()
+}
+
 func (e *resumable) stopTimerLocked() {
 	if e.stopTimer != nil {
 		e.stopTimer()
-		e.stopTimer = nil
+		e.stopTimer, e.timer = nil, nil
 	}
 }
 
 // addConn registers a started connection and its handler unless Shutdown is
-// running.
+// running; the first connect's stream holds it (release).
 func (s *Server) addConn(e *resumable, h *handler) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -543,32 +641,54 @@ func (s *Server) addConn(e *resumable, h *handler) bool {
 	}
 	s.handlers[h] = struct{}{}
 	s.conns[e.handle] = e
+	e.holdLocked()
 	return true
 }
 
-// beginResume claims handle's connection for one resume: statusLost when it
-// is gone, statusBusy while another resume runs, statusRefused during
-// Shutdown.
+// beginResume claims handle's connection for one resume and holds it
+// (release): statusLost when it is gone, statusBusy while another resume
+// holds the claim, statusRefused during Shutdown.
 func (s *Server) beginResume(handle string) (*resumable, uint32) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	e := s.conns[handle]
 	switch {
 	case e == nil || e.removed || e.expired:
+		s.mu.Unlock()
 		return nil, statusLost
 	case s.closing > 0:
+		s.mu.Unlock()
 		return nil, statusRefused
 	case e.resuming:
+		s.mu.Unlock()
 		return nil, statusBusy
+	case e.running == 0 && !e.deadline.IsZero() && !s.cfg.clock.Now().Before(e.deadline):
+		// Past its deadline and the timer has not fired yet: expired here,
+		// so no resume can claim a connection that is over.
+		e.expired = true
+		e.stopTimerLocked()
+		s.mu.Unlock()
+		e.expire()
+		return nil, statusLost
 	}
 	e.resuming = true
+	e.holdLocked()
+	s.mu.Unlock()
 	return e, statusOK
 }
 
-func (s *Server) endResume(e *resumable) {
+// unclaim releases a resume's claim once its stream is installed; a failed
+// resume's claim ends with its hold in endAttempt.
+func (s *Server) unclaim(e *resumable) {
 	s.mu.Lock()
 	e.resuming = false
 	s.mu.Unlock()
+}
+
+// expire ends a detached connection detach_timeout and drops its conn, so
+// run's end, or a write blocked on the conn, returns.
+func (e *resumable) expire() {
+	e.endWith(CloseDetachTimeout)
+	e.rc.End(errConnEnded)
 }
 
 func (s *Server) proofFailed(e *resumable) int {
@@ -576,17 +696,6 @@ func (s *Server) proofFailed(e *resumable) int {
 	defer s.mu.Unlock()
 	e.failures++
 	return e.failures
-}
-
-// resumed reports whether e can take the resumed stream (it did not end or
-// expire meanwhile) and returns its marker function.
-func (s *Server) resumed(e *resumable) (func(string), bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if e.removed || e.expired {
-		return nil, false
-	}
-	return e.mark, true
 }
 
 // serveConn runs one connection: the SSH handshake on its ResumableConn,
