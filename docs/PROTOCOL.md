@@ -984,6 +984,19 @@ session mux presented, as ASN.1 DER in unpadded base64url:
 - open: `lp("localport-recording-open-v2") || lp(id) || lp(session_id) || lp(SHA-256(wrapped_dek)) || lp(key_sha256)`
 - complete: `lp("localport-recording-complete-v1") || lp(id) || lp(SHA-256(wrapped_dek)) || segments (uint32 BE) || lp(final_hash) || ended_at (uint64 BE, Unix seconds) || incomplete (1 byte) || final (1 byte) || lp(reason)`
 
+Test vectors, pinned by the agent (`internal/recording/sealer_test.go`
+`TestDigestGoldenVectors`) and by the control plane's tests. Inputs: id
+`0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b`, session_id
+`0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a60`, wrapped_dek the 100 bytes `0x00..0x63`,
+key_sha256 32 bytes `0xaa`, ended_at 1767225600.
+
+| Message | Fields | SHA-256 (hex) |
+|---|---|---|
+| open | as above | `1fd36cf1ee83db594888e6f756215db9f0da2d54010de28871dd26bd07aa1b80` |
+| complete | segments 3, final_hash 32 bytes `0x11`, incomplete 1, final 0, reason `spool_full` | `92888520be1ffa46e439c6bd69fe2f649229a2fd30069502ca2d3a620dce86a9` |
+| complete | segments 0, empty final_hash, incomplete 0, final 0, empty reason | `13f8d36b55dfc5860e976202b9cc377f9be382876974a2bbd5621c2db827109f` |
+| chain | `h_0` = SHA-256(`0x00`), `h_1` = SHA-256(`0x01`): `chain_1` | `9b7558cb7f9026dd06976425c566b059852482d41d70b9be604842e13bb87320` |
+
 The spool and memory hold only unsigned fields; every open and complete is
 signed when it is sent, so a renewed certificate signs on the next mux.
 

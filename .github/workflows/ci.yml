@@ -108,6 +108,56 @@ jobs:
           sudo useradd --create-home --shell /bin/sh lptest
       - run: sudo env "PATH=$PATH" GOTOOLCHAIN=local LOCALPORT_TEST_LOGIN=lptest make test-root
 
+  # The TestRoot tests on macOS, as root with OpenDirectory PAM and the
+  # localport PAM service. The runner has passwordless sudo.
+  test-root-macos:
+    name: Test as root (PAM, macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: The test account and the PAM service
+        run: |
+          sudo sysadminctl -addUser lptest -shell /bin/sh -password "$(openssl rand -base64 24)"
+          sudo install -m 0644 packaging/pam/localport.darwin /etc/pam.d/localport
+      - run: sudo env "PATH=$PATH" GOTOOLCHAIN=local LOCALPORT_TEST_LOGIN=lptest make test-root
+
+  # The helper's password logon (LogonUser) for a real local account, created
+  # with a generated password. The full helper needs SYSTEM, which a runner
+  # step does not have.
+  test-windows-logon:
+    name: Password logon (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: The test account
+        # Windows PowerShell 5.1: Microsoft.PowerShell.LocalAccounts is native there.
+        shell: powershell
+        run: |
+          $bytes = New-Object byte[] 24
+          [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+          $pw = [Convert]::ToBase64String($bytes) + 'aA1!'
+          Write-Output "::add-mask::$pw"
+          New-LocalUser -Name lptest -Password (ConvertTo-SecureString $pw -AsPlainText -Force) -PasswordNeverExpires | Out-Null
+          "LOCALPORT_TEST_PASSWORD=$pw" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - run: go test -count=1 -v -run '^TestRootPasswordLogon$' ./internal/sessionhelper/
+        env:
+          GOTOOLCHAIN: local
+          LOCALPORT_TEST_LOGIN: lptest
+
   # Compiles the SELinux CIL module against the targeted policy.
   selinux:
     name: SELinux module

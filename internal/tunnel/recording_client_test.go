@@ -32,24 +32,30 @@ var testCertificate = []byte("session certificate bytes")
 
 // recordingRequest is one recording request as the stub edge received it.
 type recordingRequest struct {
-	method string
-	path   string
-	header http.Header
-	body   []byte
+	method  string
+	path    string
+	header  http.Header
+	body    []byte
+	release chan struct{}
 }
+
+// unhold lets the held handler of this request, and no other, answer.
+func (r recordingRequest) unhold() { close(r.release) }
 
 // recordingEdge serves /v1/recording/* on a fakeSessionEdge. Every request is
 // reported on reqs once its body is read; with hold set, the handler then
-// waits for one value on release (or the stream's end) before it answers.
+// waits for its own unhold (or the stream's end) before it answers. With
+// ignoreCancel set, a held handler waits for its unhold only, the way a handler
+// stays parked until the client's stream reset reaches the edge.
 type recordingEdge struct {
-	reqs    chan recordingRequest
-	hold    bool
-	release chan struct{}
-	answer  func(recordingRequest) (int, string)
+	reqs         chan recordingRequest
+	hold         bool
+	ignoreCancel atomic.Bool
+	answer       func(recordingRequest) (int, string)
 }
 
 func newRecordingEdge(answer func(recordingRequest) (int, string)) *recordingEdge {
-	return &recordingEdge{reqs: make(chan recordingRequest, 16), release: make(chan struct{}), answer: answer}
+	return &recordingEdge{reqs: make(chan recordingRequest, 16), answer: answer}
 }
 
 func (s *recordingEdge) serve(w http.ResponseWriter, r *http.Request) {
@@ -57,12 +63,16 @@ func (s *recordingEdge) serve(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	req := recordingRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: body}
+	req := recordingRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: body, release: make(chan struct{})}
 	s.reqs <- req
 	if s.hold {
+		streamEnd := r.Context().Done()
+		if s.ignoreCancel.Load() {
+			streamEnd = nil
+		}
 		select {
-		case <-s.release:
-		case <-r.Context().Done():
+		case <-req.release:
+		case <-streamEnd:
 			return
 		}
 	}
@@ -367,46 +377,48 @@ func TestRecordingRequestsWaitForAFreeSlot(t *testing.T) {
 			results <- err
 		}()
 	}
-	finish := func() {
+	finish := func(r recordingRequest) {
 		t.Helper()
-		rec.release <- struct{}{}
+		r.unhold()
 		if err := <-results; err != nil {
 			t.Fatalf("request failed: %v", err)
 		}
 	}
 
 	put(0, true)
-	rec.expect(t)
+	firstDrain := rec.expect(t)
 	put(1, true) // a second drain waits even with a segment slot free
 	rec.expectNone(t)
 	put(2, false) // a live segment takes the free slot
-	rec.expect(t)
+	live := rec.expect(t)
 	put(3, false)
 	rec.expectNone(t)
-	finish()
-	rec.expect(t)
-	finish()
-	rec.expect(t)
-	finish()
-	finish()
+	finish(firstDrain)
+	admitted := rec.expect(t)
+	finish(live)
+	last := rec.expect(t)
+	finish(admitted)
+	finish(last)
 
 	go func() {
 		_, err := c.Complete(ctx, testRecordingID, []byte("dek"), recording.Completion{EndedAt: time.Unix(1, 0)})
 		results <- err
 	}()
-	if r := rec.expect(t); r.path != recordingCompletePath {
-		t.Fatalf("first request %s, want the complete", r.path)
+	complete := rec.expect(t)
+	if complete.path != recordingCompletePath {
+		t.Fatalf("first request %s, want the complete", complete.path)
 	}
 	go func() {
 		_, err := c.Open(ctx, testRecordingID, testSessionID, []byte("dek"), make([]byte, 32), nil)
 		results <- err
 	}()
 	rec.expectNone(t)
-	finish()
-	if r := rec.expect(t); r.path != recordingOpenPath {
-		t.Fatalf("second request %s, want the open", r.path)
+	finish(complete)
+	open := rec.expect(t)
+	if open.path != recordingOpenPath {
+		t.Fatalf("second request %s, want the open", open.path)
 	}
-	finish()
+	finish(open)
 }
 
 // A cancelled request gives its slot back, in flight or still waiting, and a
@@ -439,8 +451,7 @@ func TestRecordingSlotIsReleasedOnCancelAndConnClose(t *testing.T) {
 		_, err := c.Open(context.Background(), testRecordingID, testSessionID, []byte("dek"), make([]byte, 32), nil)
 		results <- err
 	}()
-	rec.expect(t)
-	rec.release <- struct{}{}
+	rec.expect(t).unhold()
 	if err := <-results; err != nil {
 		t.Fatalf("open after the cancels: %v", err)
 	}
@@ -460,6 +471,40 @@ func TestRecordingSlotIsReleasedOnCancelAndConnClose(t *testing.T) {
 		if err := <-results; !errors.Is(err, recording.ErrNoSessionMux) && !errors.Is(err, recording.ErrTransport) {
 			t.Fatalf("request on a closed conn = %v", err)
 		}
+	}
+}
+
+// A cancelled request frees its slot at once, while its handler at the edge can
+// stay parked until the stream reset arrives. The next request's unhold must
+// reach that request, not the parked one.
+func TestRecordingUnholdReachesOnlyItsRequest(t *testing.T) {
+	rec, c, _ := startHeldRecordingClient(t)
+	rec.ignoreCancel.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	results := make(chan error, 2)
+	go func() {
+		_, err := c.Complete(ctx, testRecordingID, []byte("dek"), recording.Completion{EndedAt: time.Unix(1, 0)})
+		results <- err
+	}()
+	parked := rec.expect(t)
+	t.Cleanup(parked.unhold)
+	cancel()
+	if err := <-results; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled complete = %v, want context.Canceled", err)
+	}
+
+	go func() {
+		_, err := c.Open(context.Background(), testRecordingID, testSessionID, []byte("dek"), make([]byte, 32), nil)
+		results <- err
+	}()
+	rec.expect(t).unhold()
+	select {
+	case err := <-results:
+		if err != nil {
+			t.Fatalf("open after the cancel: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the open never answered: its unhold reached the parked handler")
 	}
 }
 

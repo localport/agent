@@ -4,10 +4,48 @@ package sessionhelper
 
 import (
 	"errors"
+	"os"
 	"testing"
 
 	"golang.org/x/sys/windows"
 )
+
+// TestRootPasswordLogon logs LOCALPORT_TEST_LOGIN, a local account, on with
+// LOCALPORT_TEST_PASSWORD through the helper's password logon: the token is
+// the account's, and a wrong password is an account refusal. CI creates the
+// account with a generated password.
+func TestRootPasswordLogon(t *testing.T) {
+	name, password := os.Getenv("LOCALPORT_TEST_LOGIN"), os.Getenv("LOCALPORT_TEST_PASSWORD")
+	if name == "" || password == "" {
+		t.Skip("set LOCALPORT_TEST_LOGIN and LOCALPORT_TEST_PASSWORD to a local test account")
+	}
+	l, err := parseLogin(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _, _, err := windows.LookupSID("", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	token, err := passwordLogonToken(l, []byte(password))
+	if err != nil {
+		t.Fatalf("password logon: %v", err)
+	}
+	defer token.Close()
+	tu, err := token.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tu.User.Sid.Equals(want) {
+		t.Fatalf("token user %s, want %s", tu.User.Sid, want)
+	}
+
+	_, err = passwordLogonToken(l, []byte(password+"-wrong"))
+	if !errors.Is(err, errAccount) || !errors.Is(err, windows.ERROR_LOGON_FAILURE) {
+		t.Fatalf("wrong password = %v, want errAccount wrapping ERROR_LOGON_FAILURE", err)
+	}
+}
 
 func TestParseLogin(t *testing.T) {
 	for in, want := range map[string]login{

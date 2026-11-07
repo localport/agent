@@ -189,7 +189,7 @@ make build
 
 ## Contributing
 
-Issues and pull requests are welcome. For non-trivial changes, open an issue to discuss the approach before submitting. Run `make test`, `make vet`, and `make lint` before opening a pull request. `sudo LOCALPORT_TEST_LOGIN=<account> make test-root` runs the tests that need root: a real PAM terminal session started by the session helper for that test account, which needs `/bin/sh` as its shell and the `localport` PAM service file installed (`packaging/pam/`).
+Issues and pull requests are welcome. For non-trivial changes, open an issue to discuss the approach before submitting. Run `make test`, `make vet`, and `make lint` before opening a pull request. `sudo LOCALPORT_TEST_LOGIN=<account> make test-root` runs the tests that need root: a real PAM terminal session started by the session helper for that test account, which needs `/bin/sh` as its shell and the `localport` PAM service file installed (`packaging/pam/`). On Windows, `LOCALPORT_TEST_LOGIN=<local account> LOCALPORT_TEST_PASSWORD=<its password> go test -run '^TestRootPasswordLogon$' ./internal/sessionhelper/` checks the session helper's password logon against that account.
 
 ## Security
 

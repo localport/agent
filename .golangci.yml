@@ -27,3 +27,9 @@ linters:
       - path: _test\.go
         linters:
           - errcheck
+
+# Formatting is part of the lint gate, so `make lint` fails on an unformatted
+# file.
+formatters:
+  enable:
+    - gofmt
