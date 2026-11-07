@@ -718,12 +718,35 @@ stream:
    `vnc` target itself, with a 10 s timeout, without a helper. A failed dial
    refuses the channel `connect failed` with `connection_refused` or
    `unreachable` (a timeout included); the channel is accepted only after
-   the dial succeeds. The agent relays the channel and the target connection
+   the dial succeeds. Before it relays freely the agent reads the VNC
+   handshake (RFC 6143 section 7.1, as noVNC speaks it), forwarding every
+   byte unchanged: the server's ProtocolVersion (`RFB ddd.ddd\n`; the
+   repeater's `000.000` is refused), the client's (`RFB 003.003`, `003.007`
+   or `003.008`), the security type list and the client's choice (3.3: the
+   server's `u32` choice), and for VeNCrypt (19) its versions, ack,
+   subtypes and the client's subtype. When the choice or the VeNCrypt
+   subtype is RA2ne (6) it reads the server's RSA key (`u32` bit length,
+   1024 to 8192, then modulus and exponent of `ceil(bits/8)` bytes each)
+   and holds it: a key other than the one pinned for the device's `vnc`
+   target ends the connection `desktop_key_changed`; otherwise it sends
+   the channel request `desktop-key@localport.io` (want-reply true) whose
+   payload is the SHA-256 of exactly those length, modulus and exponent
+   bytes in lowercase hex (SSH string) and whether it is pinned (boolean).
+   A false reply ends it `desktop_key_rejected`; a true one pins an
+   unpinned key and then forwards it. Once a key is pinned for the target,
+   a handshake that chooses no RA2ne ends `desktop_key_downgraded`; an
+   unreadable pin store ends `desktop_key_unavailable`; a malformed
+   handshake, or a target that does not answer within 30 s when the agent
+   reads from it (time spent waiting for the client does not count),
+   `desktop_handshake_invalid`. The pins live in `desktop_pins.json` (see
+   Stored identity); `localport set <device> --vnc-reset-pin` forgets the
+   `vnc` one, or removes the whole file when it is unreadable. The agent
+   then relays the channel and the target connection
    until either ends; the channel's end, or its refusal, ends the
    connection, and every end of the connection closes the target connection.
-   The agent answers every request on the channel false. Only data from the
-   client on the channel counts as activity for the idle timer; target
-   output and global requests do not. A recorded
+   The agent answers every other request on the channel false. Only data
+   from the client on the channel counts as activity for the idle timer;
+   target output and global requests do not. A recorded
    connection writes an asciicast event `p` at each listen, cancel, forward
    open and forward close (direction, kind, address, result, bytes in and
    out), never the forwarded bytes; under Strict a `p` event the recorder
@@ -737,7 +760,10 @@ stream:
    device's other sessions end too), `exited` (the channel of a `terminal`
    or `vnc` connection, or the last channel of a `files` connection, closed or
    was refused, a Strict
-   recording failure on it included), `recording_failed` (a Strict
+   recording failure on it included), the `vnc` handshake check's
+   `desktop_key_changed`, `desktop_key_downgraded`, `desktop_key_rejected`,
+   `desktop_key_unavailable` and `desktop_handshake_invalid` (step 3),
+   `recording_failed` (a Strict
    connection's port forwarding events could not be recorded) and, on one
    channel, `helper_failed` (the session helper's channel ended without an
    exit). A client that closes the
@@ -1244,6 +1270,11 @@ of backups and configuration management.
                       device pins
   .keys.lock          serializes ticket_keys.json writers; taken after
                       .renew.lock, never before it
+  desktop_pins.json   device only: { <kind>: { target, key_sha256 } }, the
+                      desktop target server key a person trusted on the
+                      first browser connection, per desktop kind
+  .pins.lock          serializes desktop_pins.json writers (the agent and
+                      `set --vnc-reset-pin`); taken alone
   .sessions.lock      held by the one process that serves the device's
                       sessions; taking it removes the session_jti.log and
                       .jti.lock files older agents left
@@ -1255,8 +1286,8 @@ opened without following links and must be a directory owned by the agent's
 user. The base may be a symlink only when it comes from `LOCALPORT_HOME` or
 `$HOME`, and its target must have the same owner. The machine-wide config
 directory is never followed. A failing path is refused, never repaired.
-`meta.json`, `pending.json`, the certificate, the key and `ticket_keys.json` are
-opened with `O_NOFOLLOW` (`FILE_FLAG_OPEN_REPARSE_POINT` on Windows) and must be
+`meta.json`, `pending.json`, the certificate, the key, `ticket_keys.json` and
+`desktop_pins.json` are opened with `O_NOFOLLOW` (`FILE_FLAG_OPEN_REPARSE_POINT` on Windows) and must be
 owner-only.
 
 A save writes the certificate and key under new serial-named files, then

@@ -472,7 +472,7 @@ func (f *forwarder) local(nc ssh.NewChannel) {
 func (f *forwarder) relayAndRecord(ch ssh.Channel, fc launcher.ForwardConn, closeEv forwardEvent) {
 	var in, out int64
 	if f.track(fc, closeEv.Dir == "remote") {
-		in, out = f.c.relay(ch, fc, true)
+		in, out = f.c.relay(ch, fc)
 		f.untrack(fc)
 	} else {
 		_ = fc.Close()
@@ -742,9 +742,8 @@ func (a activityWriter) Write(p []byte) (int, error) {
 // relay copies between an SSH forward channel and its connection until both
 // directions ended (each end's EOF half-closes the other) or either fails,
 // then closes both. in counts bytes from the client toward the target, out
-// bytes back. Client bytes are activity for the idle timer; target bytes are
-// too when outActive.
-func (c *conn) relay(ch ssh.Channel, fc launcher.ForwardConn, outActive bool) (in, out int64) {
+// bytes back.
+func (c *conn) relay(ch ssh.Channel, fc launcher.ForwardConn) (in, out int64) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -757,12 +756,8 @@ func (c *conn) relay(ch ssh.Channel, fc launcher.ForwardConn, outActive bool) (i
 		}
 		_ = fc.CloseWrite()
 	}()
-	var toClient io.Writer = ch
-	if outActive {
-		toClient = activityWriter{ch, c}
-	}
 	var err error
-	out, err = io.Copy(toClient, fc)
+	out, err = io.Copy(activityWriter{ch, c}, fc)
 	if err != nil {
 		_ = ch.Close()
 		_ = fc.Close()

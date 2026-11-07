@@ -8,23 +8,47 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/localport/agent/internal/identity"
 )
 
-// vncTarget is a target VNC server: it echoes each connection and hands the
-// test the server side of every accepted conn; closed receives once a conn
-// reads its client's close.
+// vncTarget is a target VNC server: it runs handshake on each connection,
+// then echoes it, and hands the test the server side of every accepted conn;
+// closed receives once a conn reads its client's close.
 type vncTarget struct {
 	ln       net.Listener
 	accepted chan net.Conn
 	closed   chan struct{}
 }
 
+// vncAuthHandshake is a 3.8 server offering VNC authentication only; the
+// test client chooses it and the echo starts (no authentication runs).
+func vncAuthHandshake(c net.Conn) error {
+	if _, err := io.WriteString(c, "RFB 003.008\n"); err != nil {
+		return err
+	}
+	if _, err := io.ReadFull(c, make([]byte, 12)); err != nil {
+		return err
+	}
+	if _, err := c.Write([]byte{1, 2}); err != nil {
+		return err
+	}
+	_, err := io.ReadFull(c, make([]byte, 1))
+	return err
+}
+
 func newVNCTarget(t *testing.T) *vncTarget {
+	t.Helper()
+	return newScriptedTarget(t, vncAuthHandshake)
+}
+
+func newScriptedTarget(t *testing.T, handshake func(net.Conn) error) *vncTarget {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -40,13 +64,54 @@ func newVNCTarget(t *testing.T) *vncTarget {
 			}
 			v.accepted <- c
 			go func() {
-				_, _ = io.Copy(c, c)
+				if handshake(c) == nil {
+					_, _ = io.Copy(c, c)
+				} else {
+					// Wait for the peer's close, as a server would.
+					_, _ = io.Copy(io.Discard, c)
+				}
 				_ = c.Close()
 				v.closed <- struct{}{}
 			}()
 		}
 	}()
 	return v
+}
+
+// memKeys is an in-memory desktop key store.
+type memKeys struct {
+	mu   sync.Mutex
+	pins map[string][32]byte
+	err  error
+}
+
+func (m *memKeys) Lookup(kind, target string) ([32]byte, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return [32]byte{}, false, m.err
+	}
+	k, ok := m.pins[kind+" "+target]
+	return k, ok, nil
+}
+
+func (m *memKeys) Pin(_ context.Context, kind, target string, key [32]byte) (identity.PinResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return 0, m.err
+	}
+	if m.pins == nil {
+		m.pins = map[string][32]byte{}
+	}
+	if k, ok := m.pins[kind+" "+target]; ok {
+		if k == key {
+			return identity.PinMatch, nil
+		}
+		return identity.PinChanged, nil
+	}
+	m.pins[kind+" "+target] = key
+	return identity.PinNew, nil
 }
 
 func (v *vncTarget) waitClosed(t *testing.T) {
@@ -75,6 +140,7 @@ func desktopFixture(t *testing.T, addr string, edit func(*ServerConfig)) *sshFix
 	t.Helper()
 	return newSSHFixture(t, func(c *ServerConfig) {
 		c.Capabilities, c.Desktop, c.VNCTarget = []string{"desktop"}, []string{"vnc"}, addr
+		c.DesktopKeys = &memKeys{}
 		if edit != nil {
 			edit(c)
 		}
@@ -87,14 +153,46 @@ func (f *sshFixture) vncOpts() certOpts {
 	return o
 }
 
-// openVNC opens the desktop channel naming host:port, keeping its requests.
+// openVNC opens the desktop channel naming host:port, keeping its requests,
+// and runs the client half of vncAuthHandshake, so the channel then echoes.
 func openVNC(client *ssh.Client, host string, port uint32) (ssh.Channel, <-chan *ssh.Request, error) {
+	ch, reqs, err := openDesktopChannel(client, host, port)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := clientHandshake(ch, "RFB 003.008\n", 2); err != nil {
+		return nil, nil, err
+	}
+	return ch, reqs, nil
+}
+
+func openDesktopChannel(client *ssh.Client, host string, port uint32) (ssh.Channel, <-chan *ssh.Request, error) {
 	return client.OpenChannel(chanDirectTCPIP, ssh.Marshal(struct {
 		Host     string
 		Port     uint32
 		OrigHost string
 		OrigPort uint32
 	}{host, port, "127.0.0.1", 0}))
+}
+
+// clientHandshake reads the server version and a 3.7+ type list, sends
+// version and chooses choice.
+func clientHandshake(ch ssh.Channel, version string, choice byte) error {
+	if _, err := io.ReadFull(ch, make([]byte, 12)); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(ch, version); err != nil {
+		return err
+	}
+	n := make([]byte, 1)
+	if _, err := io.ReadFull(ch, n); err != nil {
+		return err
+	}
+	if _, err := io.ReadFull(ch, make([]byte, n[0])); err != nil {
+		return err
+	}
+	_, err := ch.Write([]byte{choice})
+	return err
 }
 
 // waitEndRequest returns the reason of the channel's end@localport.io
@@ -284,6 +382,9 @@ func TestDesktopIdle(t *testing.T) {
 			t.Fatal(err)
 		}
 		server := target.serverSide(t)
+		// The round trip settles the handshake's client bytes, which are
+		// activity, before the clock moves.
+		pingPong(t, ch)
 		clock.advance(idleTimeout + time.Minute)
 		if _, err := server.Write([]byte("frame")); err != nil {
 			t.Fatal(err)
@@ -378,12 +479,107 @@ func TestDesktopEndDuringTheDial(t *testing.T) {
 	}
 	select {
 	case err := <-opened:
+		// The refusal races the connection's close, so only the failure is certain.
 		if err == nil {
 			t.Fatal("the channel opened after the end")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the channel open was never answered")
 	}
+}
+
+// A dial that connects after the connection ended closes what it connected
+// and never opens the channel.
+func TestDesktopDialFinishingAfterTheEnd(t *testing.T) {
+	target := newVNCTarget(t)
+	dialing := make(chan struct{})
+	f := desktopFixture(t, target.ln.Addr().String(), func(c *ServerConfig) {
+		c.dialDesktop = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			close(dialing)
+			<-ctx.Done()
+			// A dial that completes although its context was cancelled.
+			return net.Dial(network, addr)
+		}
+	})
+	client := f.connect(t, f.vncOpts())
+	opened := make(chan error, 1)
+	go func() {
+		_, _, err := openVNC(client, "localport-desktop", 1)
+		opened <- err
+	}()
+	<-dialing
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := f.srv.ShutdownConfigChanged(ctx); err != nil {
+		t.Fatalf("end during a dial: %v", err)
+	}
+	if err := <-opened; err == nil {
+		t.Fatal("the channel opened after the end")
+	}
+	target.serverSide(t)
+	target.waitClosed(t)
+}
+
+// The target's close ends the channel and the connection without an end
+// request: the channel already stopped. A client's EOF ends the target.
+func TestDesktopEndsWithItsChannel(t *testing.T) {
+	t.Run("target closes", func(t *testing.T) {
+		target := newVNCTarget(t)
+		f := desktopFixture(t, target.ln.Addr().String(), nil)
+		client := f.connect(t, f.vncOpts())
+		ch, reqs, err := openVNC(client, "localport-desktop", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pingPong(t, ch)
+		_ = target.serverSide(t).Close()
+		select {
+		case r, ok := <-reqs:
+			if ok {
+				t.Fatalf("request %q after the target closed", r.Type)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the channel did not close")
+		}
+		waitClosed(t, client)
+	})
+	t.Run("target closes during the check", func(t *testing.T) {
+		target := newScriptedTarget(t, func(c net.Conn) error {
+			_, _ = io.WriteString(c, "RFB 003.008\n")
+			_ = c.Close()
+			return errors.New("closed mid-handshake")
+		})
+		f := desktopFixture(t, target.ln.Addr().String(), func(c *ServerConfig) { c.DesktopKeys = &memKeys{} })
+		client := f.connect(t, f.vncOpts())
+		ch, reqs, err := openDesktopChannel(client, "localport-desktop", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		readFor(t, ch, "RFB 003.008\n")
+		_, _ = io.WriteString(ch, "RFB 003.008\n")
+		select {
+		case r, ok := <-reqs:
+			if ok {
+				t.Fatalf("request %q after the target closed", r.Type)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the channel did not close")
+		}
+		waitClosed(t, client)
+	})
+	t.Run("client EOF", func(t *testing.T) {
+		target := newVNCTarget(t)
+		f := desktopFixture(t, target.ln.Addr().String(), nil)
+		client := f.connect(t, f.vncOpts())
+		ch, _, err := openVNC(client, "localport-desktop", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pingPong(t, ch)
+		_ = ch.CloseWrite()
+		target.waitClosed(t)
+		waitClosed(t, client)
+	})
 }
 
 // A desktop connection resumes with its relay; a detach timeout closes the

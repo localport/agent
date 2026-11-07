@@ -146,6 +146,9 @@ type Store struct {
 	// same Root gets instances of its own.
 	ticketKeysMu sync.Mutex
 	ticketKeys   map[string]*TicketKeys
+	// desktopPins holds one DesktopPins per device directory, as ticketKeys;
+	// guarded by ticketKeysMu.
+	desktopPins map[string]*DesktopPins
 
 	// afterMetaRead, when set, runs in readPair between its two reads. Tests
 	// promote there.

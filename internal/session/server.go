@@ -111,6 +111,9 @@ type ServerConfig struct {
 	// VNCTarget is the configured vnc target, HOST:PORT: the only address a
 	// vnc connection's channel reaches, whatever it requests.
 	VNCTarget string
+	// DesktopKeys holds the desktop targets' pinned server keys; nil ends
+	// every connection whose handshake needs it (desktop_key_unavailable).
+	DesktopKeys DesktopKeys
 	// OnEvent receives one line per notable failure. Optional.
 	OnEvent func(string)
 	// Uploader delivers the recordings of certificates with rec; nil leaves
@@ -130,6 +133,9 @@ type ServerConfig struct {
 	clock clock
 	// dialDesktop replaces the desktop target dial. Tests set it.
 	dialDesktop func(ctx context.Context, network, addr string) (net.Conn, error)
+	// desktopCheckTimeout replaces the handshake check's per-read target
+	// deadline when set. Tests set it.
+	desktopCheckTimeout time.Duration
 }
 
 // clock is the time source of the validity and idle checks. NewTimer returns

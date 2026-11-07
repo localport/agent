@@ -1,14 +1,18 @@
 package session
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"net"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/launcher"
 )
 
@@ -35,6 +39,9 @@ type desktopChannel struct {
 	// stopped is set once the relay ended or the end was told; the end
 	// request goes out at most once and never after the channel stopped.
 	stopped bool
+	// endReason is the connection's end reason when it ended before the
+	// channel was accepted; the open goroutine tells it instead.
+	endReason string
 }
 
 // desktopTarget is the configured address of a desktop kind.
@@ -72,26 +79,37 @@ func (c *conn) openDesktop(nc ssh.NewChannel, kind string, wg *sync.WaitGroup) {
 		return
 	}
 	wg.Go(func() {
-		defer c.desktopDone(d)
+		// A check that ends the connection leaves the end to run (c.fail),
+		// which tells the client its reason; every other return ends it here.
+		failed := false
+		defer func() {
+			if !failed {
+				c.desktopDone(d)
+			}
+		}()
 		dial := (&net.Dialer{}).DialContext
 		if c.s.cfg.dialDesktop != nil {
 			dial = c.s.cfg.dialDesktop
 		}
 		target, err := dial(ctx, "tcp", c.s.desktopTarget(kind))
 		cancel()
-		if err != nil {
-			_ = nc.Reject(ssh.ConnectionFailed, desktopDialCode(err))
-			return
-		}
 		c.mu.Lock()
-		ended := c.ended
-		if !ended {
+		ended, reason := c.ended, d.endReason
+		if err == nil && !ended {
 			d.target = target
 		}
 		c.mu.Unlock()
-		if ended {
-			_ = target.Close()
-			_ = nc.Reject(ssh.ConnectionFailed, "the connection ended")
+		switch {
+		case ended:
+			// The connection ended during the dial: its reason, not the
+			// cancelled dial's, is why the channel is refused.
+			if err == nil {
+				_ = target.Close()
+			}
+			_ = nc.Reject(ssh.ConnectionFailed, endRefusal(reason))
+			return
+		case err != nil:
+			_ = nc.Reject(ssh.ConnectionFailed, desktopDialCode(err))
 			return
 		}
 		ch, reqs, err := nc.Accept()
@@ -100,19 +118,87 @@ func (c *conn) openDesktop(nc ssh.NewChannel, kind string, wg *sync.WaitGroup) {
 			return
 		}
 		wg.Go(func() { discardChannelRequests(reqs) })
+		checkCtx, checkCancel := context.WithCancel(context.Background())
+		defer checkCancel()
 		c.mu.Lock()
-		ended = c.ended
+		ended, reason = c.ended, d.endReason
 		if !ended {
-			d.ch = ch
+			// The end cancels the handshake check's pin wait from now on.
+			d.ch, d.cancel = ch, checkCancel
 		}
 		c.mu.Unlock()
 		if ended {
-			_ = ch.Close()
+			// The end closed only the target; the client still learns why.
 			_ = target.Close()
+			if reason != "" {
+				_, _ = ch.SendRequest(reqDesktopEnd, false, ssh.Marshal(struct{ Reason string }{reason}))
+			}
+			_ = ch.Close()
 			return
 		}
-		c.relay(ch, target.(launcher.ForwardConn), false)
+		check := &rfbCheck{c: c, ch: ch, target: target, fromClient: bufio.NewReader(ch), fromTarget: bufio.NewReader(target),
+			keys: c.s.cfg.DesktopKeys, kind: kind, addr: c.s.desktopTarget(kind), timeout: c.s.cfg.desktopCheckTimeout}
+		if check.keys == nil {
+			check.keys = noDesktopKeys{}
+		}
+		if check.timeout == 0 {
+			check.timeout = desktopCheckTimeout
+		}
+		reason, err = check.run(checkCtx)
+		switch {
+		case err != nil:
+			return
+		case reason != "":
+			failed = true
+			c.fail(reason)
+			return
+		}
+		c.relayDesktop(ch, target, check.fromClient, check.fromTarget)
 	})
+}
+
+// noDesktopKeys is the pin store of a server configured without one: every
+// lookup fails, so a server key or a pinned-target rule ends the connection.
+type noDesktopKeys struct{}
+
+var errNoDesktopKeys = errors.New("no desktop key store")
+
+func (noDesktopKeys) Lookup(string, string) ([32]byte, bool, error) {
+	return [32]byte{}, false, errNoDesktopKeys
+}
+
+func (noDesktopKeys) Pin(context.Context, string, string, [32]byte) (identity.PinResult, error) {
+	return 0, errNoDesktopKeys
+}
+
+// relayDesktop copies between the desktop channel and the target until
+// either direction ends, then closes both: a remote framebuffer protocol has
+// no half-close, so one side's end is the session's. It reads from the
+// handshake check's buffered readers, so bytes they read ahead come first.
+// Only client bytes are activity for the idle timer.
+func (c *conn) relayDesktop(ch ssh.Channel, target net.Conn, fromClient, fromTarget io.Reader) {
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(activityWriter{target, c}, fromClient)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(ch, fromTarget)
+		done <- struct{}{}
+	}()
+	<-done
+	_ = ch.Close()
+	_ = target.Close()
+	<-done
+}
+
+// endRefusal is the refusal message of a channel whose connection ended
+// before it opened: the end reason, or "exited" when the end had none.
+func endRefusal(reason string) string {
+	if reason == "" {
+		return CloseExited
+	}
+	return reason
 }
 
 // discardChannelRequests refuses every request of a desktop channel; none is
@@ -160,7 +246,9 @@ func (c *conn) desktopDone(d *desktopChannel) {
 
 // endDesktop ends the desktop channel, if any, for the connection's end:
 // it cancels a running dial, tells the client the reason when there is one
-// and the channel has not stopped, and closes the channel and the target.
+// and the channel has not stopped, and closes the channel and the target. A
+// channel not accepted yet keeps the reason for its open goroutine, which
+// refuses or tells with it while the connection still carries messages.
 // Called by end with ended already set, so nothing registers after it.
 func (c *conn) endDesktop(reason string) {
 	c.mu.Lock()
@@ -171,8 +259,13 @@ func (c *conn) endDesktop(reason string) {
 	}
 	cancel, ch, target, tell := d.cancel, d.ch, d.target, !d.stopped && reason != ""
 	d.stopped = true
+	if ch == nil {
+		d.endReason = reason
+	}
 	c.mu.Unlock()
 	cancel()
+	// The client is told before the target closes: the target's close ends
+	// the relay, which closes the channel.
 	if ch != nil {
 		if tell {
 			_, _ = ch.SendRequest(reqDesktopEnd, false, ssh.Marshal(struct{ Reason string }{reason}))

@@ -139,12 +139,14 @@ func (s *Store) TicketKeys(ref Ref) (*TicketKeys, error) {
 // Path is the identity's ticket_keys.json.
 func (t *TicketKeys) Path() string { return filepath.Join(t.dir, ticketKeysFile) }
 
-// forgetTicketKeys drops the instance of a removed identity directory, so a
-// later enrolment into the same directory starts from its file.
+// forgetTicketKeys drops the ticket key and desktop pin instances of a
+// removed identity directory, so a later enrolment into the same directory
+// starts from its files.
 func (s *Store) forgetTicketKeys(dir string) {
 	s.ticketKeysMu.Lock()
 	defer s.ticketKeysMu.Unlock()
 	delete(s.ticketKeys, dir)
+	delete(s.desktopPins, dir)
 }
 
 // Load reads ticket_keys.json into memory. An absent file is an empty set; a

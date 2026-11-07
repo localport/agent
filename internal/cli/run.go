@@ -290,6 +290,14 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 		spec.HintRevoked = hintRevoked(keys, nil, logEvent)
 		return nil, err
 	}
+	// A device ref always has a pin store; without one every desktop
+	// handshake that needs it ends desktop_key_unavailable.
+	var desktopKeys session.DesktopKeys
+	if pins, err := store.DesktopPins(ref); err == nil {
+		desktopKeys = pins
+	} else {
+		logEvent(fmt.Sprintf("identity: no desktop key store for %s: %v", ref, err))
+	}
 	refresher := &identity.KeyRefresher{Store: store, Ref: ref, OnEvent: logEvent}
 	spec.HintRevoked = hintRevoked(keys, refresher, logEvent)
 	spec.SessionHandler = session.NewServer(session.ServerConfig{
@@ -303,6 +311,7 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 		PasswordLogins: spec.PasswordLogins,
 		Desktop:        spec.Desktop,
 		VNCTarget:      spec.VNCTarget,
+		DesktopKeys:    desktopKeys,
 		OnEvent:        logEvent,
 		Uploader:       uploads,
 		Identifier:     ref.Identity,

@@ -48,13 +48,15 @@ type Entry struct {
 
 // The codes. Each has one Entry in registry.
 const (
-	PendingLost          Code = "AG001"
-	DeviceCredential     Code = "AG002"
-	NoTicketKeys         Code = "AG003"
-	TicketKeysUnreadable Code = "AG004"
-	TicketKeysBusy       Code = "AG005"
-	RenewalInProgress    Code = "AG006"
-	NotRenewable         Code = "AG007"
+	PendingLost           Code = "AG001"
+	DeviceCredential      Code = "AG002"
+	NoTicketKeys          Code = "AG003"
+	TicketKeysUnreadable  Code = "AG004"
+	TicketKeysBusy        Code = "AG005"
+	RenewalInProgress     Code = "AG006"
+	NotRenewable          Code = "AG007"
+	DesktopPinsUnreadable Code = "AG008"
+	DesktopPinsBusy       Code = "AG009"
 
 	UnsafeExecutable Code = "AG011"
 	UntrustedPath    Code = "AG012"
@@ -102,6 +104,8 @@ var registry = []Entry{
 	{TicketKeysBusy, "Ticket keys busy", "another process is writing this identity's ticket keys"},
 	{RenewalInProgress, "Renewal in progress", "another process is renewing this credential"},
 	{NotRenewable, "Credential does not renew", "a sign-in credential does not renew; run `localport login` again"},
+	{DesktopPinsUnreadable, "Desktop target keys unreadable", "desktop_pins.json cannot be read"},
+	{DesktopPinsBusy, "Desktop target keys busy", "another process is changing this device's desktop target keys"},
 
 	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
 	{UntrustedPath, "Untrusted credential path", "untrusted credential path"},
