@@ -568,7 +568,7 @@ func TestUserauthRefusals(t *testing.T) {
 		{"unknown critical option", func(o *certOpts) { o.extraCO = true }, 0},
 		{"login not enabled", func(o *certOpts) { o.login = "root" }, 0},
 		{"kind not enabled", func(o *certOpts) { o.kind = "rdp" }, 0},
-		{"kind not served", func(o *certOpts) { o.kind = "vnc" }, 0},
+		{"desktop certificate with a device login", func(o *certOpts) { o.kind = "vnc" }, 0},
 		{"recording key not held", func(o *certOpts) { o.rec = &certRec{Policy: RecPolicyStrict, PubSHA256: "AAAA"} }, 0},
 		{"files certificate without its files option", func(o *certOpts) { o.kind, o.noFiles = "files", true }, 0},
 		{"files option malformed", func(o *certOpts) { o.kind, o.files = "files", new("upload,download") }, 0},

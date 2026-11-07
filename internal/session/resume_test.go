@@ -247,7 +247,7 @@ func (f *sshFixture) connectResumableAs(t *testing.T, o certOpts) *resumeConn {
 	rc.cr = cr
 	rc.ended = attachAsync(cr.Conn, rc.stream, 0)
 	c, chans, reqs, err := ssh.NewClientConn(cr.Conn, "gw-01", &ssh.ClientConfig{
-		User: testLogin, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.FixedHostKey(f.hostKey),
+		User: o.login, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.FixedHostKey(f.hostKey),
 	})
 	if err != nil {
 		t.Fatalf("ssh over the resumable conn: %v", err)

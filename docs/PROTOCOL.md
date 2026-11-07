@@ -623,8 +623,8 @@ stream:
    | signed by a session CA key the agent holds (`ticket_keys.json`); an unknown CA key triggers one key fetch (at most 3 s, at most once per 5 minutes) and one retry |
    | valid now within 30 s of skew, for the user name as its principal |
    | exactly the critical options `device@localport.io`, naming this device's prefix and registered key (`spki_sha256`), and for a `files` or `ssh` certificate `files@localport.io`: the file directions its SFTP channels may use, one of `""`, `download`, `upload`, `download,upload` (any other value, or a `files` or `ssh` certificate without it, is refused) |
-   | the kind (`kind@localport.io`) enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) and served by this agent (`terminal`, `ssh`, `files`) |
-   | the user name listed in the local `logins` |
+   | the kind (`kind@localport.io`) enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) and served by this agent (`terminal`, `ssh`, `files`, `vnc`) |
+   | for `terminal`, `ssh` and `files`: the user name listed in the local `logins`; for `vnc`: the user name `localport-desktop` and no `rec@localport.io` (a desktop session is never recorded) |
    | a `rec@localport.io`, when present, naming the held team recording key; a mismatch triggers one key fetch, under the same floor, and one retry |
 
    On Windows, a user name listed in the device's `password_logins` then needs
@@ -708,23 +708,43 @@ stream:
    helper's pipe with a 64 KiB credit window per forward and direction. When
    the helper exits, the connection's forwards end and later forwarding
    requests on it are refused (`helper_failed`); the connection continues.
-   Forwarded data counts as activity for the idle timer. A recorded
+   Forwarded data, both ways, counts as activity for the idle timer.
+
+   A `vnc` connection serves one `direct-tcpip` channel and nothing else:
+   other channel types are refused `prohibited`, a second channel `resource
+   shortage`, and every global request is answered false. The agent checks
+   the channel's payload as for a local forward (`invalid` otherwise),
+   ignores the host and port it names, and dials the device's configured
+   `vnc` target itself, with a 10 s timeout, without a helper. A failed dial
+   refuses the channel `connect failed` with `connection_refused` or
+   `unreachable` (a timeout included); the channel is accepted only after
+   the dial succeeds. The agent relays the channel and the target connection
+   until either ends; the channel's end, or its refusal, ends the
+   connection, and every end of the connection closes the target connection.
+   The agent answers every request on the channel false. Only data from the
+   client on the channel counts as activity for the idle timer; target
+   output and global requests do not. A recorded
    connection writes an asciicast event `p` at each listen, cancel, forward
    open and forward close (direction, kind, address, result, bytes in and
    out), never the forwarded bytes; under Strict a `p` event the recorder
    cannot take ends the connection `recording_failed`.
 4. End: the agent closes the connection, after writing
    `localport: session ended: <reason>` to each open channel's stderr, for
-   `idle` (30 minutes without client channel data or a request),
+   `idle` (30 minutes without client channel data or a request; on a `vnc`
+   connection, without client channel data),
    `shutdown` (the control session is ending), `config_changed`
    (`localport set` changed the device's entry and the agent reloaded it; the
    device's other sessions end too), `exited` (the channel of a `terminal`
-   connection, or the last channel of a `files` connection, closed, a Strict
+   or `vnc` connection, or the last channel of a `files` connection, closed or
+   was refused, a Strict
    recording failure on it included), `recording_failed` (a Strict
    connection's port forwarding events could not be recorded) and, on one
    channel, `helper_failed` (the session helper's channel ended without an
    exit). A client that closes the
-   connection ends it without a reason.
+   connection ends it without a reason. A `vnc` connection's channel has no
+   stderr: before closing it for a reason, unless the channel already ended,
+   the agent sends the channel request `end@localport.io` (want-reply false)
+   whose payload is one SSH string, the reason (one or more of `[a-z_]`).
 
 Reconnect: a failed dial or bind, and a mux that drops, are retried for the
 life of the control session with full-jitter backoff from 1 s, doubling to a

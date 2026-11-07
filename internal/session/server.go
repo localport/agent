@@ -108,6 +108,9 @@ type ServerConfig struct {
 	PasswordLogins []string
 	// Desktop lists the configured desktop targets: rdp, vnc.
 	Desktop []string
+	// VNCTarget is the configured vnc target, HOST:PORT: the only address a
+	// vnc connection's channel reaches, whatever it requests.
+	VNCTarget string
 	// OnEvent receives one line per notable failure. Optional.
 	OnEvent func(string)
 	// Uploader delivers the recordings of certificates with rec; nil leaves
@@ -125,6 +128,8 @@ type ServerConfig struct {
 
 	// clock replaces the wall clock for validity and idle checks. Tests set it.
 	clock clock
+	// dialDesktop replaces the desktop target dial. Tests set it.
+	dialDesktop func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // clock is the time source of the validity and idle checks. NewTimer returns
@@ -880,6 +885,15 @@ func (s *Server) localRefusal(adm *admission) error {
 	switch {
 	case !s.kindEnabled(adm.Kind):
 		return refuseCert("kind %q is not enabled on this device", adm.Kind)
+	case isDesktopKind(adm.Kind):
+		// The agent process dials the target: no login or launcher applies.
+		switch {
+		case adm.Login != desktopPrincipal:
+			return refuseCert("a desktop certificate names login %q", desktopPrincipal)
+		case adm.Rec != nil:
+			return refuseCert("a desktop session is never recorded")
+		}
+		return nil
 	case adm.Kind != "terminal" && adm.Kind != "ssh" && adm.Kind != "files":
 		return refuseCert("kind %q is not served by this agent", adm.Kind)
 	case s.launcher == nil:
@@ -1119,7 +1133,10 @@ type conn struct {
 	served   int
 	ended    bool
 	channels map[*channel]struct{}
-	// allClosed receives once when a terminal connection's channel closed.
+	// desktop is a desktop connection's one channel once its open began.
+	desktop *desktopChannel
+	// allClosed receives once when a terminal connection's channel closed,
+	// or a desktop connection's channel ended or was refused.
 	allClosed chan struct{}
 }
 
@@ -1170,8 +1187,8 @@ func (c *conn) fail(reason string) {
 }
 
 // run serves an admitted connection until its first recorded end: the client
-// closing it, the idle timeout, a Shutdown, the channel of a terminal
-// connection closing (a failed Strict recording ends its own channel), or a
+// closing it, the idle timeout, a Shutdown, the channel of a terminal or
+// desktop connection closing (a failed Strict recording ends its own channel), or a
 // failed Strict forwards recording, or an end e queues (detach timeout, a
 // resume refused or lost). It then writes the reason to every open channel's
 // stderr (a detached conn is dropped first, so nothing waits for a stream),
@@ -1198,11 +1215,15 @@ func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel
 		c.accept(chans, &wg)
 	})
 	wg.Go(func() {
-		// Global requests, answered in order: keepalives count as activity;
+		// Global requests, answered in order: keepalives count as activity,
+		// except on a desktop connection, where only client channel data does;
 		// the remote forwarding requests are served when allowed, every
 		// other request is refused.
+		desktop := isDesktopKind(c.adm.Load().Kind)
 		for r := range reqs {
-			c.active()
+			if !desktop {
+				c.active()
+			}
 			ok, payload := c.fwd.globalRequest(r)
 			if r.WantReply {
 				_ = r.Reply(ok, payload)
@@ -1248,7 +1269,8 @@ wait:
 }
 
 // end decides the connection's end and ends every open channel, telling the
-// client why on its stderr when there is a reason.
+// client why when there is a reason: on a session channel's stderr, on a
+// desktop channel by end@localport.io.
 func (c *conn) end(reason string) {
 	c.mu.Lock()
 	c.ended = true
@@ -1260,6 +1282,7 @@ func (c *conn) end(reason string) {
 	for _, ch := range open {
 		ch.end(reason)
 	}
+	c.endDesktop(reason)
 	c.fwd.end()
 }
 
@@ -1279,12 +1302,18 @@ func (c *conn) markRecordings(label string) {
 	forwards.marker(label)
 }
 
-// accept serves the connection's channel opens: session channels, at most
-// maxChannels open and one in all on a terminal connection, and the local
-// port forwarding channels (forward.go, their own bounds). On a recorded
+// accept serves the connection's channel opens: on a desktop connection its
+// one channel (desktop.go); otherwise session channels, at most maxChannels
+// open and one in all on a terminal connection, and the local port
+// forwarding channels (forward.go, their own bounds). On a recorded
 // connection every session channel opens its own recording.
 func (c *conn) accept(chans <-chan ssh.NewChannel, wg *sync.WaitGroup) {
 	for nc := range chans {
+		// A connection's kind holds for its life: a resume keeps it.
+		if kind := c.adm.Load().Kind; isDesktopKind(kind) {
+			c.openDesktop(nc, kind, wg)
+			continue
+		}
 		switch nc.ChannelType() {
 		case "session":
 		case chanDirectTCPIP, chanDirectStreamLocal:
