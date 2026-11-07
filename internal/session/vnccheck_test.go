@@ -109,7 +109,7 @@ func TestDesktopKeyFirstUseAndMatch(t *testing.T) {
 		o := f.vncOpts()
 		o.serial = serial
 		client := f.connect(t, o)
-		ch, reqs, err := openDesktopChannel(client, "localport-desktop", 1)
+		ch, reqs, err := openDesktopChannel(client, chanVNC)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -169,7 +169,7 @@ func TestDesktopKeyRefusals(t *testing.T) {
 			keys = tc.keys(target.ln.Addr().String())
 			f := desktopFixture(t, target.ln.Addr().String(), func(c *ServerConfig) { c.DesktopKeys = keys })
 			client := f.connect(t, f.vncOpts())
-			ch, reqs, err := openDesktopChannel(client, "localport-desktop", 1)
+			ch, reqs, err := openDesktopChannel(client, chanVNC)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -202,7 +202,7 @@ func TestDesktopKeyFraming(t *testing.T) {
 	t.Run("3.3", func(t *testing.T) {
 		f, _ := keyFixture(t, rfbServer("RFB 003.003\n", nil, 6, sendKeyThenFrame(key)), &memKeys{})
 		client := f.connect(t, f.vncOpts())
-		ch, reqs, err := openDesktopChannel(client, "localport-desktop", 1)
+		ch, reqs, err := openDesktopChannel(client, chanVNC)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -233,7 +233,7 @@ func TestDesktopKeyFraming(t *testing.T) {
 		})
 		f, _ := keyFixture(t, script, &memKeys{})
 		client := f.connect(t, f.vncOpts())
-		ch, reqs, err := openDesktopChannel(client, "localport-desktop", 1)
+		ch, reqs, err := openDesktopChannel(client, chanVNC)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -251,7 +251,7 @@ func TestDesktopKeyFraming(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f, _ := keyFixture(t, rfbServer(version, []byte{2}, 0, func(net.Conn) error { return nil }), &memKeys{})
 			client := f.connect(t, f.vncOpts())
-			_, reqs, err := openDesktopChannel(client, "localport-desktop", 1)
+			_, reqs, err := openDesktopChannel(client, chanVNC)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -274,7 +274,7 @@ func TestDesktopKeyCheckDeadlinePerRead(t *testing.T) {
 		c.desktopCheckTimeout = timeout
 	})
 	client := f.connect(t, f.vncOpts())
-	ch, reqs, err := openDesktopChannel(client, "localport-desktop", 1)
+	ch, reqs, err := openDesktopChannel(client, chanVNC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestDesktopKeyCheckDeadlinePerRead(t *testing.T) {
 	readFor(t, ch, string(key)+"frame")
 }
 
-// A target silent past the deadline ends the check as a malformed handshake.
+// A target silent past the deadline ends the check desktop_handshake_timeout.
 func TestDesktopKeyCheckSilentTarget(t *testing.T) {
 	target := newScriptedTarget(t, func(c net.Conn) error {
 		if _, err := io.WriteString(c, "RFB 003.008\n"); err != nil {
@@ -301,14 +301,14 @@ func TestDesktopKeyCheckSilentTarget(t *testing.T) {
 		c.desktopCheckTimeout = 200 * time.Millisecond
 	})
 	client := f.connect(t, f.vncOpts())
-	ch, reqs, err := openDesktopChannel(client, "localport-desktop", 1)
+	ch, reqs, err := openDesktopChannel(client, chanVNC)
 	if err != nil {
 		t.Fatal(err)
 	}
 	readFor(t, ch, "RFB 003.008\n")
 	_, _ = io.WriteString(ch, "RFB 003.008\n")
-	if reason := waitEndRequest(t, reqs); reason != CloseDesktopHandshake {
-		t.Fatalf("end reason %q, want %q", reason, CloseDesktopHandshake)
+	if reason := waitEndRequest(t, reqs); reason != CloseDesktopHandshakeTimeout {
+		t.Fatalf("end reason %q, want %q", reason, CloseDesktopHandshakeTimeout)
 	}
 }
 
@@ -319,7 +319,7 @@ func TestDesktopKeyEndDuringTheQuestion(t *testing.T) {
 	keys := &memKeys{}
 	f, target := keyFixture(t, rfbServer("RFB 003.008\n", []byte{6}, 0, sendKeyThenFrame(key)), keys)
 	client := f.connect(t, f.vncOpts())
-	ch, reqs, err := openDesktopChannel(client, "localport-desktop", 1)
+	ch, reqs, err := openDesktopChannel(client, chanVNC)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,16 +1,10 @@
 package session
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
-	"fmt"
-	"io"
-	"net"
-	"os"
 	"regexp"
 	"time"
 
@@ -19,23 +13,28 @@ import (
 	"github.com/localport/agent/internal/identity"
 )
 
-// Reasons a desktop connection's handshake check ends it with.
+// Reasons a desktop connection's handshake ends it with, both kinds.
 const (
 	CloseDesktopKeyChanged     = "desktop_key_changed"
 	CloseDesktopKeyDowngraded  = "desktop_key_downgraded"
 	CloseDesktopKeyRejected    = "desktop_key_rejected"
 	CloseDesktopKeyUnavailable = "desktop_key_unavailable"
 	CloseDesktopHandshake      = "desktop_handshake_invalid"
+	// CloseDesktopHandshakeTimeout: the client wait or a target deadline of
+	// the handshake expired.
+	CloseDesktopHandshakeTimeout = "desktop_handshake_timeout"
+	// CloseDesktopTargetClosed: the target closed or failed before the relay.
+	CloseDesktopTargetClosed = "desktop_target_closed"
 )
 
 const (
 	// reqDesktopKey asks the client to trust the target's server key before
-	// any key byte reaches it; its payload is the key's hex SHA-256 and
-	// whether it is pinned, its reply the client's answer.
+	// any key byte reaches it; its payload describes the key (vncKeyInfo,
+	// rdpKeyInfo), its reply is the client's answer.
 	reqDesktopKey = "desktop-key@localport.io"
-	// desktopCheckTimeout bounds each target read of the handshake check;
-	// time spent waiting for the client does not count.
-	desktopCheckTimeout = 30 * time.Second
+	// desktopTargetTimeout bounds each target read and write of the
+	// handshake; the deadlines are cleared before the relay.
+	desktopTargetTimeout = 30 * time.Second
 	// RFB security types noVNC 1.7.0 runs whose key the agent checks: RA2ne,
 	// at top level or as a VeNCrypt subtype (core/rfb.js).
 	rfbSecRA2ne    = 6
@@ -51,40 +50,32 @@ type DesktopKeys interface {
 	Pin(ctx context.Context, kind, target string, key [32]byte) (identity.PinResult, error)
 }
 
+// vncKeyInfo is the desktop-key@localport.io payload of a vnc target: the
+// RA2ne key's hex SHA-256 and whether it is pinned.
+type vncKeyInfo struct {
+	SHA256 string
+	Pinned bool
+}
+
 // rfbServerVersion is the form of a server ProtocolVersion; noVNC accepts
 // several versions beyond RFC 6143's (003.889, 004.00x, 005.000), so only the
 // form is checked and the client's reply sets the framing.
 var rfbServerVersion = regexp.MustCompile(`^RFB [0-9]{3}\.[0-9]{3}\n$`)
 
-// errHandshake marks a malformed handshake.
-var errHandshake = errors.New("malformed RFB handshake")
-
 // rfbCheck reads a VNC connection's handshake up to its security type, and
-// for RA2ne up to the server key, forwarding every byte unchanged. It holds
-// buffered readers on both sides; the relay continues from them, so bytes
-// read ahead are never lost.
+// for RA2ne up to the server key, forwarding every byte unchanged. The relay
+// continues from the handshake's buffered readers, so bytes read ahead are
+// never lost.
 type rfbCheck struct {
-	c          *conn
-	ch         ssh.Channel
-	target     net.Conn
-	fromClient *bufio.Reader
-	fromTarget *bufio.Reader
-	keys       DesktopKeys
-	kind, addr string
-	// timeout is the deadline of each target read.
-	timeout time.Duration
+	*desktopHandshake
 }
 
 // run runs the handshake check. It returns the reason to end the
-// connection with, or "" to relay; err is set when an end of the connection
-// or a broken side interrupted it (the connection's own end reports it).
+// connection with, or "" to relay; err is a handshakeError or the
+// connection's end (handshakeOutcome maps it).
 func (k *rfbCheck) run(ctx context.Context) (reason string, err error) {
-	defer func() { _ = k.target.SetReadDeadline(time.Time{}) }()
-	reason, err = k.check(ctx)
-	if errors.Is(err, errHandshake) || errors.Is(err, os.ErrDeadlineExceeded) {
-		return CloseDesktopHandshake, nil
-	}
-	return reason, err
+	defer func() { _ = k.target.SetDeadline(time.Time{}) }()
+	return k.check(ctx)
 }
 
 func (k *rfbCheck) check(ctx context.Context) (string, error) {
@@ -93,7 +84,7 @@ func (k *rfbCheck) check(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if !rfbServerVersion.Match(sv) || string(sv) == "RFB 000.000\n" {
-		return "", errHandshake
+		return "", malformed(sideTarget, "server version %q", sv)
 	}
 	cv, err := k.fromClientForward(12)
 	if err != nil {
@@ -102,6 +93,9 @@ func (k *rfbCheck) check(ctx context.Context) (string, error) {
 	var choice uint32
 	switch string(cv) {
 	case "RFB 003.003\n":
+		if err := k.clientWaitDone(); err != nil {
+			return "", err
+		}
 		b, err := k.fromServer(4)
 		if err != nil {
 			return "", err
@@ -115,7 +109,7 @@ func (k *rfbCheck) check(ctx context.Context) (string, error) {
 			return "", err
 		}
 		if n[0] == 0 {
-			return "", nil
+			return "", k.clientWaitDone()
 		}
 		if _, err := k.fromServer(int(n[0])); err != nil {
 			return "", err
@@ -126,18 +120,31 @@ func (k *rfbCheck) check(ctx context.Context) (string, error) {
 		}
 		choice = uint32(b[0])
 	default:
-		return "", errHandshake
+		return "", malformed(sideClient, "client version %q", cv)
 	}
 	switch choice {
 	case rfbSecRA2ne:
+		if err := k.clientWaitDone(); err != nil {
+			return "", err
+		}
 		return k.keyStep(ctx)
 	case rfbSecVeNCrypt:
 		sub, ok, err := k.veNCrypt()
 		if err != nil || !ok {
+			if err == nil {
+				err = k.clientWaitDone()
+			}
+			return "", err
+		}
+		if err := k.clientWaitDone(); err != nil {
 			return "", err
 		}
 		if sub == rfbSecRA2ne {
 			return k.keyStep(ctx)
+		}
+	default:
+		if err := k.clientWaitDone(); err != nil {
+			return "", err
 		}
 	}
 	return k.nonRSA()
@@ -184,97 +191,46 @@ func (k *rfbCheck) nonRSA() (string, error) {
 	return "", nil
 }
 
-// keyStep reads the RA2ne server key, compares it with the pin, asks the
-// client to trust it, pins it on first use, and only then forwards it.
+// keyStep reads the RA2ne server key, runs the shared trust step on its
+// SHA-256, and only then forwards it.
 func (k *rfbCheck) keyStep(ctx context.Context) (string, error) {
-	hdr, err := k.readTarget(4)
+	hdr, err := k.readTarget(k.fromTarget, 4)
 	if err != nil {
 		return "", err
 	}
 	bits := binary.BigEndian.Uint32(hdr)
 	if bits < rfbMinKeyBits || bits > rfbMaxKeyBits {
-		return "", errHandshake
+		return "", malformed(sideTarget, "RA2ne key of %d bits", bits)
 	}
-	body, err := k.readTarget(2 * int((bits+7)/8))
+	body, err := k.readTarget(k.fromTarget, 2*int((bits+7)/8))
 	if err != nil {
 		return "", err
 	}
 	key := append(hdr, body...)
 	sum := sha256.Sum256(key)
-	pinned, held, err := k.keys.Lookup(k.kind, k.addr)
-	if err != nil {
-		k.c.s.log("session: desktop key of %s: %v", k.addr, err)
-		return CloseDesktopKeyUnavailable, nil
+	reason, err := k.trust(ctx, sum, func(pinned bool) []byte {
+		return ssh.Marshal(vncKeyInfo{hex.EncodeToString(sum[:]), pinned})
+	})
+	if reason != "" || err != nil {
+		return reason, err
 	}
-	if held && pinned != sum {
-		k.c.s.log("session: desktop target %s presented key %x, pinned %x", k.addr, sum, pinned)
-		return CloseDesktopKeyChanged, nil
-	}
-	ok, err := k.ch.SendRequest(reqDesktopKey, true, ssh.Marshal(struct {
-		SHA256 string
-		Pinned bool
-	}{hex.EncodeToString(sum[:]), held}))
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return CloseDesktopKeyRejected, nil
-	}
-	if !held {
-		switch r, err := k.keys.Pin(ctx, k.kind, k.addr, sum); {
-		case err != nil:
-			if ctx.Err() != nil {
-				return "", ctx.Err()
-			}
-			k.c.s.log("session: pin desktop key of %s: %v", k.addr, err)
-			return CloseDesktopKeyUnavailable, nil
-		case r == identity.PinChanged:
-			k.c.s.log("session: desktop target %s presented key %x, another was pinned first", k.addr, sum)
-			return CloseDesktopKeyChanged, nil
-		}
-	}
-	if _, err := k.ch.Write(key); err != nil {
-		return "", err
-	}
-	return "", nil
+	return "", k.writeClient(key)
 }
 
 // fromServer reads n target bytes and forwards them to the client.
 func (k *rfbCheck) fromServer(n int) ([]byte, error) {
-	b, err := k.readTarget(n)
+	b, err := k.readTarget(k.fromTarget, n)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := k.ch.Write(b); err != nil {
-		return nil, err
-	}
-	return b, nil
+	return b, k.writeClient(b)
 }
 
-// fromClientForward reads n client bytes and forwards them to the target;
-// they count as activity.
+// fromClientForward reads n client bytes and forwards them to the target.
 func (k *rfbCheck) fromClientForward(n int) ([]byte, error) {
-	b, err := k.read(k.fromClient, n)
+	b, err := k.readClient(n)
 	if err != nil {
 		return nil, err
 	}
-	k.c.active()
-	if _, err := k.target.Write(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// readTarget reads n target bytes within the check's per-read deadline.
-func (k *rfbCheck) readTarget(n int) ([]byte, error) {
-	_ = k.target.SetReadDeadline(time.Now().Add(k.timeout))
-	return k.read(k.fromTarget, n)
-}
-
-func (k *rfbCheck) read(r io.Reader, n int) ([]byte, error) {
-	b := make([]byte, n)
-	if _, err := io.ReadFull(r, b); err != nil {
-		return nil, fmt.Errorf("read handshake: %w", err)
-	}
-	return b, nil
+	return b, k.writeTarget(b)
 }

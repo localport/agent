@@ -83,71 +83,87 @@ func TestReloadProbesTheLauncherAgain(t *testing.T) {
 	}
 }
 
-// --vnc-reset-pin alone forgets the device's VNC server key without writing
-// the config or reloading; with another flag it does both; a second reset
-// finds none.
-func TestSetResetsTheVNCKeyPin(t *testing.T) {
-	m := &fakeManager{installed: true}
-	file := asRoot(t, m)
-	writeDevices(t, file)
-	store, err := identity.SystemStore(file.Base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ref := deviceRef("factory.gw-01")
-	pins, err := store.DesktopPins(ref)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pin := func() {
-		t.Helper()
-		if _, err := pins.Pin(context.Background(), "vnc", "127.0.0.1:5900", [32]byte{1}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	held := func() bool {
-		t.Helper()
-		_, ok, err := pins.Lookup("vnc", "127.0.0.1:5900")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return ok
-	}
-	pin()
-	before, err := os.ReadFile(file.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runSet([]string{"factory.gw-01", "--vnc-reset-pin"}); err != nil {
-		t.Fatalf("set --vnc-reset-pin = %v", err)
-	}
-	if held() {
-		t.Fatal("the pin survived the reset")
-	}
-	if after, _ := os.ReadFile(file.Path); string(after) != string(before) || m.reloads != 0 {
-		t.Fatalf("a reset alone wrote the config (%v) or reloaded (%d)", string(after) != string(before), m.reloads)
-	}
-	if err := runSet([]string{"factory.gw-01", "--vnc-reset-pin"}); err != nil {
-		t.Fatalf("second reset = %v", err)
-	}
-	pin()
-	if err := runSet([]string{"factory.gw-01", "--allow-ports", "80", "--vnc-reset-pin"}); err != nil {
-		t.Fatalf("set with a setting and the reset = %v", err)
-	}
-	if held() || m.reloads != 1 {
-		t.Fatalf("pin held %v, reloads %d; want reset and one reload", held(), m.reloads)
-	}
-	if runtime.GOOS == "windows" {
-		return
-	}
-	// A reset that fails still leaves the saved setting applied.
-	dir := store.Dir(ref)
-	if err := os.Chmod(dir, 0o770); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	err = runSet([]string{"factory.gw-01", "--allow-ports", "81", "--vnc-reset-pin"})
-	if !errors.Is(err, identity.ErrDesktopPinsUnreadable) || m.reloads != 2 {
-		t.Fatalf("set with a failing reset = %v, reloads %d; want the pin error and a second reload", err, m.reloads)
+// desktopPinTargets are the targets the reset tests pin, by kind.
+var desktopPinTargets = map[string]string{"rdp": "127.0.0.1:3389", "vnc": "127.0.0.1:5900"}
+
+// --rdp-reset-pin and --vnc-reset-pin alone forget the device's key of their
+// kind, and only that kind's, without writing the config or reloading; with
+// another flag they do both; a second reset finds none.
+func TestSetResetsTheDesktopKeyPin(t *testing.T) {
+	for kind, other := range map[string]string{"rdp": "vnc", "vnc": "rdp"} {
+		t.Run(kind, func(t *testing.T) {
+			flag := "--" + kind + "-reset-pin"
+			m := &fakeManager{installed: true}
+			file := asRoot(t, m)
+			writeDevices(t, file)
+			store, err := identity.SystemStore(file.Base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := deviceRef("factory.gw-01")
+			pins, err := store.DesktopPins(ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pin := func(kind string) {
+				t.Helper()
+				if _, err := pins.Pin(context.Background(), kind, desktopPinTargets[kind], [32]byte{1}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			held := func(kind string) bool {
+				t.Helper()
+				_, ok, err := pins.Lookup(kind, desktopPinTargets[kind])
+				if err != nil {
+					t.Fatal(err)
+				}
+				return ok
+			}
+			pin(kind)
+			pin(other)
+			before, err := os.ReadFile(file.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := runSet([]string{"factory.gw-01", flag}); err != nil {
+				t.Fatalf("set %s = %v", flag, err)
+			}
+			if held(kind) || !held(other) {
+				t.Fatalf("after the reset %s held %v, %s held %v; want only %s forgotten", kind, held(kind), other, held(other), kind)
+			}
+			if after, _ := os.ReadFile(file.Path); string(after) != string(before) || m.reloads != 0 {
+				t.Fatalf("a reset alone wrote the config (%v) or reloaded (%d)", string(after) != string(before), m.reloads)
+			}
+			if err := runSet([]string{"factory.gw-01", flag}); err != nil {
+				t.Fatalf("second reset = %v", err)
+			}
+			pin(kind)
+			if err := runSet([]string{"factory.gw-01", "--allow-ports", "80", flag}); err != nil {
+				t.Fatalf("set with a setting and the reset = %v", err)
+			}
+			if held(kind) || m.reloads != 1 {
+				t.Fatalf("pin held %v, reloads %d; want reset and one reload", held(kind), m.reloads)
+			}
+			pin(kind)
+			if err := runSet([]string{"factory.gw-01", "--rdp-reset-pin", "--vnc-reset-pin"}); err != nil {
+				t.Fatalf("both resets = %v", err)
+			}
+			if held("rdp") || held("vnc") || m.reloads != 1 {
+				t.Fatalf("both resets: rdp held %v, vnc held %v, reloads %d", held("rdp"), held("vnc"), m.reloads)
+			}
+			if runtime.GOOS == "windows" {
+				return
+			}
+			// A reset that fails still leaves the saved setting applied.
+			dir := store.Dir(ref)
+			if err := os.Chmod(dir, 0o770); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+			err = runSet([]string{"factory.gw-01", "--allow-ports", "81", flag})
+			if !errors.Is(err, identity.ErrDesktopPinsUnreadable) || m.reloads != 2 {
+				t.Fatalf("set with a failing reset = %v, reloads %d; want the pin error and a second reload", err, m.reloads)
+			}
+		})
 	}
 }

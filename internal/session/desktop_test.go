@@ -9,7 +9,6 @@ import (
 	"net"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,10 +152,10 @@ func (f *sshFixture) vncOpts() certOpts {
 	return o
 }
 
-// openVNC opens the desktop channel naming host:port, keeping its requests,
-// and runs the client half of vncAuthHandshake, so the channel then echoes.
-func openVNC(client *ssh.Client, host string, port uint32) (ssh.Channel, <-chan *ssh.Request, error) {
-	ch, reqs, err := openDesktopChannel(client, host, port)
+// openVNC opens the vnc desktop channel, keeping its requests, and runs the
+// client half of vncAuthHandshake, so the channel then echoes.
+func openVNC(client *ssh.Client) (ssh.Channel, <-chan *ssh.Request, error) {
+	ch, reqs, err := openDesktopChannel(client, chanVNC)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -166,13 +165,10 @@ func openVNC(client *ssh.Client, host string, port uint32) (ssh.Channel, <-chan 
 	return ch, reqs, nil
 }
 
-func openDesktopChannel(client *ssh.Client, host string, port uint32) (ssh.Channel, <-chan *ssh.Request, error) {
-	return client.OpenChannel(chanDirectTCPIP, ssh.Marshal(struct {
-		Host     string
-		Port     uint32
-		OrigHost string
-		OrigPort uint32
-	}{host, port, "127.0.0.1", 0}))
+// openDesktopChannel opens a desktop channel of chanType with the empty
+// payload the agent requires.
+func openDesktopChannel(client *ssh.Client, chanType string) (ssh.Channel, <-chan *ssh.Request, error) {
+	return client.OpenChannel(chanType, nil)
 }
 
 // clientHandshake reads the server version and a 3.7+ type list, sends
@@ -215,49 +211,28 @@ func waitEndRequest(t *testing.T, reqs <-chan *ssh.Request) string {
 	}
 }
 
-// The desktop channel reaches the configured target whatever address it
-// names; the named address sees no connection.
-func TestDesktopDialsOnlyTheTarget(t *testing.T) {
+// The vnc channel reaches the configured vnc target; the client's close of
+// the channel closes the target and ends the connection.
+func TestDesktopReachesTheTarget(t *testing.T) {
 	target := newVNCTarget(t)
-	decoy, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer decoy.Close()
-	var decoyHits atomic.Int32
-	go func() {
-		for {
-			c, err := decoy.Accept()
-			if err != nil {
-				return
-			}
-			decoyHits.Add(1)
-			_ = c.Close()
-		}
-	}()
 	f := desktopFixture(t, target.ln.Addr().String(), nil)
 	client := f.connect(t, f.vncOpts())
-	port := uint32(decoy.Addr().(*net.TCPAddr).Port)
-	ch, _, err := openVNC(client, "127.0.0.1", port)
+	ch, _, err := openVNC(client)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	pingPong(t, ch)
 	target.serverSide(t)
-	if n := decoyHits.Load(); n != 0 {
-		t.Fatalf("the requested address saw %d connections", n)
-	}
-	// The client's close of the channel closes the target and ends the
-	// connection.
 	_ = ch.Close()
 	target.waitClosed(t)
 	waitClosed(t, client)
 }
 
 // A desktop certificate needs the desktop login, no recording, and its kind
-// configured; rdp is not served yet.
+// configured.
 func TestDesktopAdmission(t *testing.T) {
 	target := newVNCTarget(t)
+	rdp := func(o *certOpts) { o.kind = "rdp" }
 	for _, tc := range []struct {
 		name    string
 		desktop []string
@@ -267,7 +242,10 @@ func TestDesktopAdmission(t *testing.T) {
 		{"vnc", []string{"vnc"}, nil, true},
 		{"recorded", []string{"vnc"}, func(o *certOpts) { o.rec = &certRec{Policy: RecPolicyStrict, PubSHA256: "AAAA"} }, false},
 		{"no vnc target", []string{"rdp"}, nil, false},
-		{"rdp", []string{"rdp", "vnc"}, func(o *certOpts) { o.kind = "rdp" }, false},
+		{"rdp", []string{"rdp", "vnc"}, rdp, true},
+		{"rdp recorded", []string{"rdp"}, func(o *certOpts) { rdp(o); o.rec = &certRec{Policy: RecPolicyStrict, PubSHA256: "AAAA"} }, false},
+		{"rdp other login", []string{"rdp"}, func(o *certOpts) { rdp(o); o.login = "root" }, false},
+		{"no rdp target", []string{"vnc"}, rdp, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := desktopFixture(t, target.ln.Addr().String(), func(c *ServerConfig) { c.Desktop = tc.desktop })
@@ -283,18 +261,38 @@ func TestDesktopAdmission(t *testing.T) {
 	}
 }
 
-// A desktop connection serves one direct-tcpip channel and nothing else.
+// A desktop connection serves one channel of its kind's type, with an empty
+// payload, and nothing else. A refused open before the channel ends the
+// connection; one after it leaves the channel serving.
 func TestDesktopChannelRules(t *testing.T) {
 	target := newVNCTarget(t)
 	f := desktopFixture(t, target.ln.Addr().String(), nil)
-	client := f.connect(t, f.vncOpts())
-	if _, err := client.NewSession(); err == nil {
-		t.Fatal("a session channel opened")
-	}
 	var oce *ssh.OpenChannelError
-	if _, err := client.Dial("unix", filepath.Join(t.TempDir(), "s")); !errors.As(err, &oce) || oce.Reason != ssh.Prohibited {
-		t.Fatalf("direct-streamlocal: %v, want prohibited", err)
+	for name, open := range map[string]func(client *ssh.Client) error{
+		"session": func(client *ssh.Client) error { _, _, err := client.OpenChannel("session", nil); return err },
+		"direct-streamlocal": func(client *ssh.Client) error {
+			_, err := client.Dial("unix", filepath.Join(t.TempDir(), "s"))
+			return err
+		},
+		"rdp type": func(client *ssh.Client) error { _, _, err := openDesktopChannel(client, chanRDP); return err },
+		"direct-tcpip": func(client *ssh.Client) error {
+			_, _, err := client.OpenChannel(chanDirectTCPIP, ssh.Marshal(struct {
+				Host     string
+				Port     uint32
+				OrigHost string
+				OrigPort uint32
+			}{"localport-desktop", 1, "127.0.0.1", 0}))
+			return err
+		},
+		"payload": func(client *ssh.Client) error { _, _, err := client.OpenChannel(chanVNC, []byte{0}); return err },
+	} {
+		client := f.connect(t, f.vncOpts())
+		if err := open(client); !errors.As(err, &oce) || oce.Reason != ssh.Prohibited {
+			t.Fatalf("%s: %v, want prohibited", name, err)
+		}
+		waitClosed(t, client)
 	}
+	client := f.connect(t, f.vncOpts())
 	ok, _, err := client.SendRequest(reqTCPIPForward, true, ssh.Marshal(struct {
 		Addr string
 		Port uint32
@@ -302,13 +300,16 @@ func TestDesktopChannelRules(t *testing.T) {
 	if err != nil || ok {
 		t.Fatalf("tcpip-forward: %v, %v; want refused", ok, err)
 	}
-	ch, _, err := openVNC(client, "localport-desktop", 1)
+	ch, _, err := openVNC(client)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	pingPong(t, ch)
-	if _, _, err := openVNC(client, "localport-desktop", 1); !errors.As(err, &oce) || oce.Reason != ssh.ResourceShortage {
+	if _, _, err := openVNC(client); !errors.As(err, &oce) || oce.Reason != ssh.ResourceShortage {
 		t.Fatalf("a second channel: %v, want resource shortage", err)
+	}
+	if _, _, err := openDesktopChannel(client, chanRDP); !errors.As(err, &oce) || oce.Reason != ssh.Prohibited {
+		t.Fatalf("a wrong type after the channel: %v, want prohibited", err)
 	}
 	if ok, err := ch.SendRequest("env", true, nil); err != nil || ok {
 		t.Fatalf("a channel request: %v", err)
@@ -317,27 +318,32 @@ func TestDesktopChannelRules(t *testing.T) {
 }
 
 // A refused target dial rejects the channel with its code and ends the
-// connection; a malformed open is refused invalid.
+// connection.
 func TestDesktopDialRefusals(t *testing.T) {
 	closed, _ := net.Listen("tcp", "127.0.0.1:0")
 	addr := closed.Addr().String()
 	_ = closed.Close()
 	f := desktopFixture(t, addr, nil)
 	client := f.connect(t, f.vncOpts())
-	_, _, err := openVNC(client, "localport-desktop", 1)
+	_, _, err := openVNC(client)
 	var oce *ssh.OpenChannelError
 	if !errors.As(err, &oce) || oce.Reason != ssh.ConnectionFailed || oce.Message != "connection_refused" {
 		t.Fatalf("open: %v, want connection_refused", err)
 	}
 	waitClosed(t, client)
+}
 
-	o := f.vncOpts()
-	o.serial = 43
-	client = f.connect(t, o)
-	if _, _, err := openVNC(client, "", 1); !errors.As(err, &oce) || oce.Message != "invalid" {
-		t.Fatalf("an empty host: %v, want invalid", err)
+// A terminal connection rejects both desktop channel types as it rejects any
+// unknown type.
+func TestTerminalRejectsDesktopChannels(t *testing.T) {
+	f := newSSHFixture(t, nil)
+	client := f.connect(t, f.defaults())
+	for _, typ := range []string{chanVNC, chanRDP} {
+		var oce *ssh.OpenChannelError
+		if _, _, err := openDesktopChannel(client, typ); !errors.As(err, &oce) || oce.Reason != ssh.Prohibited {
+			t.Fatalf("%s: %v, want prohibited", typ, err)
+		}
 	}
-	waitClosed(t, client)
 }
 
 // idleClock is manualClock that also fires the idle timer on demand.
@@ -377,7 +383,7 @@ func TestDesktopIdle(t *testing.T) {
 		target := newVNCTarget(t)
 		f := desktopFixture(t, target.ln.Addr().String(), func(c *ServerConfig) { c.clock = clock })
 		client := f.connect(t, f.vncOpts())
-		ch, reqs, err := openVNC(client, "localport-desktop", 1)
+		ch, reqs, err := openVNC(client)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -405,7 +411,7 @@ func TestDesktopIdle(t *testing.T) {
 		target := newVNCTarget(t)
 		f := desktopFixture(t, target.ln.Addr().String(), func(c *ServerConfig) { c.clock = clock })
 		client := f.connect(t, f.vncOpts())
-		ch, reqs, err := openVNC(client, "localport-desktop", 1)
+		ch, reqs, err := openVNC(client)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -436,7 +442,7 @@ func TestDesktopEndClosesTheTarget(t *testing.T) {
 			target := newVNCTarget(t)
 			f := desktopFixture(t, target.ln.Addr().String(), nil)
 			client := f.connect(t, f.vncOpts())
-			ch, reqs, err := openVNC(client, "localport-desktop", 1)
+			ch, reqs, err := openVNC(client)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -468,7 +474,7 @@ func TestDesktopEndDuringTheDial(t *testing.T) {
 	client := f.connect(t, f.vncOpts())
 	opened := make(chan error, 1)
 	go func() {
-		_, _, err := openVNC(client, "localport-desktop", 1)
+		_, _, err := openVNC(client)
 		opened <- err
 	}()
 	<-dialing
@@ -504,7 +510,7 @@ func TestDesktopDialFinishingAfterTheEnd(t *testing.T) {
 	client := f.connect(t, f.vncOpts())
 	opened := make(chan error, 1)
 	go func() {
-		_, _, err := openVNC(client, "localport-desktop", 1)
+		_, _, err := openVNC(client)
 		opened <- err
 	}()
 	<-dialing
@@ -520,14 +526,16 @@ func TestDesktopDialFinishingAfterTheEnd(t *testing.T) {
 	target.waitClosed(t)
 }
 
-// The target's close ends the channel and the connection without an end
-// request: the channel already stopped. A client's EOF ends the target.
+// The target's close during the relay ends the channel and the connection
+// without an end request: the channel already stopped. During the handshake
+// it ends desktop_target_closed, told to the client. A client's EOF ends the
+// target.
 func TestDesktopEndsWithItsChannel(t *testing.T) {
 	t.Run("target closes", func(t *testing.T) {
 		target := newVNCTarget(t)
 		f := desktopFixture(t, target.ln.Addr().String(), nil)
 		client := f.connect(t, f.vncOpts())
-		ch, reqs, err := openVNC(client, "localport-desktop", 1)
+		ch, reqs, err := openVNC(client)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -551,19 +559,14 @@ func TestDesktopEndsWithItsChannel(t *testing.T) {
 		})
 		f := desktopFixture(t, target.ln.Addr().String(), func(c *ServerConfig) { c.DesktopKeys = &memKeys{} })
 		client := f.connect(t, f.vncOpts())
-		ch, reqs, err := openDesktopChannel(client, "localport-desktop", 1)
+		ch, reqs, err := openDesktopChannel(client, chanVNC)
 		if err != nil {
 			t.Fatal(err)
 		}
 		readFor(t, ch, "RFB 003.008\n")
 		_, _ = io.WriteString(ch, "RFB 003.008\n")
-		select {
-		case r, ok := <-reqs:
-			if ok {
-				t.Fatalf("request %q after the target closed", r.Type)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("the channel did not close")
+		if reason := waitEndRequest(t, reqs); reason != CloseDesktopTargetClosed {
+			t.Fatalf("end reason %q, want %q", reason, CloseDesktopTargetClosed)
 		}
 		waitClosed(t, client)
 	})
@@ -571,7 +574,7 @@ func TestDesktopEndsWithItsChannel(t *testing.T) {
 		target := newVNCTarget(t)
 		f := desktopFixture(t, target.ln.Addr().String(), nil)
 		client := f.connect(t, f.vncOpts())
-		ch, _, err := openVNC(client, "localport-desktop", 1)
+		ch, _, err := openVNC(client)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -589,7 +592,7 @@ func TestDesktopResume(t *testing.T) {
 	target := newVNCTarget(t)
 	f := desktopFixture(t, target.ln.Addr().String(), func(c *ServerConfig) { c.clock = clock })
 	rc := f.connectResumableAs(t, f.vncOpts())
-	ch, _, err := openVNC(rc.client, "localport-desktop", 1)
+	ch, _, err := openVNC(rc.client)
 	if err != nil {
 		t.Fatal(err)
 	}

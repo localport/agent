@@ -55,10 +55,12 @@ type desktopPin struct {
 }
 
 // DesktopPins is a device identity's pinned desktop target keys, kept in
-// desktop_pins.json beside meta.json, keyed by desktop kind ("vnc"), each
+// desktop_pins.json beside meta.json, keyed by desktop kind ("rdp": the
+// SHA-256 of the leaf certificate's SPKI; "vnc": of the RA2ne key), each
 // naming the target address it was pinned for. Writers hold writeMu, then
 // the file lock .pins.lock, and re-read the file under both, so writers in
-// this process and in others (`localport set --vnc-reset-pin`) never lose a
+// this process and in others (`localport set --rdp-reset-pin`,
+// `--vnc-reset-pin`) never lose a
 // write. .pins.lock is taken alone: never with .renew.lock or .keys.lock. It
 // is held across file I/O only. The file goes with the identity directory
 // (Store.Remove, Store.RemoveDevices), which is never recreated here.

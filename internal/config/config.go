@@ -70,9 +70,10 @@ type DeviceSpec struct {
 	Capabilities []string
 	Logins       []string
 	Desktop      []string
-	// VNCTarget is the vnc target address when Desktop holds vnc; local to
-	// the session server, never reported.
+	// VNCTarget and RDPTarget are the vnc and rdp target addresses when
+	// Desktop holds the kind; local to the session server, never reported.
 	VNCTarget string
+	RDPTarget string
 	// PasswordLogins are the Logins whose sessions ask for the login's
 	// password (LocalDevice.PasswordLogins); local to the session server.
 	PasswordLogins []string

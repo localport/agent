@@ -2,11 +2,12 @@ package session
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -19,15 +20,33 @@ import (
 const (
 	// desktopDialTimeout bounds the dial of a desktop target.
 	desktopDialTimeout = 10 * time.Second
+	// desktopClientWait bounds the handshake's wait for the client, from the
+	// channel's accept to its last client read before the key question.
+	desktopClientWait = 30 * time.Second
 	// reqDesktopEnd is the channel request telling the client why the agent
 	// ended a desktop channel; its payload is one string holding the reason.
 	reqDesktopEnd = "end@localport.io"
+	// The channel type of each desktop kind; the open carries no payload.
+	chanVNC = "vnc@localport.io"
+	chanRDP = "rdp@localport.io"
 )
+
+// desktopChannelType is the channel type a desktop kind's connection serves,
+// or "" for a kind that is not a desktop kind.
+func desktopChannelType(kind string) string {
+	switch kind {
+	case "vnc":
+		return chanVNC
+	case "rdp":
+		return chanRDP
+	}
+	return ""
+}
 
 // isDesktopKind reports whether kind is a desktop kind the agent serves: its
 // connection carries one channel to the configured target, dialed by the
 // agent process.
-func isDesktopKind(kind string) bool { return kind == "vnc" }
+func isDesktopKind(kind string) bool { return desktopChannelType(kind) != "" }
 
 // desktopChannel is the one channel of a desktop connection, guarded by the
 // connection's mu: the dial's cancel until the dial returns, then the
@@ -46,20 +65,35 @@ type desktopChannel struct {
 
 // desktopTarget is the configured address of a desktop kind.
 func (s *Server) desktopTarget(kind string) string {
-	if kind == "vnc" {
+	switch kind {
+	case "vnc":
 		return s.cfg.VNCTarget
+	case "rdp":
+		return s.cfg.RDPTarget
 	}
 	return ""
 }
 
-// openDesktop serves the channel open of a desktop connection: one
-// direct-tcpip channel, whatever address it names, relayed to the
-// configured target. Any other channel is refused. The connection ends with
-// its one channel, or when that channel is refused. It never blocks the
-// accept loop: the dial runs on its own goroutine, joined by wg.
+// openDesktop serves the channel open of a desktop connection: one channel
+// of its kind's type with an empty payload, relayed to the configured
+// target after the kind's handshake. Any other channel is refused. The
+// connection ends with its one channel, when that channel is refused after
+// the dial started, or when an open is refused before any channel
+// registered, so a refused client does not hold a session slot. It never
+// blocks the accept loop: the dial runs on its own goroutine, joined by wg.
 func (c *conn) openDesktop(nc ssh.NewChannel, kind string, wg *sync.WaitGroup) {
-	if nc.ChannelType() != chanDirectTCPIP {
-		_ = nc.Reject(ssh.Prohibited, "a desktop connection serves only its direct-tcpip channel")
+	if want := desktopChannelType(kind); nc.ChannelType() != want || len(nc.ExtraData()) != 0 {
+		_ = nc.Reject(ssh.Prohibited, "a "+kind+" connection serves only its "+want+" channel, with no payload")
+		c.mu.Lock()
+		var d *desktopChannel
+		if !c.ended && c.desktop == nil {
+			d = &desktopChannel{cancel: func() {}}
+			c.desktop = d
+		}
+		c.mu.Unlock()
+		if d != nil {
+			c.desktopDone(d)
+		}
 		return
 	}
 	c.mu.Lock()
@@ -72,12 +106,6 @@ func (c *conn) openDesktop(nc ssh.NewChannel, kind string, wg *sync.WaitGroup) {
 	d := &desktopChannel{cancel: cancel}
 	c.desktop = d
 	c.mu.Unlock()
-	if !validDirectTCPIP(nc.ExtraData()) {
-		cancel()
-		_ = nc.Reject(ssh.ConnectionFailed, launcher.FwdCodeName(launcher.FwdCodeInvalid))
-		c.desktopDone(d)
-		return
-	}
 	wg.Go(func() {
 		// A check that ends the connection leaves the end to run (c.fail),
 		// which tells the client its reason; every other return ends it here.
@@ -136,16 +164,35 @@ func (c *conn) openDesktop(nc ssh.NewChannel, kind string, wg *sync.WaitGroup) {
 			_ = ch.Close()
 			return
 		}
-		check := &rfbCheck{c: c, ch: ch, target: target, fromClient: bufio.NewReader(ch), fromTarget: bufio.NewReader(target),
-			keys: c.s.cfg.DesktopKeys, kind: kind, addr: c.s.desktopTarget(kind), timeout: c.s.cfg.desktopCheckTimeout}
-		if check.keys == nil {
-			check.keys = noDesktopKeys{}
+		h := &desktopHandshake{c: c, ch: ch, target: target, fromClient: bufio.NewReader(ch),
+			keys: c.s.cfg.DesktopKeys, kind: kind, addr: c.s.desktopTarget(kind), timeout: c.s.cfg.desktopCheckTimeout,
+			wait: c.startClientWait(wg)}
+		defer h.wait.end()
+		if h.keys == nil {
+			h.keys = noDesktopKeys{}
 		}
-		if check.timeout == 0 {
-			check.timeout = desktopCheckTimeout
+		if h.timeout == 0 {
+			h.timeout = desktopTargetTimeout
 		}
-		reason, err = check.run(checkCtx)
+		var relayTarget io.ReadWriter
+		if kind == "rdp" {
+			g := &rdpGateway{desktopHandshake: h}
+			reason, err = g.run(checkCtx)
+			relayTarget = g.tls
+		} else {
+			h.fromTarget = bufio.NewReader(target)
+			reason, err = (&rfbCheck{desktopHandshake: h}).run(checkCtx)
+			relayTarget = struct {
+				io.Reader
+				io.Writer
+			}{h.fromTarget, target}
+		}
+		reason, err = handshakeOutcome(reason, err)
 		switch {
+		case errors.Is(err, errDesktopEnded):
+			// The client wait expired: its end tells the client.
+			failed = true
+			return
 		case err != nil:
 			return
 		case reason != "":
@@ -153,8 +200,234 @@ func (c *conn) openDesktop(nc ssh.NewChannel, kind string, wg *sync.WaitGroup) {
 			c.fail(reason)
 			return
 		}
-		c.relayDesktop(ch, target, check.fromClient, check.fromTarget)
+		c.relayDesktop(ch, target, h.fromClient, relayTarget)
 	})
+}
+
+// desktopHandshake is what both desktop handshakes share: the accepted
+// channel, the target connection, the buffered client reader the relay
+// continues from, the pin store and the client wait. Only the open
+// goroutine uses it.
+type desktopHandshake struct {
+	c          *conn
+	ch         ssh.Channel
+	target     net.Conn
+	fromClient *bufio.Reader
+	// fromTarget is the vnc check's buffered target reader; the rdp gateway
+	// reads the target unbuffered, since TLS runs on the same connection.
+	fromTarget *bufio.Reader
+	keys       DesktopKeys
+	kind, addr string
+	// timeout is the deadline of each target read and write.
+	timeout time.Duration
+	wait    *clientWait
+}
+
+// handshakeSide is the side of a desktop handshake an I/O error came from.
+type handshakeSide uint8
+
+const (
+	sideClient handshakeSide = iota + 1
+	sideTarget
+)
+
+// handshakeFault is what went wrong in a desktop handshake.
+type handshakeFault uint8
+
+const (
+	// faultDeadline: a target read or write passed its deadline.
+	faultDeadline handshakeFault = iota + 1
+	// faultClosed: an EOF or I/O error, a short read included.
+	faultClosed
+	// faultMalformed: bytes that do not parse, or a refused form.
+	faultMalformed
+)
+
+// handshakeError is a failure of a desktop handshake, typed by side and
+// fault so the end code never depends on error text.
+type handshakeError struct {
+	side  handshakeSide
+	fault handshakeFault
+	err   error
+}
+
+func (e *handshakeError) Error() string {
+	side := "client"
+	if e.side == sideTarget {
+		side = "target"
+	}
+	return fmt.Sprintf("desktop handshake (%s): %v", side, e.err)
+}
+
+func (e *handshakeError) Unwrap() error { return e.err }
+
+// clientIOError types an error reading or writing the channel.
+func clientIOError(err error) error {
+	return &handshakeError{side: sideClient, fault: faultClosed, err: err}
+}
+
+// targetIOError types an error reading or writing the target.
+func targetIOError(err error) error {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return &handshakeError{side: sideTarget, fault: faultDeadline, err: err}
+	}
+	return &handshakeError{side: sideTarget, fault: faultClosed, err: err}
+}
+
+// malformed types bytes from side that do not parse or take a refused form.
+func malformed(side handshakeSide, format string, args ...any) error {
+	return &handshakeError{side: side, fault: faultMalformed, err: fmt.Errorf(format, args...)}
+}
+
+// errDesktopEnded marks a handshake interrupted by the connection's end,
+// which reports its own reason.
+var errDesktopEnded = errors.New("desktop connection ended")
+
+// handshakeOutcome maps a handshake's result to the end of the connection,
+// first match wins: a target deadline ends desktop_handshake_timeout, a
+// target EOF or I/O error desktop_target_closed, a client error ends it
+// "exited" with no reason told (err is kept), and malformed bytes end
+// desktop_handshake_invalid. Any other error is the connection's own end.
+func handshakeOutcome(reason string, err error) (string, error) {
+	var he *handshakeError
+	switch {
+	case err == nil:
+		return reason, nil
+	case !errors.As(err, &he):
+		return "", err
+	case he.fault == faultDeadline:
+		return CloseDesktopHandshakeTimeout, nil
+	case he.fault == faultClosed && he.side == sideTarget:
+		return CloseDesktopTargetClosed, nil
+	case he.fault == faultClosed:
+		return "", err
+	}
+	return CloseDesktopHandshake, nil
+}
+
+// readClient reads n client bytes; they count as activity.
+func (h *desktopHandshake) readClient(n int) ([]byte, error) {
+	b := make([]byte, n)
+	if _, err := io.ReadFull(h.fromClient, b); err != nil {
+		return nil, clientIOError(err)
+	}
+	h.c.active()
+	return b, nil
+}
+
+// writeClient writes b to the channel.
+func (h *desktopHandshake) writeClient(b []byte) error {
+	if _, err := h.ch.Write(b); err != nil {
+		return clientIOError(err)
+	}
+	return nil
+}
+
+// readTarget reads n target bytes from r within the target deadline.
+func (h *desktopHandshake) readTarget(r io.Reader, n int) ([]byte, error) {
+	_ = h.target.SetReadDeadline(time.Now().Add(h.timeout))
+	b := make([]byte, n)
+	if _, err := io.ReadFull(r, b); err != nil {
+		return nil, targetIOError(err)
+	}
+	return b, nil
+}
+
+// writeTarget writes b to the target within the target deadline.
+func (h *desktopHandshake) writeTarget(b []byte) error {
+	_ = h.target.SetWriteDeadline(time.Now().Add(h.timeout))
+	if _, err := h.target.Write(b); err != nil {
+		return targetIOError(err)
+	}
+	return nil
+}
+
+// clientWaitDone stops the client wait after the handshake's last client
+// read before the key question; errDesktopEnded when the wait had expired.
+func (h *desktopHandshake) clientWaitDone() error {
+	if !h.wait.end() {
+		return errDesktopEnded
+	}
+	return nil
+}
+
+// trust runs the key step both kinds share for the target key sum: a
+// pinned, different key ends desktop_key_changed; otherwise the client is
+// asked (payload built with whether the key is pinned), a refusal ends
+// desktop_key_rejected, and a key not pinned is pinned on first use. A
+// store failure ends desktop_key_unavailable. "" lets the handshake go on.
+func (h *desktopHandshake) trust(ctx context.Context, sum [32]byte, payload func(pinned bool) []byte) (string, error) {
+	pinned, held, err := h.keys.Lookup(h.kind, h.addr)
+	if err != nil {
+		h.c.s.log("session: desktop key of %s: %v", h.addr, err)
+		return CloseDesktopKeyUnavailable, nil
+	}
+	if held && pinned != sum {
+		h.c.s.log("session: desktop target %s presented key %x, pinned %x", h.addr, sum, pinned)
+		return CloseDesktopKeyChanged, nil
+	}
+	ok, err := h.ch.SendRequest(reqDesktopKey, true, payload(held))
+	if err != nil {
+		return "", clientIOError(err)
+	}
+	if !ok {
+		return CloseDesktopKeyRejected, nil
+	}
+	if held {
+		return "", nil
+	}
+	switch r, err := h.keys.Pin(ctx, h.kind, h.addr, sum); {
+	case err != nil:
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		h.c.s.log("session: pin desktop key of %s: %v", h.addr, err)
+		return CloseDesktopKeyUnavailable, nil
+	case r == identity.PinChanged:
+		h.c.s.log("session: desktop target %s presented key %x, another was pinned first", h.addr, sum)
+		return CloseDesktopKeyChanged, nil
+	}
+	return "", nil
+}
+
+// clientWait is the handshake's bound on the client: unless end runs
+// first, it ends the connection desktop_handshake_timeout.
+type clientWait struct {
+	c       *conn
+	stop    func() bool
+	done    chan struct{}
+	over    bool
+	expired bool
+}
+
+// startClientWait arms the client wait on the server clock; its watcher
+// goroutine is joined by wg and leaves at end.
+func (c *conn) startClientWait(wg *sync.WaitGroup) *clientWait {
+	fire, stop := c.s.cfg.clock.NewTimer(desktopClientWait)
+	w := &clientWait{c: c, stop: stop, done: make(chan struct{})}
+	wg.Go(func() {
+		select {
+		case <-fire:
+			c.fail(CloseDesktopHandshakeTimeout)
+		case <-w.done:
+		}
+	})
+	return w
+}
+
+// end stops the wait and reports whether it stopped in time. When the timer
+// had fired, the end of the connection runs (end records it itself, since
+// the watcher may see done first). Called by the open goroutine only;
+// repeat calls return the first answer.
+func (w *clientWait) end() bool {
+	if !w.over {
+		w.over = true
+		if w.expired = !w.stop(); w.expired {
+			w.c.fail(CloseDesktopHandshakeTimeout)
+		}
+		close(w.done)
+	}
+	return !w.expired
 }
 
 // noDesktopKeys is the pin store of a server configured without one: every
@@ -171,19 +444,20 @@ func (noDesktopKeys) Pin(context.Context, string, string, [32]byte) (identity.Pi
 	return 0, errNoDesktopKeys
 }
 
-// relayDesktop copies between the desktop channel and the target until
-// either direction ends, then closes both: a remote framebuffer protocol has
-// no half-close, so one side's end is the session's. It reads from the
-// handshake check's buffered readers, so bytes they read ahead come first.
-// Only client bytes are activity for the idle timer.
-func (c *conn) relayDesktop(ch ssh.Channel, target net.Conn, fromClient, fromTarget io.Reader) {
+// relayDesktop copies between the desktop channel and peer, the target's
+// stream (the target connection, or its TLS session for rdp), until either
+// direction ends, then closes the channel and the target connection: neither
+// desktop protocol has a half-close, so one side's end is the session's. It
+// reads the client from the handshake's buffered reader, so bytes read ahead
+// come first. Only client bytes are activity for the idle timer.
+func (c *conn) relayDesktop(ch ssh.Channel, target net.Conn, fromClient io.Reader, peer io.ReadWriter) {
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(activityWriter{target, c}, fromClient)
+		_, _ = io.Copy(activityWriter{peer, c}, fromClient)
 		done <- struct{}{}
 	}()
 	go func() {
-		_, _ = io.Copy(ch, fromTarget)
+		_, _ = io.Copy(ch, peer)
 		done <- struct{}{}
 	}()
 	<-done
@@ -209,19 +483,6 @@ func discardChannelRequests(reqs <-chan *ssh.Request) {
 			_ = r.Reply(false, nil)
 		}
 	}
-}
-
-// validDirectTCPIP reports whether payload is a well-formed direct-tcpip open
-// (RFC 4254 7.2), with the bounds forwarder.local applies.
-func validDirectTCPIP(payload []byte) bool {
-	var p struct {
-		Host     string
-		Port     uint32
-		OrigHost string
-		OrigPort uint32
-	}
-	return ssh.Unmarshal(payload, &p) == nil && p.Host != "" && len(p.Host) <= launcher.MaxForwardHost &&
-		bytes.IndexByte([]byte(p.Host), 0) < 0 && p.Port >= 1 && p.Port <= 65535
 }
 
 // desktopDialCode is the refusal code of a failed target dial.

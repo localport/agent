@@ -219,14 +219,14 @@ func deviceSpec(store *identity.Store, d config.LocalDevice, probe sessionProbe,
 		capabilities[i] = string(c)
 	}
 	var desktop []string
-	var vncTarget string
+	var vncTarget, rdpTarget string
 	if slices.Contains(d.Enable, config.CapabilityDesktop) {
 		for _, target := range []struct{ kind, value string }{{"rdp", d.RDP}, {"vnc", d.VNC}} {
 			if target.value != "" {
 				desktop = append(desktop, target.kind)
 			}
 		}
-		vncTarget = d.VNC
+		vncTarget, rdpTarget = d.VNC, d.RDP
 	}
 	// The edge names the device by the prefix in its certificate; the
 	// client name only labels it in this agent's output.
@@ -248,6 +248,7 @@ func deviceSpec(store *identity.Store, d config.LocalDevice, probe sessionProbe,
 		PasswordLogins: d.PasswordLogins,
 		Desktop:        desktop,
 		VNCTarget:      vncTarget,
+		RDPTarget:      rdpTarget,
 		RunAsAgent:     d.RunAsAgent,
 	}
 	if d.UsesLogins() {
@@ -311,6 +312,7 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 		PasswordLogins: spec.PasswordLogins,
 		Desktop:        spec.Desktop,
 		VNCTarget:      spec.VNCTarget,
+		RDPTarget:      spec.RDPTarget,
 		DesktopKeys:    desktopKeys,
 		OnEvent:        logEvent,
 		Uploader:       uploads,

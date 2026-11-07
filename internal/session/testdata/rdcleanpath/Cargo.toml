@@ -1,0 +1,14 @@
+# Generates ../rdcleanpath.golden, the RDCleanPath PDUs the rdp gateway
+# tests compare the agent's encoding and decoding with, from IronRDP's own
+# encoder. Regenerate from this directory:
+#   cargo run -q > ../rdcleanpath.golden
+[package]
+name = "rdcleanpath-golden"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ironrdp-rdcleanpath = { git = "https://github.com/Devolutions/IronRDP", rev = "da016ce860040c6cb37943cfc857d836735d252c" }
+
+[workspace]

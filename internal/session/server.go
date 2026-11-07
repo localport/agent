@@ -111,6 +111,9 @@ type ServerConfig struct {
 	// VNCTarget is the configured vnc target, HOST:PORT: the only address a
 	// vnc connection's channel reaches, whatever it requests.
 	VNCTarget string
+	// RDPTarget is the configured rdp target, HOST:PORT: the only address an
+	// rdp connection's channel reaches, whatever its RDCleanPath request names.
+	RDPTarget string
 	// DesktopKeys holds the desktop targets' pinned server keys; nil ends
 	// every connection whose handshake needs it (desktop_key_unavailable).
 	DesktopKeys DesktopKeys
@@ -129,17 +132,19 @@ type ServerConfig struct {
 	// Launcher starts sessions; nil is the launcher socket or pipe.
 	Launcher Launcher
 
-	// clock replaces the wall clock for validity and idle checks. Tests set it.
+	// clock replaces the wall clock for validity, idle and desktop client
+	// wait checks. Tests set it.
 	clock clock
 	// dialDesktop replaces the desktop target dial. Tests set it.
 	dialDesktop func(ctx context.Context, network, addr string) (net.Conn, error)
-	// desktopCheckTimeout replaces the handshake check's per-read target
-	// deadline when set. Tests set it.
+	// desktopCheckTimeout replaces the desktop handshake's per-operation
+	// target deadline when set. Tests set it.
 	desktopCheckTimeout time.Duration
 }
 
-// clock is the time source of the validity and idle checks. NewTimer returns
-// the timer's channel and a stop function.
+// clock is the time source of the validity, idle and desktop client wait
+// checks. NewTimer returns the timer's channel and a stop function, which
+// reports false when the timer already fired.
 type clock interface {
 	Now() time.Time
 	NewTimer(d time.Duration) (<-chan time.Time, func() bool)

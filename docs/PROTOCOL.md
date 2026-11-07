@@ -623,8 +623,8 @@ stream:
    | signed by a session CA key the agent holds (`ticket_keys.json`); an unknown CA key triggers one key fetch (at most 3 s, at most once per 5 minutes) and one retry |
    | valid now within 30 s of skew, for the user name as its principal |
    | exactly the critical options `device@localport.io`, naming this device's prefix and registered key (`spki_sha256`), and for a `files` or `ssh` certificate `files@localport.io`: the file directions its SFTP channels may use, one of `""`, `download`, `upload`, `download,upload` (any other value, or a `files` or `ssh` certificate without it, is refused) |
-   | the kind (`kind@localport.io`) enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) and served by this agent (`terminal`, `ssh`, `files`, `vnc`) |
-   | for `terminal`, `ssh` and `files`: the user name listed in the local `logins`; for `vnc`: the user name `localport-desktop` and no `rec@localport.io` (a desktop session is never recorded) |
+   | the kind (`kind@localport.io`) enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) and served by this agent (`terminal`, `ssh`, `files`, `rdp`, `vnc`) |
+   | for `terminal`, `ssh` and `files`: the user name listed in the local `logins`; for `rdp` and `vnc`: the user name `localport-desktop` and no `rec@localport.io` (a desktop session is never recorded) |
    | a `rec@localport.io`, when present, naming the held team recording key; a mismatch triggers one key fetch, under the same floor, and one retry |
 
    On Windows, a user name listed in the device's `password_logins` then needs
@@ -710,64 +710,119 @@ stream:
    requests on it are refused (`helper_failed`); the connection continues.
    Forwarded data, both ways, counts as activity for the idle timer.
 
-   A `vnc` connection serves one `direct-tcpip` channel and nothing else:
-   other channel types are refused `prohibited`, a second channel `resource
-   shortage`, and every global request is answered false. The agent checks
-   the channel's payload as for a local forward (`invalid` otherwise),
-   ignores the host and port it names, and dials the device's configured
-   `vnc` target itself, with a 10 s timeout, without a helper. A failed dial
-   refuses the channel `connect failed` with `connection_refused` or
-   `unreachable` (a timeout included); the channel is accepted only after
-   the dial succeeds. Before it relays freely the agent reads the VNC
-   handshake (RFC 6143 section 7.1, as noVNC speaks it), forwarding every
-   byte unchanged: the server's ProtocolVersion (`RFB ddd.ddd\n`; the
-   repeater's `000.000` is refused), the client's (`RFB 003.003`, `003.007`
-   or `003.008`), the security type list and the client's choice (3.3: the
-   server's `u32` choice), and for VeNCrypt (19) its versions, ack,
-   subtypes and the client's subtype. When the choice or the VeNCrypt
-   subtype is RA2ne (6) it reads the server's RSA key (`u32` bit length,
-   1024 to 8192, then modulus and exponent of `ceil(bits/8)` bytes each)
-   and holds it: a key other than the one pinned for the device's `vnc`
-   target ends the connection `desktop_key_changed`; otherwise it sends
-   the channel request `desktop-key@localport.io` (want-reply true) whose
-   payload is the SHA-256 of exactly those length, modulus and exponent
-   bytes in lowercase hex (SSH string) and whether it is pinned (boolean).
-   A false reply ends it `desktop_key_rejected`; a true one pins an
-   unpinned key and then forwards it. Once a key is pinned for the target,
-   a handshake that chooses no RA2ne ends `desktop_key_downgraded`; an
-   unreadable pin store ends `desktop_key_unavailable`; a malformed
-   handshake, or a target that does not answer within 30 s when the agent
-   reads from it (time spent waiting for the client does not count),
-   `desktop_handshake_invalid`. The pins live in `desktop_pins.json` (see
-   Stored identity); `localport set <device> --vnc-reset-pin` forgets the
-   `vnc` one, or removes the whole file when it is unreadable. The agent
-   then relays the channel and the target connection
-   until either ends; the channel's end, or its refusal, ends the
-   connection, and every end of the connection closes the target connection.
-   The agent answers every other request on the channel false. Only data
-   from the client on the channel counts as activity for the idle timer;
-   target output and global requests do not. A recorded
+   A desktop connection (`rdp` or `vnc`) serves one channel of its kind's
+   type, `rdp@localport.io` or `vnc@localport.io`, with an empty open
+   payload, and nothing else: any other type (`direct-tcpip` and the other
+   kind's type included) or a payload is refused `prohibited`, a second
+   channel `resource shortage`, and every global request is answered false.
+   A `prohibited` refusal before the channel opened ends the connection;
+   one after it leaves the channel serving.
+   The agent dials the device's configured target of the kind itself, with
+   a 10 s timeout, without a helper. A failed dial refuses the channel
+   `connect failed` with `connection_refused` or `unreachable` (a timeout
+   included); the channel is accepted only after the dial succeeds.
+
+   The handshake before the relay is bounded. From the channel's accept, the
+   client has 30 s to send its part, up to the last client read before the
+   key question (for `rdp` the request PDU; for `vnc` the client's last
+   version, type or VeNCrypt reply); past it the connection ends
+   `desktop_handshake_timeout`. Each target read and write has a 30 s
+   deadline, which ends it `desktop_handshake_timeout` too; the deadlines
+   are cleared before the relay. Waiting for the reply to
+   `desktop-key@localport.io` has no handshake bound. Both bounds keep
+   running while the connection is detached, so a network drop during the
+   handshake ends it rather than resuming it. A target EOF or I/O error
+   before the relay ends `desktop_target_closed`; a client EOF or close ends
+   it `exited`, with nothing told.
+
+   On a `vnc` connection the agent reads the VNC handshake (RFC 6143 section
+   7.1, as noVNC speaks it), forwarding every byte unchanged: the server's
+   ProtocolVersion (`RFB ddd.ddd\n`; the repeater's `000.000` is refused),
+   the client's (`RFB 003.003`, `003.007` or `003.008`), the security type
+   list and the client's choice (3.3: the server's `u32` choice), and for
+   VeNCrypt (19) its versions, ack, subtypes and the client's subtype. When
+   the choice or the VeNCrypt subtype is RA2ne (6) it reads the server's RSA
+   key (`u32` bit length, 1024 to 8192, then modulus and exponent of
+   `ceil(bits/8)` bytes each) and holds it for the key step below, whose
+   key is the SHA-256 of exactly those length, modulus and exponent bytes;
+   the key question's payload is that hash in lowercase hex (SSH string)
+   and whether it is pinned (boolean). After a true reply or a pin match it
+   forwards the key. Once a key is pinned for the target, a handshake that
+   chooses no RA2ne ends `desktop_key_downgraded`. A malformed handshake
+   ends `desktop_handshake_invalid`.
+
+   On an `rdp` connection the agent is an RDCleanPath gateway (the protocol
+   IronRDP's web client speaks). It reads one DER RDCleanPath request PDU
+   of at most 16 KiB: version 3390, a `destination` and an
+   `x224_connection_pdu`, optionally `proxy_auth`, and no other field (a
+   `preconnection_blob`, `server_auth` or the VMConnect form is refused);
+   `destination` and `proxy_auth` are ignored and never logged, and bytes
+   after the PDU enter the relay first. The X.224 Connection Request, one
+   TPKT of at most 512 bytes whose length field equals its size, goes to
+   the target unchanged. The target's Connection Confirm is read as one
+   TPKT of 11 to 512 bytes: a Negotiation Failure is sent to the client as
+   an RDCleanPath error PDU (code 2, the confirm as `x224_connection_pdu`)
+   and ends `rdp_negotiation_failed`; a confirm without a Negotiation
+   Response (Standard RDP Security) or selecting a protocol other than TLS
+   (1), CredSSP (2) or CredSSP with Early User Authorization Result (8) ends
+   `rdp_security_refused`. The agent then runs TLS 1.2 or later with the
+   target, without a server name and without chain verification; a TLS
+   alert or protocol error ends `rdp_tls_failed`. The key is the SHA-256 of
+   the leaf certificate's SubjectPublicKeyInfo; the key question's payload
+   is, as SSH wire values: string that hash in lowercase hex, boolean
+   pinned, string the certificate's SHA-256 (whole DER) and string its
+   SHA-1 (the Windows thumbprint), both lowercase hex, string subject and
+   string issuer (RFC 4514, each at most 512 bytes), boolean self-signed
+   (subject and issuer equal), uint64 notBefore and uint64 notAfter (Unix
+   seconds). After a true reply or a pin match the agent sends the
+   RDCleanPath response PDU (version 3390, the confirm as
+   `x224_connection_pdu`, every peer certificate's DER leaf first as
+   `server_cert_chain`, the configured target as `server_addr`) and relays
+   the channel and the TLS plaintext; nothing from the target reaches the
+   client before then. A malformed request or confirm ends
+   `desktop_handshake_invalid`.
+
+   The key step, both kinds: a key other than the one pinned for the
+   device's target of the kind ends the connection `desktop_key_changed`
+   (the agent logs the target and both hashes); otherwise the agent sends
+   the channel request `desktop-key@localport.io` (want-reply true) with
+   the kind's payload. A false reply ends it `desktop_key_rejected`; a true
+   one pins an unpinned key. An unreadable pin store ends
+   `desktop_key_unavailable`. The pins live in `desktop_pins.json` (see
+   Stored identity); `localport set <device> --rdp-reset-pin` or
+   `--vnc-reset-pin` forgets the kind's pin, or removes the whole file when
+   it is unreadable.
+
+   The agent then relays the channel and the target until either ends; the
+   channel's end, or its refusal after the dial, ends the connection, and
+   every end of the connection closes the target connection. The agent
+   answers every other request on the channel false. Only data from the
+   client on the channel counts as activity for the idle timer; target
+   output and global requests do not. A recorded
    connection writes an asciicast event `p` at each listen, cancel, forward
    open and forward close (direction, kind, address, result, bytes in and
    out), never the forwarded bytes; under Strict a `p` event the recorder
    cannot take ends the connection `recording_failed`.
 4. End: the agent closes the connection, after writing
    `localport: session ended: <reason>` to each open channel's stderr, for
-   `idle` (30 minutes without client channel data or a request; on a `vnc`
+   `idle` (30 minutes without client channel data or a request; on a desktop
    connection, without client channel data),
    `shutdown` (the control session is ending), `config_changed`
    (`localport set` changed the device's entry and the agent reloaded it; the
    device's other sessions end too), `exited` (the channel of a `terminal`
-   or `vnc` connection, or the last channel of a `files` connection, closed or
+   or desktop connection, or the last channel of a `files` connection, closed or
    was refused, a Strict
-   recording failure on it included), the `vnc` handshake check's
-   `desktop_key_changed`, `desktop_key_downgraded`, `desktop_key_rejected`,
-   `desktop_key_unavailable` and `desktop_handshake_invalid` (step 3),
+   recording failure on it included), the desktop handshake's
+   `desktop_handshake_timeout`, `desktop_target_closed`,
+   `desktop_key_changed`, `desktop_key_downgraded` (`vnc`),
+   `desktop_key_rejected`, `desktop_key_unavailable`,
+   `desktop_handshake_invalid`, `rdp_negotiation_failed`,
+   `rdp_security_refused` and `rdp_tls_failed` (`rdp`) (step 3),
    `recording_failed` (a Strict
    connection's port forwarding events could not be recorded) and, on one
    channel, `helper_failed` (the session helper's channel ended without an
    exit). A client that closes the
-   connection ends it without a reason. A `vnc` connection's channel has no
+   connection ends it without a reason. A desktop connection's channel has no
    stderr: before closing it for a reason, unless the channel already ended,
    the agent sends the channel request `end@localport.io` (want-reply false)
    whose payload is one SSH string, the reason (one or more of `[a-z_]`).
@@ -1274,7 +1329,7 @@ of backups and configuration management.
                       desktop target server key a person trusted on the
                       first browser connection, per desktop kind
   .pins.lock          serializes desktop_pins.json writers (the agent and
-                      `set --vnc-reset-pin`); taken alone
+                      `set --rdp-reset-pin`, `--vnc-reset-pin`); taken alone
   .sessions.lock      held by the one process that serves the device's
                       sessions; taking it removes the session_jti.log and
                       .jti.lock files older agents left

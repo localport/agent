@@ -28,8 +28,9 @@ func runSet(args []string) (err error) {
 	fs := flag.NewFlagSet("set", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	device := addDeviceFlags(fs)
-	// set's own flag: it acts on the device's pinned key, not its config, so
-	// it is not a deviceFlags flag connect would share.
+	// set's own flags: they act on the device's pinned keys, not its config,
+	// so they are not deviceFlags flags connect would share.
+	resetRDPPin := fs.Bool("rdp-reset-pin", false, "forget the RDP server certificate key trusted for this device; the next connection asks to trust it again")
 	resetVNCPin := fs.Bool("vnc-reset-pin", false, "forget the VNC server key trusted for this device; the next connection asks to trust the key again")
 	fs.Usage = func() { usageSet(fs) }
 
@@ -53,15 +54,24 @@ func runSet(args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	var resetKinds []string
+	if *resetRDPPin {
+		resetKinds = append(resetKinds, "rdp")
+	}
+	if *resetVNCPin {
+		resetKinds = append(resetKinds, "vnc")
+	}
 	configFlags := false
-	fs.Visit(func(f *flag.Flag) { configFlags = configFlags || f.Name != "vnc-reset-pin" })
-	if *resetVNCPin && !configFlags {
+	fs.Visit(func(f *flag.Flag) {
+		configFlags = configFlags || (f.Name != "rdp-reset-pin" && f.Name != "vnc-reset-pin")
+	})
+	if len(resetKinds) > 0 && !configFlags {
 		// A pin reset alone changes no setting: no config write, no reload.
 		ref, err := lookupDevice(file, name)
 		if err != nil {
 			return err
 		}
-		return resetDesktopPin(who, ref)
+		return resetDesktopPins(who, ref, resetKinds)
 	}
 	ref, err := updateDevice(file, fs, device, who, name)
 	if err != nil {
@@ -69,11 +79,11 @@ func runSet(args []string) (err error) {
 	}
 	fmt.Fprintf(os.Stderr, "  updated %s in %s\n", ref, file.Path)
 	applyErr := applySettings(who)
-	if *resetVNCPin {
+	if len(resetKinds) > 0 {
 		// After the config lock is released (the two locks never nest), and
 		// after the saved settings were applied, so a failed reset leaves no
 		// setting saved but unapplied.
-		return errors.Join(applyErr, resetDesktopPin(who, ref))
+		return errors.Join(applyErr, resetDesktopPins(who, ref, resetKinds))
 	}
 	return applyErr
 }
@@ -140,10 +150,14 @@ func lookupDevice(file config.LocalConfigFile, name string) (identity.Ref, error
 	return local.Devices[i].Identity, nil
 }
 
-// resetDesktopPin forgets the VNC server key pinned for ref in the credential
-// store beside the invoker's config. Open sessions continue; the next
-// connection asks to trust the server's key again.
-func resetDesktopPin(who invoker, ref identity.Ref) error {
+// desktopKeyNames names each desktop kind's pinned key in set's output.
+var desktopKeyNames = map[string]string{"rdp": "RDP server certificate key", "vnc": "VNC server key"}
+
+// resetDesktopPins forgets the server keys of kinds pinned for ref in the
+// credential store beside the invoker's config. Open sessions continue; the
+// next connection asks to trust the server's key again. An unreadable pin
+// file is removed by the first reset, which leaves nothing for the rest.
+func resetDesktopPins(who invoker, ref identity.Ref, kinds []string) error {
 	store, err := who.store()
 	if err != nil {
 		return err
@@ -152,17 +166,21 @@ func resetDesktopPin(who invoker, ref identity.Ref) error {
 	if err != nil {
 		return err
 	}
-	result, err := pins.Reset(context.Background(), "vnc")
-	if err != nil {
-		return fmt.Errorf("reset the VNC server key of %s: %w", ref, err)
-	}
-	switch result {
-	case identity.ResetForgot:
-		fmt.Fprintf(os.Stderr, "  forgot the VNC server key trusted for %s; the next connection asks to trust the key\n", ref)
-	case identity.ResetDiscarded:
-		fmt.Fprintf(os.Stderr, "  removed the unreadable desktop_pins.json of %s with every server key it held; the next connection asks to trust the key\n", ref)
-	default:
-		fmt.Fprintf(os.Stderr, "  no VNC server key was trusted for %s\n", ref)
+	for _, kind := range kinds {
+		name := desktopKeyNames[kind]
+		result, err := pins.Reset(context.Background(), kind)
+		if err != nil {
+			return fmt.Errorf("reset the %s of %s: %w", name, ref, err)
+		}
+		switch result {
+		case identity.ResetForgot:
+			fmt.Fprintf(os.Stderr, "  forgot the %s trusted for %s; the next connection asks to trust the key\n", name, ref)
+		case identity.ResetDiscarded:
+			fmt.Fprintf(os.Stderr, "  removed the unreadable desktop_pins.json of %s with every server key it held; the next connection asks to trust the key\n", ref)
+			return nil
+		default:
+			fmt.Fprintf(os.Stderr, "  no %s was trusted for %s\n", name, ref)
+		}
 	}
 	return nil
 }
@@ -203,7 +221,7 @@ func findDevice(devices []config.LocalDevice, name string) (int, error) {
 func usageSet(fs *flag.FlagSet) {
 	fmt.Fprint(os.Stderr, `Usage: localport set <device> [--enable LIST] [--logins LIST] [--files-root DIR]
                      [--rdp[=HOST:PORT]] [--vnc[=HOST:PORT]] [--host HOST] [--allow-ports LIST]
-                     [--vnc-reset-pin]
+                     [--rdp-reset-pin] [--vnc-reset-pin]
 
   Change what an enrolled device allows, in the local config. <device> is its
   identity, <fleet>.<device>, or the device name when unique. Only the flags
@@ -213,10 +231,10 @@ func usageSet(fs *flag.FlagSet) {
   device run with localport run applies it
   when restarted.
 
-  --vnc-reset-pin forgets the VNC server key trusted on the device's first
-  browser connection, after the server's key changed on purpose; alone it
-  changes no setting and reloads nothing. An unreadable desktop_pins.json is
-  removed with every key it held.
+  --rdp-reset-pin and --vnc-reset-pin forget the RDP server certificate key or
+  the VNC server key trusted on the device's first browser connection, after
+  the server's key changed on purpose; alone they change no setting and reload
+  nothing. An unreadable desktop_pins.json is removed with every key it held.
 
 Flags:
 `)
