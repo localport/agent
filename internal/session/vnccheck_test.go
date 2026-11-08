@@ -95,6 +95,48 @@ func keyFixture(t *testing.T, script func(net.Conn) error, keys *memKeys) (*sshF
 	return f, target
 }
 
+// Client bytes sent ahead of the agent's handshake reads reach the target: the
+// relay continues from the reader the check buffered them in.
+func TestDesktopKeyHandOverKeepsPipelinedClientBytes(t *testing.T) {
+	key := rsaKey(2048, 7)
+	got := make(chan string, 1)
+	script := rfbServer("RFB 003.008\n", []byte{6}, 0, func(c net.Conn) error {
+		if err := sendKeyThenFrame(key)(c); err != nil {
+			return err
+		}
+		ahead := make([]byte, 5)
+		if _, err := io.ReadFull(c, ahead); err != nil {
+			return err
+		}
+		got <- string(ahead)
+		return nil
+	})
+	f, _ := keyFixture(t, script, &memKeys{})
+	client := f.connect(t, f.vncOpts())
+	ch, reqs, err := openDesktopChannel(client, chanVNC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(ch, make([]byte, 12)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ch.Write(append([]byte("RFB 003.008\n\x06"), "ahead"...)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(ch, make([]byte, 2)); err != nil {
+		t.Fatal(err)
+	}
+	keyRequest(t, reqs, true)
+	select {
+	case ahead := <-got:
+		if ahead != "ahead" {
+			t.Fatalf("target read %q", ahead)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pipelined bytes never reached the target")
+	}
+}
+
 // A first RA2ne key is asked for, pinned on trust and forwarded with the
 // bytes the server wrote after it; the next connection asks with pinned set.
 func TestDesktopKeyFirstUseAndMatch(t *testing.T) {

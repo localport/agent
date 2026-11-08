@@ -564,15 +564,16 @@ Bind: a new connection over the control connection's carrier, first frame
 After `MuxBindAck`, roles reverse relative to the port mux: the edge is the
 HTTP/2 server and the agent the client, with prior knowledge (no ALPN). The
 agent advertises `SETTINGS_MAX_FRAME_SIZE` 16 KiB and an initial stream window
-of 128 KiB, and raises the connection window by 20 x 128 KiB. It pings a silent
+of 128 KiB, and raises the connection window by 21 x 128 KiB. It pings a silent
 connection every 30 s, closes it when a ping goes unanswered for 15 s, and
 closes it when a write makes no progress for 15 s. It bounds each response's
 header list to 4416 bytes as HTTP/2 counts it (name, value and 32 bytes per
 field: 4 KiB plus Go's allowance for 10 fields) and advertises that as
 `SETTINGS_MAX_HEADER_LIST_SIZE`. It sends `User-Agent: localport-agent` and
-asks for no compression. The edge allows 20 concurrent streams: the accept
-stream, 16 session streams, 2 recording segment requests and 1 recording open
-or complete (see [Session recording](#session-recording)). The edge refuses a
+asks for no compression. The edge allows 21 concurrent streams: the accept
+stream, 16 session streams, 2 recording segment requests, 1 recording open and
+1 recording complete or failed open (see
+[Session recording](#session-recording)). The edge refuses a
 17th session on one mux with the end reason `agent_closed`.
 
 Accept stream: the agent's first request is `POST /v1/session-accept` with no
@@ -609,7 +610,8 @@ stream:
    `aes128-gcm@openssh.com`; MACs `hmac-sha2-256-etm@openssh.com`,
    `hmac-sha2-512-etm@openssh.com`. The prelude must finish within 10 s of
    the stream's start, and the handshake and userauth within 10 s of the
-   connection's start.
+   connection's start, apart from a keyboard-interactive prompt, which has
+   5 minutes of its own.
 2. Userauth: `publickey` with an SSH user certificate only, at most 3 attempts.
    After the client proves possession of the certificate's key, the agent
    accepts it only when all of these hold; every refusal is a userauth failure
@@ -672,7 +674,9 @@ stream:
    `localport: <code>` to the channel's stderr (`login_not_allowed`,
    `kind_disabled`, `agent_busy`, `kind_unavailable`, `launcher_unavailable`,
    `recording_unavailable` for a Strict channel whose recording did not open).
-   The helper's exit becomes `exit-status`, then the channel closes; a Strict
+   The helper's exit becomes `exit-status`, or for a Unix helper killed by a
+   signal `exit-signal` (the RFC 4254 name without `SIG`, `<name>@localport.io`
+   outside its list, core-dumped false), then the channel closes; a Strict
    channel whose recording fails ends with
    `localport: session ended: recording_failed`.
 
@@ -884,7 +888,12 @@ relays them like any bytes.
   direction it no longer allows ends that direction's listeners and
   forwarded connections; an SFTP channel started with a file direction its
   `files@localport.io` no longer allows ends `files_narrowed`, written to
-  its recording as an asciicast marker of that label.
+  its recording as an asciicast marker of that label. A resume whose
+  certificate names a recording that a started channel or the running forwards
+  helper cannot meet (never recorded, under either policy, or recording failed
+  under Strict) is answered 3 and ends the connection with the logged reason
+  `recording_required`; a start in progress across such a resume is refused
+  with `recording_required`.
 - Statuses: 0 ok, 1 `resume_refused`, 2 `resume_busy` (another resume of the
   handle runs; retry), 3 `resume_lost` (no such connection, or a position
   outside the send buffer). Three failed proofs end the connection
@@ -982,6 +991,7 @@ SHA-256 of these messages with the key of the device certificate the carrying
 session mux presented, as ASN.1 DER in unpadded base64url:
 
 - open: `lp("localport-recording-open-v2") || lp(id) || lp(session_id) || lp(SHA-256(wrapped_dek)) || lp(key_sha256)`
+- failed open: `lp("localport-recording-open-failed-v1") || lp(id) || lp(session_id) || lp(key_sha256) || lp(reason)`, `key_sha256` being the hash the admitting certificate names
 - complete: `lp("localport-recording-complete-v1") || lp(id) || lp(SHA-256(wrapped_dek)) || segments (uint32 BE) || lp(final_hash) || ended_at (uint64 BE, Unix seconds) || incomplete (1 byte) || final (1 byte) || lp(reason)`
 
 Test vectors, pinned by the agent (`internal/recording/sealer_test.go`
@@ -993,6 +1003,7 @@ key_sha256 32 bytes `0xaa`, ended_at 1767225600.
 | Message | Fields | SHA-256 (hex) |
 |---|---|---|
 | open | as above | `1fd36cf1ee83db594888e6f756215db9f0da2d54010de28871dd26bd07aa1b80` |
+| failed open | reason `spool_full` | `a307228e2e7c2275b8773203aeafef41f8c97adf675c3ad565762de0d2c72ff9` |
 | complete | segments 3, final_hash 32 bytes `0x11`, incomplete 1, final 0, reason `spool_full` | `92888520be1ffa46e439c6bd69fe2f649229a2fd30069502ca2d3a620dce86a9` |
 | complete | segments 0, empty final_hash, incomplete 0, final 0, empty reason | `13f8d36b55dfc5860e976202b9cc377f9be382876974a2bbd5621c2db827109f` |
 | chain | `h_0` = SHA-256(`0x00`), `h_1` = SHA-256(`0x01`): `chain_1` | `9b7558cb7f9026dd06976425c566b059852482d41d70b9be604842e13bb87320` |
@@ -1007,8 +1018,24 @@ are unpadded base64url.
 | Request | Body | `200` answer |
 | ------- | ---- | ------------ |
 | `POST /v1/recording/open` | `{"wrapped_dek","signature","certificate","session_id"}` (`session_id` the canonical UUID of the stream the connection runs on, a resume stream's after a resume; only an open while the mux carries that stream can create the recording, a later one reopens it and a missing recording is `recording_not_found`) | `{"status","segments","chain"}`: the segments the server holds and its chain over them (empty with 0 segments) |
+| `POST /v1/recording/open`, header `Localport-Recording-Failed: <reason>` (a failed open: `spool_full`, `disk_low` or `recording_failed`) | `{"wrapped_dek":"","signature","certificate","session_id"}`, signed over the failed open digest | `{"status","segments"}`; moves a recording that never started to `incomplete` with the reason, creating it when it does not exist and the session is attested; a repeat answers `200`, any other recording state `recording_closed` |
 | `PUT /v1/recording/segment`, headers `Localport-Segment-Index` (decimal, no sign or leading zeros) and `Localport-Segment-Sha256` (unpadded base64url of `h_i`) | the segment object, at least 18 bytes | `{"status","segments"}`; a segment already stored answers `200` like a fresh one |
 | `POST /v1/recording/complete` | `{"segments","final_hash","ended_at","incomplete","final","reason","signature"}` | `{"status","segments"}` |
+
+Every open a live channel or forwards start sends, normal or failed, carries
+`Localport-Recording-Session` (the session's canonical UUID) and
+`Localport-Session-Channels` (decimal, the recorded starts of that stream so
+far, this one included, counted before the start is attempted and from zero on
+each resume stream). The edge reads both before it takes a stream slot, so a
+`recording_busy` refusal still counts. An open of a spooled entry after an agent
+restart carries neither.
+
+Each recorded start reports its outcome: one open, and one failed open when the
+start fails before or after that open. A failed open never delays the channel.
+It is queued in memory (at most 64, the oldest dropped), kept across a mux loss,
+retried with backoff from 1 s to 30 s on `recording_busy`,
+`recording_unavailable`, a transport failure or no mux, ended by any other
+refusal, and dropped 10 minutes after queuing.
 
 A refusal is `{"code","retry_after"}`, `retry_after` in seconds on `429` and
 `503` only (5 on a `503` without one). The agent counts a refusal only with a
@@ -1034,7 +1061,7 @@ Backoff is full jitter from 1 s to 60 s and also covers transport failures and a
 missing session mux; an entry that found no session mux is retried at once, with
 its backoff reset, when the device's session mux comes up. Per mux the agent
 sends at most 2 segment requests (spool drain uses at most 1, so a live segment
-always has a stream) and 1 open or complete, and per recording at most one
+always has a stream), 1 open and 1 complete or failed open, and per recording at most one
 segment at a time, in index order. A drop on a server refusal is logged with the
 refusal's code, and a drop on a chain mismatch with `recording_mismatch`; a
 local drop (device no longer configured, nothing accepted for 24 h, a server
@@ -1049,6 +1076,10 @@ to a unique temporary file, fsynced and renamed: `<id>/meta.json` (device
 identifier, `wrapped_dek`, key hash, policy, counters, chain, and the complete
 fields once known) and `<id>/<index>.seg`. `meta.json` is written before the
 open and before the first output, so a crash leaves an entry to complete. The
+final segment is always spooled and named in `meta.json` before it can be sent,
+so a crash after its delivery still completes the recording as final. At
+restart a segment file at the sealed count, written just before a crash, is
+adopted, with each contiguous one after it. The
 spool holds at most 32 MiB per agent across every device and recording,
 `meta.json` files included. Each recording counts the largest `meta.json` it can
 reach (its complete fields included) plus the space of each segment hash it

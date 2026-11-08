@@ -18,8 +18,6 @@ import (
 	"time"
 )
 
-const spoolID3 = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5d"
-
 // fakeClock drives the uploader's timers: Advance fires every timer due.
 type fakeClock struct {
 	mu     sync.Mutex
@@ -85,7 +83,9 @@ type edgeCall struct {
 	index uint32
 	hash  [32]byte
 	done  Completion
-	reply chan edgeReply
+	// reason is a failed open's.
+	reason string
+	reply  chan edgeReply
 }
 
 type edgeReply struct {
@@ -115,8 +115,12 @@ func (f *fakeEdge) do(ctx context.Context, c *edgeCall) (Result, error) {
 	}
 }
 
-func (f *fakeEdge) Open(ctx context.Context, id, _ string, _, _, _ []byte) (Result, error) {
+func (f *fakeEdge) Open(ctx context.Context, id, _ string, _, _, _ []byte, _ int32) (Result, error) {
 	return f.do(ctx, &edgeCall{op: "open", id: id})
+}
+
+func (f *fakeEdge) OpenFailed(ctx context.Context, fo FailedOpen) (Result, error) {
+	return f.do(ctx, &edgeCall{op: "failed", id: fo.ID, reason: fo.Reason})
 }
 
 func (f *fakeEdge) Complete(ctx context.Context, id string, _ []byte, done Completion) (Result, error) {
@@ -127,7 +131,11 @@ func (f *fakeEdge) PutSegment(ctx context.Context, id string, seg Segment) (Resu
 	return f.do(ctx, &edgeCall{op: "segment", id: id, index: seg.Index, hash: seg.Hash})
 }
 
-func (f *fakeEdge) PutSpooledSegment(ctx context.Context, id string, seg Segment) (Result, error) {
+func (f *fakeEdge) PutSpooledSegment(ctx context.Context, id string, load func() (Segment, error)) (Result, error) {
+	seg, err := load()
+	if err != nil {
+		return Result{}, err
+	}
 	if sha256.Sum256(seg.Object) != seg.Hash {
 		return Result{}, errors.New("spooled segment hash mismatch")
 	}
@@ -266,16 +274,35 @@ func (f *uploaderFixture) stop() {
 	<-f.done
 }
 
+// begin opens recording id and answers its open.
 func (f *uploaderFixture) begin(t *testing.T, id, policy string) *Handoff {
 	t.Helper()
 	m := testMeta(id)
 	m.Policy = policy
 	m.LastAcceptedAt = f.clock.Now()
-	h, err := f.u.Begin(context.Background(), m)
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
+	type begun struct {
+		h   *Handoff
+		err error
 	}
-	return h
+	done := make(chan begun, 1)
+	go func() {
+		h, err := f.u.BeginOpen(context.Background(), m)
+		done <- begun{h, err}
+	}()
+	ok(f.edge.expect(t, "open", id, 0), 0)
+	b := <-done
+	if b.err != nil {
+		t.Fatalf("BeginOpen: %v", b.err)
+	}
+	return b.h
+}
+
+// resumeEmpty restarts an uploader over one crashed entry with no segment, so
+// its open is the uploader's own and is retried.
+func resumeEmpty(t *testing.T, maxJitter bool, edits ...func(*Uploader)) *uploaderFixture {
+	t.Helper()
+	dir := seedEntry(t, crashedMeta(spoolID1, 0))
+	return runUploader(t, dir, maxJitter, &fixtureStart, allConfigured, edits...)
 }
 
 func (f *uploaderFixture) spooled(id string, index uint32) bool {
@@ -334,7 +361,6 @@ func handSegment(t *testing.T, h *Handoff, seg Segment) {
 func TestUploaderDeliversOpenSegmentsCompleteInOrder(t *testing.T) {
 	f := startUploader(t, false)
 	h := f.begin(t, spoolID1, PolicyBestEffort)
-	ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 	handSegment(t, h, testSeg(0, 64))
 	handSegment(t, h, testSeg(1, 64))
 	c0 := f.edge.expect(t, "segment", spoolID1, 0)
@@ -360,7 +386,6 @@ func TestUploaderDeliversOpenSegmentsCompleteInOrder(t *testing.T) {
 func TestUploaderSpillsSegmentUnacknowledgedAfterAckTimeout(t *testing.T) {
 	f := startUploader(t, false)
 	h := f.begin(t, spoolID1, PolicyBestEffort)
-	ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 	handSegment(t, h, testSeg(0, 64))
 	c := f.edge.expect(t, "segment", spoolID1, 0)
 	f.clock.Advance(AckTimeout - time.Millisecond)
@@ -375,8 +400,8 @@ func TestUploaderSpillsSegmentUnacknowledgedAfterAckTimeout(t *testing.T) {
 
 func TestUploaderSpoolsWithoutMuxThenDrains(t *testing.T) {
 	f := startUploader(t, false)
-	f.edge.up.Store(false)
 	h := f.begin(t, spoolID1, PolicyBestEffort)
+	f.edge.up.Store(false)
 	handSegment(t, h, testSeg(0, 64))
 	if !f.spooled(spoolID1, 0) {
 		t.Fatal("segment produced without a mux was not spooled at once")
@@ -384,7 +409,6 @@ func TestUploaderSpoolsWithoutMuxThenDrains(t *testing.T) {
 	f.waitBackoff(t, spoolID1)
 	f.edge.up.Store(true)
 	f.clock.Advance(maxBackoff)
-	ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 	ok(f.edge.expect(t, "spooled", spoolID1, 0), 1)
 	waitFor(t, "drained segment removed", func() bool { return !f.spooled(spoolID1, 0) })
 }
@@ -395,7 +419,6 @@ func TestUploaderSpoolsWithoutMuxThenDrains(t *testing.T) {
 func TestUploaderRefusesASegmentWithoutRoomForItsHash(t *testing.T) {
 	f := startUploader(t, false)
 	h := f.begin(t, spoolID1, PolicyBestEffort)
-	ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 	if err := f.spool.CreateEntry(testMeta(spoolID2)); err != nil {
 		t.Fatal(err)
 	}
@@ -421,15 +444,14 @@ func TestUploaderRefusesASegmentWithoutRoomForItsHash(t *testing.T) {
 // publication does not.
 func TestUploaderClientUpWakesEntriesWaitingForTheMux(t *testing.T) {
 	f := startUploader(t, false)
-	f.edge.up.Store(false)
 	h := f.begin(t, spoolID1, PolicyBestEffort)
+	f.edge.up.Store(false)
 	handSegment(t, h, testSeg(0, 64))
 	f.waitBackoff(t, spoolID1)
 	f.edge.up.Store(true)
 	f.u.ClientUp("another-device")
 	f.edge.expectNone(t)
 	f.u.ClientUp(testMeta(spoolID1).Identifier)
-	ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 	ok(f.edge.expect(t, "spooled", spoolID1, 0), 1)
 }
 
@@ -438,15 +460,13 @@ func TestUploaderClientUpWakesEntriesWaitingForTheMux(t *testing.T) {
 func TestUploaderRequestEndsAtItsDeadline(t *testing.T) {
 	short := func(u *Uploader) { u.requestTimeout = func(int) time.Duration { return 300 * time.Millisecond } }
 	t.Run("open", func(t *testing.T) {
-		f := startUploader(t, false, short)
-		f.begin(t, spoolID1, PolicyBestEffort)
+		f := resumeEmpty(t, false, short)
 		f.edge.expect(t, "open", spoolID1, 0)
 		f.waitBackoff(t, spoolID1)
 	})
 	t.Run("segment", func(t *testing.T) {
 		f := startUploader(t, false, short)
 		h := f.begin(t, spoolID1, PolicyBestEffort)
-		ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 		handSegment(t, h, testSeg(0, 64))
 		f.edge.expect(t, "segment", spoolID1, 0)
 		f.waitBackoff(t, spoolID1)
@@ -454,7 +474,6 @@ func TestUploaderRequestEndsAtItsDeadline(t *testing.T) {
 	t.Run("complete", func(t *testing.T) {
 		f := startUploader(t, false, short)
 		h := f.begin(t, spoolID1, PolicyBestEffort)
-		ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 		if err := h.End(Completion{EndedAt: fixtureStart, Final: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -519,7 +538,6 @@ func TestUploaderCutsAtASpooledSegmentThatFailsItsCheck(t *testing.T) {
 func TestUploaderOutOfOrderResyncsThroughOpen(t *testing.T) {
 	f := startUploader(t, false)
 	h := f.begin(t, spoolID1, PolicyBestEffort)
-	ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 	segs := []Segment{testSeg(0, 64), testSeg(1, 64), testSeg(2, 64)}
 	for _, s := range segs {
 		handSegment(t, h, s)
@@ -534,12 +552,23 @@ func TestUploaderOutOfOrderResyncsThroughOpen(t *testing.T) {
 	ok(f.edge.expect(t, "segment", spoolID1, 2), 3)
 }
 
-func TestUploaderOpenAboveSealedDropsLiveEntry(t *testing.T) {
+func TestUploaderOpenOfANewRecordingWithSegmentsFails(t *testing.T) {
 	f := startUploader(t, false)
-	f.begin(t, spoolID1, PolicyBestEffort)
+	errc := make(chan error, 1)
+	go func() {
+		m := testMeta(spoolID1)
+		m.LastAcceptedAt = f.clock.Now()
+		_, err := f.u.BeginOpen(context.Background(), m)
+		errc <- err
+	}()
 	open := f.edge.expect(t, "open", spoolID1, 0)
 	open.reply <- edgeReply{res: Result{Status: "ok", Segments: 1, Chain: chainOf(testSeg(0, 64))}}
-	waitFor(t, "entry dropped", func() bool { return f.entryGone(spoolID1) })
+	if err := <-errc; err == nil {
+		t.Fatal("BeginOpen accepted an open that answered segments")
+	}
+	if !f.entryGone(spoolID1) {
+		t.Fatal("the refused open left a spool entry")
+	}
 }
 
 func TestUploaderRefusalsDropTheEntry(t *testing.T) {
@@ -559,7 +588,6 @@ func TestUploaderRefusalsDropTheEntry(t *testing.T) {
 		t.Run(tc.code, func(t *testing.T) {
 			f := startUploader(t, false)
 			h := f.begin(t, spoolID1, PolicyBestEffort)
-			ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 			handSegment(t, h, testSeg(0, 64))
 			refuse(f.edge.expect(t, "segment", spoolID1, 0), tc.status, tc.code, 0)
 			waitFor(t, "entry dropped", func() bool { return f.entryGone(spoolID1) })
@@ -571,8 +599,7 @@ func TestUploaderRefusalsDropTheEntry(t *testing.T) {
 }
 
 func TestUploaderQuotaWaitsRetryAfterPlusJitter(t *testing.T) {
-	f := startUploader(t, true)
-	f.begin(t, spoolID1, PolicyBestEffort)
+	f := resumeEmpty(t, true)
 	refuse(f.edge.expect(t, "open", spoolID1, 0), http.StatusTooManyRequests, CodeQuota, 30*time.Second)
 	waitFor(t, "quota jitter drawn", func() bool {
 		f.jitterMu.Lock()
@@ -592,8 +619,7 @@ func TestUploaderQuotaWaitsRetryAfterPlusJitter(t *testing.T) {
 }
 
 func TestUploaderBusyBacksOffWithRetryAfterFloor(t *testing.T) {
-	f := startUploader(t, false)
-	f.begin(t, spoolID1, PolicyBestEffort)
+	f := resumeEmpty(t, false)
 	refuse(f.edge.expect(t, "open", spoolID1, 0), http.StatusServiceUnavailable, CodeBusy, 5*time.Second)
 	f.waitBackoff(t, spoolID1)
 	f.clock.Advance(4 * time.Second)
@@ -607,42 +633,26 @@ func TestUploaderBusyBacksOffWithRetryAfterFloor(t *testing.T) {
 }
 
 func TestUploaderEntryInBackoffDoesNotBlockAnother(t *testing.T) {
-	f := startUploader(t, false)
-	f.begin(t, spoolID1, PolicyBestEffort)
+	f := resumeEmpty(t, false)
 	refuse(f.edge.expect(t, "open", spoolID1, 0), http.StatusServiceUnavailable, CodeBusy, time.Minute)
+	f.waitBackoff(t, spoolID1)
 	f.begin(t, spoolID2, PolicyBestEffort)
-	ok(f.edge.expect(t, "open", spoolID2, 0), 0)
 }
 
-// Spool drain uses PutSpooledSegment, a live segment PutSegment, and a Strict
-// open goes out while drain is in flight, ahead of a queued Best effort open.
+// Spool drain uses PutSpooledSegment, a live segment PutSegment, and an open
+// goes out while drain is in flight.
 func TestUploaderDrainLeavesSlotsForStrictOpen(t *testing.T) {
 	f := startUploader(t, false)
 	a := f.begin(t, spoolID1, PolicyBestEffort)
-	openA := f.edge.expect(t, "open", spoolID1, 0)
+	f.edge.up.Store(false)
 	handSegment(t, a, testSeg(0, 64))
-	f.clock.Advance(AckTimeout)
-	waitFor(t, "segment 0 spooled", func() bool { return f.spooled(spoolID1, 0) })
-	ok(openA, 0)
-	handSegment(t, a, testSeg(1, 64))
+	f.waitBackoff(t, spoolID1)
+	f.edge.up.Store(true)
+	f.clock.Advance(maxBackoff)
 	drain := f.edge.expect(t, "spooled", spoolID1, 0)
+	handSegment(t, a, testSeg(1, 64))
 
-	strict := make(chan error, 1)
-	go func() {
-		m := testMeta(spoolID2)
-		m.Policy = PolicyStrict
-		m.LastAcceptedAt = f.clock.Now()
-		_, err := f.u.Begin(context.Background(), m)
-		strict <- err
-	}()
-	strictOpen := f.edge.expect(t, "open", spoolID2, 0)
-	f.begin(t, spoolID3, PolicyBestEffort)
-	f.edge.expectNone(t) // the Best effort open waits for the Strict open
-	ok(strictOpen, 0)
-	if err := <-strict; err != nil {
-		t.Fatalf("Strict Begin: %v", err)
-	}
-	ok(f.edge.expect(t, "open", spoolID3, 0), 0)
+	f.begin(t, spoolID2, PolicyStrict) // answered while the drain is in flight
 	ok(drain, 1)
 	ok(f.edge.expect(t, "segment", spoolID1, 1), 2)
 }
@@ -654,7 +664,7 @@ func TestUploaderStrictOpenFailureRemovesEntry(t *testing.T) {
 		m := testMeta(spoolID1)
 		m.Policy = PolicyStrict
 		m.LastAcceptedAt = f.clock.Now()
-		_, err := f.u.Begin(context.Background(), m)
+		_, err := f.u.BeginOpen(context.Background(), m)
 		errc <- err
 	}()
 	refuse(f.edge.expect(t, "open", spoolID1, 0), http.StatusServiceUnavailable, CodeUnavailable, 5*time.Second)
@@ -670,7 +680,6 @@ func TestUploaderStrictOpenFailureRemovesEntry(t *testing.T) {
 func TestUploaderStopSpoolsMemorySegments(t *testing.T) {
 	f := startUploader(t, false)
 	h := f.begin(t, spoolID1, PolicyBestEffort)
-	ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 	handSegment(t, h, testSeg(0, 64))
 	f.edge.expect(t, "segment", spoolID1, 0)
 	handSegment(t, h, testSeg(1, 64))
@@ -691,7 +700,6 @@ func TestUploaderStopSpoolsMemorySegments(t *testing.T) {
 func TestUploaderMemoryCapWithSpoolRefusalReportsStop(t *testing.T) {
 	f := startUploader(t, false)
 	h := f.begin(t, spoolID1, PolicyBestEffort)
-	f.edge.expect(t, "open", spoolID1, 0) // held: segments stay in memory
 	const size = MaxUnacked / 4
 	for i := range uint32(4) {
 		handSegment(t, h, testSeg(i, size))
@@ -716,7 +724,6 @@ func TestUploaderMemoryCapWithSpoolRefusalReportsStop(t *testing.T) {
 func TestUploaderSegmentOfEntryDroppedDuringItsSpoolWrite(t *testing.T) {
 	f := startUploader(t, false)
 	h := f.begin(t, spoolID1, PolicyBestEffort)
-	ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 	const size = MaxUnacked / 4
 	for i := range uint32(4) {
 		handSegment(t, h, testSeg(i, size))
@@ -792,6 +799,98 @@ func wantCompletion(t *testing.T, c *edgeCall, want Completion) {
 		got.Incomplete != want.Incomplete || got.Final != want.Final || got.Reason != want.Reason {
 		t.Fatalf("complete = %+v, want %+v", got, want)
 	}
+}
+
+// A crash between a segment write and its meta write leaves a file at the
+// sealed count: it is adopted, delivered and counted.
+func TestUploaderRestartAdoptsASegmentWrittenBeforeItsMeta(t *testing.T) {
+	segs := []Segment{testSeg(0, 64), testSeg(1, 64)}
+	f := restartUploader(t, seedEntry(t, crashedMeta(spoolID1, 0, segs[:1]...), segs...), fixtureStart, allConfigured)
+	answerOpen(f.edge.expect(t, "open", spoolID1, 0), 0, nil)
+	ok(f.edge.expect(t, "spooled", spoolID1, 0), 1)
+	ok(f.edge.expect(t, "spooled", spoolID1, 1), 2)
+	c := f.edge.expect(t, "complete", spoolID1, 0)
+	wantCompletion(t, c, Completion{Segments: 2, FinalHash: chainOf(segs...), EndedAt: fixtureStart, Incomplete: true, Reason: ReasonAgentRestart})
+}
+
+// A file past a gap, or any file of an entry whose complete fields are
+// written, is not adopted.
+func TestUploaderRestartRemovesSegmentsItCannotAdopt(t *testing.T) {
+	segs := []Segment{testSeg(0, 64), testSeg(1, 64), testSeg(2, 64)}
+	t.Run("past a gap", func(t *testing.T) {
+		f := restartUploader(t, seedEntry(t, crashedMeta(spoolID1, 0, segs[:1]...), segs[0], segs[2]), fixtureStart, allConfigured)
+		waitFor(t, "segment 2 removed", func() bool { return !f.spooled(spoolID1, 2) })
+		answerOpen(f.edge.expect(t, "open", spoolID1, 0), 0, nil)
+		ok(f.edge.expect(t, "spooled", spoolID1, 0), 1)
+		c := f.edge.expect(t, "complete", spoolID1, 0)
+		if c.done.Segments != 1 {
+			t.Fatalf("complete with %d segments, want 1", c.done.Segments)
+		}
+	})
+	t.Run("completed entry", func(t *testing.T) {
+		m := crashedMeta(spoolID1, 0, segs[:1]...)
+		m.Complete = &Completion{Segments: 1, FinalHash: chainOf(segs[0]), EndedAt: fixtureStart, Final: true}
+		f := restartUploader(t, seedEntry(t, m, segs[0], segs[1]), fixtureStart, allConfigured)
+		waitFor(t, "segment 1 removed", func() bool { return !f.spooled(spoolID1, 1) })
+	})
+}
+
+// The final segment is on disk, and named final in the meta, before it can be
+// sent.
+func TestUploaderSpoolsTheFinalSegmentBeforeSendingIt(t *testing.T) {
+	f := startUploader(t, false)
+	h := f.begin(t, spoolID1, PolicyBestEffort)
+	seg := testSeg(0, 64)
+	seg.Final = true
+	handSegment(t, h, seg)
+	if !f.spooled(spoolID1, 0) {
+		t.Fatal("the final segment was not spooled")
+	}
+	f.edge.expect(t, "spooled", spoolID1, 0)
+	_, scan := openTestSpool(t, f.dir)
+	if len(scan.Entries) != 1 || scan.Entries[0].Meta.FinalIndex == nil || *scan.Entries[0].Meta.FinalIndex != 0 {
+		t.Fatalf("persisted meta %+v does not name the final segment", scan.Entries)
+	}
+}
+
+// A crash after the final segment was delivered and before End's meta write
+// completes as final.
+func TestUploaderRestartAfterTheFinalSegmentCompletesFinal(t *testing.T) {
+	segs := []Segment{testSeg(0, 64), testSeg(1, 64)}
+	final := uint32(1)
+	t.Run("final segment delivered", func(t *testing.T) {
+		m := crashedMeta(spoolID1, 2, segs...)
+		m.FinalIndex = &final
+		f := restartUploader(t, seedEntry(t, m), fixtureStart, allConfigured)
+		answerOpen(f.edge.expect(t, "open", spoolID1, 0), 2, chainOf(segs...))
+		c := f.edge.expect(t, "complete", spoolID1, 0)
+		wantCompletion(t, c, Completion{Segments: 2, FinalHash: chainOf(segs...), EndedAt: fixtureStart, Final: true})
+	})
+	t.Run("final segment file written, meta not", func(t *testing.T) {
+		m := crashedMeta(spoolID1, 1, segs[:1]...)
+		m.FinalIndex = &final
+		f := restartUploader(t, seedEntry(t, m, segs[1]), fixtureStart, allConfigured)
+		answerOpen(f.edge.expect(t, "open", spoolID1, 0), 1, chainOf(segs[0]))
+		ok(f.edge.expect(t, "spooled", spoolID1, 1), 2)
+		c := f.edge.expect(t, "complete", spoolID1, 0)
+		wantCompletion(t, c, Completion{Segments: 2, FinalHash: chainOf(segs...), EndedAt: fixtureStart, Final: true})
+	})
+	t.Run("final segment named, crash before its write", func(t *testing.T) {
+		m := crashedMeta(spoolID1, 1, segs[:1]...)
+		m.FinalIndex = &final
+		f := restartUploader(t, seedEntry(t, m), fixtureStart, allConfigured)
+		answerOpen(f.edge.expect(t, "open", spoolID1, 0), 1, chainOf(segs[0]))
+		c := f.edge.expect(t, "complete", spoolID1, 0)
+		wantCompletion(t, c, Completion{Segments: 1, FinalHash: chainOf(segs[0]), EndedAt: fixtureStart, Incomplete: true, Reason: ReasonAgentRestart})
+	})
+	t.Run("final segment lost", func(t *testing.T) {
+		m := crashedMeta(spoolID1, 1, segs...)
+		m.FinalIndex = &final
+		f := restartUploader(t, seedEntry(t, m), fixtureStart, allConfigured)
+		answerOpen(f.edge.expect(t, "open", spoolID1, 0), 1, chainOf(segs[0]))
+		c := f.edge.expect(t, "complete", spoolID1, 0)
+		wantCompletion(t, c, Completion{Segments: 1, FinalHash: chainOf(segs[0]), EndedAt: fixtureStart, Incomplete: true, Reason: ReasonAgentRestart})
+	})
 }
 
 func TestUploaderRestartSendsSpooledSegmentsFromTheServerCount(t *testing.T) {
@@ -902,7 +1001,6 @@ func TestUploaderRestartDropsEntryOfUnconfiguredDevice(t *testing.T) {
 func TestUploaderRetriesLastIndexAfterLostResponse(t *testing.T) {
 	f := startUploader(t, false)
 	h := f.begin(t, spoolID1, PolicyBestEffort)
-	ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 	seg := testSeg(0, 64)
 	handSegment(t, h, seg)
 	f.edge.expect(t, "segment", spoolID1, 0).reply <- edgeReply{err: fmt.Errorf("%w: response lost", ErrTransport)}
@@ -925,9 +1023,7 @@ func TestUploaderRetriesLastIndexAfterLostResponse(t *testing.T) {
 func TestUploaderHandoffDoesNotWaitOnAnotherEntrysSpoolWrite(t *testing.T) {
 	f := startUploader(t, false)
 	ha := f.begin(t, spoolID1, PolicyBestEffort)
-	ok(f.edge.expect(t, "open", spoolID1, 0), 0)
 	hb := f.begin(t, spoolID2, PolicyBestEffort)
-	ok(f.edge.expect(t, "open", spoolID2, 0), 0)
 	const size = MaxUnacked / 4
 	for i := range uint32(4) {
 		handSegment(t, ha, testSeg(i, size))

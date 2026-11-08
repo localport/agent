@@ -70,12 +70,13 @@ const (
 
 // HTTP/2 client settings of the session mux. They match the edge's server
 // settings (16 KiB frames, 128 KiB stream windows, and a connection window
-// worth 20 streams: the accept stream, 16 sessions, 2 segment requests and 1
-// open or complete), so neither side buffers more than the other allows.
+// worth 21 streams: the accept stream, 16 sessions, 2 segment requests, 1 open
+// and 1 complete or failed open), so neither side buffers more than the other
+// allows.
 const (
 	sessionMuxMaxFrame     = 16 << 10
 	sessionMuxStreamWindow = 128 << 10
-	sessionMuxConnWindow   = 20 * sessionMuxStreamWindow
+	sessionMuxConnWindow   = 21 * sessionMuxStreamWindow
 	// sessionMuxMaxHeaderBytes bounds each response's header list (Go adds
 	// 320 bytes of field overhead), as the edge bounds request headers.
 	sessionMuxMaxHeaderBytes = 4 << 10
@@ -442,8 +443,25 @@ func (m *sessionMux) handOver(stream net.Conn, id [sessionIDLen]byte, serial uin
 		defer m.served.Done()
 		defer stream.Close()
 		m.handler.Serve(stream, id, serial)
+		flushSessionStream(stream)
 	}()
 	return true
+}
+
+// sessionStreamFlushTimeout bounds how long a finished session stream waits
+// for the edge to take its last bytes.
+const sessionStreamFlushTimeout = 2 * time.Second
+
+// flushSessionStream delivers what Serve wrote last, such as a refusal, before
+// the deferred Close resets the stream: it half-closes and reads to EOF.
+func flushSessionStream(stream net.Conn) {
+	closer, ok := stream.(interface{ CloseWrite() error })
+	if !ok {
+		return
+	}
+	_ = closer.CloseWrite()
+	_ = stream.SetReadDeadline(time.Now().Add(sessionStreamFlushTimeout))
+	_, _ = io.Copy(io.Discard, stream)
 }
 
 // newSessionMuxRequest builds a request on the session mux. A nil body sends

@@ -81,15 +81,21 @@ func (t *Tunnel) runMux(ctx context.Context, addr, session string, dialer transp
 	}
 
 	for attempt := 0; ; attempt++ {
+		start := t.now()
 		t.serveConnUntilClosed(ctx, conn)
 		if ctx.Err() != nil {
 			return
+		}
+		// Only a mux that stayed up resets the backoff: an edge can ack each
+		// bind and drop the conn at once.
+		if t.now().Sub(start) >= sessionMuxStableAfter {
+			attempt = 0
 		}
 
 		slog.Default().Debug("multiplexed transport dropped, re-establishing",
 			slog.String("tunnel", t.opts.Label))
 
-		if !sleepCtx(ctx, muxRetryBackoff(attempt)) {
+		if !t.sleep(ctx, muxRetryBackoff(attempt)) {
 			return
 		}
 
@@ -100,7 +106,6 @@ func (t *Tunnel) runMux(ctx context.Context, addr, session string, dialer transp
 				slog.Any("error", err))
 			return
 		}
-		attempt = -1 // reset backoff after a successful bind
 	}
 }
 

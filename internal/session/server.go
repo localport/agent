@@ -52,14 +52,22 @@ const (
 	maxSessions = 8
 	// maxChannels bounds the session channels of one connection; a terminal
 	// connection has one.
-	maxChannels = 4
-	// handshakeTimeout bounds the SSH key exchange and userauth from the
-	// stream's start.
-	handshakeTimeout  = 10 * time.Second
+	maxChannels       = 4
 	keyRefreshTimeout = 3 * time.Second
 	idleTimeout       = 30 * time.Minute
 	// serverVersion is the SSH identification string.
 	serverVersion = "SSH-2.0-localport"
+)
+
+// Handshake bounds, variables so tests shorten them.
+var (
+	// handshakeTimeout bounds the SSH key exchange and userauth from the
+	// stream's start.
+	handshakeTimeout = 10 * time.Second
+	// interactiveAuthTimeout bounds one keyboard-interactive prompt, which a
+	// person answers, as the trust dialog does; the rest of the handshake
+	// stays under handshakeTimeout.
+	interactiveAuthTimeout = 5 * time.Minute
 )
 
 // Permissions extension keys carrying the admitted identity from userauth to
@@ -144,13 +152,19 @@ type ServerConfig struct {
 
 // clock is the time source of the validity, idle and desktop client wait
 // checks. NewTimer returns the timer's channel and a stop function, which
-// reports false when the timer already fired.
+// reports false when the timer already fired; NewDetachTimer is the same for
+// a detached connection's expiry, apart so tests can fire that one alone.
 type clock interface {
 	Now() time.Time
 	NewTimer(d time.Duration) (<-chan time.Time, func() bool)
+	NewDetachTimer(d time.Duration) (<-chan time.Time, func() bool)
 }
 
 type wallClock struct{}
+
+func (c wallClock) NewDetachTimer(d time.Duration) (<-chan time.Time, func() bool) {
+	return c.NewTimer(d)
+}
 
 func (wallClock) Now() time.Time { return time.Now() }
 
@@ -170,9 +184,11 @@ type Server struct {
 	launcher Launcher
 
 	// mu guards the fields below and every decision on them.
-	mu       sync.Mutex
-	closing  int // Shutdown calls in progress
-	sessions int // slots taken, at most maxSessions
+	mu      sync.Mutex
+	closing int // Shutdown calls in progress
+	// refreshes cancels the key refreshes in flight (keyRefreshContext).
+	refreshes map[*context.CancelFunc]struct{}
+	sessions  int // slots taken, at most maxSessions
 	// forwards counts the forward channels of every connection, at most
 	// maxDeviceForwards.
 	forwards int
@@ -255,6 +271,11 @@ var (
 	errConnEnded        = errors.New("session: connection ended")
 	errHandshakeTimeout = errors.New("session: SSH handshake timed out")
 )
+
+// afterAttemptClaimCleared, when set by a test, runs in endAttempt inside the
+// critical section, after the claim is cleared and before the hold is
+// released.
+var afterAttemptClaimCleared atomic.Pointer[func()]
 
 // afterResumeInstall, when set by a test, runs in serveResume once the
 // stream is installed and before the resume's claim is released.
@@ -525,11 +546,17 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 	if !s.endHandshake(h) {
 		return
 	}
-	_ = stream.SetDeadline(time.Time{})
 	// The connection continues under the resume certificate and this stream's
 	// session id, which the edge attests for recordings, before any byte of
 	// the stream is read.
-	s.readmit(e, &connAdmission{admission: adm, sessionID: uuidText(id)})
+	if s.readmit(e, &connAdmission{admission: adm, sessionID: uuidText(id)}) {
+		s.log("session: resume refused: %s: the resume names a recording that a running channel or forwards helper does not have", CloseRecordingRequired)
+		_ = writePrelude(stream, proofReplyMsg{Status: statusLost})
+		e.endWith(CloseRecordingRequired)
+		e.rc.End(ErrResumeLost)
+		return
+	}
+	_ = stream.SetDeadline(time.Time{})
 	// Installed while this resume still holds its claim, so no other resume
 	// runs between the positions it signed and the stream taking over. An
 	// expired or removed connection's conn has ended and refuses the stream.
@@ -556,15 +583,14 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 }
 
 // readmit records a verified resume's admission on e and applies it to the
-// connection run serves, if it started.
-func (s *Server) readmit(e *resumable, a *connAdmission) {
+// connection run serves, if it started. It reports that the admission names a
+// recording the running connection cannot meet; the caller then ends it.
+func (s *Server) readmit(e *resumable, a *connAdmission) bool {
 	s.mu.Lock()
 	e.admitted = a
 	c := e.conn
 	s.mu.Unlock()
-	if c != nil {
-		c.readmit(a)
-	}
+	return c != nil && c.readmit(a)
 }
 
 // mark queues label on every recording of e's connection, if run started.
@@ -615,6 +641,9 @@ func (s *Server) endAttempt(e *resumable, claimed bool) {
 	if claimed {
 		e.resuming = false
 	}
+	if hook := afterAttemptClaimCleared.Load(); hook != nil {
+		(*hook)()
+	}
 	expire := s.releaseLocked(e)
 	s.mu.Unlock()
 	if expire {
@@ -638,7 +667,7 @@ func (s *Server) releaseLocked(e *resumable) bool {
 		e.expired = true
 		return true
 	}
-	fire, stop := s.cfg.clock.NewTimer(left)
+	fire, stop := s.cfg.clock.NewDetachTimer(left)
 	cancel := make(chan struct{})
 	timer := &struct{}{}
 	e.timer = timer
@@ -759,7 +788,7 @@ func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64,
 	handshake := time.AfterFunc(handshakeTimeout, func() { e.rc.End(errHandshakeTimeout) })
 	secret := &connSecret{}
 	defer secret.clear()
-	cfg, err := s.serverConfig(serial, secret, certKey)
+	cfg, err := s.serverConfig(serial, secret, certKey, func(d time.Duration) { handshake.Reset(d) })
 	if err != nil {
 		handshake.Stop()
 		s.log("session: %v", err)
@@ -819,7 +848,7 @@ const passwordPrompt = "Windows password: "
 // keyboard-interactive prompt, so the prompt exists only after a verified
 // certificate; its answer goes to secret. Userauth must present certKey, the
 // key the prelude bound the connection to.
-func (s *Server) serverConfig(serial uint64, secret *connSecret, certKey ssh.PublicKey) (*ssh.ServerConfig, error) {
+func (s *Server) serverConfig(serial uint64, secret *connSecret, certKey ssh.PublicKey, rearmHandshake func(time.Duration)) (*ssh.ServerConfig, error) {
 	hostKey, device, err := s.hostIdentity()
 	if err != nil {
 		return nil, err
@@ -855,7 +884,9 @@ func (s *Server) serverConfig(serial uint64, secret *connSecret, certKey ssh.Pub
 			}
 			return nil, &ssh.PartialSuccessError{Next: ssh.ServerAuthCallbacks{
 				KeyboardInteractiveCallback: func(_ ssh.ConnMetadata, client ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+					rearmHandshake(interactiveAuthTimeout)
 					answers, err := client("", "", []string{passwordPrompt}, []bool{false})
+					rearmHandshake(handshakeTimeout)
 					if err != nil {
 						return nil, err
 					}
@@ -922,7 +953,7 @@ func (s *Server) localRefusal(adm *admission) error {
 func (s *Server) withCARefresh(cert *ssh.Certificate, verify func() (*admission, error)) (*admission, error) {
 	adm, err := verify()
 	if err != nil && s.cfg.RefreshKeys != nil && !signedByCA(cert, s.caKeys()) {
-		ctx, cancel := context.WithTimeout(context.Background(), keyRefreshTimeout)
+		ctx, cancel := s.keyRefreshContext()
 		if rerr := s.cfg.RefreshKeys(ctx); rerr != nil {
 			s.log("session: CA key refresh for an unknown CA key: %v", rerr)
 		}
@@ -930,6 +961,29 @@ func (s *Server) withCARefresh(cert *ssh.Certificate, verify func() (*admission,
 		adm, err = verify()
 	}
 	return adm, err
+}
+
+// keyRefreshContext bounds one key refresh by keyRefreshTimeout and ends it
+// when a Shutdown starts, so a refresh in flight never outlasts Shutdown's
+// budget.
+func (s *Server) keyRefreshContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), keyRefreshTimeout)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing > 0 {
+		cancel()
+		return ctx, cancel
+	}
+	if s.refreshes == nil {
+		s.refreshes = make(map[*context.CancelFunc]struct{})
+	}
+	s.refreshes[&cancel] = struct{}{}
+	return ctx, func() {
+		s.mu.Lock()
+		delete(s.refreshes, &cancel)
+		s.mu.Unlock()
+		cancel()
+	}
 }
 
 func (s *Server) caKeys() []ed25519.PublicKey {
@@ -985,7 +1039,7 @@ func (s *Server) recordingKeyMatches(want string) bool {
 	if s.cfg.RefreshKeys == nil {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), keyRefreshTimeout)
+	ctx, cancel := s.keyRefreshContext()
 	if err := s.cfg.RefreshKeys(ctx); err != nil {
 		s.log("session: key refresh for a recording key mismatch: %v", err)
 	}
@@ -1079,6 +1133,9 @@ func (s *Server) ShutdownConfigChanged(ctx context.Context) error {
 func (s *Server) shutdown(ctx context.Context, reason string) error {
 	s.mu.Lock()
 	s.closing++
+	for cancel := range s.refreshes {
+		(*cancel)()
+	}
 	for h := range s.handlers {
 		if h.stopped {
 			continue
@@ -1157,36 +1214,50 @@ type conn struct {
 type connAdmission struct {
 	*admission
 	sessionID string
+	// recordedStarts counts the recorded starts under this stream, each counted
+	// before it is attempted; a resume's admission counts from zero.
+	recordedStarts atomic.Int32
 }
 
 func (c *conn) active() { c.lastActivity.Store(c.s.cfg.clock.Now().UnixNano()) }
 
 // readmit runs the connection under a resume's admission from now on and
 // ends the forwards it no longer allows. Channels already open keep their
-// recordings.
-func (c *conn) readmit(a *connAdmission) {
+// recordings. It reports true, changing nothing else, when the admission names
+// a recording that a started channel or the running forwards helper cannot
+// meet; a start in progress meets the stored admission at its hand-off.
+func (c *conn) readmit(a *connAdmission) bool {
 	c.mu.Lock()
 	c.adm.Store(a)
+	violated := c.fwd.recordingViolatedLocked(a)
 	conns, listeners, client := c.fwd.disallowedLocked()
 	channels := slices.Collect(maps.Keys(c.channels))
 	c.mu.Unlock()
+	for _, ch := range channels {
+		violated = violated || ch.recordingViolated(a)
+	}
+	if violated {
+		return true
+	}
 	c.fwd.closeDisallowed(conns, listeners, client)
 	// An SFTP channel's file server holds the access it started with; one the
 	// new admission no longer covers ends (a channel starting now sees the new
 	// admission at its hand-off instead). Its recording gets the reason as a
-	// marker before the end.
+	// marker before the end. The end runs apart from this resume, whose stream
+	// is not installed yet: the reason's stderr write waits on the send buffer.
 	for _, ch := range channels {
 		ch.mu.Lock()
-		narrowed := ch.kind == launcher.KindSFTP && !a.Files.covers(ch.files)
+		narrowed := !ch.stopped.Load() && ch.kind == launcher.KindSFTP && !a.Files.covers(ch.files)
 		rec := ch.rec
 		ch.mu.Unlock()
 		if narrowed {
 			if rec != nil {
 				rec.marker(CloseFilesNarrowed)
 			}
-			ch.end(CloseFilesNarrowed)
+			go ch.end(CloseFilesNarrowed)
 		}
 	}
+	return false
 }
 
 // fail ends the connection with reason unless its end is already decided.

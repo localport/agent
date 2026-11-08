@@ -246,6 +246,9 @@ type Tunnel struct {
 
 	// newDialers builds the dialers of one connect attempt.
 	newDialers func(transport.Options) []transport.Dialer
+	// now and sleep pace the port mux re-establishment.
+	now   func() time.Time
+	sleep func(context.Context, time.Duration) bool
 	// rolloverEvery is how often a device session checks for a pending
 	// certificate to register with.
 	rolloverEvery time.Duration
@@ -347,6 +350,8 @@ func New(opts Options) *Tunnel {
 	t := &Tunnel{
 		opts:          opts,
 		newDialers:    transport.DefaultDialers,
+		now:           time.Now,
+		sleep:         sleepCtx,
 		rolloverEvery: rolloverCheckInterval,
 		edgeAddr:      opts.Edge,
 		activeConns:   make(map[string]*activeConn),
@@ -412,6 +417,7 @@ func (t *Tunnel) dialTarget(port uint16) (net.Conn, int, error) {
 // cancellation. It returns nil on a clean stop, or the registration error when
 // the edge refuses the tunnel permanently.
 func (t *Tunnel) Run(ctx context.Context) error {
+	defer t.closeConn()
 	attempt := 0
 	var failingSince time.Time
 	for {

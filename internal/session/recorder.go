@@ -19,6 +19,46 @@ import (
 // strictBackpressure for queue space, or the recorder panicked.
 const CloseRecordingFailed = "recording_failed"
 
+// CloseRecordingRequired ends a connection whose resume names a recording that
+// a running channel or forwards helper does not have, and refuses a start in
+// progress across such a resume.
+const CloseRecordingRequired = "recording_required"
+
+// recordingState is how a started channel or forwards helper is recorded.
+type recordingState uint8
+
+const (
+	// recordingNever: started under an admission that names no recording.
+	recordingNever recordingState = iota
+	// recordingLive: a recorder is running, or ended normally.
+	recordingLive
+	// recordingFailed: attempted, and the start or the recorder failed.
+	recordingFailed
+)
+
+// recordingStateOf is the state of a start that attempted a recording or not
+// and holds rec, nil when it runs unrecorded.
+func recordingStateOf(rec *sessionRecorder, attempted bool) recordingState {
+	switch {
+	case rec != nil && rec.failedByError():
+		return recordingFailed
+	case rec != nil:
+		return recordingLive
+	case attempted:
+		return recordingFailed
+	}
+	return recordingNever
+}
+
+// violatedBy reports whether state cannot run under a: a recording that was
+// never attempted, under either policy, or one that failed under Strict.
+func (a *connAdmission) violatedBy(state recordingState) bool {
+	if a.Rec == nil {
+		return false
+	}
+	return state == recordingNever || (state == recordingFailed && a.Rec.Policy == RecPolicyStrict)
+}
+
 const (
 	// recorderQueueBytes bounds the terminal output queued for one recorder:
 	// two segments' worth. Start, resize and exit events always fit.
@@ -41,17 +81,24 @@ var (
 // errRecordingUnavailable reports a recording that could not start.
 var errRecordingUnavailable = errcode.New(errcode.RecordingUnavailable)
 
+// newRecordingSealer makes a recording's sealer; tests replace it.
+var newRecordingSealer = recording.NewSealer
+
 // startRecording creates the entry of recording id, one session channel of
 // connection sessionID, and hands it to the uploader with the admitting
 // certificate, from which the first open creates the row, and sends that
-// open, bounded by strictOpenTimeout. The entry exists only when it returns a
-// recorder.
-func (s *Server) startRecording(id, sessionID string, adm *admission, start time.Time) (*sessionRecorder, error) {
+// open, bounded by strictOpenTimeout. channels is the stream's cumulative
+// recorded start count, which the open carries. The entry exists only when it
+// returns a recorder. A start that fails with an uploader present queues one
+// failed open, as does a later abort of the returned recorder.
+func (s *Server) startRecording(id, sessionID string, adm *admission, start time.Time, channels int32) (*sessionRecorder, error) {
 	if s.cfg.Uploader == nil || s.cfg.RecordingKey == nil {
 		return nil, fmt.Errorf("%w: no uploader", errRecordingUnavailable)
 	}
+	reportFailed := func(reason string) { s.reportFailedOpen(id, sessionID, adm, reason, channels) }
 	key, sum, ok := s.cfg.RecordingKey()
 	if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != adm.Rec.PubSHA256 {
+		reportFailed(recording.ReasonRecordingFailed)
 		return nil, fmt.Errorf("%w: the held recording key changed", errRecordingUnavailable)
 	}
 	// Both policies open before the channel's helper starts; the edge attests
@@ -61,8 +108,9 @@ func (s *Server) startRecording(id, sessionID string, adm *admission, start time
 	strict := adm.Rec.Policy == RecPolicyStrict
 	ctx, cancel := context.WithTimeout(context.Background(), strictOpenTimeout)
 	defer cancel()
-	sealer, err := recording.NewSealer(id, key)
+	sealer, err := newRecordingSealer(id, key)
 	if err != nil {
+		reportFailed(recording.ReasonRecordingFailed)
 		return nil, fmt.Errorf("%w: %w", errRecordingUnavailable, err)
 	}
 	h, err := s.cfg.Uploader.BeginOpen(ctx, recording.Meta{
@@ -74,12 +122,43 @@ func (s *Server) startRecording(id, sessionID string, adm *admission, start time
 		KeySHA256:      sum[:],
 		Policy:         adm.Rec.Policy,
 		Certificate:    adm.Cert,
+		Channels:       channels,
 	})
 	if err != nil {
 		sealer.Discard()
+		reportFailed(startFailureReason(err))
 		return nil, fmt.Errorf("%w: %w", errRecordingUnavailable, err)
 	}
-	return newSessionRecorder(h, sealer, strict, s.log), nil
+	r := newSessionRecorder(h, sealer, strict, s.log)
+	r.onAbort = func() { reportFailed(recording.ReasonRecordingFailed) }
+	return r, nil
+}
+
+// startFailureReason is the reason a failed start reports: a spool refusal
+// names itself, anything else, an open timeout included, is recording_failed.
+func startFailureReason(err error) string {
+	switch {
+	case errors.Is(err, recording.ErrSpoolFull):
+		return recording.ReasonSpoolFull
+	case errors.Is(err, recording.ErrDiskLow):
+		return recording.ReasonDiskLow
+	}
+	return recording.ReasonRecordingFailed
+}
+
+// reportFailedOpen queues the failed open of recording id. The key hash is the
+// one the certificate names, which the control plane checks the signature
+// against.
+func (s *Server) reportFailedOpen(id, sessionID string, adm *admission, reason string, channels int32) {
+	sum, err := base64.RawURLEncoding.DecodeString(adm.Rec.PubSHA256)
+	if err != nil {
+		s.log("session: recording %s: failed start not reported: %v", id, err)
+		return
+	}
+	s.cfg.Uploader.ReportFailedOpen(recording.FailedOpen{
+		ID: id, SessionID: sessionID, Identifier: s.cfg.Identifier,
+		KeySHA256: sum, Certificate: adm.Cert, Reason: reason, Channels: channels,
+	})
 }
 
 // recordingHandoff is the uploader's side of one recording
@@ -107,6 +186,8 @@ type sessionRecorder struct {
 	sealer  *recording.Sealer
 	strict  bool
 	log     func(format string, args ...any)
+	// onAbort reports the failed start after abort; nil in tests.
+	onAbort func()
 
 	// failed is closed when a Strict recording fails; the server then ends
 	// the session with CloseRecordingFailed.
@@ -181,6 +262,14 @@ func newSessionRecorder(h recordingHandoff, sealer *recording.Sealer, strict boo
 	}
 	go r.run()
 	return r
+}
+
+// failedByError reports whether the recording ended by a failure; a normal
+// end or abort is not one.
+func (r *sessionRecorder) failedByError() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.how == recFail
 }
 
 // failedC delivers the Strict failure; nil, which never fires, without one.
@@ -322,7 +411,15 @@ func (r *sessionRecorder) poke() {
 func (r *sessionRecorder) end() { r.closeAndWait(recEnd) }
 
 // abort removes the recording of a session refused after it started.
-func (r *sessionRecorder) abort() { r.closeAndWait(recAbort) }
+func (r *sessionRecorder) abort() {
+	if r == nil {
+		return
+	}
+	r.closeAndWait(recAbort)
+	if r.onAbort != nil {
+		r.onAbort()
+	}
+}
 
 // closeAndWait closes the recording with how and waits for run, at most
 // recorderEndTimeout. Past that the recorder is abandoned: the session never

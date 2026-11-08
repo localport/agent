@@ -107,6 +107,10 @@ func (l *fakeLauncher) lastRequest(t *testing.T) launcher.Request {
 func (l *fakeLauncher) helper(conn net.Conn, req launcher.Request) {
 	defer conn.Close()
 	exit := func(code int32) { _ = launcher.WriteFrame(conn, launcher.Frame{Type: launcher.FrameExit, Code: code}) }
+	if req.Command == "killed" {
+		exit(-9)
+		return
+	}
 	if req.Command == "hold" {
 		// Ignores every frame, eof included, until the agent closes the channel.
 		_, _ = io.Copy(io.Discard, conn)
@@ -964,6 +968,7 @@ func TestLauncherRefusalFailsTheRequest(t *testing.T) {
 type capturedOpen struct {
 	id, sessionID string
 	cert          []byte
+	channels      int32
 }
 
 // captureClient records each open and answers it, and accepts every segment,
@@ -973,6 +978,8 @@ type captureClient struct {
 	block bool
 	opens chan capturedOpen
 	priv  hpke.PrivateKey
+	// failedOpens, when set, receives each failed open.
+	failedOpens chan recording.FailedOpen
 
 	mu       sync.Mutex
 	wrapped  map[string][]byte
@@ -1014,14 +1021,25 @@ func (c *captureClient) plaintext(t *testing.T, id string) string {
 	}
 }
 
-func (c *captureClient) Open(ctx context.Context, id, sessionID string, wrappedDEK, _, cert []byte) (recording.Result, error) {
+func (c *captureClient) OpenFailed(_ context.Context, f recording.FailedOpen) (recording.Result, error) {
+	if c.failedOpens != nil {
+		c.failedOpens <- f
+	}
+	return recording.Result{Status: "incomplete"}, nil
+}
+
+func (c *captureClient) Open(ctx context.Context, id, sessionID string, wrappedDEK, _, cert []byte, channels int32) (recording.Result, error) {
 	c.mu.Lock()
 	if c.wrapped == nil {
 		c.wrapped = map[string][]byte{}
 	}
 	c.wrapped[id] = bytes.Clone(wrappedDEK)
 	c.mu.Unlock()
-	c.opens <- capturedOpen{id: id, sessionID: sessionID, cert: bytes.Clone(cert)}
+	select {
+	case c.opens <- capturedOpen{id: id, sessionID: sessionID, cert: bytes.Clone(cert), channels: channels}:
+	case <-ctx.Done():
+		return recording.Result{}, ctx.Err()
+	}
 	if c.block {
 		<-ctx.Done()
 		return recording.Result{}, ctx.Err()
@@ -1038,7 +1056,11 @@ func (c *captureClient) PutSegment(_ context.Context, id string, seg recording.S
 	return recording.Result{Status: "recording", Segments: seg.Index + 1}, nil
 }
 
-func (c *captureClient) PutSpooledSegment(_ context.Context, id string, seg recording.Segment) (recording.Result, error) {
+func (c *captureClient) PutSpooledSegment(_ context.Context, id string, load func() (recording.Segment, error)) (recording.Result, error) {
+	seg, err := load()
+	if err != nil {
+		return recording.Result{}, err
+	}
 	c.keep(id, seg)
 	return recording.Result{Status: "recording", Segments: seg.Index + 1}, nil
 }

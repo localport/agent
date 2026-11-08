@@ -181,7 +181,7 @@ func TestRecordingRequestsOnTheWire(t *testing.T) {
 
 	wrapped := []byte("wrapped dek bytes")
 	keySum := bytes.Repeat([]byte{0xaa}, 32)
-	res, err := c.Open(ctx, testRecordingID, testSessionID, wrapped, keySum, testCertificate)
+	res, err := c.Open(ctx, testRecordingID, testSessionID, wrapped, keySum, testCertificate, 0)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestRecordingSignerFollowsTheConnCertificate(t *testing.T) {
 
 	signedBy := func(c *RecordingClient) map[string]string {
 		t.Helper()
-		if _, err := c.Open(context.Background(), testRecordingID, testSessionID, wrapped, keySum, testCertificate); err != nil {
+		if _, err := c.Open(context.Background(), testRecordingID, testSessionID, wrapped, keySum, testCertificate, 0); err != nil {
 			t.Fatalf("Open: %v", err)
 		}
 		var body map[string]string
@@ -285,7 +285,7 @@ func TestRecordingSignerFollowsTheConnCertificate(t *testing.T) {
 	if _, err := tn.RecordingClient(); !errors.Is(err, recording.ErrNoSessionMux) {
 		t.Fatalf("RecordingClient after stop: %v, want ErrNoSessionMux", err)
 	}
-	if _, err := old.Open(context.Background(), testRecordingID, testSessionID, wrapped, keySum, testCertificate); err == nil {
+	if _, err := old.Open(context.Background(), testRecordingID, testSessionID, wrapped, keySum, testCertificate, 0); err == nil {
 		t.Fatal("Open on a closed conn succeeded")
 	}
 
@@ -360,8 +360,9 @@ func startHeldRecordingClient(t *testing.T) (*recordingEdge, *RecordingClient, f
 	return rec, waitRecordingClient(t, tn), stop
 }
 
-// The agent holds a third segment request, a second spool drain and an open
-// behind a running complete until a slot frees; held requests never fail.
+// The agent holds a third segment request, a second spool drain and a failed
+// open behind a running complete until a slot frees; held requests never
+// fail. An open goes past a held complete and a held failed open.
 func TestRecordingRequestsWaitForAFreeSlot(t *testing.T) {
 	rec, c, _ := startHeldRecordingClient(t)
 	ctx := context.Background()
@@ -370,7 +371,7 @@ func TestRecordingRequestsWaitForAFreeSlot(t *testing.T) {
 		go func() {
 			var err error
 			if spooled {
-				_, err = c.PutSpooledSegment(ctx, testRecordingID, testSegment(index))
+				_, err = c.PutSpooledSegment(ctx, testRecordingID, func() (recording.Segment, error) { return testSegment(index), nil })
 			} else {
 				_, err = c.PutSegment(ctx, testRecordingID, testSegment(index))
 			}
@@ -408,17 +409,34 @@ func TestRecordingRequestsWaitForAFreeSlot(t *testing.T) {
 	if complete.path != recordingCompletePath {
 		t.Fatalf("first request %s, want the complete", complete.path)
 	}
-	go func() {
-		_, err := c.Open(ctx, testRecordingID, testSessionID, []byte("dek"), make([]byte, 32), nil)
-		results <- err
-	}()
-	rec.expectNone(t)
-	finish(complete)
-	open := rec.expect(t)
-	if open.path != recordingOpenPath {
-		t.Fatalf("second request %s, want the open", open.path)
+	failedOpen := func() {
+		go func() {
+			_, err := c.OpenFailed(ctx, recording.FailedOpen{ID: testRecordingID, SessionID: testSessionID, KeySHA256: make([]byte, 32), Reason: recording.ReasonSpoolFull})
+			results <- err
+		}()
 	}
-	finish(open)
+	failedOpen()
+	rec.expectNone(t) // the failed open shares the complete's slot
+	expectOpen := func() {
+		t.Helper()
+		go func() {
+			_, err := c.Open(ctx, testRecordingID, testSessionID, []byte("dek"), make([]byte, 32), nil, 0)
+			results <- err
+		}()
+		open := rec.expect(t)
+		if open.path != recordingOpenPath {
+			t.Fatalf("request %s, want the open", open.path)
+		}
+		finish(open)
+	}
+	expectOpen() // past the held complete
+	finish(complete)
+	failed := rec.expect(t)
+	if failed.path != recordingOpenPath {
+		t.Fatalf("request %s, want the failed open", failed.path)
+	}
+	expectOpen() // past the held failed open
+	finish(failed)
 }
 
 // A cancelled request gives its slot back, in flight or still waiting, and a
@@ -434,13 +452,13 @@ func TestRecordingSlotIsReleasedOnCancelAndConnClose(t *testing.T) {
 	rec.expect(t)
 	waitCtx, cancelWait := context.WithCancel(context.Background())
 	go func() {
-		_, err := c.Open(waitCtx, testRecordingID, testSessionID, []byte("dek"), make([]byte, 32), nil)
+		_, err := c.Complete(waitCtx, testRecordingID, []byte("dek"), recording.Completion{EndedAt: time.Unix(1, 0)})
 		results <- err
 	}()
 	rec.expectNone(t)
 	cancelWait()
 	if err := <-results; !errors.Is(err, context.Canceled) {
-		t.Fatalf("waiting open = %v, want context.Canceled", err)
+		t.Fatalf("waiting complete = %v, want context.Canceled", err)
 	}
 	cancel()
 	if err := <-results; !errors.Is(err, context.Canceled) || !errors.Is(err, recording.ErrTransport) {
@@ -448,7 +466,7 @@ func TestRecordingSlotIsReleasedOnCancelAndConnClose(t *testing.T) {
 	}
 
 	go func() {
-		_, err := c.Open(context.Background(), testRecordingID, testSessionID, []byte("dek"), make([]byte, 32), nil)
+		_, err := c.Open(context.Background(), testRecordingID, testSessionID, []byte("dek"), make([]byte, 32), nil, 0)
 		results <- err
 	}()
 	rec.expect(t).unhold()
@@ -462,7 +480,7 @@ func TestRecordingSlotIsReleasedOnCancelAndConnClose(t *testing.T) {
 	}()
 	rec.expect(t)
 	go func() {
-		_, err := c.Open(context.Background(), testRecordingID, testSessionID, []byte("dek"), make([]byte, 32), nil)
+		_, err := c.Complete(context.Background(), testRecordingID, []byte("dek"), recording.Completion{EndedAt: time.Unix(1, 0)})
 		results <- err
 	}()
 	rec.expectNone(t)
@@ -494,7 +512,7 @@ func TestRecordingUnholdReachesOnlyItsRequest(t *testing.T) {
 	}
 
 	go func() {
-		_, err := c.Open(context.Background(), testRecordingID, testSessionID, []byte("dek"), make([]byte, 32), nil)
+		_, err := c.Open(context.Background(), testRecordingID, testSessionID, []byte("dek"), make([]byte, 32), nil, 0)
 		results <- err
 	}()
 	rec.expect(t).unhold()

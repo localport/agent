@@ -98,6 +98,12 @@ type Meta struct {
 	Hashes [][]byte `json:"hashes,omitempty"`
 	// Complete holds the unsigned complete fields once they are known.
 	Complete *Completion `json:"complete,omitempty"`
+	// FinalIndex is the index of the final segment, written before that
+	// segment can be sent.
+	FinalIndex *uint32 `json:"final_index,omitempty"`
+	// Channels is the cumulative channel count the open of a live start
+	// carries (Client.Open). It is never stored: a resumed open carries none.
+	Channels int32 `json:"-"`
 }
 
 // Chain returns the chain value over all Sealed segments.
@@ -329,6 +335,8 @@ func metaBudget(m Meta) (int64, error) {
 	}
 	m.Hashes = append(slices.Clone(m.Hashes), make([]byte, sha256.Size))
 	m.Sealed, m.Acked = math.MaxUint32, math.MaxUint32
+	widestIndex := uint32(math.MaxUint32)
+	m.FinalIndex = &widestIndex
 	m.AckedChain = make([]byte, sha256.Size)
 	m.LastAcceptedAt = widest
 	m.Complete = &Completion{

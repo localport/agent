@@ -8,6 +8,9 @@ import (
 	"maps"
 	"os"
 	"regexp"
+	"runtime"
+	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,7 +78,7 @@ type windowChange struct {
 // a launcher session, then the relay between the channel and the helper:
 // client bytes become data frames (and eof), the helper's data and stderr
 // frames become channel data and extended data, and its exit frame becomes
-// exit-status and the channel's close.
+// exit-status or exit-signal and the channel's close.
 type channel struct {
 	c  *conn
 	ch ssh.Channel
@@ -89,6 +92,8 @@ type channel struct {
 	// rec is this channel's recording on a recorded connection, nil
 	// otherwise; set by start before the relay goroutines, ended by serve.
 	rec *sessionRecorder
+	// recAttempted is set under mu once the start tried to record.
+	recAttempted bool
 
 	// mu orders start's hand-off of helper, session, started and readerDone
 	// against end, which may run on another goroutine while the launcher
@@ -261,14 +266,21 @@ func (ch *channel) start(kind, command string) bool {
 	// A resume that narrowed the file access while the server started either
 	// finds ch.files set (conn.readmit ends the channel) or is seen here: the
 	// admission is stored before readmit reads ch.files under ch.mu.
-	narrowed := kind == launcher.KindSFTP && !ch.c.adm.Load().Files.covers(files)
-	if ch.stopped.Load() || narrowed {
+	current := ch.c.adm.Load()
+	narrowed := kind == launcher.KindSFTP && !current.Files.covers(files)
+	// The same stored-admission check as narrowed: a resume that named a
+	// recording either finds ch.started set or is seen here.
+	required := current.violatedBy(recordingStateOf(rec, ch.recAttempted))
+	if ch.stopped.Load() || narrowed || required {
 		ch.mu.Unlock()
 		_ = ours.Close()
 		_ = sess.Close()
 		rec.abort()
-		if narrowed {
+		switch {
+		case narrowed:
 			ch.refuse(CloseFilesNarrowed)
+		case required:
+			ch.refuse(CloseRecordingRequired)
 		}
 		return false
 	}
@@ -308,8 +320,11 @@ func (ch *channel) openRecording() (*sessionRecorder, bool) {
 	if a.Rec == nil {
 		return nil, true
 	}
+	ch.mu.Lock()
+	ch.recAttempted = true
+	ch.mu.Unlock()
 	id := uuidText(newRecordingID())
-	rec, err := c.s.startRecording(id, a.sessionID, a.admission, c.s.cfg.clock.Now())
+	rec, err := c.s.startRecording(id, a.sessionID, a.admission, c.s.cfg.clock.Now(), a.recordedStarts.Add(1))
 	if err == nil {
 		return rec, true
 	}
@@ -320,6 +335,14 @@ func (ch *channel) openRecording() (*sessionRecorder, bool) {
 	}
 	c.s.log("session: %s: channel runs unrecorded: %v", a.sessionID, err)
 	return nil, true
+}
+
+// recordingViolated reports whether this channel, started and not stopped,
+// cannot run under a; a channel with no start request has no state.
+func (ch *channel) recordingViolated(a *connAdmission) bool {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	return ch.started && !ch.stopped.Load() && a.violatedBy(recordingStateOf(ch.rec, ch.recAttempted))
 }
 
 // watchRecording ends the channel when its Strict recording fails.
@@ -380,6 +403,35 @@ func (ch *channel) readClient() {
 	}
 }
 
+// exitSignalMsg is the SSH exit-signal payload (RFC 4254 section 6.10).
+type exitSignalMsg struct {
+	Signal     string
+	CoreDumped bool
+	Error      string
+	Lang       string
+}
+
+// rfcSignals are the signal names RFC 4254 section 6.10 defines.
+var rfcSignals = []string{"ABRT", "ALRM", "FPE", "HUP", "ILL", "INT", "KILL", "PIPE", "QUIT", "SEGV", "TERM", "USR1", "USR2"}
+
+// decodeExit reads an exit frame's code. Off Windows a negative code -n means
+// killed by signal n, recorded as 128+n; on Windows the code is the process's
+// 32-bit exit status, which may read negative.
+func decodeExit(code int32, goos string) (status int, signal string) {
+	if goos == "windows" || code >= 0 {
+		return int(uint32(code)), ""
+	}
+	n := int(-code)
+	name := signalName(n)
+	if name == "" {
+		name = strconv.Itoa(n)
+	}
+	if !slices.Contains(rfcSignals, name) {
+		name += "@localport.io"
+	}
+	return 128 + n, name
+}
+
 // readHelper relays the helper's frames until its exit frame or the
 // channel's end.
 func (ch *channel) readHelper() {
@@ -423,9 +475,14 @@ func (ch *channel) readHelper() {
 			line, _ := ev.Marshal()
 			ch.rec.file(line, ch.halted)
 		case launcher.FrameExit:
-			ch.rec.exit(int(f.Code))
+			status, signal := decodeExit(f.Code, runtime.GOOS)
+			ch.rec.exit(status)
 			if !ch.stopped.Swap(true) {
-				_, _ = ch.ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(f.Code)}))
+				if signal != "" {
+					_, _ = ch.ch.SendRequest("exit-signal", false, ssh.Marshal(exitSignalMsg{Signal: signal}))
+				} else {
+					_, _ = ch.ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(status)}))
+				}
 				_ = ch.ch.CloseWrite()
 				_ = ch.ch.Close()
 			}
@@ -449,11 +506,12 @@ func (ch *channel) end(reason string) {
 		helper := ch.helper
 		ch.mu.Unlock()
 		close(ch.halted)
-		if reason != "" && !wasStopped {
-			_, _ = ch.ch.Stderr().Write([]byte("\r\nlocalport: session ended: " + reason + "\r\n"))
-		}
+		// Before the reason: its write can wait on a full send buffer.
 		if helper != nil {
 			_ = helper.Close()
+		}
+		if reason != "" && !wasStopped {
+			_, _ = ch.ch.Stderr().Write([]byte("\r\nlocalport: session ended: " + reason + "\r\n"))
 		}
 		_ = ch.ch.Close()
 		if hook := afterChannelEnd.Load(); hook != nil {

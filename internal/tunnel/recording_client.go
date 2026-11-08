@@ -26,15 +26,20 @@ const (
 	recordingIDHeader            = "Localport-Recording-Id"
 	recordingSegmentIndexHeader  = "Localport-Segment-Index"
 	recordingSegmentSHA256Header = "Localport-Segment-Sha256"
+	recordingFailedHeader        = "Localport-Recording-Failed"
+	recordingSessionHeader       = "Localport-Recording-Session"
+	sessionChannelsHeader        = "Localport-Session-Channels"
 
 	// recordingMaxResponse bounds every recording response body the agent reads.
 	recordingMaxResponse = 4 << 10
 
-	// In-flight requests per conn, within the edge's 20 streams: 2 segment
-	// requests, of which at most 1 drains the spool, and 1 open or complete.
-	recordingSegmentSlots = 2
-	recordingDrainSlots   = 1
-	recordingControlSlots = 1
+	// In-flight requests per conn, within the edge's 21 streams: 2 segment
+	// requests, of which at most 1 drains the spool, 1 open, and 1 complete or
+	// failed open.
+	recordingSegmentSlots    = 2
+	recordingDrainSlots      = 1
+	recordingOpenSlots       = 1
+	recordingBackgroundSlots = 1
 )
 
 // RecordingClient sends recording requests on one session mux conn and
@@ -47,21 +52,24 @@ type RecordingClient struct {
 	signer crypto.Signer
 	closed <-chan struct{}
 
-	control  chan struct{}
-	segments chan struct{}
-	drain    chan struct{}
+	// open is held by opens only, so a complete cannot delay a live open.
+	open       chan struct{}
+	background chan struct{}
+	segments   chan struct{}
+	drain      chan struct{}
 }
 
 var _ recording.Client = (*RecordingClient)(nil)
 
 func newRecordingClient(connCtx context.Context, cc *http.ClientConn, signer crypto.Signer) *RecordingClient {
 	return &RecordingClient{
-		cc:       cc,
-		signer:   signer,
-		closed:   connCtx.Done(),
-		control:  make(chan struct{}, recordingControlSlots),
-		segments: make(chan struct{}, recordingSegmentSlots),
-		drain:    make(chan struct{}, recordingDrainSlots),
+		cc:         cc,
+		signer:     signer,
+		closed:     connCtx.Done(),
+		open:       make(chan struct{}, recordingOpenSlots),
+		background: make(chan struct{}, recordingBackgroundSlots),
+		segments:   make(chan struct{}, recordingSegmentSlots),
+		drain:      make(chan struct{}, recordingDrainSlots),
 	}
 }
 
@@ -96,8 +104,9 @@ type recordingCompleteBody struct {
 // Open sends the signed open of recording id of connection sessionID. keySHA256
 // is the SHA-256 of the team key the DEK is wrapped to; certificate is the
 // connection's SSH user certificate, from which the control plane creates the
-// recording at the first open.
-func (c *RecordingClient) Open(ctx context.Context, id, sessionID string, wrappedDEK, keySHA256, certificate []byte) (recording.Result, error) {
+// recording at the first open. channels, when positive, travels in headers the
+// edge reads before it takes a slot.
+func (c *RecordingClient) Open(ctx context.Context, id, sessionID string, wrappedDEK, keySHA256, certificate []byte, channels int32) (recording.Result, error) {
 	sig, err := recording.Sign(c.signer, recording.OpenDigest(id, sessionID, wrappedDEK, keySHA256))
 	if err != nil {
 		return recording.Result{}, fmt.Errorf("sign recording open: %w", err)
@@ -111,7 +120,43 @@ func (c *RecordingClient) Open(ctx context.Context, id, sessionID string, wrappe
 	if err != nil {
 		return recording.Result{}, err
 	}
-	return c.sendControl(ctx, recordingOpenPath, id, body, true)
+	return c.sendControl(ctx, c.open, recordingOpenPath, id, body, true, channelHeaders(sessionID, channels))
+}
+
+// OpenFailed sends the signed report that recording id never started: an open
+// with no wrapped DEK and the reason in a header the edge reads before it
+// takes a slot.
+func (c *RecordingClient) OpenFailed(ctx context.Context, f recording.FailedOpen) (recording.Result, error) {
+	sig, err := recording.Sign(c.signer, recording.OpenFailedDigest(f.ID, f.SessionID, f.KeySHA256, f.Reason))
+	if err != nil {
+		return recording.Result{}, fmt.Errorf("sign recording failed open: %w", err)
+	}
+	body, err := json.Marshal(recordingOpenBody{
+		Signature:   sig,
+		Certificate: base64.RawURLEncoding.EncodeToString(f.Certificate),
+		SessionID:   f.SessionID,
+	})
+	if err != nil {
+		return recording.Result{}, err
+	}
+	headers := channelHeaders(f.SessionID, f.Channels)
+	if headers == nil {
+		headers = http.Header{}
+	}
+	headers.Set(recordingFailedHeader, f.Reason)
+	return c.sendControl(ctx, c.background, recordingOpenPath, f.ID, body, false, headers)
+}
+
+// channelHeaders carries a live start's cumulative channel count; nil for an
+// open that has none.
+func channelHeaders(sessionID string, channels int32) http.Header {
+	if channels <= 0 {
+		return nil
+	}
+	h := http.Header{}
+	h.Set(recordingSessionHeader, sessionID)
+	h.Set(sessionChannelsHeader, strconv.FormatInt(int64(channels), 10))
+	return h
 }
 
 // Complete sends the signed complete of recording id.
@@ -132,7 +177,7 @@ func (c *RecordingClient) Complete(ctx context.Context, id string, wrappedDEK []
 	if err != nil {
 		return recording.Result{}, err
 	}
-	return c.sendControl(ctx, recordingCompletePath, id, body, false)
+	return c.sendControl(ctx, c.background, recordingCompletePath, id, body, false, nil)
 }
 
 // PutSegment sends a live session's segment of recording id.
@@ -140,15 +185,20 @@ func (c *RecordingClient) PutSegment(ctx context.Context, id string, seg recordi
 	return c.putSegment(ctx, id, seg)
 }
 
-// PutSpooledSegment sends a segment read back from the spool. At most one
-// such request is in flight per conn, so a live segment always finds one of
-// the two segment slots free of spool drain.
-func (c *RecordingClient) PutSpooledSegment(ctx context.Context, id string, seg recording.Segment) (recording.Result, error) {
+// PutSpooledSegment sends the segment load reads back from the spool. At most
+// one such request is in flight per conn, so a live segment always finds one
+// of the two segment slots free of spool drain, and load runs only inside
+// that place, so waiting requests hold no segment in memory.
+func (c *RecordingClient) PutSpooledSegment(ctx context.Context, id string, load func() (recording.Segment, error)) (recording.Result, error) {
 	release, err := c.acquire(ctx, c.drain)
 	if err != nil {
 		return recording.Result{}, err
 	}
 	defer release()
+	seg, err := load()
+	if err != nil {
+		return recording.Result{}, err
+	}
 	return c.putSegment(ctx, id, seg)
 }
 
@@ -168,8 +218,8 @@ func (c *RecordingClient) putSegment(ctx context.Context, id string, seg recordi
 	return c.roundTrip(req, false)
 }
 
-func (c *RecordingClient) sendControl(ctx context.Context, path, id string, body []byte, wantChain bool) (recording.Result, error) {
-	release, err := c.acquire(ctx, c.control)
+func (c *RecordingClient) sendControl(ctx context.Context, slots chan struct{}, path, id string, body []byte, wantChain bool, headers http.Header) (recording.Result, error) {
+	release, err := c.acquire(ctx, slots)
 	if err != nil {
 		return recording.Result{}, err
 	}
@@ -177,6 +227,9 @@ func (c *RecordingClient) sendControl(ctx context.Context, path, id string, body
 	req, err := newSessionMuxRequest(ctx, http.MethodPost, path, bytes.NewReader(body))
 	if err != nil {
 		return recording.Result{}, err
+	}
+	for name, values := range headers {
+		req.Header[name] = values
 	}
 	req.Header.Set(recordingIDHeader, id)
 	return c.roundTrip(req, wantChain)

@@ -45,12 +45,18 @@ const MaxCertificate = 8 << 10
 // ErrNoSessionMux, an error wrapping ErrTransport, or a *Refusal.
 type Client interface {
 	// Open sends the open of recording id of connection sessionID with the
-	// connection's certificate (Meta.SessionID, Meta.Certificate).
-	Open(ctx context.Context, id, sessionID string, wrappedDEK, keySHA256, certificate []byte) (Result, error)
+	// connection's certificate (Meta.SessionID, Meta.Certificate). channels,
+	// when positive, is the stream's cumulative recorded start count.
+	Open(ctx context.Context, id, sessionID string, wrappedDEK, keySHA256, certificate []byte, channels int32) (Result, error)
+	// OpenFailed reports that recording id never started, on the background
+	// control slot, signed over the failure and its reason.
+	OpenFailed(ctx context.Context, f FailedOpen) (Result, error)
 	Complete(ctx context.Context, id string, wrappedDEK []byte, done Completion) (Result, error)
 	// PutSegment sends a live session's segment.
 	PutSegment(ctx context.Context, id string, seg Segment) (Result, error)
-	// PutSpooledSegment sends a segment read back from the spool; at most one
-	// such request is in flight per conn.
-	PutSpooledSegment(ctx context.Context, id string, seg Segment) (Result, error)
+	// PutSpooledSegment sends the segment load reads back from the spool. At
+	// most one such request is in flight per conn, and load runs only once it
+	// holds that place, so waiting requests hold no segment in memory. A load
+	// error is returned unchanged.
+	PutSpooledSegment(ctx context.Context, id string, load func() (Segment, error)) (Result, error)
 }

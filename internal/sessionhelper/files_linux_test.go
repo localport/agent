@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -79,6 +80,32 @@ func TestRenameNoReplaceDoesNotReplaceARacingCreate(t *testing.T) {
 		}
 		_ = os.RemoveAll(filepath.Join(dir, "from"))
 		_ = os.RemoveAll(filepath.Join(dir, "to"))
+	}
+}
+
+// A FIFO named as the target's parent is refused at once.
+func TestRenameNoReplaceDoesNotBlockOnAFIFOParent(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := os.Mkdir(filepath.Join(dir, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(filepath.Join(dir, "fifo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- renameNoReplace(root, "d", "fifo/x") }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a rename under a FIFO succeeded")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the rename blocked on the FIFO")
 	}
 }
 

@@ -28,11 +28,12 @@ const (
 	// IDLen is the length of a recording id, a canonical UUID in text form.
 	IDLen = 36
 
-	dekLen          = chacha20poly1305.KeySize
-	deflateLevel    = 6
-	wrapInfoContext = "localport-recording-v1"
-	openContext     = "localport-recording-open-v2"
-	completeContext = "localport-recording-complete-v1"
+	dekLen            = chacha20poly1305.KeySize
+	deflateLevel      = 6
+	wrapInfoContext   = "localport-recording-v1"
+	openContext       = "localport-recording-open-v2"
+	openFailedContext = "localport-recording-open-failed-v1"
+	completeContext   = "localport-recording-complete-v1"
 )
 
 var (
@@ -210,6 +211,20 @@ func OpenDigest(id, sessionID string, wrappedDEK, keySHA256 []byte) []byte {
 	msg = lengthPrefixed(msg, []byte(sessionID))
 	msg = lengthPrefixed(msg, dek[:])
 	msg = lengthPrefixed(msg, keySHA256)
+	sum := sha256.Sum256(msg)
+	return sum[:]
+}
+
+// OpenFailedDigest is the digest the device signs for a failed open:
+// SHA-256(lp(context) || lp(id) || lp(session_id) || lp(key_sha256) ||
+// lp(reason)).
+func OpenFailedDigest(id, sessionID string, keySHA256 []byte, reason string) []byte {
+	var msg []byte
+	msg = lengthPrefixed(msg, []byte(openFailedContext))
+	msg = lengthPrefixed(msg, []byte(id))
+	msg = lengthPrefixed(msg, []byte(sessionID))
+	msg = lengthPrefixed(msg, keySHA256)
+	msg = lengthPrefixed(msg, []byte(reason))
 	sum := sha256.Sum256(msg)
 	return sum[:]
 }

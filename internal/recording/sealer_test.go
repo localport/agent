@@ -237,6 +237,7 @@ func TestDigestGoldenVectors(t *testing.T) {
 	}{
 		// The control plane's tests pin the same vector.
 		{"open", OpenDigest(testID, testSessionID, wrapped, keySum), "1fd36cf1ee83db594888e6f756215db9f0da2d54010de28871dd26bd07aa1b80"},
+		{"open failed", OpenFailedDigest(testID, testSessionID, keySum, ReasonSpoolFull), "a307228e2e7c2275b8773203aeafef41f8c97adf675c3ad565762de0d2c72ff9"},
 		{"complete incomplete", CompleteDigest(testID, wrapped, Completion{
 			Segments: 3, FinalHash: bytes.Repeat([]byte{0x11}, 32), EndedAt: ended,
 			Incomplete: true, Reason: ReasonSpoolFull,

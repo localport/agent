@@ -84,7 +84,7 @@ func (e *fakeSessionEdge) serveConn(conn net.Conn) {
 		Handler:   e,
 		Protocols: &protocols,
 		HTTP2: &http.HTTP2Config{
-			MaxConcurrentStreams: 20,
+			MaxConcurrentStreams: 21,
 			MaxReadFrameSize:     16 << 10,
 		},
 	}
@@ -914,8 +914,7 @@ func (d *runEdgeDialer) expectSessionBind(t *testing.T) {
 
 // When the edge ends a control session, Run shuts the session handler down
 // before it closes the session mux conn, and both before the control conn;
-// the reconnect binds a fresh session mux. Run leaves the last control conn
-// to its caller, so goroutines settle once the test closes it.
+// the reconnect binds a fresh session mux.
 func TestRunStopsTheSessionMuxBeforeClosingTheControlConn(t *testing.T) {
 	before := runtime.NumGoroutine()
 	log := &closeLog{}
@@ -958,7 +957,39 @@ func TestRunStopsTheSessionMuxBeforeClosingTheControlConn(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run did not return after cancel")
 	}
-	tn.closeConn()
+	goroutinesSettle(t, before)
+}
+
+// Run closes the control conn when ctx ends the session; no caller holds it.
+func TestRunClosesTheControlConnOnCancel(t *testing.T) {
+	before := runtime.NumGoroutine()
+	log := &closeLog{}
+	edge := newFakeSessionEdge(t)
+	d := &runEdgeDialer{log: log, edge: edge, controls: make(chan net.Conn, 1), sessionBinds: make(chan struct{}, 1)}
+	tn := sessionDeviceTunnel(Options{SessionHandler: newStreamEchoHandler(), Capabilities: []string{"terminal"}})
+	tn.newDialers = func(transport.Options) []transport.Dialer { return []transport.Dialer{d} }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ran := make(chan error, 1)
+	go func() { ran <- tn.Run(ctx) }()
+
+	defer d.expectControl(t).Close()
+	d.expectSessionBind(t)
+	edge.expectAccept(t)
+
+	cancel()
+	select {
+	case err := <-ran:
+		if err != nil {
+			t.Fatalf("Run = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+	if got := log.snapshot(); !slices.Contains(got, "control closed") {
+		t.Fatalf("after cancel the close log is %v, want the control conn closed", got)
+	}
 	goroutinesSettle(t, before)
 }
 
@@ -1021,8 +1052,8 @@ func TestSessionMuxClientSettings(t *testing.T) {
 		case *http2.WindowUpdateFrame:
 			if f.StreamID == 0 {
 				window = true
-				if f.Increment != 20*128<<10 {
-					t.Errorf("connection WINDOW_UPDATE = %d, want 20 x 128 KiB", f.Increment)
+				if f.Increment != 21*128<<10 {
+					t.Errorf("connection WINDOW_UPDATE = %d, want 21 x 128 KiB", f.Increment)
 				}
 			}
 		}

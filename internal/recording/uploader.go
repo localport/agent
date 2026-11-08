@@ -88,14 +88,15 @@ type Uploader struct {
 
 	mu      sync.Mutex
 	entries map[string]*upload
-	// control counts the uploader's open and complete requests in flight per
-	// device identifier (one session mux each); strict counts the opens a
-	// caller waits on (BeginOpen, and Begin of a Strict recording) waiting or
-	// in flight per device identifier. The uploader starts a control request
-	// only when both are zero, so such an open never queues behind one it
-	// started later.
+	// control counts the uploader's open, complete and failed open requests in
+	// flight per device identifier (one session mux each); strict counts the
+	// opens BeginOpen waits on or has in flight per device identifier. The
+	// uploader starts a control request only when both are zero, so such an
+	// open never queues behind one it started later.
 	control map[string]int
 	strict  map[string]int
+	// failed holds the failed opens to report, oldest first.
+	failed  []*failedOpen
 	stopped bool
 	// diskWork holds the spool removals decided under mu; Run performs them
 	// after releasing it.
@@ -154,11 +155,13 @@ const (
 )
 
 type result struct {
-	e     *upload
-	op    op
-	index uint32
-	res   Result
-	err   error
+	e *upload
+	// failed is set instead of e on the result of a failed open.
+	failed *failedOpen
+	op     op
+	index  uint32
+	res    Result
+	err    error
 }
 
 // NewUploader returns an uploader; Resume hands it the spool's entries and
@@ -198,15 +201,19 @@ func NewUploader(cfg UploaderConfig) *Uploader {
 // before Run. Each entry repeats its open to learn the server's segments and
 // chain, sends its spooled segments from the server's count on and
 // completes; one without complete fields completes incomplete with reason
-// agent_restart. Segment files below the acknowledged count or past the
-// sealed count are removed.
+// agent_restart, or final when its final segment was the last delivered. A
+// segment file at the sealed count, written by a crash before its meta write,
+// is adopted with the hash of its content, as is each contiguous one after
+// it. Any other segment file below the acknowledged count or past the sealed
+// count is removed.
 func (u *Uploader) Resume(scan Scan) {
 	now := u.now()
 	for _, en := range scan.Entries {
-		m := en.Meta
-		e := &upload{meta: m, resumed: true, since: now, mem: make(map[uint32]*memSegment), onDisk: make(map[uint32]struct{})}
+		e := &upload{meta: en.Meta, resumed: true, since: now, mem: make(map[uint32]*memSegment), onDisk: make(map[uint32]struct{})}
+		m := &e.meta
+		// en.Indices is ascending, so each adoption moves Sealed to the next.
 		for _, idx := range en.Indices {
-			if idx >= m.Acked && idx < m.Sealed {
+			if (idx >= m.Acked && idx < m.Sealed) || u.adoptSegment(e, idx) {
 				e.onDisk[idx] = struct{}{}
 				continue
 			}
@@ -222,6 +229,29 @@ func (u *Uploader) Resume(scan Scan) {
 	u.poke()
 }
 
+// adoptSegment takes the spooled segment idx into e when it is the next to
+// seal and the entry has no complete fields. The file is whole, since the
+// spool writes by rename. The next meta write spends the hash reservation.
+func (u *Uploader) adoptSegment(e *upload, idx uint32) bool {
+	m := &e.meta
+	if idx != m.Sealed || m.Complete != nil {
+		return false
+	}
+	obj, err := u.spool.ReadSegment(m.ID, idx)
+	if err != nil {
+		u.log.Warn("recording segment past the sealed count not readable", slog.String("recording", m.ID), slog.Uint64("index", uint64(idx)), slog.Any("error", err))
+		return false
+	}
+	if err := u.spool.ReserveHash(m.ID); err != nil {
+		u.log.Warn("recording segment past the sealed count has no room for its hash", slog.String("recording", m.ID), slog.Uint64("index", uint64(idx)), slog.Any("error", err))
+		return false
+	}
+	hash := sha256.Sum256(obj)
+	m.Hashes = append(m.Hashes, hash[:])
+	m.Sealed++
+	return true
+}
+
 // Handoff is the recorder's side of one recording: segments in index order,
 // then End.
 type Handoff struct {
@@ -229,40 +259,27 @@ type Handoff struct {
 	e *upload
 }
 
-// Begin writes m as the entry's meta.json and hands the recording over. m
-// carries no segment yet. Best effort queues the open. Strict sends the open
-// now, ahead of any open or complete the uploader has not started on that
-// device, and on failure removes the entry and returns the error.
-func (u *Uploader) Begin(ctx context.Context, m Meta) (*Handoff, error) {
-	return u.begin(ctx, m, m.Policy == PolicyStrict)
-}
-
-// BeginOpen is Begin that sends the open now for either policy: the first
-// open creates the recording's row from m.Certificate, which verifies only
-// within its short validity, so a queued open could come too late. On
-// failure it removes the entry and returns the error; the caller decides
-// whether the session runs unrecorded.
+// BeginOpen writes m as the entry's meta.json, hands the recording over and
+// sends the open now, ahead of any open or complete the uploader has not
+// started on that device: the first open creates the recording's row from
+// m.Certificate, which verifies only within its short validity, so a queued
+// open could come too late. m carries no segment yet. On failure it removes
+// the entry and returns the error; the caller decides whether the session
+// runs unrecorded.
 func (u *Uploader) BeginOpen(ctx context.Context, m Meta) (*Handoff, error) {
-	return u.begin(ctx, m, true)
-}
-
-func (u *Uploader) begin(ctx context.Context, m Meta, openNow bool) (*Handoff, error) {
 	if m.Sealed != 0 || m.Acked != 0 || m.Complete != nil {
 		return nil, fmt.Errorf("%w: begin with segments or completion", ErrHandoff)
 	}
 	if err := u.spool.CreateEntry(m); err != nil {
 		return nil, err
 	}
-	e := &upload{meta: m, live: true, mem: make(map[uint32]*memSegment), onDisk: make(map[uint32]struct{})}
-	if openNow {
-		if err := u.openStrict(ctx, m); err != nil {
-			if rmErr := u.spool.Remove(m.ID); rmErr != nil {
-				u.log.Error("recording entry not removed", slog.String("recording", m.ID), slog.Any("error", rmErr))
-			}
-			return nil, err
+	if err := u.openStrict(ctx, m); err != nil {
+		if rmErr := u.spool.Remove(m.ID); rmErr != nil {
+			u.log.Error("recording entry not removed", slog.String("recording", m.ID), slog.Any("error", rmErr))
 		}
-		e.opened = true
+		return nil, err
 	}
+	e := &upload{meta: m, live: true, opened: true, mem: make(map[uint32]*memSegment), onDisk: make(map[uint32]struct{})}
 	u.mu.Lock()
 	u.entries[m.ID] = e
 	u.mu.Unlock()
@@ -286,7 +303,7 @@ func (u *Uploader) openStrict(ctx context.Context, m Meta) error {
 	if err != nil {
 		return err
 	}
-	res, err := c.Open(ctx, m.ID, m.SessionID, m.WrappedDEK, m.KeySHA256, m.Certificate)
+	res, err := c.Open(ctx, m.ID, m.SessionID, m.WrappedDEK, m.KeySHA256, m.Certificate, m.Channels)
 	if err != nil {
 		return err
 	}
@@ -326,19 +343,27 @@ func (h *Handoff) Segment(seg Segment) error {
 		return fmt.Errorf("%w: segment %d after %d sealed", ErrHandoff, seg.Index, e.meta.Sealed)
 	}
 	memFull := e.memBytes+len(seg.Object) > MaxUnacked
-	if !memFull && !u.stopped && !u.noMux(e.meta.Identifier) {
+	// The final segment is always spooled: a crash that leaves it delivered
+	// without End's meta write still completes as final, through FinalIndex.
+	if !seg.Final && !memFull && !u.stopped && !u.noMux(e.meta.Identifier) {
 		e.takeLocked(seg, &memSegment{seg: seg, spillAt: u.now().Add(AckTimeout)})
 		taken = true
 		u.mu.Unlock()
 		u.poke()
 		return nil
 	}
+	if seg.Final {
+		e.meta.FinalIndex = &seg.Index
+	}
 	// The index is taken only after the write, so the segment cannot be sent,
 	// and so acknowledged, before it is on disk.
 	meta := e.meta.snapshot()
+	u.mu.Unlock()
+	if seg.Final {
+		u.writeMeta(meta)
+	}
 	meta.Sealed++
 	meta.Hashes = append(meta.Hashes, bytes.Clone(seg.Hash[:]))
-	u.mu.Unlock()
 
 	err := u.spool.WriteSegment(meta.ID, seg)
 	if err == nil {
@@ -455,6 +480,7 @@ func (u *Uploader) ClientUp(identifier string) {
 			e.next = time.Time{}
 		}
 	}
+	u.resetFailedOpensLocked(identifier)
 	u.mu.Unlock()
 	u.poke()
 }
@@ -529,6 +555,7 @@ func (u *Uploader) shutdown(results chan result, wg *sync.WaitGroup) {
 	}
 	u.mu.Lock()
 	u.stopped = true
+	u.dropFailedOpensLocked()
 	var held []*upload
 	for _, e := range u.entries {
 		if len(e.mem) != 0 {
@@ -583,6 +610,7 @@ func (u *Uploader) dispatchLocked(ctx context.Context, results chan<- result, wg
 	for _, e := range due {
 		u.startLocked(ctx, e, now, results, wg)
 	}
+	u.dispatchFailedOpensLocked(ctx, now, later, results, wg)
 	if wake.IsZero() {
 		return 0, false, spills
 	}
@@ -650,10 +678,11 @@ func (u *Uploader) startLocked(ctx context.Context, e *upload, now time.Time, re
 	} else if o == opSegment {
 		want = m.Hashes[0]
 	}
+	final := m.FinalIndex != nil && *m.FinalIndex == m.Acked
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r.res, r.err = u.send(ctx, r.op, identifier, id, sessionID, dek, keySHA, cert, done, r.index, live, want)
+		r.res, r.err = u.send(ctx, r.op, identifier, id, sessionID, dek, keySHA, cert, done, r.index, live, want, final)
 		results <- r
 	}()
 }
@@ -667,7 +696,7 @@ func laterOf(a, b time.Time) time.Time {
 
 // send makes one request. A spooled segment (live nil) is read and checked
 // against want, its persisted hash, before it is sent.
-func (u *Uploader) send(ctx context.Context, o op, identifier, id, sessionID string, dek, keySHA, cert []byte, done Completion, index uint32, live *Segment, want []byte) (Result, error) {
+func (u *Uploader) send(ctx context.Context, o op, identifier, id, sessionID string, dek, keySHA, cert []byte, done Completion, index uint32, live *Segment, want []byte, final bool) (Result, error) {
 	c, err := u.client(identifier)
 	if err != nil {
 		return Result{}, err
@@ -676,7 +705,7 @@ func (u *Uploader) send(ctx context.Context, o op, identifier, id, sessionID str
 	case opOpen:
 		ctx, cancel := context.WithTimeout(ctx, u.requestTimeout(0))
 		defer cancel()
-		return c.Open(ctx, id, sessionID, dek, keySHA, cert)
+		return c.Open(ctx, id, sessionID, dek, keySHA, cert, 0)
 	case opComplete:
 		ctx, cancel := context.WithTimeout(ctx, u.requestTimeout(0))
 		defer cancel()
@@ -687,20 +716,26 @@ func (u *Uploader) send(ctx context.Context, o op, identifier, id, sessionID str
 		defer cancel()
 		return c.PutSegment(ctx, id, *live)
 	}
-	obj, err := u.spool.ReadSegment(id, index)
-	if err != nil {
-		return Result{}, fmt.Errorf("%w: read segment %d: %w", errSegmentLost, index, err)
-	}
-	seg := Segment{Index: index, Object: obj, Hash: sha256.Sum256(obj)}
-	if !bytes.Equal(seg.Hash[:], want) {
-		return Result{}, fmt.Errorf("%w: segment %d differs from its persisted hash", errSegmentLost, index)
-	}
-	ctx, cancel := context.WithTimeout(ctx, u.requestTimeout(len(obj)))
+	ctx, cancel := context.WithTimeout(ctx, u.requestTimeout(MaxObject))
 	defer cancel()
-	return c.PutSpooledSegment(ctx, id, seg)
+	return c.PutSpooledSegment(ctx, id, func() (Segment, error) {
+		obj, err := u.spool.ReadSegment(id, index)
+		if err != nil {
+			return Segment{}, fmt.Errorf("%w: read segment %d: %w", errSegmentLost, index, err)
+		}
+		seg := Segment{Index: index, Object: obj, Hash: sha256.Sum256(obj), Final: final}
+		if !bytes.Equal(seg.Hash[:], want) {
+			return Segment{}, fmt.Errorf("%w: segment %d differs from its persisted hash", errSegmentLost, index)
+		}
+		return seg, nil
+	})
 }
 
 func (u *Uploader) applyLocked(r result) {
+	if r.failed != nil {
+		u.applyFailedOpenLocked(r)
+		return
+	}
 	e := r.e
 	e.busy = false
 	if r.op != opSegment {
@@ -820,29 +855,32 @@ func (u *Uploader) resyncLocked(e *upload, res Result) {
 	}
 }
 
-// cutLocked completes the entry at its acknowledged count, incomplete, when
-// the segment to send next was lost (a crash before it reached the spool, or
-// a spooled file that failed its read-back, see errSegmentLost) or a resumed
-// entry has no complete fields. The segments past that count are dropped with
-// the entry once complete is accepted.
+// cutLocked completes the entry at its acknowledged count when the segment to
+// send next was lost (a crash before it reached the spool, or a spooled file
+// that failed its read-back, see errSegmentLost) or a resumed entry has no
+// complete fields. That is incomplete, unless the crash came after the final
+// segment was delivered: then only End's meta write is missing and the
+// recording is whole. The segments past that count are dropped with the entry
+// once complete is accepted.
 func (u *Uploader) cutLocked(e *upload, now time.Time) {
 	m := &e.meta
 	if m.Acked < m.Sealed {
 		u.log.Warn("recording completed early, segment lost",
 			slog.String("recording", m.ID), slog.Uint64("index", uint64(m.Acked)), slog.Uint64("sealed", uint64(m.Sealed)))
 	}
-	reason := ReasonAgentRestart
-	if e.live {
-		reason = ReasonRecordingFailed
-	}
 	endedAt := now
 	if m.Complete != nil {
 		endedAt = m.Complete.EndedAt
 	}
-	m.Complete = &Completion{
-		Segments: m.Acked, FinalHash: bytes.Clone(m.AckedChain), EndedAt: endedAt,
-		Incomplete: true, Final: false, Reason: reason,
+	final := !e.live && m.Complete == nil && m.Acked == m.Sealed && m.FinalIndex != nil && *m.FinalIndex+1 == m.Acked
+	done := Completion{Segments: m.Acked, FinalHash: bytes.Clone(m.AckedChain), EndedAt: endedAt, Final: final}
+	if !final {
+		done.Incomplete, done.Reason = true, ReasonAgentRestart
+		if e.live {
+			done.Reason = ReasonRecordingFailed
+		}
 	}
+	m.Complete = &done
 	m.Sealed = m.Acked
 	m.Hashes = nil
 	clear(e.mem)

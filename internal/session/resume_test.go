@@ -190,16 +190,18 @@ func (c *manualClock) advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
-// NewTimer records every detach timer (at most detachTimeout, the time left
-// of a detach deadline included); the idle timer never fires.
-func (c *manualClock) NewTimer(d time.Duration) (<-chan time.Time, func() bool) {
+// NewTimer is every other timer, which never fires.
+func (c *manualClock) NewTimer(time.Duration) (<-chan time.Time, func() bool) {
+	return make(chan time.Time, 1), func() bool { return true }
+}
+
+// NewDetachTimer records a detach timer.
+func (c *manualClock) NewDetachTimer(d time.Duration) (<-chan time.Time, func() bool) {
 	ch := make(chan time.Time, 1)
-	if d <= detachTimeout {
-		c.mu.Lock()
-		c.detach = append(c.detach, ch)
-		c.armed = append(c.armed, d)
-		c.mu.Unlock()
-	}
+	c.mu.Lock()
+	c.detach = append(c.detach, ch)
+	c.armed = append(c.armed, d)
+	c.mu.Unlock()
 	return ch, func() bool { return true }
 }
 

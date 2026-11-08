@@ -116,12 +116,14 @@ type forwarder struct {
 	startMu sync.Mutex
 
 	// The fields below are guarded by c.mu.
-	client    *launcher.ForwardClient
-	session   *launcher.Session
-	rec       *sessionRecorder
-	failed    bool
-	open      int
-	listeners map[string]*remoteListener
+	client  *launcher.ForwardClient
+	session *launcher.Session
+	rec     *sessionRecorder
+	// recAttempted is set with client when its start tried to record.
+	recAttempted bool
+	failed       bool
+	open         int
+	listeners    map[string]*remoteListener
 	// conns are the relayed connections, each true for the remote direction.
 	conns map[launcher.ForwardConn]bool
 }
@@ -198,9 +200,11 @@ func (f *forwarder) ensure() (*launcher.ForwardClient, error) {
 		return nil, err
 	}
 	var rec *sessionRecorder
+	attempted := false
 	if a := c.adm.Load(); a.Rec != nil {
+		attempted = true
 		var err error
-		rec, err = s.startRecording(uuidText(newRecordingID()), a.sessionID, a.admission, s.cfg.clock.Now())
+		rec, err = s.startRecording(uuidText(newRecordingID()), a.sessionID, a.admission, s.cfg.clock.Now(), a.recordedStarts.Add(1))
 		if err != nil {
 			if a.Rec.Policy == RecPolicyStrict {
 				s.log("session: %s: forwarding refused: %v", a.sessionID, err)
@@ -247,7 +251,17 @@ func (f *forwarder) ensure() (*launcher.ForwardClient, error) {
 		rec.abort()
 		return nil, errors.New(CloseHelperFailed)
 	}
-	f.client, f.session, f.rec = client, sess, rec
+	// A resume that named a recording either finds this client published or
+	// is seen here. A later forward starts under the new admission and
+	// records, so this refusal does not set failed.
+	if c.adm.Load().violatedBy(recordingStateOf(rec, attempted)) {
+		c.mu.Unlock()
+		_ = client.Close()
+		_ = sess.Close()
+		rec.abort()
+		return nil, errors.New(CloseRecordingRequired)
+	}
+	f.client, f.session, f.rec, f.recAttempted = client, sess, rec, attempted
 	c.mu.Unlock()
 	rec.start(time.Now(), defaultCols, defaultRows)
 	f.wg.Go(func() { f.watch(client, rec) })
@@ -278,6 +292,12 @@ func (f *forwarder) watch(client *launcher.ForwardClient, rec *sessionRecorder) 
 	for _, fc := range conns {
 		_ = fc.Close()
 	}
+}
+
+// recordingViolatedLocked reports whether the running helper cannot run under
+// a. It runs with c.mu held.
+func (f *forwarder) recordingViolatedLocked(a *connAdmission) bool {
+	return f.client != nil && !f.failed && a.violatedBy(recordingStateOf(f.rec, f.recAttempted))
 }
 
 // track registers a relayed connection of the remote or local direction, so

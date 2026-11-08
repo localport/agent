@@ -27,12 +27,14 @@ func statVFS(dir string) (*sftp.StatVFS, error) {
 // confined; a file system without RENAME_NOREPLACE takes the check-then-rename
 // path.
 func renameNoReplace(root *os.Root, from, to string) error {
-	fromDir, err := root.Open(path.Dir(from))
+	// O_DIRECTORY and O_NONBLOCK: a FIFO named as a parent answers at once.
+	const parentFlags = os.O_RDONLY | unix.O_DIRECTORY | unix.O_NONBLOCK
+	fromDir, err := root.OpenFile(path.Dir(from), parentFlags, 0)
 	if err != nil {
 		return err
 	}
 	defer fromDir.Close()
-	toDir, err := root.Open(path.Dir(to))
+	toDir, err := root.OpenFile(path.Dir(to), parentFlags, 0)
 	if err != nil {
 		return err
 	}

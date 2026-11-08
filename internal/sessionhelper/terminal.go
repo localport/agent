@@ -100,7 +100,7 @@ type terminal struct {
 	// killDone is closed once the SIGKILL step ran or became unnecessary.
 	killDone chan struct{}
 
-	// exitCode is the shell's exit status once reaped.
+	// exitCode is the shell's exit frame code once reaped (exitCode).
 	exitCode int
 
 	// observeExit blocks until the shell exited, without reaping it.
