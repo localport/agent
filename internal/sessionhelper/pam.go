@@ -7,6 +7,11 @@ package sessionhelper
 #include <stdlib.h>
 #include <string.h>
 #include <security/pam_appl.h>
+#include <grp.h>
+#include <unistd.h>
+
+// initgroups takes an int on macOS and a gid_t on Linux.
+static int lp_initgroups(const char *user, unsigned int gid) { return initgroups(user, gid); }
 
 // lp_conv answers no prompt: the session's identity was authenticated
 // upstream, so a module that asks for input fails the step (PAM_CONV_ERR).
@@ -63,8 +68,10 @@ type pamSession struct {
 }
 
 // openPAM runs the account stack, establishes credentials and opens the
-// session for login on tty (a device path such as /dev/pts/3).
-func openPAM(login, tty string) (*pamSession, error) {
+// session for login on tty (a device path such as /dev/pts/3). It sets this
+// process's supplementary groups to the login's before pam_setcred, so groups
+// a PAM module adds survive to the child, which keeps them (NoSetGroups).
+func openPAM(login, tty string, gid uint32) (*pamSession, error) {
 	cService, cUser := C.CString(pamService), C.CString(login)
 	defer C.free(unsafe.Pointer(cService))
 	defer C.free(unsafe.Pointer(cUser))
@@ -90,6 +97,10 @@ func openPAM(login, tty string) (*pamSession, error) {
 		p.last = rc
 		p.end()
 		return nil, fmt.Errorf("pam_acct_mgmt: %s", p.strerror(rc))
+	}
+	if rc, errno := C.lp_initgroups(cUser, C.uint(gid)); rc != 0 {
+		p.end()
+		return nil, fmt.Errorf("initgroups: %w", errno)
 	}
 	if rc := C.pam_setcred(p.h, C.PAM_ESTABLISH_CRED); rc != C.PAM_SUCCESS {
 		p.last = rc

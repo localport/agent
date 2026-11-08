@@ -202,8 +202,8 @@ func TestStartRelaysTheHelpersChannel(t *testing.T) {
 	if f, err = fr.ReadFrame(); err != nil || f.Type != FrameExit || f.Code != 7 {
 		t.Fatalf("second frame %+v, %v", f, err)
 	}
-	if e, err := sess.Wait(); err != nil || e.Status != 0 {
-		t.Fatalf("Wait = %+v, %v", e, err)
+	if resp, err := readResponse(sess.conn); err != nil || resp.Exit == nil || resp.Exit.Status != 0 {
+		t.Fatalf("exit report = %+v, %v", resp, err)
 	}
 }
 

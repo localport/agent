@@ -102,7 +102,7 @@ func Run(log func(string, ...any)) int {
 	}
 	var pam *pamSession
 	if pamAvailable && !req.AgentAccount {
-		pam, err = openPAM(a.Name, pamTTY)
+		pam, err = openPAM(a.Name, pamTTY, a.GID)
 		if err != nil {
 			closePTY()
 			if errors.Is(err, errPAMAccount) {
@@ -120,7 +120,9 @@ func Run(log func(string, ...any)) int {
 		args: shellArgs(shell, req),
 		env:  sessionEnv(a, shell, req.Term, loginDefsPath(a.UID), pamEnv, req.Env),
 		dir:  workDir(a.Home),
-		cred: &syscall.Credential{Uid: a.UID, Gid: a.GID, Groups: a.Groups},
+		// With PAM the groups are already this process's: initgroups, then
+		// pam_setcred.
+		cred: &syscall.Credential{Uid: a.UID, Gid: a.GID, Groups: a.Groups, NoSetGroups: pam != nil && pamAvailable},
 	}
 	if req.Kind == launcher.KindSFTP {
 		// The file server is this binary run as the login, as sshd runs

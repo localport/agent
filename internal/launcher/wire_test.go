@@ -3,8 +3,12 @@ package launcher
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
+	"net"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Validate bounds the Windows fields: a pipe only under the session prefix
@@ -86,5 +90,36 @@ func TestHelperRequestPasswordTrailer(t *testing.T) {
 	}
 	if got, err := ReadHelperRequest(&none); err != nil || got.HasPassword || got.Password != nil || none.Len() != 0 {
 		t.Fatalf("without a password: %+v, %v, %d bytes left", got, err, none.Len())
+	}
+}
+
+// The request bound ends with the request: a later read on the conn waits for
+// data instead of failing at the expired deadline.
+func TestReadWithinClearsTheDeadline(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	const bound = 20 * time.Millisecond
+	if err := readWithin(server, bound, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(3 * bound)
+	go func() { _, _ = client.Write([]byte{1}) }()
+	if _, err := server.Read(make([]byte, 1)); err != nil {
+		t.Fatalf("read after the request bound = %v", err)
+	}
+}
+
+// A stalled request read ends at the bound.
+func TestReadWithinBoundsTheRead(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	err := readWithin(server, 20*time.Millisecond, func() error {
+		_, err := server.Read(make([]byte, 1))
+		return err
+	})
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("readWithin = %v, want the deadline error", err)
 	}
 }

@@ -68,9 +68,11 @@ func (s *Server) handle(conn *os.File) {
 		s.Log("launcher: refused a connection from %s: not the device service", sid)
 		return
 	}
-	_ = conn.SetDeadline(time.Now().Add(requestTimeout))
-	body, err := readBody(conn)
-	_ = conn.SetDeadline(time.Time{})
+	var body []byte
+	err = readWithin(conn, requestTimeout, func() (err error) {
+		body, err = readBody(conn)
+		return err
+	})
 	if err != nil {
 		return
 	}
@@ -80,9 +82,10 @@ func (s *Server) handle(conn *os.File) {
 		return
 	}
 	if req.HasPassword {
-		_ = conn.SetReadDeadline(time.Now().Add(requestTimeout))
-		req.Password, err = readSecret(conn)
-		_ = conn.SetReadDeadline(time.Time{})
+		err = readWithin(conn, requestTimeout, func() (err error) {
+			req.Password, err = readSecret(conn)
+			return err
+		})
 		if err != nil {
 			s.refuse(conn, CodeBadRequest)
 			return

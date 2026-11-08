@@ -222,6 +222,30 @@ func TestForwardMuxCreditWindow(t *testing.T) {
 	}
 }
 
+// The stream count is the live streams: a close from either side leaves it
+// at once, so a dial after that close is not refused for it.
+func TestForwardMuxLenCountsOnlyLiveStreams(t *testing.T) {
+	m := NewForwardMux(func(FwdMsg) error { return nil })
+	for id := range uint32(3) {
+		if _, err := m.Open(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.Deliver(FwdMsg{Type: FwdClose, ID: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Len(); got != 2 {
+		t.Fatalf("Len after the peer's close = %d, want 2", got)
+	}
+	s := m.streams[1]
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Len(); got != 1 {
+		t.Fatalf("Len after a local close = %d, want 1", got)
+	}
+}
+
 // TestForwardMuxPeerClose checks that bytes received before the peer's close
 // stay readable and the read then fails, and that a closed stream's writer
 // wakes.

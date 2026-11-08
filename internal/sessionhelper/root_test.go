@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -195,7 +196,7 @@ func TestRootHelperRunsAPAMSession(t *testing.T) {
 	}
 	// The listing's own sh holds one descriptor beyond 0-2; the helper's
 	// channel (3) and control (4) must not reach the shell.
-	if err := launcher.WriteFrame(agentEnd, launcher.Frame{Type: launcher.FrameData, Data: []byte("echo WHO=$(id -un) PATH=$PATH; sh -c 'cd " + fdDir + " && echo FDS= * END'; exit 3\n")}); err != nil {
+	if err := launcher.WriteFrame(agentEnd, launcher.Frame{Type: launcher.FrameData, Data: []byte("echo WHO=$(id -un) PATH=$PATH; echo GROUPS=$(id -G) END; sh -c 'cd " + fdDir + " && echo FDS= * END'; exit 3\n")}); err != nil {
 		t.Fatal(err)
 	}
 	fr := launcher.NewFrameReader(agentEnd)
@@ -215,6 +216,25 @@ func TestRootHelperRunsAPAMSession(t *testing.T) {
 	}
 	if !regexp.MustCompile(`WHO=` + regexp.QuoteMeta(login) + ` PATH=/`).MatchString(out.String()) {
 		t.Fatalf("output %q: the shell did not run as %s with a PATH", out.String(), login)
+	}
+	// The shell holds the login's own groups, none of the helper's root groups.
+	u, err := user.Lookup(login)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := u.GroupIds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := regexp.MustCompile(`GROUPS=([0-9 ]*) END`).FindStringSubmatch(out.String())
+	if g == nil {
+		t.Fatalf("output %q: no group list", out.String())
+	}
+	got := strings.Fields(g[1])
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(slices.Compact(got), slices.Compact(want)) {
+		t.Fatalf("the shell's groups are %v, want the login's %v", got, want)
 	}
 	m := regexp.MustCompile(`FDS= ([0-9 ]*) END`).FindStringSubmatch(out.String())
 	if m == nil || len(strings.Fields(m[1])) != 4 {

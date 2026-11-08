@@ -74,12 +74,14 @@ func (s *Server) handle(conn *net.UnixConn) {
 		s.Log("launcher: refused a connection from uid %d (pid %d): not the agent account", uid, pid)
 		return
 	}
-	_ = conn.SetDeadline(time.Now().Add(requestTimeout))
-	req, channel, err := recvRequest(conn)
-	// The bound covers the request only: a helper may take up to
-	// helperStartTimeout before the answer, and each reply bounds its own
-	// write (respond).
-	_ = conn.SetDeadline(time.Time{})
+	var (
+		req     Request
+		channel *os.File
+	)
+	err = readWithin(conn, requestTimeout, func() (err error) {
+		req, channel, err = recvRequest(conn)
+		return err
+	})
 	if err != nil {
 		var r *RefusalError
 		if errors.As(err, &r) {

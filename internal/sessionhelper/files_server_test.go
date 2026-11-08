@@ -94,6 +94,35 @@ func newFilesHarnessWith(t *testing.T, access FilesAccess) *filesHarness {
 	return h
 }
 
+// A relative link target keeps the client's text and works inside the root;
+// an absolute or escaping target gives the client no way out.
+func TestFilesSymlinkTargetsAreConfined(t *testing.T) {
+	h := newFilesHarness(t)
+	if err := os.WriteFile(filepath.Join(h.dir, "inside"), []byte("in"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Symlink("inside", "/rel"); err != nil {
+		t.Fatalf("relative target: %v", err)
+	}
+	if got, err := os.Readlink(filepath.Join(h.dir, "rel")); err != nil || got != "inside" {
+		t.Fatalf("stored target %q, %v", got, err)
+	}
+	f, err := h.client.Open("/rel")
+	if err != nil {
+		t.Fatalf("open through the relative link: %v", err)
+	}
+	_ = f.Close()
+	for name, target := range map[string]string{"/abs": filepath.Join(filepath.Dir(h.dir), "secret"), "/esc": "../secret"} {
+		if err := h.client.Symlink(target, name); err != nil {
+			continue // refused at creation
+		}
+		if f, err := h.client.Open(name); err == nil {
+			_ = f.Close()
+			t.Fatalf("%s to %s reached outside the root", name, target)
+		}
+	}
+}
+
 // Put, get, a write at an offset past the end (resume), and a rewrite in
 // place keep the file's identity and bytes; each handle writes one event
 // with its byte count.

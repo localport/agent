@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -62,11 +63,19 @@ func createPipeInstance(name, sddl string, first bool, maxInstances uint32) (win
 }
 
 // PipeListener accepts clients on the launcher pipe. Accept runs on one
-// goroutine; Close may run on any.
+// goroutine; Close may run on any, any number of times.
 type PipeListener struct {
 	name, sddl string
-	first      bool
 	stop       windows.Handle
+
+	closeOnce sync.Once
+	closeErr  error
+
+	// mu is held for the whole of Accept, so Close releases the handles only
+	// once Accept has left them.
+	mu     sync.Mutex
+	closed bool
+	first  bool
 	// next is the instance waiting for the next client. Accept creates it
 	// before returning a connection, so the name does not lapse between
 	// clients unless that creation fails. A process that takes a lapsed
@@ -113,6 +122,11 @@ func (l *PipeListener) prepare() error {
 // Accept waits for the next client and returns its connection, pollable so
 // deadlines apply. It returns net.ErrClosed after Close.
 func (l *PipeListener) Accept() (*os.File, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil, net.ErrClosed
+	}
 	if ev, _ := windows.WaitForSingleObject(l.stop, 0); ev == windows.WAIT_OBJECT_0 {
 		return nil, net.ErrClosed
 	}
@@ -165,8 +179,26 @@ func connectPipe(h, stop windows.Handle) error {
 	return nil
 }
 
-// Close stops Accept; connections already returned stay open.
-func (l *PipeListener) Close() error { return windows.SetEvent(l.stop) }
+// Close stops Accept, waits for it to return and releases the waiting pipe
+// instance and the stop event. Connections already returned stay open.
+func (l *PipeListener) Close() error {
+	l.closeOnce.Do(func() {
+		// Without the event a blocked Accept never returns, so the handles
+		// stay open rather than the wait below hanging.
+		if l.closeErr = windows.SetEvent(l.stop); l.closeErr != nil {
+			return
+		}
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.closed = true
+		if l.next != 0 {
+			_ = windows.CloseHandle(l.next)
+			l.next = 0
+		}
+		l.closeErr = windows.CloseHandle(l.stop)
+	})
+	return l.closeErr
+}
 
 // pipeClientSID returns the user SID of the client connected to conn,
 // read by impersonating it at the level it allowed (identification).

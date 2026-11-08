@@ -5,11 +5,13 @@ package sessionhelper
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -99,6 +101,78 @@ func (s *shell) expectExit(t *testing.T, code int32) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the terminal did not end after its exit frame")
 	}
+}
+
+// The terminal names its session after the foreground group's leader has
+// exited, when getsid on that group has nothing to ask.
+func TestPTYSessionSurvivesAnExitedGroupLeader(t *testing.T) {
+	master, slave, err := openPTY(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	cmd := exec.Command("/bin/sh", "-c", "set -m; sleep 0.3 | sleep 20")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	k := &terminal{master: master}
+	deadline := time.Now().Add(10 * time.Second)
+	var pgrp int
+	for time.Now().Before(deadline) {
+		p := k.foregroundGroup()
+		if p != 0 && p != cmd.Process.Pid {
+			pgrp = p
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if pgrp == 0 {
+		t.Fatal("the pipeline never became the foreground group")
+	}
+	for {
+		if _, err := unix.Getsid(pgrp); errors.Is(err, unix.ESRCH) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the group leader did not exit")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := ptySession(master); got != cmd.Process.Pid {
+		t.Fatalf("ptySession = %d, want the session leader %d", got, cmd.Process.Pid)
+	}
+}
+
+// A process killed by a signal reports minus the signal; a process that
+// exits 137 reports 137.
+func TestExitCodeDistinguishesASignalFromAStatus(t *testing.T) {
+	run := func(script string) int {
+		t.Helper()
+		cmd := exec.Command("/bin/sh", "-c", script)
+		_ = cmd.Run()
+		return exitCode(cmd.ProcessState)
+	}
+	if got := run("kill -KILL $$"); got != -9 {
+		t.Fatalf("killed = %d, want -9", got)
+	}
+	if got := run("exit 137"); got != 137 {
+		t.Fatalf("exit 137 = %d", got)
+	}
+}
+
+// A terminal shell killed by a signal sends the negative code.
+func TestTerminalShellKilledBySignal(t *testing.T) {
+	s := startShell(t)
+	s.send(t, "kill -KILL $$\n")
+	s.expectExit(t, -9)
 }
 
 func TestTerminalRoundTripAndExitCode(t *testing.T) {

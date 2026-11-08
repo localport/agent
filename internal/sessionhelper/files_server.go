@@ -332,8 +332,8 @@ func (s *filesServer) PosixRename(r *sftp.Request) error {
 }
 
 // rename is SFTP v3 rename, which never replaces the target: a hard link and
-// an unlink for a regular file, as OpenSSH does, else a rename after
-// checking that the target does not exist.
+// an unlink for a regular file, as OpenSSH does, else a rename that refuses an
+// existing target.
 func (s *filesServer) rename(from, to string) error {
 	fi, err := s.root.Lstat(from)
 	if err != nil {
@@ -346,12 +346,18 @@ func (s *filesServer) rename(from, to string) error {
 			return err
 		}
 	}
-	if _, err := s.root.Lstat(to); err == nil {
+	return renameNoReplace(s.root, from, to)
+}
+
+// checkThenRename renames after checking that the target does not exist; a
+// racing create can be replaced.
+func checkThenRename(root *os.Root, from, to string) error {
+	if _, err := root.Lstat(to); err == nil {
 		return &fs.PathError{Op: "rename", Path: to, Err: fs.ErrExist}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	return s.root.Rename(from, to)
+	return root.Rename(from, to)
 }
 
 // removeKind removes a directory (dir) or anything else, refusing the other

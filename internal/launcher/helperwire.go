@@ -13,6 +13,15 @@ import (
 	"github.com/localport/agent/internal/config"
 )
 
+// readWithin runs read under a deadline on conn and clears the deadline
+// after it. The bound covers the request only: a helper may take up to
+// helperStartTimeout before the answer, and each reply bounds its own write.
+func readWithin(conn interface{ SetDeadline(time.Time) error }, timeout time.Duration, read func() error) error {
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
+	return read()
+}
+
 const (
 	// requestTimeout bounds reading the one request after accept.
 	requestTimeout = 5 * time.Second

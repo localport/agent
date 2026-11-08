@@ -270,7 +270,9 @@ type deviceSessionState struct {
 // registration (spec.Credential), never Store.Load, which lags behind a
 // renewed certificate until it is promoted. It returns nil state when no
 // server is set, and an error, leaving sessions off, when the sessions lock
-// cannot be held, as when another process serves the same identity.
+// cannot be held, as when another process serves the same identity, or when
+// the device has logins and this process is not an account the session
+// launcher serves.
 func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.DeviceSpec, uploads *recording.Uploader, logEvent func(string)) (*deviceSessionState, error) {
 	keys, err := store.TicketKeys(ref)
 	if err != nil {
@@ -285,6 +287,13 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 	if len(spec.Capabilities) == 0 || spec.Credential == nil {
 		spec.HintRevoked = hintRevoked(keys, nil, logEvent)
 		return nil, nil
+	}
+	// A test's launcher replaces the one whose account check this mirrors.
+	if sessionLauncher == nil && len(spec.Logins) > 0 {
+		if err := checkSessionAccount(); err != nil {
+			spec.HintRevoked = hintRevoked(keys, nil, logEvent)
+			return nil, err
+		}
 	}
 	lock, err := session.LockSessions(store.Dir(ref))
 	if err != nil {

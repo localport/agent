@@ -317,7 +317,7 @@ func (k *terminal) finish() {
 		k.markEnded()
 		k.procMu.Lock()
 		foreground := k.foregroundGroup()
-		k.leader = k.recordLeader(foreground)
+		k.leader = k.recordLeader()
 		if !k.exitSeen {
 			_ = k.cmd.Process.Signal(syscall.SIGHUP)
 		}
@@ -353,15 +353,27 @@ func (k *terminal) foregroundGroup() int {
 	return pgrp
 }
 
-// recordLeader returns the session leader of the foreground process group.
-// It returns nil when there is no foreground group or no session leader, or
-// when the leader is the shell, which the group SIGKILL covers.
-func (k *terminal) recordLeader(pgrp int) *sessionLeader {
-	if pgrp <= 0 {
-		return nil
+// ptySession returns the session id of the terminal behind master, read from
+// the terminal itself, so a foreground group whose leader exited still yields
+// it; 0 when it has none.
+func ptySession(master *os.File) int {
+	rc, err := master.SyscallConn()
+	if err != nil {
+		return 0
 	}
-	sid, err := unix.Getsid(pgrp)
-	if err != nil || sid == k.cmd.Process.Pid {
+	sid, ioctlErr := 0, error(nil)
+	if err := rc.Control(func(fd uintptr) { sid, ioctlErr = unix.IoctlGetInt(int(fd), ioctlGetSession) }); err != nil || ioctlErr != nil || sid <= 0 {
+		return 0
+	}
+	return sid
+}
+
+// recordLeader returns the terminal's session leader. It returns nil when
+// there is none, or when the leader is the shell, which the group SIGKILL
+// covers.
+func (k *terminal) recordLeader() *sessionLeader {
+	sid := ptySession(k.master)
+	if sid == 0 || sid == k.cmd.Process.Pid {
 		return nil
 	}
 	l, err := holdLeader(sid)
@@ -415,10 +427,11 @@ func (k *terminal) endKill() {
 	close(k.killDone)
 }
 
-// exitCode is the process's exit status, or 128 + the signal that ended it.
+// exitCode is the exit frame's code: the process's exit status, or minus the
+// signal that ended it.
 func exitCode(ps *os.ProcessState) int {
 	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-		return 128 + int(ws.Signal())
+		return -int(ws.Signal())
 	}
 	return ps.ExitCode()
 }

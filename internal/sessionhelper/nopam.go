@@ -23,9 +23,9 @@ const pamAvailable = false
 // pamSession is empty without PAM.
 type pamSession struct{}
 
-func openPAM(string, string) (*pamSession, error) { return &pamSession{}, nil }
-func (*pamSession) env() []string                 { return nil }
-func (*pamSession) close()                        {}
+func openPAM(string, string, uint32) (*pamSession, error) { return &pamSession{}, nil }
+func (*pamSession) env() []string                         { return nil }
+func (*pamSession) close()                                {}
 
 // accountChecks applies sshd's shadow checks for a host without PAM: the
 // entry is not locked and not expired (checkShadow). A host with no

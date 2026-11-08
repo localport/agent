@@ -7,9 +7,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -41,6 +43,56 @@ func listen(t *testing.T, name string, me *windows.SID) *PipeListener {
 	l := &PipeListener{name: name, sddl: "O:" + me.String() + "D:P(A;;GA;;;" + me.String() + ")", first: true, stop: stop}
 	t.Cleanup(func() { _ = l.Close() })
 	return l
+}
+
+var procGetProcessHandleCount = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetProcessHandleCount")
+
+func processHandleCount(t *testing.T) int {
+	t.Helper()
+	var n uint32
+	if r, _, err := procGetProcessHandleCount.Call(uintptr(windows.CurrentProcess()), uintptr(unsafe.Pointer(&n))); r == 0 {
+		t.Fatal(err)
+	}
+	return int(n)
+}
+
+// Close releases the stop event and the waiting instance, with an Accept
+// blocked or none. Many rounds make a leak of one handle stand out from the
+// runtime's own handle use.
+func TestPipeListenerCloseReleasesItsHandles(t *testing.T) {
+	const rounds = 64
+	me := currentSID(t)
+	before := processHandleCount(t)
+	for i := range rounds {
+		l := listen(t, testPipeName(t), me)
+		if err := l.prepare(); err != nil {
+			t.Fatal(err)
+		}
+		accepted := make(chan error, 1)
+		if i%2 == 0 {
+			go func() {
+				_, err := l.Accept()
+				accepted <- err
+			}()
+		} else {
+			accepted <- net.ErrClosed
+		}
+		if err := l.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-accepted; !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Accept = %v, want net.ErrClosed", err)
+		}
+		if err := l.Close(); err != nil {
+			t.Fatalf("second Close = %v", err)
+		}
+		if _, err := l.Accept(); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Accept after Close = %v, want net.ErrClosed", err)
+		}
+	}
+	if grew := processHandleCount(t) - before; grew >= rounds {
+		t.Fatalf("%d handles survived %d listeners", grew, rounds)
+	}
 }
 
 // The server reads the client's token; the client checks the pipe's owner.
