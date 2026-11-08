@@ -24,7 +24,7 @@ import (
 // client verified the agent's host-key signature, so a relay learns nothing
 // it could replay (the TLS 1.3 PSK binder model).
 const (
-	preludeVersion    = 1
+	preludeVersion    = 2
 	preludeMaxMessage = 16 << 10
 	resumeHandleLen   = 16
 	resumeTokenLabel  = "localport-resume-v1"
@@ -96,8 +96,11 @@ type resumeMsg struct {
 	Handle    []byte
 	ClientKey []byte
 	Position  uint64
-	Cert      []byte
-	Sig       []byte
+	// Close asks the agent to end the connection once the resume is proven,
+	// as a received closeTag does, instead of installing the stream.
+	Close bool
+	Cert  []byte
+	Sig   []byte
 }
 
 type resumeReplyMsg struct {
@@ -302,6 +305,13 @@ func Hello(stream io.ReadWriter, signer ssh.Signer, hostKey ssh.PublicKey) (*Cli
 // first connect), and returns the agent's received position for Conn.Attach.
 // Call it only while Conn is detached. A *ResumeError is the agent's refusal.
 func (c *ClientResumable) Resume(stream io.ReadWriter, signer ssh.Signer) (uint64, error) {
+	return c.resume(stream, signer, false)
+}
+
+// resume runs a resume's prelude; with closeConn it is a close resume: the
+// agent ends the connection once the proof verifies and a position outside
+// its send buffer does not matter. The caller ends Conn after a close resume.
+func (c *ClientResumable) resume(stream io.ReadWriter, signer ssh.Signer, closeConn bool) (uint64, error) {
 	cert, err := certOf(signer)
 	if err != nil {
 		return 0, err
@@ -314,7 +324,7 @@ func (c *ClientResumable) Resume(stream io.ReadWriter, signer ssh.Signer) (uint6
 		return 0, err
 	}
 	msg := resumeMsg{Version: preludeVersion, Handle: c.handle, ClientKey: priv.PublicKey().Bytes(),
-		Position: c.Conn.Received(), Cert: cert.Marshal()}
+		Position: c.Conn.Received(), Close: closeConn, Cert: cert.Marshal()}
 	if msg.Sig, err = signPrelude(signer, clientSigContext, transcript(msg.noSig())); err != nil {
 		return 0, err
 	}
@@ -332,7 +342,7 @@ func (c *ClientResumable) Resume(stream io.ReadWriter, signer ssh.Signer) (uint6
 	if len(reply.AgentKey) != 32 || !verifyPrelude(c.hostKey, agentSigContext, th, reply.Sig) {
 		return 0, errors.New("session prelude: the agent's resume signature does not verify with the pinned host key")
 	}
-	if !c.Conn.CanResumeFrom(reply.Position) {
+	if !closeConn && !c.Conn.CanResumeFrom(reply.Position) {
 		c.Conn.End(ErrResumeLost)
 		return 0, &ResumeError{Code: CloseResumeLost}
 	}

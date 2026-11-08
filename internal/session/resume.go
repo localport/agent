@@ -139,8 +139,8 @@ func (c *ResumableConn) Attach(stream net.Conn, peerReceived uint64) AttachEnd {
 // until its run is done, so the newest stream always takes over and no two
 // run at once. peerReceived is the position the peer reported in the
 // prelude, and the peer was told Received(). A position outside the send
-// buffer ends the conn with ErrResumeLost and sends closeTag; an ended conn
-// refuses the stream; both close stream and return a nil run and Ended. The
+// buffer ends the conn with ErrResumeLost and sends closeTag; an ended conn,
+// or one whose peer closed it, refuses the stream; both close stream and return a nil run and Ended. The
 // caller must call a non-nil run, once: it serves the stream until it ends
 // (see Attach).
 func (c *ResumableConn) Install(stream net.Conn, peerReceived uint64) (run func() AttachEnd, end AttachEnd) {
@@ -155,7 +155,7 @@ func (c *ResumableConn) Install(stream net.Conn, peerReceived uint64) (run func(
 		}
 	}
 	switch {
-	case c.ended != nil:
+	case c.ended != nil, c.remoteClosed:
 		c.mu.Unlock()
 		_ = stream.Close()
 		return nil, Ended
@@ -431,6 +431,16 @@ func (c *ResumableConn) Write(p []byte) (int, error) {
 		c.cond.Broadcast()
 	}
 	return written, nil
+}
+
+// CloseRemote records a deliberate close the peer sent outside a stream (a
+// close resume), as a received closeTag: Read returns io.EOF once the
+// received bytes are read, Write fails and Install refuses later streams.
+func (c *ResumableConn) CloseRemote() {
+	c.mu.Lock()
+	c.remoteClosed = true
+	c.cond.Broadcast()
+	c.mu.Unlock()
 }
 
 // Close is a deliberate close: the attached stream sends what is buffered,

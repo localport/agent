@@ -281,6 +281,10 @@ var afterAttemptClaimCleared atomic.Pointer[func()]
 // stream is installed and before the resume's claim is released.
 var afterResumeInstall atomic.Pointer[func(*resumable)]
 
+// onConnEnd, when set by a test, gets the reason serveConn ends a connection
+// with ("" for a client's close), before its channels end.
+var onConnEnd atomic.Pointer[func(reason string)]
+
 // detachTimeout bounds how long a connection waits detached for a resume.
 const detachTimeout = 5 * time.Minute
 
@@ -534,6 +538,15 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 		if s.proofFailed(e) >= maxProofFailures {
 			e.endWith(CloseResumeRefused)
 		}
+		return
+	}
+	if m.Close {
+		// A close resume ends the connection as a received closeTag does; a
+		// lost position does not matter to an end. The conn takes no later
+		// stream, so the token is spent.
+		s.log("session: resume closed the connection")
+		_ = writePrelude(stream, proofReplyMsg{Status: statusOK})
+		e.rc.CloseRemote()
 		return
 	}
 	if lost {
@@ -1342,6 +1355,9 @@ wait:
 	stopTimer()
 	if !e.rc.Attached() {
 		e.rc.End(errConnEnded)
+	}
+	if hook := onConnEnd.Load(); hook != nil {
+		(*hook)(reason)
 	}
 	c.end(reason)
 	_ = sc.Close()

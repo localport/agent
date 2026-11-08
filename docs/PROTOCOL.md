@@ -857,14 +857,14 @@ two pin one wire vector, `TestResumeWireVector`). A connection does not
 survive an agent restart.
 
 Prelude messages are a 4-byte big-endian length (at most 16 KiB) and the x/crypto
-SSH wire encoding of one message (`sshtype` 160 to 165, version 1). The edge
-relays them like any bytes.
+SSH wire encoding of one message (`sshtype` 160 to 165, version 2; the agent
+refuses any other version). The edge relays them like any bytes.
 
 | Step | Sender | Message |
 | --- | --- | --- |
 | first connect | client | hello: version, fresh X25519 key, the certificate the edge admitted, the client's signature (its certificate key) |
 | | agent | hello reply: status, fresh X25519 key, a random 16-byte handle, its host key, its host-key signature |
-| resume | client | resume: version, handle, fresh X25519 key, bytes received, the resume certificate, the client's signature |
+| resume | client | resume: version, handle, fresh X25519 key, bytes received, close (boolean), the resume certificate, the client's signature |
 | | agent | resume reply: status, fresh X25519 key, bytes received, its host-key signature |
 | | client | proof: `HMAC-SHA256(token, transcript)`, sent only after it verified the reply under the pinned host key |
 | | agent | proof reply: status |
@@ -899,6 +899,12 @@ relays them like any bytes.
   outside the send buffer). Three failed proofs end the connection
   `resume_refused`. A resume of a handle whose stream is still attached
   detaches that stream first.
+- A close resume (close true) is how a client that lost its stream ends the
+  connection at once instead of leaving it to the detach deadline. It passes
+  every check a resume does, proof included; the agent then answers 0 and
+  ends the connection as a received closeTag does, whatever the position, and
+  no later resume of the handle attaches. A refused close resume leaves the
+  connection detached.
 
 After the prelude each side sends frames `uvarint ack | uvarint len | data`:
 `ack` is the count of bytes received since its last ack, `data` at most

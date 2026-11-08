@@ -15,14 +15,14 @@
 
 ARG TOOLCHAIN
 
-FROM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS go
+FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS go
 
 FROM almalinux:8.10@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b AS glibc-el8
 RUN dnf -y -q install gcc pam-devel binutils && dnf clean all
 COPY --from=go /usr/local/go /usr/local/go
 ENV GLIBC_FLOOR=2.28
 
-FROM golang:1.27.3-alpine3.24@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS musl
+FROM golang:1.27.4-alpine3.24@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS musl
 RUN apk add -q --no-cache gcc musl-dev linux-pam-dev binutils
 
 FROM ${TOOLCHAIN} AS build

@@ -6,11 +6,13 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 )
 
-// TestResumeWireVector pins the prelude transcript, token, proof and
-// closeTag encoding. web/wasm/sshclient/client holds the same test, so the
-// two implementations cannot drift.
+// TestResumeWireVector pins the prelude transcript, the close resume message
+// and its transcript, token, proof and closeTag encoding. web/wasm/sshclient/client
+// holds the same test, so the two implementations cannot drift.
 func TestResumeWireVector(t *testing.T) {
 	hello := helloMsg{Version: preludeVersion, ClientKey: bytes.Repeat([]byte{1}, 32), Cert: []byte("cert")}
 	reply := helloReplyMsg{AgentKey: bytes.Repeat([]byte{2}, 32), Handle: bytes.Repeat([]byte{3}, resumeHandleLen)}
@@ -21,11 +23,15 @@ func TestResumeWireVector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	resume := resumeMsg{Version: preludeVersion, Handle: reply.Handle, ClientKey: hello.ClientKey, Position: 7, Close: true, Cert: hello.Cert}
+	resumeReply := resumeReplyMsg{AgentKey: reply.AgentKey, Position: 9}
 	for name, c := range map[string][2]string{
-		"transcript": {hex.EncodeToString(th), "d530d326bab17596e813ab5463b5d5a4aa7163b535c807b78f3e092356c363bf"},
-		"token":      {hex.EncodeToString(token), "2c08b9288a15608ae439c5290c103a680581954f7fc6f797c306212fb6a25d9b"},
-		"proof":      {hex.EncodeToString(resumeProof(token, th)), "23b9a01044025cc737745db07e65c4cea601f378c81242f68375c4bbfea23b83"},
-		"closeTag":   {hex.EncodeToString(binary.AppendUvarint(nil, closeTag)), "ffffffffffffffffff01"},
+		"transcript":        {hex.EncodeToString(th), "66e18f4517e05de10724c8b72777da6110476a06657287a541ba706e61e37915"},
+		"close resume":      {hex.EncodeToString(ssh.Marshal(resume.noSig())), "a2000000020000001003030303030303030303030303030303000000200101010101010101010101010101010101010101010101010101010101010101000000000000000701000000046365727400000000"},
+		"resume transcript": {hex.EncodeToString(transcript(resume.noSig(), resumeReply.noSig())), "764a280a0ef37aa4fa1eef1bd69fda317a3897d3737a1ec6b48fbd3433eb5566"},
+		"token":             {hex.EncodeToString(token), "01c6f548677d8313766615560ee00e0a499b2680008248761f7651fd759cd12b"},
+		"proof":             {hex.EncodeToString(resumeProof(token, th)), "b8c76fd56b9cfffd1054d47b4da6678805f1a81f7d4db02310461fd0a28f9a67"},
+		"closeTag":          {hex.EncodeToString(binary.AppendUvarint(nil, closeTag)), "ffffffffffffffffff01"},
 	} {
 		if c[0] != c[1] {
 			t.Errorf("%s = %s, want %s", name, c[0], c[1])
