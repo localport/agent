@@ -105,12 +105,15 @@ type rdpKeyInfo struct {
 // rdpGateway is the RDCleanPath gateway of an rdp connection: it reads the
 // client's request, relays its X.224 Connection Request unchanged, checks
 // the confirm, runs TLS with the target, pins the leaf's key, and answers
-// with the RDCleanPath response; the relay then carries the TLS plaintext.
-// Nothing from the target reaches the client before the pin decision.
+// with the RDCleanPath response; the relay then carries the TLS plaintext
+// through the rdp filter. Nothing from the target reaches the client before
+// the pin decision.
 type rdpGateway struct {
 	*desktopHandshake
 	// tls is the target's TLS session once the gateway succeeded.
 	tls *tls.Conn
+	// protocol is the security protocol the target's confirm selected.
+	protocol uint32
 }
 
 // run runs the gateway. It returns the reason to end the connection with,
@@ -184,7 +187,7 @@ func (g *rdpGateway) run(ctx context.Context) (string, error) {
 	if err := g.writeClient(pdu); err != nil {
 		return "", err
 	}
-	g.tls = tc
+	g.tls, g.protocol = tc, protocol
 	return "", nil
 }
 

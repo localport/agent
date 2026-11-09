@@ -1,0 +1,23 @@
+# Generates ../rdpfilter.golden, the RDP PDUs the rdp filter tests
+# (rdpfilter_test.go, rdpcliprdr_test.go) replay through the agent: an
+# in-process IronRDP client (ironrdp-connector, the browser client's code)
+# connected to an IronRDP server (ironrdp-acceptor), recorded after the
+# security upgrade, and the clipboard and dynamic channel PDUs both sides
+# encode. Regenerate from this directory:
+#   cargo run -q > ../rdpfilter.golden
+[package]
+name = "rdpfilter-golden"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ironrdp-acceptor = { git = "https://github.com/Devolutions/IronRDP", rev = "da016ce860040c6cb37943cfc857d836735d252c" }
+ironrdp-cliprdr = { git = "https://github.com/Devolutions/IronRDP", rev = "da016ce860040c6cb37943cfc857d836735d252c" }
+ironrdp-connector = { git = "https://github.com/Devolutions/IronRDP", rev = "da016ce860040c6cb37943cfc857d836735d252c" }
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", rev = "da016ce860040c6cb37943cfc857d836735d252c" }
+ironrdp-dvc = { git = "https://github.com/Devolutions/IronRDP", rev = "da016ce860040c6cb37943cfc857d836735d252c" }
+ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP", rev = "da016ce860040c6cb37943cfc857d836735d252c" }
+ironrdp-svc = { git = "https://github.com/Devolutions/IronRDP", rev = "da016ce860040c6cb37943cfc857d836735d252c" }
+
+[workspace]

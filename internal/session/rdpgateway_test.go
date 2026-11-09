@@ -392,18 +392,37 @@ func noRequestsThenClose(t *testing.T, reqs <-chan *ssh.Request) {
 
 // On first use the agent relays the X.224 request unchanged, asks with the
 // certificate's details, pins the SPKI on trust, and answers with the
-// confirm, the chain and the target; the relay then carries plaintext, the
-// bytes sent after the request first. The next connection asks pinned.
+// confirm, the chain and the target; the filter then carries the plaintext,
+// the bytes sent after the request first: a TSRequest the target echoes, or
+// under TLS alone a Connect Initial the target answers. The next connection
+// asks pinned.
 func TestRDPGatewayFirstUseAndMatch(t *testing.T) {
 	cert := testCert(t, "desktop.test")
 	leaf := cert.Leaf
+	session := rdpTranscript(t, "base")
 	for _, protocol := range []uint32{rdpProtocolSSL, rdpProtocolHybrid, rdpProtocolHybridEx} {
-		target := newRDPTarget(t, cert, x224Confirm(protocol), nil)
+		first, answer := tsNego, tsNego
+		var after func(net.Conn) error
+		if protocol == rdpProtocolSSL {
+			first, answer = session[0].pdu, session[1].pdu
+			after = func(c net.Conn) error {
+				tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+				if _, err := io.ReadFull(tc, make([]byte, len(first))); err != nil {
+					return err
+				}
+				if _, err := tc.Write(answer); err != nil {
+					return err
+				}
+				_, _ = io.Copy(io.Discard, tc)
+				return errors.New("session over")
+			}
+		}
+		target := newRDPTarget(t, cert, x224Confirm(protocol), after)
 		addr := target.ln.Addr().String()
 		keys := &memKeys{}
 		f := rdpFixture(t, addr, func(c *ServerConfig) { c.DesktopKeys = keys })
 		client := f.connect(t, f.rdpOpts())
-		ch, reqs := openRDP(t, client, append(marshalRequest(t, validRequest()), "early"...))
+		ch, reqs := openRDP(t, client, append(marshalRequest(t, validRequest()), first[:3]...))
 		if got := <-target.requests; !bytes.Equal(got, x224Request) {
 			t.Fatalf("target got %x, want %x", got, x224Request)
 		}
@@ -421,10 +440,10 @@ func TestRDPGatewayFirstUseAndMatch(t *testing.T) {
 			!bytes.Equal(resp.CertChain[0], leaf.Raw) || resp.ServerAddr != addr || resp.Error != (rdcleanpathError{}) {
 			t.Fatalf("response %+v", resp)
 		}
-		if _, err := ch.Write([]byte("ping")); err != nil {
+		if _, err := ch.Write(first[3:]); err != nil {
 			t.Fatal(err)
 		}
-		readFor(t, r, "earlyping")
+		readFor(t, r, string(answer))
 		if k, held, _ := keys.Lookup("rdp", addr); !held || k != spki {
 			t.Fatalf("pin %x %v, want %x", k, held, spki)
 		}

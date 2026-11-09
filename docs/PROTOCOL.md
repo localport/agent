@@ -824,9 +824,82 @@ stream:
    RDCleanPath response PDU (version 3390, the confirm as
    `x224_connection_pdu`, every peer certificate's DER leaf first as
    `server_cert_chain`, the configured target as `server_addr`) and relays
-   the channel and the TLS plaintext; nothing from the target reaches the
-   client before then. A malformed request or confirm ends
-   `desktop_handshake_invalid`.
+   the channel and the TLS plaintext through its RDP filter; nothing from
+   the target reaches the client before then. A malformed request or
+   confirm ends `desktop_handshake_invalid`.
+
+   The RDP filter frames every byte of the plaintext and forwards only what
+   it frames; anything else ends the connection `desktop_protocol_violation`
+   (section numbers are those of MS-RDPBCGR, MS-RDPECLIP and MS-RDPEDYC):
+   - CredSSP, under CredSSP (2) and CredSSP with Early User Authorization
+     Result (8): each TSRequest in either direction is one DER SEQUENCE
+     (tag 0x30) of at most 64 KiB with definite lengths, read by its outer
+     length, so bytes glued after it are framed on their own. The client's
+     exchange is over at its TSRequest carrying `authInfo`; under protocol 8
+     the server's 4-byte Early User Authorization Result (0 or 5) follows.
+     The next client byte must start a TPKT. Under TLS (1) the first byte
+     must.
+   - Slow path: a TPKT of at most 16 KiB plus 4 holding one X.224 Data TPDU
+     with EOT set and one MCS PDU: client to server Connect Initial (first),
+     Erect Domain, Attach User, Channel Join, Send Data Request and
+     Disconnect Provider Ultimatum; server to client Connect Response
+     (first), Attach User Confirm, Channel Join Confirm, Send Data
+     Indication and Disconnect Provider Ultimatum. Fast-path PDUs (action 0,
+     no security flags) are framed by their length and forwarded; they
+     carry no channel data (2.2.8.1.2, 2.2.9.1.2).
+   - Static channels: the Connect Initial's CS_NET (at most 31 channels)
+     may name only `drdynvc` and, when the certificate allows a clipboard
+     direction, `cliprdr` (names compared case-insensitively). Any other
+     name, or `cliprdr` with no direction allowed, ends the connection
+     `desktop_channel_refused` before the Connect Initial reaches the
+     target; the agent never rewrites CS_NET. The Connect Response must
+     select no RDP Standard Security encryption; its SC_NET maps the names
+     to channel ids. Send Data on any id other than the I/O channel, the
+     message channel, the user channel from Attach User Confirm and the
+     mapped `cliprdr` and `drdynvc` ids, or a client Send Data from another
+     initiator, ends the connection.
+   - Chunks: on `cliprdr` and `drdynvc` a chunk with `CHANNEL_PACKET_COMPRESSED`
+     or a compression type, or larger than the negotiated chunk size, ends
+     the connection. The chunk size is the server's `VCChunkSize` when both
+     the Demand Active and the Confirm Active carry it (a server value
+     outside 1,600 to 16,256 ends the connection), else 1,600 (3.1.5.2.1);
+     a Deactivate All starts a new exchange. Chunks reassemble by
+     `CHANNEL_FLAG_FIRST` and `LAST` up to 1 MiB plus 64 KiB on `cliprdr`
+     and 1,600 bytes on `drdynvc`; a successful Format Data Response past
+     the bound is discarded chunk by chunk, not buffered. The agent writes
+     the messages it forwards or sends in chunks of the negotiated size.
+   - Dynamic channels (`drdynvc`): the agent frames Capabilities (5),
+     Create (1), Data First (2), Data (3) and Close (4) (2.2). The client's
+     Capabilities Response must carry version 1 or 2, so compressed data,
+     which needs version 3 on both sides (2.2.3.3, 2.2.3.4), never appears;
+     a version 3 response, Data First Compressed (6), Data Compressed (7)
+     and Soft-Sync (8, 9, which serve multitransport tunnels only) end the
+     connection. Only `Microsoft::Windows::RDS::DisplayControl` opens: the
+     agent answers a server Create Request for any other name with a
+     Create Response of `STATUS_NOT_FOUND` (0xC0000225) and the client never
+     sees it. Data on a channel the client did not create successfully, in
+     either direction, ends the connection; a Close for one is dropped.
+   - Clipboard (`cliprdr`), per the connection's current certificate:
+     Clipboard Capabilities pass with `CB_STREAM_FILECLIP_ENABLED`,
+     `CB_FILECLIP_NO_FILE_PATHS`, `CB_CAN_LOCK_CLIPDATA` and
+     `CB_HUGE_FILE_SUPPORT_ENABLED` cleared; Monitor Ready passes server to
+     client. A Format List from the server passes only when `copy` is
+     allowed, from the client only when `paste` is, reduced to CF_TEXT (1),
+     CF_OEMTEXT (7), CF_UNICODETEXT (13) and CF_LOCALE (16). A list refused
+     or reduced to nothing is answered by the agent with a Format List
+     Response OK, and when the receiver held a list in that direction the
+     agent sends it an empty Format List and absorbs its answer; a resume
+     that narrows a direction does the same at the next `cliprdr` PDU. A
+     Format Data Request passes only for a format of the list the agent
+     forwarded that way; the agent answers any other with
+     `CB_RESPONSE_FAIL`, in order behind the answers to earlier requests (at
+     most 64 outstanding per direction). A Format Data Response passes only
+     as the answer to the oldest outstanding request, while its direction is
+     allowed, and up to 1 MiB; otherwise the requester gets
+     `CB_RESPONSE_FAIL`. A File Contents Request is answered
+     `CB_RESPONSE_FAIL` with its stream id; File Contents Responses, Lock,
+     Unlock and Temporary Directory are dropped. Every length is checked
+     before use. Typed keystrokes and the screen are not restricted.
 
    The key step, both kinds: a key other than the one pinned for the
    device's target of the kind ends the connection `desktop_key_changed`
@@ -864,7 +937,8 @@ stream:
    `desktop_key_rejected`, `desktop_key_unavailable`,
    `desktop_handshake_invalid`, `rdp_negotiation_failed`,
    `rdp_security_refused` and `rdp_tls_failed` (`rdp`) (step 3),
-   `desktop_protocol_violation` (`vnc`, step 3, also during the relay),
+   `desktop_protocol_violation` (step 3, also during the relay),
+   `desktop_channel_refused` (`rdp`, during the relay),
    `recording_failed` (a Strict
    connection's port forwarding events could not be recorded) and, on one
    channel, `helper_failed` (the session helper's channel ended without an

@@ -177,8 +177,10 @@ func (c *conn) openDesktop(nc ssh.NewChannel, kind string, wg *sync.WaitGroup) {
 		var toTarget, toClient func() string
 		if kind == "rdp" {
 			g := &rdpGateway{desktopHandshake: h}
-			reason, err = g.run(checkCtx)
-			toTarget, toClient = c.copyPumps(ch, h.fromClient, g.tls)
+			if reason, err = g.run(checkCtx); reason == "" && err == nil {
+				filter := newRDPFilter(g)
+				toTarget, toClient = filter.pumpToTarget, filter.pumpToClient
+			}
 		} else {
 			h.fromTarget = bufio.NewReaderSize(target, rfbServerBuffer)
 			check := &rfbCheck{desktopHandshake: h}
@@ -469,21 +471,6 @@ func (c *conn) relayDesktop(ch ssh.Channel, target net.Conn, toTarget, toClient 
 	_ = target.Close()
 	<-done
 	return ""
-}
-
-// copyPumps are the pumps of a desktop connection whose bytes pass unfiltered.
-// The client side reads the handshake's buffered reader, so bytes read ahead
-// come first. Only client bytes are activity for the idle timer.
-func (c *conn) copyPumps(ch ssh.Channel, fromClient io.Reader, peer io.ReadWriter) (toTarget, toClient func() string) {
-	toTarget = func() string {
-		_, _ = io.Copy(activityWriter{peer, c}, fromClient)
-		return ""
-	}
-	toClient = func() string {
-		_, _ = io.Copy(ch, peer)
-		return ""
-	}
-	return toTarget, toClient
 }
 
 // endRefusal is the refusal message of a channel whose connection ended
