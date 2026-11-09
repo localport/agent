@@ -624,7 +624,7 @@ stream:
    | a user certificate whose serial is the notice's serial |
    | signed by a session CA key the agent holds (`ticket_keys.json`); an unknown CA key triggers one key fetch (at most 3 s, at most once per 5 minutes) and one retry |
    | valid now within 30 s of skew, for the user name as its principal |
-   | exactly the critical options `device@localport.io`, naming this device's prefix and registered key (`spki_sha256`), and for a `files` or `ssh` certificate `files@localport.io`: the file directions its SFTP channels may use, one of `""`, `download`, `upload`, `download,upload` (any other value, or a `files` or `ssh` certificate without it, is refused) |
+   | exactly the critical options `device@localport.io`, naming this device's prefix and registered key (`spki_sha256`), and for a `files` or `ssh` certificate `files@localport.io`: the file directions its SFTP channels may use, one of `""`, `download`, `upload`, `download,upload` (any other value, or a `files` or `ssh` certificate without it, is refused), and for a `vnc` or `rdp` certificate `clipboard@localport.io`: the clipboard directions of its desktop channel, one of `""`, `copy`, `paste`, `copy,paste` (any other value, a desktop certificate without it, or the option on another kind, is refused) |
    | the kind (`kind@localport.io`) enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) and served by this agent (`terminal`, `ssh`, `files`, `rdp`, `vnc`) |
    | for `terminal`, `ssh` and `files`: the user name listed in the local `logins`; for `rdp` and `vnc`: the user name `localport-desktop` and no `rec@localport.io` (a desktop session is never recorded) |
    | a `rec@localport.io`, when present, naming the held team recording key; a mismatch triggers one key fetch, under the same floor, and one retry |
@@ -740,7 +740,7 @@ stream:
    it `exited`, with nothing told.
 
    On a `vnc` connection the agent reads the VNC handshake (RFC 6143 section
-   7.1, as noVNC speaks it), forwarding every byte unchanged: the server's
+   7.1, as noVNC speaks it), forwarding each byte it admits unchanged: the server's
    ProtocolVersion (`RFB ddd.ddd\n`; the repeater's `000.000` is refused),
    the client's (`RFB 003.003`, `003.007` or `003.008`), the security type
    list and the client's choice (3.3: the server's `u32` choice), and for
@@ -754,6 +754,48 @@ stream:
    forwards the key. Once a key is pinned for the target, a handshake that
    chooses no RA2ne ends `desktop_key_downgraded`. A malformed handshake
    ends `desktop_handshake_invalid`.
+
+   The security types are those noVNC 1.7.0 runs and the agent frames: None
+   (1), VNCAuth (2), RA2ne (6), Tight (16), VeNCrypt (19), XVP (22), ARD (30)
+   and MSLogonII (113); VeNCrypt subtypes None, VNCAuth, RA2ne, Tight, XVP,
+   ARD, MSLogonII and Plain (256). Any other choice, every stream-encrypting
+   type included (RA2 5, VeNCrypt TLS and X509 257 to 262), ends the
+   connection `desktop_protocol_violation` before it reaches the other side.
+   A server's refusal (type 0 under 3.3, an empty list under 3.7 and 3.8) is
+   forwarded with its reason of at most 4 KiB and ends the connection.
+
+   The agent then frames the rest of the handshake per security type,
+   forwarding each message: authentication, the Tight NOTUNNEL tunnel and
+   None, VNCAuth or UnixLogon (129) sub-authentications only, SecurityResult
+   (a failure and its 3.8 reason are forwarded and end the connection),
+   ClientInit and ServerInit. Every length is bounded before it is read. After
+   ServerInit it frames every message in both directions, and streams
+   rectangle bodies as they arrive. These end the connection
+   `desktop_protocol_violation`: an unknown message type, a length past its
+   bound, a rectangle in an encoding no forwarded `SetEncodings` kept, a
+   negative `CutText` length, a `SetPixelFormat` after the first
+   `SetEncodings`, `FramebufferUpdateRequest` or `EnableContinuousUpdates`, a 24-bit
+   `SetPixelFormat` of 8-bit channels at shifts that are not byte-aligned, and
+   an extension message whose pseudo-encoding no forwarded `SetEncodings` kept.
+
+   Client to server the agent allows `SetPixelFormat` (8, 16 or 32 bits per
+   pixel), `SetEncodings`, `FramebufferUpdateRequest`, `KeyEvent`,
+   `PointerEvent`, `ClientCutText`, and with their pseudo-encoding
+   `EnableContinuousUpdates`, `ClientFence`, `SetDesktopSize`, xvp and the
+   QEMU extended key event. `SetEncodings` is forwarded reduced to Raw,
+   CopyRect, RRE, Hextile, Zlib, ZRLE, Tight, TightPNG and the pseudo-encodings
+   quality level, compress level, DesktopSize, LastRect, ExtendedDesktopSize,
+   DesktopName, Cursor, XCursor, Fence, ContinuousUpdates, QEMUExtendedKeyEvent,
+   QEMULedEvent and Xvp; every other entry is removed, Extended Clipboard
+   (0xC0A1E5CE), ExtendedMouseButtons, H.264 and JPEG among them. Server to
+   client it allows `FramebufferUpdate`, `SetColourMapEntries`, `Bell`,
+   `ServerCutText`, `EndOfContinuousUpdates`, `ServerFence` and xvp.
+
+   `ServerCutText` passes only when the connection's current certificate
+   allows `copy`, `ClientCutText` only when it allows `paste`, and each only
+   up to 1 MiB. A refused `CutText` is consumed and the session continues. A
+   resume certificate's directions apply from its next `CutText`. Typed
+   keystrokes and the screen are not restricted.
 
    On an `rdp` connection the agent is an RDCleanPath gateway (the protocol
    IronRDP's web client speaks). It reads one DER RDCleanPath request PDU
@@ -822,6 +864,7 @@ stream:
    `desktop_key_rejected`, `desktop_key_unavailable`,
    `desktop_handshake_invalid`, `rdp_negotiation_failed`,
    `rdp_security_refused` and `rdp_tls_failed` (`rdp`) (step 3),
+   `desktop_protocol_violation` (`vnc`, step 3, also during the relay),
    `recording_failed` (a Strict
    connection's port forwarding events could not be recorded) and, on one
    channel, `helper_failed` (the session helper's channel ended without an

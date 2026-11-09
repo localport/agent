@@ -51,11 +51,66 @@ func rfbServer(version string, types []byte, type33 uint32, after func(c net.Con
 	}
 }
 
-// sendKeyThenFrame writes the key and "frame" in one write, as a server may.
+// sendKeyThenFrame writes the key.
 func sendKeyThenFrame(key []byte) func(net.Conn) error {
 	return func(c net.Conn) error {
-		_, err := c.Write(append(append([]byte(nil), key...), "frame"...))
+		_, err := c.Write(key)
 		return err
+	}
+}
+
+// RA2ne messages after the server key, in the size noVNC 1.7.0 frames them
+// for 1024-bit keys on both sides (core/ra2.js).
+func ra2ClientKey() []byte { return rsaKey(1024, 2) }
+func ra2Message(n int) []byte {
+	return append(binary.BigEndian.AppendUint16(nil, uint16(n)), bytes.Repeat([]byte{9}, n)...)
+}
+
+// ra2Sealed is an authenticated message: length, payload and 16-byte tag.
+func ra2Sealed(n int) []byte {
+	return append(binary.BigEndian.AppendUint16(nil, uint16(n)), bytes.Repeat([]byte{8}, n+16)...)
+}
+
+// ra2ClientFirst is the client's key and random, sent together.
+func ra2ClientFirst() []byte { return append(ra2ClientKey(), ra2Message(128)...) }
+
+// ra2Server runs the server side of RA2ne: key and server random in one
+// write, as a server may, then the rest through ServerInit. It answers key
+// events afterwards.
+func ra2Server(key []byte) func(net.Conn) error {
+	return func(c net.Conn) error {
+		if _, err := c.Write(append(append([]byte(nil), key...), ra2Message(128)...)); err != nil {
+			return err
+		}
+		if _, err := io.ReadFull(c, make([]byte, len(ra2ClientFirst())+len(ra2Sealed(20)))); err != nil {
+			return err
+		}
+		if _, err := c.Write(append(ra2Sealed(20), ra2Sealed(1)...)); err != nil {
+			return err
+		}
+		if _, err := io.ReadFull(c, make([]byte, len(ra2Sealed(9)))); err != nil {
+			return err
+		}
+		return finishNoneHandshake(c)
+	}
+}
+
+// ra2Client runs the client side of RA2ne after the key was read.
+func ra2Client(t *testing.T, ch ssh.Channel) {
+	t.Helper()
+	if _, err := ch.Write(ra2ClientFirst()); err != nil {
+		t.Fatal(err)
+	}
+	readFor(t, ch, string(ra2Message(128)))
+	if _, err := ch.Write(ra2Sealed(20)); err != nil {
+		t.Fatal(err)
+	}
+	readFor(t, ch, string(append(ra2Sealed(20), ra2Sealed(1)...)))
+	if _, err := ch.Write(ra2Sealed(9)); err != nil {
+		t.Fatal(err)
+	}
+	if err := finishClientHandshake(ch); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -104,7 +159,7 @@ func TestDesktopKeyHandOverKeepsPipelinedClientBytes(t *testing.T) {
 		if err := sendKeyThenFrame(key)(c); err != nil {
 			return err
 		}
-		ahead := make([]byte, 5)
+		ahead := make([]byte, len(ra2ClientKey()))
 		if _, err := io.ReadFull(c, ahead); err != nil {
 			return err
 		}
@@ -120,7 +175,7 @@ func TestDesktopKeyHandOverKeepsPipelinedClientBytes(t *testing.T) {
 	if _, err := io.ReadFull(ch, make([]byte, 12)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ch.Write(append([]byte("RFB 003.008\n\x06"), "ahead"...)); err != nil {
+	if _, err := ch.Write(append([]byte("RFB 003.008\n\x06"), ra2ClientKey()...)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := io.ReadFull(ch, make([]byte, 2)); err != nil {
@@ -129,7 +184,7 @@ func TestDesktopKeyHandOverKeepsPipelinedClientBytes(t *testing.T) {
 	keyRequest(t, reqs, true)
 	select {
 	case ahead := <-got:
-		if ahead != "ahead" {
+		if ahead != string(ra2ClientKey()) {
 			t.Fatalf("target read %q", ahead)
 		}
 	case <-time.After(5 * time.Second):
@@ -137,12 +192,13 @@ func TestDesktopKeyHandOverKeepsPipelinedClientBytes(t *testing.T) {
 	}
 }
 
-// A first RA2ne key is asked for, pinned on trust and forwarded with the
-// bytes the server wrote after it; the next connection asks with pinned set.
+// A first RA2ne key is asked for, pinned on trust and forwarded, and the
+// bytes the server wrote after it reach the client through the filter; the
+// next connection asks with pinned set.
 func TestDesktopKeyFirstUseAndMatch(t *testing.T) {
 	key := rsaKey(2048, 7)
 	keys := &memKeys{}
-	f, target := keyFixture(t, rfbServer("RFB 003.008\n", []byte{6}, 0, sendKeyThenFrame(key)), keys)
+	f, target := keyFixture(t, rfbServer("RFB 003.008\n", []byte{6}, 0, ra2Server(key)), keys)
 	for _, step := range []struct {
 		serial     uint64
 		wantPinned bool
@@ -163,8 +219,9 @@ func TestDesktopKeyFirstUseAndMatch(t *testing.T) {
 		if sum != hex.EncodeToString(want[:]) || pinned != wantPinned {
 			t.Fatalf("key request %s pinned %v, want %x pinned %v", sum, pinned, want, wantPinned)
 		}
-		readFor(t, ch, string(key)+"frame")
-		pingPong(t, ch)
+		readFor(t, ch, string(key))
+		ra2Client(t, ch)
+		desktopPing(t, ch)
 		_ = ch.Close()
 		target.waitClosed(t)
 		if serial == 42 {
@@ -252,7 +309,7 @@ func TestDesktopKeyFraming(t *testing.T) {
 		_, _ = io.WriteString(ch, "RFB 003.003\n")
 		readFor(t, ch, string(binary.BigEndian.AppendUint32(nil, 6)))
 		keyRequest(t, reqs, true)
-		readFor(t, ch, string(key)+"frame")
+		readFor(t, ch, string(key))
 	})
 	t.Run("VeNCrypt RA2ne", func(t *testing.T) {
 		script := rfbServer("RFB 003.889\n", []byte{19}, 0, func(c net.Conn) error {
@@ -287,7 +344,7 @@ func TestDesktopKeyFraming(t *testing.T) {
 		readFor(t, ch, "\x00\x02\x00\x00\x01\x00\x00\x00\x00\x06")
 		_, _ = ch.Write(binary.BigEndian.AppendUint32(nil, 6))
 		keyRequest(t, reqs, true)
-		readFor(t, ch, string(key)+"frame")
+		readFor(t, ch, string(key))
 	})
 	for name, version := range map[string]string{"repeater": "RFB 000.000\n", "malformed": "SSH-2.0-xx\r\n"} {
 		t.Run(name, func(t *testing.T) {
@@ -327,7 +384,7 @@ func TestDesktopKeyCheckDeadlinePerRead(t *testing.T) {
 	time.Sleep(timeout * 7 / 10)
 	_, _ = ch.Write([]byte{6})
 	keyRequest(t, reqs, true)
-	readFor(t, ch, string(key)+"frame")
+	readFor(t, ch, string(key))
 }
 
 // A target silent past the deadline ends the check desktop_handshake_timeout.

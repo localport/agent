@@ -4,6 +4,7 @@ package session
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -26,25 +27,70 @@ type vncTarget struct {
 	closed   chan struct{}
 }
 
-// vncAuthHandshake is a 3.8 server offering VNC authentication only; the
-// test client chooses it and the echo starts (no authentication runs).
-func vncAuthHandshake(c net.Conn) error {
+// rfbServerInit is a ServerInit of 800x600, 32-bit true colour, named "x".
+func rfbServerInit() []byte {
+	b := []byte{3, 32, 2, 88, 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0}
+	return append(binary.BigEndian.AppendUint32(b, 1), 'x')
+}
+
+// finishNoneHandshake is the server side after security None under 3.8: the
+// result, ClientInit and ServerInit, then bellOnKeyEvent.
+func finishNoneHandshake(c net.Conn) error {
+	if _, err := c.Write(make([]byte, 4)); err != nil {
+		return err
+	}
+	if _, err := io.ReadFull(c, make([]byte, 1)); err != nil {
+		return err
+	}
+	if _, err := c.Write(rfbServerInit()); err != nil {
+		return err
+	}
+	return bellOnKeyEvent(c)
+}
+
+// bellOnKeyEvent answers each 8-byte KeyEvent with a Bell until the client
+// leaves, and returns the read's error.
+func bellOnKeyEvent(c net.Conn) error {
+	for {
+		if _, err := io.ReadFull(c, make([]byte, 8)); err != nil {
+			return err
+		}
+		if _, err := c.Write([]byte{rfbServerBell}); err != nil {
+			return err
+		}
+	}
+}
+
+// vncNoneHandshake is a 3.8 server offering security None; the client
+// chooses it, and after ServerInit the server answers key events.
+func vncNoneHandshake(c net.Conn) error {
 	if _, err := io.WriteString(c, "RFB 003.008\n"); err != nil {
 		return err
 	}
 	if _, err := io.ReadFull(c, make([]byte, 12)); err != nil {
 		return err
 	}
-	if _, err := c.Write([]byte{1, 2}); err != nil {
+	if _, err := c.Write([]byte{1, rfbSecNone}); err != nil {
 		return err
 	}
-	_, err := io.ReadFull(c, make([]byte, 1))
-	return err
+	if _, err := io.ReadFull(c, make([]byte, 1)); err != nil {
+		return err
+	}
+	return finishNoneHandshake(c)
 }
 
 func newVNCTarget(t *testing.T) *vncTarget {
 	t.Helper()
-	return newScriptedTarget(t, vncAuthHandshake)
+	return newScriptedTarget(t, vncNoneHandshake)
+}
+
+// desktopPing sends a KeyEvent through the filter and waits for the Bell.
+func desktopPing(t *testing.T, ch io.ReadWriter) {
+	t.Helper()
+	if _, err := ch.Write([]byte{rfbClientKeyEvent, 1, 0, 0, 0, 0, 0, 'p'}); err != nil {
+		t.Fatal(err)
+	}
+	readFor(t, ch, string([]byte{rfbServerBell}))
 }
 
 func newScriptedTarget(t *testing.T, handshake func(net.Conn) error) *vncTarget {
@@ -153,16 +199,32 @@ func (f *sshFixture) vncOpts() certOpts {
 }
 
 // openVNC opens the vnc desktop channel, keeping its requests, and runs the
-// client half of vncAuthHandshake, so the channel then echoes.
+// client half of vncNoneHandshake through ServerInit.
 func openVNC(client *ssh.Client) (ssh.Channel, <-chan *ssh.Request, error) {
 	ch, reqs, err := openDesktopChannel(client, chanVNC)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := clientHandshake(ch, "RFB 003.008\n", 2); err != nil {
+	if err := clientHandshake(ch, "RFB 003.008\n", rfbSecNone); err != nil {
+		return nil, nil, err
+	}
+	if err := finishClientHandshake(ch); err != nil {
 		return nil, nil, err
 	}
 	return ch, reqs, nil
+}
+
+// finishClientHandshake is the client side of finishNoneHandshake up to its
+// key events.
+func finishClientHandshake(ch ssh.Channel) error {
+	if _, err := io.ReadFull(ch, make([]byte, 4)); err != nil {
+		return err
+	}
+	if _, err := ch.Write([]byte{1}); err != nil {
+		return err
+	}
+	_, err := io.ReadFull(ch, make([]byte, len(rfbServerInit())))
+	return err
 }
 
 // openDesktopChannel opens a desktop channel of chanType with the empty
@@ -221,7 +283,7 @@ func TestDesktopReachesTheTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	pingPong(t, ch)
+	desktopPing(t, ch)
 	target.serverSide(t)
 	_ = ch.Close()
 	target.waitClosed(t)
@@ -304,7 +366,7 @@ func TestDesktopChannelRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	pingPong(t, ch)
+	desktopPing(t, ch)
 	if _, _, err := openVNC(client); !errors.As(err, &oce) || oce.Reason != ssh.ResourceShortage {
 		t.Fatalf("a second channel: %v, want resource shortage", err)
 	}
@@ -314,7 +376,7 @@ func TestDesktopChannelRules(t *testing.T) {
 	if ok, err := ch.SendRequest("env", true, nil); err != nil || ok {
 		t.Fatalf("a channel request: %v", err)
 	}
-	pingPong(t, ch)
+	desktopPing(t, ch)
 }
 
 // A refused target dial rejects the channel with its code and ends the
@@ -390,12 +452,12 @@ func TestDesktopIdle(t *testing.T) {
 		server := target.serverSide(t)
 		// The round trip settles the handshake's client bytes, which are
 		// activity, before the clock moves.
-		pingPong(t, ch)
+		desktopPing(t, ch)
 		clock.advance(idleTimeout + time.Minute)
-		if _, err := server.Write([]byte("frame")); err != nil {
+		if _, err := server.Write([]byte{rfbServerBell}); err != nil {
 			t.Fatal(err)
 		}
-		readFor(t, ch, "frame")
+		readFor(t, ch, string([]byte{rfbServerBell}))
 		if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -416,10 +478,10 @@ func TestDesktopIdle(t *testing.T) {
 			t.Fatal(err)
 		}
 		clock.advance(idleTimeout - time.Minute)
-		pingPong(t, ch)
+		desktopPing(t, ch)
 		clock.advance(2 * time.Minute)
 		clock.fireIdle()
-		pingPong(t, ch)
+		desktopPing(t, ch)
 		select {
 		case r := <-reqs:
 			t.Fatalf("request %v on an active connection", r)
@@ -446,7 +508,7 @@ func TestDesktopEndClosesTheTarget(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pingPong(t, ch)
+			desktopPing(t, ch)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := tc.end(f.srv, ctx); err != nil {
@@ -539,7 +601,7 @@ func TestDesktopEndsWithItsChannel(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		pingPong(t, ch)
+		desktopPing(t, ch)
 		_ = target.serverSide(t).Close()
 		select {
 		case r, ok := <-reqs:
@@ -578,7 +640,7 @@ func TestDesktopEndsWithItsChannel(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		pingPong(t, ch)
+		desktopPing(t, ch)
 		_ = ch.CloseWrite()
 		target.waitClosed(t)
 		waitClosed(t, client)
@@ -596,12 +658,12 @@ func TestDesktopResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pingPong(t, ch)
+	desktopPing(t, ch)
 	rc.cut(t)
 	if err := rc.resume(t, func(o *certOpts) { o.kind, o.login = "vnc", desktopPrincipal }); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	pingPong(t, ch)
+	desktopPing(t, ch)
 	rc.cut(t)
 	// The agent arms its detach timer after it sees the cut, which may be
 	// after the client did: fire until the connection ends.

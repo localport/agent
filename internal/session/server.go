@@ -86,6 +86,10 @@ const (
 	// certificate's files@localport.io option permits that SFTP direction.
 	permFilesDownload = "files-download"
 	permFilesUpload   = "files-upload"
+	// permClipboardCopy and permClipboardPaste are present when the
+	// certificate's clipboard@localport.io option permits that direction.
+	permClipboardCopy  = "clipboard-copy"
+	permClipboardPaste = "clipboard-paste"
 )
 
 // ServerConfig is one device's session server configuration. Capabilities,
@@ -1024,6 +1028,12 @@ func (a *admission) permissions() *ssh.Permissions {
 	if a.Files.Upload {
 		ext[permFilesUpload] = ""
 	}
+	if a.Clipboard.Copy {
+		ext[permClipboardCopy] = ""
+	}
+	if a.Clipboard.Paste {
+		ext[permClipboardPaste] = ""
+	}
 	return &ssh.Permissions{Extensions: ext}
 }
 
@@ -1040,6 +1050,8 @@ func admissionOf(p *ssh.Permissions) *admission {
 	_, a.ForwardRemote = ext[permFwdRemote]
 	_, a.Files.Download = ext[permFilesDownload]
 	_, a.Files.Upload = ext[permFilesUpload]
+	_, a.Clipboard.Copy = ext[permClipboardCopy]
+	_, a.Clipboard.Paste = ext[permClipboardPaste]
 	return a
 }
 

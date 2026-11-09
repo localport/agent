@@ -242,6 +242,11 @@ type certOpts struct {
 	// option out.
 	files   *string
 	noFiles bool
+	// clipboard replaces the clipboard option of a vnc or rdp certificate
+	// (default "copy,paste") and adds it to any other kind; noClipboard
+	// leaves the option out.
+	clipboard   *string
+	noClipboard bool
 }
 
 func (f *sshFixture) defaults() certOpts {
@@ -283,6 +288,12 @@ func (f *sshFixture) mint(t *testing.T, o certOpts) (ssh.Signer, *ssh.Certificat
 		cert.CriticalOptions[optionFiles] = "download,upload"
 		if o.files != nil {
 			cert.CriticalOptions[optionFiles] = *o.files
+		}
+	}
+	if carriesClipboard(o.kind) && !o.noClipboard || o.clipboard != nil {
+		cert.CriticalOptions[optionClipboard] = "copy,paste"
+		if o.clipboard != nil {
+			cert.CriticalOptions[optionClipboard] = *o.clipboard
 		}
 	}
 	if o.fwdLocal {

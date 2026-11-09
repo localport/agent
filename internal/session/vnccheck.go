@@ -65,10 +65,27 @@ var rfbServerVersion = regexp.MustCompile(`^RFB [0-9]{3}\.[0-9]{3}\n$`)
 // rfbCheck reads a VNC connection's handshake up to its security type, and
 // for RA2ne up to the server key, forwarding every byte unchanged. The relay
 // continues from the handshake's buffered readers, so bytes read ahead are
-// never lost.
+// never lost. A client or server choice outside the types the filter frames
+// ends the connection before it reaches the other side.
 type rfbCheck struct {
 	*desktopHandshake
+	// version is the client's ProtocolVersion, which sets the framing.
+	version string
+	// auth is the security type in effect: the choice, or a VeNCrypt subtype.
+	auth uint32
+	// refusal says how the server refused the handshake, if it did.
+	refusal rfbRefusal
 }
+
+// rfbRefusal is how a server refused the handshake during the check.
+type rfbRefusal uint8
+
+const (
+	// rfbRefusedWithReason: a U32-length reason follows.
+	rfbRefusedWithReason rfbRefusal = iota + 1
+	// rfbRefusedNoReason: nothing follows (a VeNCrypt version refusal).
+	rfbRefusedNoReason
+)
 
 // run runs the handshake check. It returns the reason to end the
 // connection with, or "" to relay; err is a handshakeError or the
@@ -90,18 +107,28 @@ func (k *rfbCheck) check(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	k.version = string(cv)
 	var choice uint32
-	switch string(cv) {
+	switch k.version {
 	case "RFB 003.003\n":
 		if err := k.clientWaitDone(); err != nil {
 			return "", err
 		}
-		b, err := k.fromServer(4)
+		b, err := k.readTarget(k.fromTarget, 4)
 		if err != nil {
 			return "", err
 		}
-		if choice = binary.BigEndian.Uint32(b); choice == 0 {
-			return "", nil // a refusal and its reason follow
+		choice = binary.BigEndian.Uint32(b)
+		if choice != 0 && !rfbTypeAllowed(choice) {
+			k.c.s.log("session: vnc target %s chose security type %d", k.addr, choice)
+			return CloseDesktopProtocolViolation, nil
+		}
+		if err := k.writeClient(b); err != nil {
+			return "", err
+		}
+		if choice == 0 {
+			k.refusal = rfbRefusedWithReason
+			return "", nil
 		}
 	case "RFB 003.007\n", "RFB 003.008\n":
 		n, err := k.fromServer(1)
@@ -109,19 +136,28 @@ func (k *rfbCheck) check(ctx context.Context) (string, error) {
 			return "", err
 		}
 		if n[0] == 0 {
+			k.refusal = rfbRefusedWithReason
 			return "", k.clientWaitDone()
 		}
 		if _, err := k.fromServer(int(n[0])); err != nil {
 			return "", err
 		}
-		b, err := k.fromClientForward(1)
+		b, err := k.readClient(1)
 		if err != nil {
 			return "", err
 		}
 		choice = uint32(b[0])
+		if !rfbTypeAllowed(choice) {
+			k.c.s.log("session: vnc client chose security type %d", choice)
+			return CloseDesktopProtocolViolation, nil
+		}
+		if err := k.writeTarget(b); err != nil {
+			return "", err
+		}
 	default:
 		return "", malformed(sideClient, "client version %q", cv)
 	}
+	k.auth = choice
 	switch choice {
 	case rfbSecRA2ne:
 		if err := k.clientWaitDone(); err != nil {
@@ -129,16 +165,18 @@ func (k *rfbCheck) check(ctx context.Context) (string, error) {
 		}
 		return k.keyStep(ctx)
 	case rfbSecVeNCrypt:
-		sub, ok, err := k.veNCrypt()
-		if err != nil || !ok {
-			if err == nil {
-				err = k.clientWaitDone()
-			}
-			return "", err
+		sub, ok, reason, err := k.veNCrypt()
+		if err != nil || reason != "" {
+			return reason, err
+		}
+		if !ok {
+			k.refusal = rfbRefusedNoReason
+			return "", k.clientWaitDone()
 		}
 		if err := k.clientWaitDone(); err != nil {
 			return "", err
 		}
+		k.auth = sub
 		if sub == rfbSecRA2ne {
 			return k.keyStep(ctx)
 		}
@@ -151,30 +189,40 @@ func (k *rfbCheck) check(ctx context.Context) (string, error) {
 }
 
 // veNCrypt reads the VeNCrypt negotiation (versions, ack, subtypes) and
-// returns the client's subtype; ok is false when the server refused it.
-func (k *rfbCheck) veNCrypt() (sub uint32, ok bool, err error) {
+// returns the client's subtype; ok is false when the server refused it, and
+// reason is set when the client chose a subtype the filter does not frame,
+// which never reaches the server.
+func (k *rfbCheck) veNCrypt() (sub uint32, ok bool, reason string, err error) {
 	if _, err := k.fromServer(2); err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	if _, err := k.fromClientForward(2); err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	ack, err := k.fromServer(1)
 	if err != nil || ack[0] != 0 {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	n, err := k.fromServer(1)
 	if err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	if _, err := k.fromServer(4 * int(n[0])); err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
-	b, err := k.fromClientForward(4)
+	b, err := k.readClient(4)
 	if err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
-	return binary.BigEndian.Uint32(b), true, nil
+	sub = binary.BigEndian.Uint32(b)
+	if !rfbSubtypeAllowed(sub) {
+		k.c.s.log("session: vnc client chose VeNCrypt subtype %d", sub)
+		return 0, false, CloseDesktopProtocolViolation, nil
+	}
+	if err := k.writeTarget(b); err != nil {
+		return 0, false, "", err
+	}
+	return sub, true, "", nil
 }
 
 // nonRSA ends a connection whose target was pinned and now uses no key.

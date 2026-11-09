@@ -174,18 +174,21 @@ func (c *conn) openDesktop(nc ssh.NewChannel, kind string, wg *sync.WaitGroup) {
 		if h.timeout == 0 {
 			h.timeout = desktopTargetTimeout
 		}
-		var relayTarget io.ReadWriter
+		var toTarget, toClient func() string
 		if kind == "rdp" {
 			g := &rdpGateway{desktopHandshake: h}
 			reason, err = g.run(checkCtx)
-			relayTarget = g.tls
+			toTarget, toClient = c.copyPumps(ch, h.fromClient, g.tls)
 		} else {
-			h.fromTarget = bufio.NewReader(target)
-			reason, err = (&rfbCheck{desktopHandshake: h}).run(checkCtx)
-			relayTarget = struct {
-				io.Reader
-				io.Writer
-			}{h.fromTarget, target}
+			h.fromTarget = bufio.NewReaderSize(target, rfbServerBuffer)
+			check := &rfbCheck{desktopHandshake: h}
+			if reason, err = check.run(checkCtx); reason == "" && err == nil {
+				filter := newRFBFilter(check, target)
+				if err = filter.handshake(); errors.Is(err, errRFBViolation) {
+					reason, err = filter.end(err), nil
+				}
+				toTarget, toClient = filter.pumpToTarget, filter.pumpToClient
+			}
 		}
 		reason, err = handshakeOutcome(reason, err)
 		switch {
@@ -200,7 +203,10 @@ func (c *conn) openDesktop(nc ssh.NewChannel, kind string, wg *sync.WaitGroup) {
 			c.fail(reason)
 			return
 		}
-		c.relayDesktop(ch, target, h.fromClient, relayTarget)
+		if reason = c.relayDesktop(ch, target, toTarget, toClient); reason != "" {
+			failed = true
+			c.fail(reason)
+		}
 	})
 }
 
@@ -444,26 +450,40 @@ func (noDesktopKeys) Pin(context.Context, string, string, [32]byte) (identity.Pi
 	return 0, errNoDesktopKeys
 }
 
-// relayDesktop copies between the desktop channel and peer, the target's
-// stream (the target connection, or its TLS session for rdp), until either
-// direction ends, then closes the channel and the target connection: neither
-// desktop protocol has a half-close, so one side's end is the session's. It
-// reads the client from the handshake's buffered reader, so bytes read ahead
-// come first. Only client bytes are activity for the idle timer.
-func (c *conn) relayDesktop(ch ssh.Channel, target net.Conn, fromClient io.Reader, peer io.ReadWriter) {
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(activityWriter{peer, c}, fromClient)
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(ch, peer)
-		done <- struct{}{}
-	}()
-	<-done
+// relayDesktop runs both directions of a desktop connection until either
+// ends: neither desktop protocol has a half-close, so one side's end is the
+// session's. A pump returns "" for a close, and the relay then closes the
+// channel and the target and waits for the other pump. A pump's reason closes
+// the target only and is returned at once: the channel stays open so the
+// connection's end can tell the client why, and that end's close of the
+// channel stops the other pump.
+func (c *conn) relayDesktop(ch ssh.Channel, target net.Conn, toTarget, toClient func() string) string {
+	done := make(chan string, 2)
+	go func() { done <- toTarget() }()
+	go func() { done <- toClient() }()
+	if reason := <-done; reason != "" {
+		_ = target.Close()
+		return reason
+	}
 	_ = ch.Close()
 	_ = target.Close()
 	<-done
+	return ""
+}
+
+// copyPumps are the pumps of a desktop connection whose bytes pass unfiltered.
+// The client side reads the handshake's buffered reader, so bytes read ahead
+// come first. Only client bytes are activity for the idle timer.
+func (c *conn) copyPumps(ch ssh.Channel, fromClient io.Reader, peer io.ReadWriter) (toTarget, toClient func() string) {
+	toTarget = func() string {
+		_, _ = io.Copy(activityWriter{peer, c}, fromClient)
+		return ""
+	}
+	toClient = func() string {
+		_, _ = io.Copy(ch, peer)
+		return ""
+	}
+	return toTarget, toClient
 }
 
 // endRefusal is the refusal message of a channel whose connection ended

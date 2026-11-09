@@ -23,6 +23,7 @@ const (
 	optionDevice     = "device@localport.io"
 	optionResume     = "resume@localport.io"
 	optionFiles      = "files@localport.io"
+	optionClipboard  = "clipboard@localport.io"
 	extKind          = "kind@localport.io"
 	extSubject       = "subject@localport.io"
 	extRec           = "rec@localport.io"
@@ -79,6 +80,18 @@ type admission struct {
 	// certificate: the SFTP directions its channels may use. Zero for every
 	// other kind, which serves no SFTP.
 	Files filesAccess
+	// Clipboard is the clipboard@localport.io restriction of a vnc or rdp
+	// certificate: the directions its desktop channel may move clipboard
+	// text. Zero for every other kind, which has no desktop channel.
+	Clipboard clipboardAccess
+}
+
+// clipboardAccess is a clipboard@localport.io value: whether clipboard text
+// may move from the device to the browser (Copy) and from the browser to the
+// device (Paste).
+type clipboardAccess struct {
+	Copy  bool
+	Paste bool
 }
 
 // filesAccess is a files@localport.io value: whether SFTP may read file
@@ -112,6 +125,25 @@ func parseFilesAccess(v string) (filesAccess, bool) {
 	return filesAccess{}, false
 }
 
+// carriesClipboard reports whether certificates of kind carry optionClipboard.
+func carriesClipboard(kind string) bool { return kind == "vnc" || kind == "rdp" }
+
+// parseClipboardAccess parses an optionClipboard value: "", "copy", "paste" or
+// "copy,paste", nothing else.
+func parseClipboardAccess(v string) (clipboardAccess, bool) {
+	switch v {
+	case "":
+		return clipboardAccess{}, true
+	case "copy":
+		return clipboardAccess{Copy: true}, true
+	case "paste":
+		return clipboardAccess{Paste: true}, true
+	case "copy,paste":
+		return clipboardAccess{Copy: true, Paste: true}, true
+	}
+	return clipboardAccess{}, false
+}
+
 // errCertRefused is every certificate refusal; the detail goes to the log
 // only, as an SSH client learns nothing but the userauth failure.
 var errCertRefused = errors.New("session certificate refused")
@@ -123,8 +155,9 @@ func refuseCert(format string, args ...any) error {
 // verifyCert checks a user certificate whose key possession userauth proved:
 // a user certificate signed by one of cas, with exactly the serial the edge
 // admitted, valid at now within certSkew, for principal user, with exactly
-// the critical options the device option (which must name device) and, for a
-// files or ssh certificate, optionFiles. A resume certificate is refused (its
+// the critical options the device option (which must name device), for a
+// files or ssh certificate optionFiles, and for a vnc or rdp certificate
+// optionClipboard. A resume certificate is refused (its
 // resume option is unknown here). It returns the certificate's claims; the
 // caller applies the local config.
 func verifyCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, device Device, serial uint64, now time.Time) (*admission, error) {
@@ -156,9 +189,12 @@ func checkCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, devi
 	if carriesFiles(kind) {
 		options = append(slices.Clone(options), optionFiles)
 	}
+	if carriesClipboard(kind) {
+		options = append(slices.Clone(options), optionClipboard)
+	}
 	// CheckCert refuses an option outside the list; the count refuses a
-	// missing one, so a files or ssh certificate without its restriction
-	// never admits unrestricted SFTP.
+	// missing one, so a certificate without its restriction never admits
+	// unrestricted SFTP or an unrestricted clipboard.
 	if len(cert.CriticalOptions) != len(options) {
 		return nil, refuseCert("want exactly the critical options %v", options)
 	}
@@ -198,6 +234,13 @@ func checkCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, devi
 			return nil, refuseCert("files option malformed")
 		}
 		a.Files = files
+	}
+	if carriesClipboard(kind) {
+		clipboard, ok := parseClipboardAccess(cert.CriticalOptions[optionClipboard])
+		if !ok {
+			return nil, refuseCert("clipboard option malformed")
+		}
+		a.Clipboard = clipboard
 	}
 	var s struct {
 		Subject string `json:"subject"`
