@@ -97,6 +97,10 @@ type rdpClipboard struct {
 	// owes, in order: true for an empty list the agent sent, whose answer
 	// it absorbs.
 	answers [2][]bool
+	// lists is, per direction, the sender's lists still owed an answer, in
+	// order: true for one the agent refused, whose Format List Response OK
+	// waits for the receiver's answers to every earlier forwarded list.
+	lists [2][]bool
 	// requests is, per direction, the outstanding Format Data Requests in
 	// order: true for one the agent refused, whose RESPONSE_FAIL waits for
 	// the answers to every earlier request.
@@ -120,12 +124,12 @@ func cliprdrPDU(typ, flags uint16, data []byte) []byte {
 	return append(b, data...)
 }
 
-// decide applies the clipboard policy to one cliprdr message from side; msg
-// is nil for a Format Data Response discarded past its bound. It returns the
-// PDUs to send.
-func (s *rdpClipboard) decide(from rdpSide, msg []byte, access clipboardAccess) ([]rdpFrame, error) {
+// decide applies the clipboard policy to one cliprdr message from side, or
+// to a successful Format Data Response discarded past its bound. It returns
+// the PDUs to send.
+func (s *rdpClipboard) decide(from rdpSide, msg []byte, discarded bool, access clipboardAccess) ([]rdpFrame, error) {
 	frames := s.narrow(access)
-	if msg == nil {
+	if discarded {
 		return s.dataResponse(frames, from, false, access)
 	}
 	if len(msg) < 8 {
@@ -173,7 +177,15 @@ func (s *rdpClipboard) decide(from rdpSide, msg []byte, access clipboardAccess) 
 		if absorb {
 			return frames, nil
 		}
-		return append(frames, rdpFrame{to: to, payload: cliprdrPDU(typ, flags, nil)}), nil
+		// The answer to the sender's oldest forwarded list, then the agent's
+		// answers to the refused lists it sent after it.
+		s.lists[d] = s.lists[d][1:]
+		frames = append(frames, rdpFrame{to: to, payload: cliprdrPDU(typ, flags, nil)})
+		for len(s.lists[d]) > 0 && s.lists[d][0] {
+			s.lists[d] = s.lists[d][1:]
+			frames = append(frames, rdpFrame{to: to, payload: cliprdrPDU(cbFormatListResponse, cbResponseOK, nil)})
+		}
+		return frames, nil
 	case cbFormatDataRequest:
 		if flags != 0 || n != 4 {
 			return nil, rdpViolation("malformed cliprdr Format Data Request")
@@ -318,15 +330,20 @@ func (s *rdpClipboard) formatList(frames []rdpFrame, from rdpSide, flags uint16,
 		}
 	}
 	d := listDir(from)
-	if len(s.answers[d]) >= rdpMaxClipQueue {
-		return nil, rdpViolation("%d unanswered cliprdr format lists", len(s.answers[d]))
+	if len(s.answers[d]) >= rdpMaxClipQueue || len(s.lists[d]) >= rdpMaxClipQueue {
+		return nil, rdpViolation("%d unanswered cliprdr format lists", max(len(s.answers[d]), len(s.lists[d])))
 	}
 	if d.allowed(access) && len(ids) > 0 {
 		s.formats[d] = ids
 		s.answers[d] = append(s.answers[d], false)
+		s.lists[d] = append(s.lists[d], false)
 		return append(frames, rdpFrame{to: from.other(), payload: cliprdrPDU(cbFormatList, flags, kept)}), nil
 	}
-	frames = append(frames, rdpFrame{to: from, payload: cliprdrPDU(cbFormatListResponse, cbResponseOK, nil)})
+	if len(s.lists[d]) > 0 {
+		s.lists[d] = append(s.lists[d], true)
+	} else {
+		frames = append(frames, rdpFrame{to: from, payload: cliprdrPDU(cbFormatListResponse, cbResponseOK, nil)})
+	}
 	if s.formats[d] != nil {
 		frames = append(frames, s.emptyView(d))
 	}

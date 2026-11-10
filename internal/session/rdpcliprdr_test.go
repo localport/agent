@@ -184,6 +184,34 @@ func TestRDPClipboardReceiverView(t *testing.T) {
 	})
 }
 
+// The agent's answer to a refused list waits behind the receiver's answer to
+// the sender's earlier forwarded list.
+func TestRDPClipboardListAnswerOrder(t *testing.T) {
+	r := newRDPRun(t, rdpProtocolSSL, allClipboard)
+	r.connect("base")
+	clipCaps(r)
+	r.send(rdpServer, rdpPDU(t, "s.list_mixed_long"))
+	r.expect(rdpClient, rdpPDU(t, "s.list_text_long"))
+	r.send(rdpServer, rdpPDU(t, "s.list_image_long"))
+	r.expect(rdpClient, rdpPDU(t, "s.list_empty_long"))
+	r.marker(rdpServer)
+	r.send(rdpClient, rdpPDU(t, "c.list_fail"))
+	r.expect(rdpServer, rdpPDU(t, "c.list_fail"))
+	r.expect(rdpServer, rdpPDU(t, "c.list_ok"))
+	r.send(rdpClient, rdpPDU(t, "c.list_ok"))
+	r.marker(rdpClient)
+}
+
+// A cliprdr message of no bytes is malformed, never read as a discarded
+// response: the outstanding request stays outstanding.
+func TestRDPClipboardEmptyMessage(t *testing.T) {
+	r := newRDPRun(t, rdpProtocolSSL, allClipboard)
+	r.connect("base")
+	copyRequested(r)
+	r.send(rdpServer, r.svc(rdpServer, rdpCliprdr, nil, 0))
+	r.wantEnd(CloseDesktopProtocolViolation)
+}
+
 // A response over rdpMaxClipText is discarded, not buffered, and the
 // requester gets RESPONSE_FAIL; one within the bound passes.
 func TestRDPClipboardResponseBound(t *testing.T) {

@@ -386,6 +386,70 @@ func TestRDPFilterStaticChannels(t *testing.T) {
 	}
 }
 
+// Channel names compare case-insensitively, and each name other than
+// drdynvc and an allowed cliprdr is refused: the recorded Connect Initial
+// with one CS_NET name replaced by another of the same length.
+func TestRDPFilterChannelNames(t *testing.T) {
+	for name, tc := range map[string]struct {
+		from, to string
+		access   clipboardAccess
+		refused  bool
+	}{
+		"CLIPRDR with a direction":    {from: "cliprdr", to: "CLIPRDR", access: clipboardAccess{Copy: true}},
+		"CLIPRDR without a direction": {from: "cliprdr", to: "CLIPRDR", refused: true},
+		"DRDYNVC":                     {from: "drdynvc", to: "DRDYNVC", access: clipboardAccess{Paste: true}},
+		"rdpsnd":                      {from: "cliprdr", to: "rdpsnd\x00", access: allClipboard, refused: true},
+		"rail":                        {from: "drdynvc", to: "rail\x00\x00\x00", access: allClipboard, refused: true},
+		"encomsp":                     {from: "drdynvc", to: "encomsp", access: allClipboard, refused: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			steps := rdpTranscript(t, "base")
+			ci := bytes.Clone(steps[0].pdu)
+			i := bytes.Index(ci, []byte(tc.from+"\x00"))
+			if i < 0 || len(tc.to) != len(tc.from) {
+				t.Fatalf("no CS_NET name %q", tc.from)
+			}
+			copy(ci[i:], tc.to)
+			r := newRDPRun(t, rdpProtocolSSL, tc.access)
+			r.send(rdpClient, ci)
+			if tc.refused {
+				r.wantEnd(CloseDesktopChannelRefused)
+				return
+			}
+			r.expect(rdpServer, ci)
+			for _, s := range steps[1:] {
+				r.pass(s.from, s.pdu)
+			}
+			r.marker(rdpClient)
+		})
+	}
+}
+
+// The IronRDP client the web page runs asks for no compression: its Client
+// Info PDU sets no INFO_COMPRESSION or compression type (MS-RDPBCGR
+// 2.2.1.11.1.1) and its Virtual Channel Capability Set is VCCAPS_NO_COMPR
+// (2.2.7.1.10), as recorded from ironrdp-connector, whose code the fork
+// carries unchanged.
+func TestRDPClientAsksNoCompression(t *testing.T) {
+	steps := rdpTranscript(t, "base")
+	info := steps[5].pdu // Client Info: TPKT 4, X.224 3, MCS 6 and a 2-byte PER length
+	data := info[15:]
+	if binary.LittleEndian.Uint16(data)&0x0040 == 0 {
+		t.Fatal("the recorded PDU is not the Client Info PDU")
+	}
+	if flags := binary.LittleEndian.Uint32(data[8:]); flags&(0x80|0x1e00) != 0 {
+		t.Fatalf("Client Info flags %#x ask for compression", flags)
+	}
+	confirm := steps[8].pdu
+	i := bytes.Index(confirm, []byte{capsTypeVirtualChannel, 0x00, 0x0c, 0x00})
+	if i < 0 {
+		t.Fatal("no Virtual Channel Capability Set in the Confirm Active")
+	}
+	if flags := binary.LittleEndian.Uint32(confirm[i+4:]); flags != 0 {
+		t.Fatalf("Virtual Channel Capability Set flags %#x", flags)
+	}
+}
+
 // Send Data on a channel the server did not assign, or from another
 // initiator, ends the connection.
 func TestRDPFilterUnknownChannel(t *testing.T) {
@@ -454,6 +518,32 @@ func TestRDPFilterChunkSize(t *testing.T) {
 		r.pass(chunk[8].from, chunk[8].pdu) // Confirm Active
 		pasteRequested(r)
 		r.pass(rdpClient, big)
+	})
+	t.Run("a chunk at the old size during a reactivation", func(t *testing.T) {
+		r := newRDPRun(t, rdpProtocolSSL, allClipboard)
+		r.connect("chunk")
+		pasteRequested(r)
+		base := rdpTranscript(t, "base")
+		r.pass(rdpServer, rdpPDU(t, "s.deactivate_all"))
+		r.pass(base[7].from, base[7].pdu) // Demand Active without VCChunkSize
+		// Sent at 4096 before the client saw the new Demand Active: it passes,
+		// written to the server at 1600, which both sizes allow.
+		r.send(rdpClient, big)
+		r.expect(rdpServer, rdpPDU(t, "c.resp_4000"))
+		r.pass(base[8].from, base[8].pdu) // Confirm Active: 1600 from now on
+		r.pass(rdpServer, rdpPDU(t, "s.req_unicode"))
+		r.send(rdpClient, big)
+		r.wantEnd(CloseDesktopProtocolViolation)
+	})
+	t.Run("writes at the smaller size while a reactivation raises it", func(t *testing.T) {
+		r := newRDPRun(t, rdpProtocolSSL, allClipboard)
+		r.connect("base")
+		copyRequested(r)
+		chunk := rdpTranscript(t, "chunk")
+		r.pass(rdpServer, rdpPDU(t, "s.deactivate_all"))
+		r.pass(chunk[7].from, chunk[7].pdu) // Demand Active, VCChunkSize 4096
+		// The client has not confirmed 4096 yet: the agent writes at 1600.
+		r.pass(rdpServer, rdpPDU(t, "s.resp_4000"))
 	})
 	t.Run("server VCChunkSize out of range", func(t *testing.T) {
 		r := newRDPRun(t, rdpProtocolSSL, allClipboard)
@@ -551,7 +641,11 @@ func TestRDPFilterDynamicChannels(t *testing.T) {
 		r.send(rdpServer, rdpPDU(t, "s.dvc_create_gfx"))
 		r.expect(rdpServer, rdpPDU(t, "c.dvc_create_gfx_not_found"))
 		r.marker(rdpServer)
+		// Data the server sent before it read the refusal is dropped, as
+		// IronRDP's client drops it for a channel it declined.
 		r.send(rdpServer, rdpPDU(t, "s.dvc_data_gfx"))
+		r.marker(rdpServer)
+		r.send(rdpClient, rdpPDU(t, "c.dvc_data_gfx"))
 		r.wantEnd(CloseDesktopProtocolViolation)
 	})
 	t.Run("failed create stays closed", func(t *testing.T) {
@@ -587,6 +681,48 @@ func TestRDPFilterDynamicChannels(t *testing.T) {
 		r.connect("base")
 		r.pass(rdpServer, rdpPDU(t, "s.dvc_caps_v3"))
 		r.send(rdpClient, rdpPDU(t, "c.dvc_caps_rsp_v3"))
+		r.wantEnd(CloseDesktopProtocolViolation)
+	})
+	t.Run("server close and the client's answer", func(t *testing.T) {
+		r := open(t)
+		r.pass(rdpServer, rdpPDU(t, "s.dvc_create_display"))
+		r.pass(rdpClient, rdpPDU(t, "c.dvc_create_ok"))
+		r.pass(rdpServer, rdpPDU(t, "s.dvc_close"))
+		// Sent before the client saw the Close: dropped, not a violation.
+		r.send(rdpClient, rdpPDU(t, "c.dvc_data"))
+		r.pass(rdpClient, rdpPDU(t, "c.dvc_close"))
+		r.send(rdpClient, rdpPDU(t, "c.dvc_close"))
+		r.marker(rdpClient)
+		r.send(rdpClient, rdpPDU(t, "c.dvc_data"))
+		r.wantEnd(CloseDesktopProtocolViolation)
+	})
+	t.Run("server close of a pending channel", func(t *testing.T) {
+		r := open(t)
+		r.pass(rdpServer, rdpPDU(t, "s.dvc_create_display"))
+		r.pass(rdpServer, rdpPDU(t, "s.dvc_close"))
+		// IronRDP answered the Create before it read the Close.
+		r.send(rdpClient, rdpPDU(t, "c.dvc_create_ok"))
+		r.pass(rdpClient, rdpPDU(t, "c.dvc_close"))
+		r.marker(rdpClient)
+	})
+	t.Run("client close", func(t *testing.T) {
+		r := open(t)
+		r.pass(rdpServer, rdpPDU(t, "s.dvc_create_display"))
+		r.pass(rdpClient, rdpPDU(t, "c.dvc_create_ok"))
+		r.pass(rdpClient, rdpPDU(t, "c.dvc_close"))
+		// Sent before the server saw the Close.
+		r.send(rdpServer, rdpPDU(t, "s.dvc_data"))
+		r.marker(rdpServer)
+		// The id is free again for a new channel.
+		r.pass(rdpServer, rdpPDU(t, "s.dvc_create_display"))
+	})
+	t.Run("data first shorter than its data", func(t *testing.T) {
+		r := open(t)
+		r.pass(rdpServer, rdpPDU(t, "s.dvc_create_display"))
+		r.pass(rdpClient, rdpPDU(t, "c.dvc_create_ok"))
+		// Data First: cmd 2, Len form 1 (two bytes), channel 3, length 10, 20 bytes.
+		pdu := append([]byte{dvcDataFirst<<4 | 1<<2, 3, 10, 0}, make([]byte, 20)...)
+		r.send(rdpClient, r.svc(rdpClient, rdpDrdynvc, pdu, 0))
 		r.wantEnd(CloseDesktopProtocolViolation)
 	})
 	t.Run("close of a channel not open is dropped", func(t *testing.T) {
@@ -665,7 +801,19 @@ func TestRDPFilterSinkSerializesDecisions(t *testing.T) {
 	// A request for a format not listed: the client pump answers it.
 	go r.send(rdpClient, rdpPDU(t, "c.req_html"))
 	<-deciding
-	time.Sleep(50 * time.Millisecond)
+	// Release the forward once the decision either waits for the sink lock
+	// or, without the lock, has written inside the gated write.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		gate.mu.Lock()
+		overlap := gate.overlap
+		gate.mu.Unlock()
+		if overlap || sink.waiting.Load() == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the decision neither waited for the sink nor wrote")
+		}
+	}
 	close(gate.release)
 	r.expect(rdpClient, resp)
 	r.expect(rdpClient, rdpPDU(t, "s.resp_fail"))

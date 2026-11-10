@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // CloseDesktopChannelRefused: an rdp client asked for a static virtual
@@ -53,7 +54,6 @@ const (
 	x224EOT                 = 0x80
 	shareControlDemand      = 0x0011
 	shareControlConfirm     = 0x0013
-	shareControlDeactivate  = 0x0016
 	capsTypeVirtualChannel  = 20
 	gccClientNetwork        = 0xc003
 	gccServerSecurity       = 0x0c02
@@ -119,6 +119,16 @@ type rdpSink struct {
 	mu       sync.Mutex
 	w        *bufio.Writer
 	writeErr func(error) error
+	// waiting counts decisions blocked in lock; tests read it to interleave a
+	// decision with a forward without a time bound.
+	waiting atomic.Int32
+}
+
+// lock takes mu for a decision.
+func (s *rdpSink) lock() {
+	s.waiting.Add(1)
+	s.mu.Lock()
+	s.waiting.Add(-1)
 }
 
 func (s *rdpSink) write(b []byte) error {
@@ -153,8 +163,10 @@ type rdpFrame struct {
 //
 // The pumps share mu, which guards every field below it. A decision on that
 // state takes mu, then the sinks it writes in the order toTarget, toClient,
-// releases mu and writes, so PDUs reach each sink in decision order while a
-// slow sink does not hold up the other pump's decisions.
+// releases mu and writes, so PDUs reach each sink in decision order. While a
+// decision waits for a sink that the other pump is writing, it holds mu, so
+// the other pump's next decision waits for that write too; a forward without
+// a decision takes only its sink.
 type rdpFilter struct {
 	c        *conn
 	protocol uint32
@@ -174,6 +186,10 @@ type rdpFilter struct {
 	// reports whether the client's capability set carried the field.
 	serverChunk uint32
 	clientChunk bool
+	// exchanging is set from a Demand Active to its Confirm Active, and
+	// previousChunk is the chunk size in force before that Demand Active.
+	exchanging    bool
+	previousChunk int
 	// serverInitiator is the initiator of the server's last Send Data
 	// Indication, which agent PDUs toward the client carry.
 	serverInitiator uint16
@@ -853,20 +869,16 @@ func (p *rdpPump) sendData(pdu, mcs []byte) error {
 }
 
 // ioChannel reads the Virtual Channel Capability Set from a Demand Active or
-// Confirm Active (MS-RDPBCGR 2.2.1.13); a Deactivate All starts a new
-// capability exchange. Other I/O channel PDUs pass unread: they carry no
-// channel data.
+// Confirm Active (MS-RDPBCGR 2.2.1.13), each replacing its side's value; a
+// capability exchange runs from the Demand Active to its Confirm Active (a
+// reactivation after a Deactivate All included). Other I/O channel PDUs pass
+// unread: they carry no channel data.
 func (p *rdpPump) ioChannel(data []byte) error {
 	if len(data) < 6 || int(binary.LittleEndian.Uint16(data)) != len(data) {
 		return nil
 	}
 	typ := binary.LittleEndian.Uint16(data[2:])
 	switch {
-	case p.from == rdpServer && typ == shareControlDeactivate:
-		p.f.mu.Lock()
-		p.f.serverChunk, p.f.clientChunk = 0, false
-		p.f.mu.Unlock()
-		return nil
 	case p.from == rdpServer && typ == shareControlDemand, p.from == rdpClient && typ == shareControlConfirm:
 	default:
 		return nil
@@ -919,9 +931,12 @@ func (p *rdpPump) ioChannel(data []byte) error {
 	}
 	p.f.mu.Lock()
 	if p.from == rdpServer {
-		p.f.serverChunk, p.f.clientChunk = chunk, false
+		if !p.f.exchanging {
+			p.f.previousChunk = p.f.chunkSize()
+		}
+		p.f.serverChunk, p.f.exchanging = chunk, true
 	} else {
-		p.f.clientChunk = chunk != 0
+		p.f.clientChunk, p.f.exchanging = chunk != 0, false
 	}
 	p.f.mu.Unlock()
 	return nil
@@ -934,6 +949,26 @@ func (f *rdpFilter) chunkSize() int {
 		return int(f.serverChunk)
 	}
 	return rdpChunkLength
+}
+
+// chunkLimit bounds an incoming chunk: while an exchange runs, chunks sent at
+// the size before it may still arrive, so the larger of the two applies.
+// Called with mu held.
+func (f *rdpFilter) chunkLimit() int {
+	if f.exchanging {
+		return max(f.previousChunk, f.chunkSize())
+	}
+	return f.chunkSize()
+}
+
+// chunkWrite is the size the agent writes chunks at: while an exchange runs,
+// the smaller of the sizes before and after it, which both sides accept.
+// Called with mu held.
+func (f *rdpFilter) chunkWrite() int {
+	if f.exchanging {
+		return min(f.previousChunk, f.chunkSize())
+	}
+	return f.chunkSize()
 }
 
 // rdpReassembly is one direction's virtual channel message in progress.
@@ -960,7 +995,7 @@ func (p *rdpPump) chunk(ch rdpChannel, data []byte) error {
 		return rdpViolation("%s chunk flags %#x", ch.name(), flags)
 	}
 	p.f.mu.Lock()
-	size := p.f.chunkSize()
+	size := p.f.chunkLimit()
 	p.f.mu.Unlock()
 	if len(body) > size {
 		return rdpViolation("%s chunk of %d bytes past the chunk size %d", ch.name(), len(body), size)
@@ -999,11 +1034,7 @@ func (p *rdpPump) chunk(ch rdpChannel, data []byte) error {
 		return rdpViolation("%s message short of its length", ch.name())
 	}
 	r.active = false
-	msg := r.buf
-	if r.discard {
-		msg = nil
-	}
-	return p.f.decide(p.from, ch, msg, r.flags)
+	return p.f.decide(p.from, ch, r.buf, r.discard, r.flags)
 }
 
 func (c rdpChannel) name() string {
@@ -1013,14 +1044,15 @@ func (c rdpChannel) name() string {
 	return "drdynvc"
 }
 
-// decide runs the channel's filter on one whole message from side and sends
-// what it decides, holding mu across the decision and the sink locks.
-func (f *rdpFilter) decide(from rdpSide, ch rdpChannel, msg []byte, flags uint32) error {
+// decide runs the channel's filter on one whole message from side, or on a
+// Format Data Response discarded past its bound, and sends what it decides,
+// holding mu until it holds the sink locks it writes.
+func (f *rdpFilter) decide(from rdpSide, ch rdpChannel, msg []byte, discarded bool, flags uint32) error {
 	f.mu.Lock()
 	var frames []rdpFrame
 	var err error
 	if ch == rdpCliprdr {
-		frames, err = f.clip.decide(from, msg, f.c.adm.Load().Clipboard)
+		frames, err = f.clip.decide(from, msg, discarded, f.c.adm.Load().Clipboard)
 	} else {
 		frames, err = f.dvc.decide(from, msg)
 	}
@@ -1039,7 +1071,7 @@ func (f *rdpFilter) decide(from rdpSide, ch rdpChannel, msg []byte, flags uint32
 	var held []*rdpSink
 	for _, side := range []rdpSide{rdpServer, rdpClient} {
 		if len(wire[side]) > 0 {
-			f.sinks[side].mu.Lock()
+			f.sinks[side].lock()
 			held = append(held, f.sinks[side])
 		}
 	}
@@ -1066,7 +1098,7 @@ func (f *rdpFilter) decide(from rdpSide, ch rdpChannel, msg []byte, flags uint32
 // encode appends fr as the chunks of one virtual channel message
 // (MS-RDPBCGR 2.2.6.1) at the negotiated chunk size. Called with mu held.
 func (f *rdpFilter) encode(dst []byte, fr rdpFrame) []byte {
-	size := f.chunkSize()
+	size := f.chunkWrite()
 	choice, initiator := byte(mcsSendDataRequest<<2), f.user-mcsUserIDBase
 	if fr.to == rdpClient {
 		choice, initiator = mcsSendDataIndication<<2, f.serverInitiator

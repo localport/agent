@@ -863,7 +863,11 @@ stream:
      the connection. The chunk size is the server's `VCChunkSize` when both
      the Demand Active and the Confirm Active carry it (a server value
      outside 1,600 to 16,256 ends the connection), else 1,600 (3.1.5.2.1);
-     a Deactivate All starts a new exchange. Chunks reassemble by
+     each Demand Active and Confirm Active, a reactivation after a
+     Deactivate All included, replaces its side's value. While an exchange
+     runs, from the Demand Active to its Confirm Active, an incoming chunk may
+     be as large as the larger of the sizes before and after it, and the
+     agent writes at the smaller. Chunks reassemble by
      `CHANNEL_FLAG_FIRST` and `LAST` up to 1 MiB plus 64 KiB on `cliprdr`
      and 1,600 bytes on `drdynvc`; a successful Format Data Response past
      the bound is discarded chunk by chunk, not buffered. The agent writes
@@ -877,8 +881,23 @@ stream:
      connection. Only `Microsoft::Windows::RDS::DisplayControl` opens: the
      agent answers a server Create Request for any other name with a
      Create Response of `STATUS_NOT_FOUND` (0xC0000225) and the client never
-     sees it. Data on a channel the client did not create successfully, in
-     either direction, ends the connection; a Close for one is dropped.
+     sees it. A Data First whose length is less than its data ends the
+     connection. Each channel id is in one state, and these PDUs move it
+     (any other ends the connection, except a Close, which is dropped,
+     3.2.5.2):
+
+     | State | Server | Client |
+     |---|---|---|
+     | none | Create: pending, or refused (client closed) | |
+     | pending | Close: server closing | Create Response: open, or client closed on failure |
+     | open | Data; Close: server closing | Data; Close: client closed |
+     | server closing | | Create Response: dropped (none on failure); Data: dropped; Close: none (the answer, 1.3.3.3) |
+     | client closed | Create: pending, or refused; Data: dropped | |
+
+     Client closed (a channel the client closed or declined, or the agent
+     refused) keeps the most recent 8 ids, as IronRDP's client drops data
+     for a channel it declined; at most 8 ids are pending, open or server
+     closing.
    - Clipboard (`cliprdr`), per the connection's current certificate:
      Clipboard Capabilities pass with `CB_STREAM_FILECLIP_ENABLED`,
      `CB_FILECLIP_NO_FILE_PATHS`, `CB_CAN_LOCK_CLIPDATA` and
@@ -887,7 +906,8 @@ stream:
      allowed, from the client only when `paste` is, reduced to CF_TEXT (1),
      CF_OEMTEXT (7), CF_UNICODETEXT (13) and CF_LOCALE (16). A list refused
      or reduced to nothing is answered by the agent with a Format List
-     Response OK, and when the receiver held a list in that direction the
+     Response OK, in order behind the receiver's answers to the sender's
+     earlier lists, and when the receiver held a list in that direction the
      agent sends it an empty Format List and absorbs its answer; a resume
      that narrows a direction does the same at the next `cliprdr` PDU. A
      Format Data Request passes only for a format of the list the agent
