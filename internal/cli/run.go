@@ -183,6 +183,9 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 	if reload != nil {
 		renewing.Go(func() { runner.watchReload(ctx, a, reload) })
 	}
+	if devicesRunning != nil {
+		devicesRunning()
+	}
 	runErr := a.Run(ctx, renderer)
 	// Every device has stopped; end the reload, renewal and key refresh loops
 	// with them.
@@ -219,6 +222,15 @@ func runOutliving(runs ...func(context.Context)) (stop func()) {
 
 // errNoDeviceStarts means every listed device was skipped.
 var errNoDeviceStarts = errcode.New(errcode.NoDeviceStarts)
+
+// resolveEdge is the edge address of a device's region; tests point it at a
+// local address so a served device dials no real edge.
+var resolveEdge = config.ResolveEdge
+
+// devicesRunning, when set, runs in serveDevices once every loop that
+// outlives the devices has started, just before the devices run. Tests set
+// it; nil otherwise.
+var devicesRunning func()
 
 // deviceSpec builds the runtime spec of one enrolled device from its local
 // config entry, its stored credential and the launcher probe. renews
@@ -261,7 +273,7 @@ func deviceSpec(store *identity.Store, d config.LocalDevice, probe sessionProbe,
 		Name:           prefix,
 		Identity:       d.Identity.Identity,
 		Host:           host,
-		Edge:           config.ResolveEdge(m.Meta.Device.Region),
+		Edge:           resolveEdge(m.Meta.Device.Region),
 		AllowPorts:     d.AllowPorts,
 		Credential:     identity.NewDeviceRegistrar(store, d.Identity, logEvent),
 		Capabilities:   capabilities,

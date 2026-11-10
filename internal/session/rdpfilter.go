@@ -215,7 +215,7 @@ func newRDPFilterOver(c *conn, protocol uint32, fromClient *bufio.Reader, toClie
 	f.sinks[rdpServer] = &rdpSink{w: bufio.NewWriterSize(target, rfbServerBuffer), writeErr: targetIOError}
 	f.sinks[rdpClient] = &rdpSink{w: bufio.NewWriterSize(toClient, rfbServerBuffer), writeErr: clientIOError}
 	f.dvc.init()
-	f.clip.note = func(d clipDir, outcome string, n int) { c.noteClipboard("rdp", d.name(), outcome, n) }
+	f.clip.note = func(d clipDir, outcome string, n int) { c.noteClipboard("rdp", d.name(), outcome, int64(n)) }
 	return f
 }
 

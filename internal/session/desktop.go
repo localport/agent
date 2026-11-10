@@ -89,13 +89,13 @@ type ClipboardDecision struct {
 
 // noteClipboard reports one clipboard decision of c's desktop connection to
 // ServerConfig.OnClipboard, which must not block.
-func (c *conn) noteClipboard(kind, direction, outcome string, n int) {
+func (c *conn) noteClipboard(kind, direction, outcome string, n int64) {
 	if c.s.cfg.OnClipboard == nil {
 		return
 	}
 	c.s.cfg.OnClipboard(ClipboardDecision{
 		SessionID: c.adm.Load().sessionID, Kind: kind, Direction: direction, Outcome: outcome,
-		Bytes: int64(n), At: c.s.cfg.clock.Now(),
+		Bytes: n, At: c.s.cfg.clock.Now(),
 	})
 }
 

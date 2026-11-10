@@ -1316,7 +1316,9 @@ are queued or 2 s after the last attempt. The body is JSON:
 
 - `id`: a version 7 UUID the agent mints when it queues the notice, in queue
   order (a 12-bit per-millisecond sequence keeps ids increasing, also when
-  the clock steps back). The edge stores it as the row id.
+  the clock steps back). The edge stores the row under a name-based UUID it
+  derives from the session and this id, so the same notice always lands on
+  the same row and no device names another row.
 - `session_id`: the canonical UUID of the stream the connection runs on now
   (a resume stream's after a resume), as a recording's `session_id`.
 - `kind`: `vnc` or `rdp`; `direction`: `copy` or `paste`; `outcome`:
@@ -1329,20 +1331,23 @@ are queued or 2 s after the last attempt. The body is JSON:
 
 At most 64 notices per batch. The edge answers `204` once it read the batch,
 whatever each notice's fate; `400` for a malformed batch or one over 64,
-which the agent drops; `408` for a body that did not arrive in time and `503`
-while another batch of the mux is in flight, both sent again. A batch that
-was not answered `204` or `400` is sent again unchanged before any later
+which the agent drops, as it drops a batch answered `404` (an edge without
+the route); `408` for a body that did not arrive in time and `503` while
+another batch of the mux is in flight, both sent again. A batch that was not
+answered `204`, `400` or `404` is sent again unchanged before any later
 notice. When the session mux stops, after its sessions ended and before its
 conn closes, the agent sends what the device has queued, bounded by 2 s.
 
 The edge records a notice when its session is live on that mux, or ended on
 the device within the last 10 minutes on that edge, and is a desktop session
-of the notice's `kind`, and its time lies between 1 minute before the
+of the notice's `kind`; its time is clamped to between 1 minute before the
 session's admission and 1 minute after the edge clock. A notice not newer
 than the last one the edge counted for its session (a batch sent again) is
 ignored. Any other notice is dropped and counted in the edge log. The first
-100 notices of a session become `clipboard` rows; later ones, and count
-notices, are summed per minute into one `clipboard_fold` row per session.
+100 notices of a session become `clipboard` rows; later ones, count notices,
+and notices past the edge's row budgets are summed
+per minute of receipt into one `clipboard_fold` row per session, or past the
+fold budgets one per fleet and kind.
 Notices are lost when the agent exits before sending them, when the flush at
 mux stop passes its bound, and when they reach the edge more than 10 minutes
 after the session ended, at another edge, or after an edge restart.

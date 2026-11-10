@@ -42,8 +42,8 @@ const (
 	clipboardSlots = 1
 )
 
-// errClipboardRejected is the edge's 400: the batch is malformed and is
-// dropped, never resent.
+// errClipboardRejected is the edge's 400 (a malformed batch) or 404 (an edge
+// without the route): the batch is dropped, never resent.
 var errClipboardRejected = errors.New("clipboard notices: the edge rejected the batch")
 
 // ClipboardClient posts clipboard notice batches on one session mux conn.
@@ -72,8 +72,8 @@ func (t *Tunnel) ClipboardClient() (*ClipboardClient, error) {
 // ErrNoClipboardClient means the device has no session mux conn up.
 var ErrNoClipboardClient = errors.New("clipboard notices: no session mux")
 
-// send posts one batch: nil on 204, errClipboardRejected on 400, any other
-// error for a batch to send again.
+// send posts one batch: nil on 204, errClipboardRejected on 400 or 404, any
+// other error for a batch to send again.
 func (c *ClipboardClient) send(ctx context.Context, body []byte) error {
 	select {
 	case c.slot <- struct{}{}:
@@ -97,7 +97,7 @@ func (c *ClipboardClient) send(ctx context.Context, body []byte) error {
 	switch resp.StatusCode {
 	case http.StatusNoContent:
 		return nil
-	case http.StatusBadRequest:
+	case http.StatusBadRequest, http.StatusNotFound:
 		return errClipboardRejected
 	}
 	return fmt.Errorf("clipboard notices: edge answered %d", resp.StatusCode)
@@ -142,12 +142,17 @@ type ClipboardNotices struct {
 	client func(identifier string) (*ClipboardClient, error)
 	// flushEvery is how long a notice waits for its batch; tests shorten it.
 	flushEvery time.Duration
+	// senderStarted, when set, runs under mu each time a sender starts.
+	// Tests set it; nil otherwise.
+	senderStarted func()
 
 	mu      sync.Mutex
 	ids     clipboardIDs
 	devices map[string]*clipboardQueue
 	// ctx is Run's context, nil before Run; senders stop when it ends.
+	// stopped is set once Run waits for its senders; no sender starts after.
 	ctx     context.Context
+	stopped bool
 	senders sync.WaitGroup
 }
 
@@ -219,11 +224,14 @@ func (q *ClipboardNotices) Note(identifier string, n ClipboardNotice) {
 
 // startLocked starts d's sender once Run runs and none owns d.
 func (q *ClipboardNotices) startLocked(d *clipboardQueue) {
-	if d.idle != nil || q.ctx == nil || q.ctx.Err() != nil {
+	if d.idle != nil || q.ctx == nil || q.stopped {
 		return
 	}
 	idle := make(chan struct{})
 	d.idle = idle
+	if q.senderStarted != nil {
+		q.senderStarted()
+	}
 	q.senders.Go(func() {
 		defer close(idle)
 		q.sendLoop(d)
@@ -242,6 +250,10 @@ func (q *ClipboardNotices) Run(ctx context.Context) {
 	}
 	q.mu.Unlock()
 	<-ctx.Done()
+	// Under mu, so no Note or Flush starts a sender once Wait may run.
+	q.mu.Lock()
+	q.stopped = true
+	q.mu.Unlock()
 	q.senders.Wait()
 }
 

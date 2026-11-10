@@ -851,11 +851,11 @@ func (f *rfbFilter) cutText(s *rfbStream, direction string, allowed bool) error 
 	n := uint64(length)
 	switch {
 	case !allowed:
-		f.c.noteClipboard("vnc", direction, clipboardDeniedPolicy, int(length))
+		f.c.noteClipboard("vnc", direction, clipboardDeniedPolicy, int64(length))
 	case n > rfbMaxCutText:
-		f.c.noteClipboard("vnc", direction, clipboardDeniedSize, int(length))
+		f.c.noteClipboard("vnc", direction, clipboardDeniedSize, int64(length))
 	default:
-		f.c.noteClipboard("vnc", direction, clipboardAllowed, int(length))
+		f.c.noteClipboard("vnc", direction, clipboardAllowed, int64(length))
 	}
 	if !allowed || n > rfbMaxCutText {
 		if _, err := s.r.Discard(8); err != nil {

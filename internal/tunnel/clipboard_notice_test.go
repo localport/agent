@@ -189,16 +189,36 @@ func TestClipboardNoticesResendAFailedBatchFirst(t *testing.T) {
 	}
 }
 
-// A batch the edge rejects as malformed is dropped, never resent.
+// A batch the edge rejects as malformed, or an edge without the route, is
+// dropped, never resent.
 func TestClipboardNoticesDropARejectedBatch(t *testing.T) {
-	clip, notices, _, _ := startClipboardTunnel(t, 20*time.Millisecond)
-	clip.answers <- http.StatusBadRequest
+	for _, status := range []int{http.StatusBadRequest, http.StatusNotFound} {
+		clip, notices, _, _ := startClipboardTunnel(t, 20*time.Millisecond)
+		clip.answers <- status
+		notices.Note(testClipDevice, testClipNotice(1))
+		clip.expect(t)
+		clip.expectNone(t, 150*time.Millisecond)
+		notices.Note(testClipDevice, testClipNotice(2))
+		if next := clip.expect(t); len(next) != 1 || next[0].Bytes != 2 {
+			t.Fatalf("%d: next batch %+v, want the later notice only", status, next)
+		}
+	}
+}
+
+// Once Run has ended no Note or Flush starts a sender, so none outlives Run.
+func TestClipboardNoticesStartNoSenderAfterRun(t *testing.T) {
+	notices := NewClipboardNotices(func(string) (*ClipboardClient, error) { return nil, ErrNoClipboardClient })
+	started := 0
+	notices.senderStarted = func() { started++ }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	notices.Run(ctx)
 	notices.Note(testClipDevice, testClipNotice(1))
-	clip.expect(t)
-	clip.expectNone(t, 150*time.Millisecond)
-	notices.Note(testClipDevice, testClipNotice(2))
-	if next := clip.expect(t); len(next) != 1 || next[0].Bytes != 2 {
-		t.Fatalf("next batch %+v, want the later notice only", next)
+	notices.Flush(context.Background(), testClipDevice, &ClipboardClient{})
+	notices.mu.Lock()
+	defer notices.mu.Unlock()
+	if started != 0 {
+		t.Fatalf("%d senders started after Run ended", started)
 	}
 }
 
