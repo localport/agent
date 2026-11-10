@@ -62,6 +62,7 @@ type deviceRunner struct {
 	parent   context.Context
 	store    *identity.Store
 	uploads  *recording.Uploader
+	notices  *tunnel.ClipboardNotices
 	logEvent func(string)
 	probe    sessionProbe
 	probed   bool
@@ -85,7 +86,7 @@ func (r *deviceRunner) build(d config.LocalDevice) (spec config.DeviceSpec, ok b
 		return config.DeviceSpec{}, false
 	}
 	served := &servedDevice{local: d}
-	state, err := deviceSessions(r.store, d.Identity, &spec, r.uploads, r.logEvent)
+	state, err := deviceSessions(r.store, d.Identity, &spec, r.uploads, r.notices, r.logEvent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  device %s: sessions disabled: %v\n", d.Identity, err)
 	} else if state != nil {

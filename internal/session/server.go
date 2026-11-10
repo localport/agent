@@ -131,6 +131,9 @@ type ServerConfig struct {
 	DesktopKeys DesktopKeys
 	// OnEvent receives one line per notable failure. Optional.
 	OnEvent func(string)
+	// OnClipboard receives each clipboard transfer decision of a desktop
+	// connection; it must not block. Nil reports none.
+	OnClipboard func(ClipboardDecision)
 	// Uploader delivers the recordings of certificates with rec; nil leaves
 	// recording unavailable: Strict connections are closed before any
 	// channel and Best effort ones run unrecorded.

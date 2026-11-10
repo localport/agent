@@ -33,9 +33,9 @@ const (
 	// recordingMaxResponse bounds every recording response body the agent reads.
 	recordingMaxResponse = 4 << 10
 
-	// In-flight requests per conn, within the edge's 21 streams: 2 segment
+	// In-flight requests per conn, within the edge's 22 streams: 2 segment
 	// requests, of which at most 1 drains the spool, 1 open, and 1 complete or
-	// failed open.
+	// failed open (the clipboard notice batch holds its own).
 	recordingSegmentSlots    = 2
 	recordingDrainSlots      = 1
 	recordingOpenSlots       = 1

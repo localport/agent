@@ -740,7 +740,7 @@ func (f *rfbFilter) clientMessages() error {
 		case rfbClientPointerEvent:
 			err = s.forward(6)
 		case rfbClientCutText:
-			err = f.cutText(s, f.c.adm.Load().Clipboard.Paste)
+			err = f.cutText(s, clipboardPaste, f.c.adm.Load().Clipboard.Paste)
 		case rfbClientEnableContinuous:
 			if err = f.requireOffered(rfbEncContinuousUpdates, "EnableContinuousUpdates"); err == nil {
 				f.formatFrozen = true
@@ -835,10 +835,11 @@ func (f *rfbFilter) setEncodings() error {
 	return nil
 }
 
-// cutText forwards a CutText when allowed and within the size bound, and
-// consumes it otherwise; a negative length is the extended format, which the
-// rewritten SetEncodings never requests.
-func (f *rfbFilter) cutText(s *rfbStream, allowed bool) error {
+// cutText forwards a CutText moving text in direction when allowed and
+// within the size bound, and consumes it otherwise, reporting the decision; a
+// negative length is the extended format, which the rewritten SetEncodings
+// never requests.
+func (f *rfbFilter) cutText(s *rfbStream, direction string, allowed bool) error {
 	b, err := s.need(8)
 	if err != nil {
 		return err
@@ -848,6 +849,14 @@ func (f *rfbFilter) cutText(s *rfbStream, allowed bool) error {
 		return rfbViolation("extended CutText")
 	}
 	n := uint64(length)
+	switch {
+	case !allowed:
+		f.c.noteClipboard("vnc", direction, clipboardDeniedPolicy, int(length))
+	case n > rfbMaxCutText:
+		f.c.noteClipboard("vnc", direction, clipboardDeniedSize, int(length))
+	default:
+		f.c.noteClipboard("vnc", direction, clipboardAllowed, int(length))
+	}
 	if !allowed || n > rfbMaxCutText {
 		if _, err := s.r.Discard(8); err != nil {
 			return s.readErr(err)
@@ -908,7 +917,7 @@ func (f *rfbFilter) serverMessages() error {
 		case rfbServerBell, rfbServerEndOfContinuous:
 			err = s.forward(1)
 		case rfbServerCutText:
-			err = f.cutText(s, f.c.adm.Load().Clipboard.Copy)
+			err = f.cutText(s, clipboardCopy, f.c.adm.Load().Clipboard.Copy)
 		case rfbServerFence:
 			err = f.fence(s)
 		case rfbServerXvp:

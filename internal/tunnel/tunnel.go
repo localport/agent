@@ -224,6 +224,10 @@ type Options struct {
 	// and enables terminal, files or desktop in Capabilities binds a session
 	// mux per control session, unless DisableMux is set.
 	SessionHandler SessionHandler
+	// ClipboardNotices queues the clipboard notices of the device's desktop
+	// sessions; each session mux flushes the device's queue before its conn
+	// closes. Nil flushes none.
+	ClipboardNotices *ClipboardNotices
 	// HintRevoked receives RegisterAck.revoked_ticket_kids of a successful
 	// registration. It runs on Run's goroutine and must not block.
 	HintRevoked func(kids []string)

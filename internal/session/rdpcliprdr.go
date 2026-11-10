@@ -105,6 +105,24 @@ type rdpClipboard struct {
 	// order: true for one the agent refused, whose RESPONSE_FAIL waits for
 	// the answers to every earlier request.
 	requests [2][]bool
+	// note reports each transfer decision: its direction, outcome and the
+	// data bytes it was about. Nil reports none.
+	note func(d clipDir, outcome string, n int)
+}
+
+// noteDecision reports one transfer decision when a reporter is set.
+func (s *rdpClipboard) noteDecision(d clipDir, outcome string, n int) {
+	if s.note != nil {
+		s.note(d, outcome, n)
+	}
+}
+
+// name is d's notice direction.
+func (d clipDir) name() string {
+	if d == clipCopy {
+		return clipboardCopy
+	}
+	return clipboardPaste
 }
 
 // clipDataResponseHeader reports whether the first chunk of a total-byte
@@ -124,13 +142,13 @@ func cliprdrPDU(typ, flags uint16, data []byte) []byte {
 	return append(b, data...)
 }
 
-// decide applies the clipboard policy to one cliprdr message from side, or
-// to a successful Format Data Response discarded past its bound. It returns
-// the PDUs to send.
-func (s *rdpClipboard) decide(from rdpSide, msg []byte, discarded bool, access clipboardAccess) ([]rdpFrame, error) {
+// decide applies the clipboard policy to one cliprdr message from side, or,
+// with discarded > 0, to a successful Format Data Response of that many data
+// bytes discarded past its bound. It returns the PDUs to send.
+func (s *rdpClipboard) decide(from rdpSide, msg []byte, discarded int, access clipboardAccess) ([]rdpFrame, error) {
 	frames := s.narrow(access)
-	if discarded {
-		return s.dataResponse(frames, from, false, access)
+	if discarded > 0 {
+		return s.dataResponse(frames, from, true, access, nil, discarded)
 	}
 	if len(msg) < 8 {
 		return nil, rdpViolation("truncated cliprdr header")
@@ -202,6 +220,11 @@ func (s *rdpClipboard) decide(from rdpSide, msg []byte, discarded bool, access c
 			s.requests[d] = append(s.requests[d], false)
 			return append(frames, rdpFrame{to: to, payload: cliprdrPDU(typ, 0, data)}), nil
 		}
+		if d.allowed(access) {
+			s.noteDecision(d, clipboardDeniedFormat, 0)
+		} else {
+			s.noteDecision(d, clipboardDeniedPolicy, 0)
+		}
 		if len(s.requests[d]) > 0 {
 			s.requests[d] = append(s.requests[d], true)
 			return frames, nil
@@ -210,9 +233,9 @@ func (s *rdpClipboard) decide(from rdpSide, msg []byte, discarded bool, access c
 	case cbFormatDataResponse:
 		switch {
 		case flags == cbResponseFail && n == 0:
-			return s.dataResponse(frames, from, false, access)
+			return s.dataResponse(frames, from, false, access, nil, 0)
 		case flags == cbResponseOK:
-			return s.dataResponse(frames, from, true, access, data)
+			return s.dataResponse(frames, from, true, access, data, len(data))
 		}
 		return nil, rdpViolation("malformed cliprdr Format Data Response")
 	case cbFileContentsRequest:
@@ -220,6 +243,11 @@ func (s *rdpClipboard) decide(from rdpSide, msg []byte, discarded bool, access c
 			return nil, rdpViolation("malformed cliprdr File Contents Request")
 		}
 		// The answer echoes the request's streamId (MS-RDPECLIP 2.2.5.4).
+		d := clipPaste
+		if from == rdpClient {
+			d = clipCopy
+		}
+		s.noteDecision(d, clipboardDeniedFormat, 0)
 		return append(frames, rdpFrame{to: from, payload: cliprdrPDU(cbFileContentsReply, cbResponseFail, data[:4])}), nil
 	case cbFileContentsReply:
 		if (flags != cbResponseOK && flags != cbResponseFail) || n < 4 {
@@ -353,8 +381,10 @@ func (s *rdpClipboard) formatList(frames []rdpFrame, from rdpSide, flags uint16,
 // dataResponse answers the oldest outstanding request of the responder's
 // direction: its data when ok, the direction is allowed and the data is at
 // most rdpMaxClipText bytes, RESPONSE_FAIL otherwise; then the agent's own
-// failures queued behind it.
-func (s *rdpClipboard) dataResponse(frames []rdpFrame, from rdpSide, ok bool, access clipboardAccess, data ...[]byte) ([]rdpFrame, error) {
+// failures queued behind it. size is the response's data length; data is
+// shorter when the filter discarded it past its bound. A successful response
+// is a transfer decision and is reported; the responder's own failure is not.
+func (s *rdpClipboard) dataResponse(frames []rdpFrame, from rdpSide, ok bool, access clipboardAccess, data []byte, size int) ([]rdpFrame, error) {
 	d := listDir(from)
 	if len(s.requests[d]) == 0 {
 		return nil, rdpViolation("cliprdr Format Data Response from the %s without a request", from.name())
@@ -362,10 +392,18 @@ func (s *rdpClipboard) dataResponse(frames []rdpFrame, from rdpSide, ok bool, ac
 	s.requests[d] = s.requests[d][1:]
 	to := from.other()
 	fail := rdpFrame{to: to, payload: cliprdrPDU(cbFormatDataResponse, cbResponseFail, nil)}
-	if ok && d.allowed(access) && len(data) == 1 && len(data[0]) <= rdpMaxClipText {
-		frames = append(frames, rdpFrame{to: to, payload: cliprdrPDU(cbFormatDataResponse, cbResponseOK, data[0])})
-	} else {
+	switch {
+	case !ok:
 		frames = append(frames, fail)
+	case !d.allowed(access):
+		s.noteDecision(d, clipboardDeniedPolicy, size)
+		frames = append(frames, fail)
+	case len(data) != size || size > rdpMaxClipText:
+		s.noteDecision(d, clipboardDeniedSize, size)
+		frames = append(frames, fail)
+	default:
+		s.noteDecision(d, clipboardAllowed, size)
+		frames = append(frames, rdpFrame{to: to, payload: cliprdrPDU(cbFormatDataResponse, cbResponseOK, data)})
 	}
 	for len(s.requests[d]) > 0 && s.requests[d][0] {
 		s.requests[d] = s.requests[d][1:]

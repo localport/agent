@@ -63,6 +63,42 @@ type desktopChannel struct {
 	endReason string
 }
 
+// Clipboard decision vocabulary: the direction text moves (copy from the
+// device to the browser, paste the other way) and the filter's outcome.
+const (
+	clipboardCopy         = "copy"
+	clipboardPaste        = "paste"
+	clipboardAllowed      = "allowed"
+	clipboardDeniedPolicy = "denied_policy"
+	clipboardDeniedSize   = "denied_size"
+	clipboardDeniedFormat = "denied_format"
+)
+
+// ClipboardDecision is one clipboard transfer decision of a desktop
+// connection, never its content: SessionID is the canonical UUID of the
+// stream the connection runs on now, Kind vnc or rdp, Bytes the text size
+// the decision was about, At the decision time.
+type ClipboardDecision struct {
+	SessionID string
+	Kind      string
+	Direction string
+	Outcome   string
+	Bytes     int64
+	At        time.Time
+}
+
+// noteClipboard reports one clipboard decision of c's desktop connection to
+// ServerConfig.OnClipboard, which must not block.
+func (c *conn) noteClipboard(kind, direction, outcome string, n int) {
+	if c.s.cfg.OnClipboard == nil {
+		return
+	}
+	c.s.cfg.OnClipboard(ClipboardDecision{
+		SessionID: c.adm.Load().sessionID, Kind: kind, Direction: direction, Outcome: outcome,
+		Bytes: int64(n), At: c.s.cfg.clock.Now(),
+	})
+}
+
 // desktopTarget is the configured address of a desktop kind.
 func (s *Server) desktopTarget(kind string) string {
 	switch kind {

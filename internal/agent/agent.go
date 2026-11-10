@@ -193,8 +193,9 @@ func deviceOptions(device config.DeviceSpec) tunnel.Options {
 		RunAsAgent:     device.RunAsAgent,
 		FullDiskAccess: device.FullDiskAccess,
 		// A nil interface value leaves sessions off.
-		SessionHandler: device.SessionHandler,
-		HintRevoked:    device.HintRevoked,
+		SessionHandler:   device.SessionHandler,
+		ClipboardNotices: device.ClipboardNotices,
+		HintRevoked:      device.HintRevoked,
 	}
 	// A nil *DeviceRegistrar in the interface would read as present.
 	if device.Credential != nil {

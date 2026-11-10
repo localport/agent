@@ -70,13 +70,13 @@ const (
 
 // HTTP/2 client settings of the session mux. They match the edge's server
 // settings (16 KiB frames, 128 KiB stream windows, and a connection window
-// worth 21 streams: the accept stream, 16 sessions, 2 segment requests, 1 open
-// and 1 complete or failed open), so neither side buffers more than the other
-// allows.
+// worth 22 streams: the accept stream, 16 sessions, 2 segment requests, 1
+// open, 1 complete or failed open, and 1 clipboard notice batch), so neither
+// side buffers more than the other allows.
 const (
 	sessionMuxMaxFrame     = 16 << 10
 	sessionMuxStreamWindow = 128 << 10
-	sessionMuxConnWindow   = 21 * sessionMuxStreamWindow
+	sessionMuxConnWindow   = 22 * sessionMuxStreamWindow
 	// sessionMuxMaxHeaderBytes bounds each response's header list (Go adds
 	// 320 bytes of field overhead), as the edge bounds request headers.
 	sessionMuxMaxHeaderBytes = 4 << 10
@@ -151,6 +151,12 @@ func (t *Tunnel) startSessionMux(ctx context.Context) func() {
 		}
 		m.signer = signer
 	}
+	if notices := t.opts.ClipboardNotices; notices != nil {
+		identifier := t.Identity()
+		// The mux is unpublished before it stops, so the flush is handed the
+		// conn's client instead of looking it up.
+		m.flushClipboard = func(ctx context.Context) { notices.Flush(ctx, identifier, m.clip.Load()) }
+	}
 	t.sessionMux.Store(m)
 	m.start()
 	return func() {
@@ -173,6 +179,13 @@ type sessionMux struct {
 	// rec is the recording client of the current conn, nil while no conn's
 	// accept stream is up.
 	rec atomic.Pointer[RecordingClient]
+	// clip is the clipboard notice client of the current conn, nil while no
+	// conn's accept stream is up.
+	clip atomic.Pointer[ClipboardClient]
+	// flushClipboard sends the device's queued clipboard notices; stop runs
+	// it after the handler's Shutdown and before the conn closes. Nil sends
+	// none. Set before start.
+	flushClipboard func(ctx context.Context)
 
 	// Seams for tests.
 	backoff         func(attempt int) time.Duration
@@ -227,6 +240,11 @@ func (m *sessionMux) stop() {
 		m.served.Add(1)
 		m.mu.Unlock()
 		m.shutdownHandler()
+		if m.flushClipboard != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), clipboardFinalFlush)
+			m.flushClipboard(ctx)
+			cancel()
+		}
 		m.cancel()
 	})
 	<-m.done
@@ -343,6 +361,9 @@ func (m *sessionMux) serve(conn net.Conn) (bool, error) {
 	if resp.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("session accept stream: edge answered %d", resp.StatusCode)
 	}
+	clip := newClipboardClient(connCtx, cc)
+	m.clip.Store(clip)
+	defer m.clip.CompareAndSwap(clip, nil)
 	if m.signer != nil {
 		// Unpublished before cc closes; a request already holding the client
 		// fails as a transport error once the conn is gone.

@@ -215,6 +215,7 @@ func newRDPFilterOver(c *conn, protocol uint32, fromClient *bufio.Reader, toClie
 	f.sinks[rdpServer] = &rdpSink{w: bufio.NewWriterSize(target, rfbServerBuffer), writeErr: targetIOError}
 	f.sinks[rdpClient] = &rdpSink{w: bufio.NewWriterSize(toClient, rfbServerBuffer), writeErr: clientIOError}
 	f.dvc.init()
+	f.clip.note = func(d clipDir, outcome string, n int) { c.noteClipboard("rdp", d.name(), outcome, n) }
 	return f
 }
 
@@ -1034,7 +1035,11 @@ func (p *rdpPump) chunk(ch rdpChannel, data []byte) error {
 		return rdpViolation("%s message short of its length", ch.name())
 	}
 	r.active = false
-	return p.f.decide(p.from, ch, r.buf, r.discard, r.flags)
+	discarded := 0
+	if r.discard {
+		discarded = r.total - 8
+	}
+	return p.f.decide(p.from, ch, r.buf, discarded, r.flags)
 }
 
 func (c rdpChannel) name() string {
@@ -1045,9 +1050,9 @@ func (c rdpChannel) name() string {
 }
 
 // decide runs the channel's filter on one whole message from side, or on a
-// Format Data Response discarded past its bound, and sends what it decides,
-// holding mu until it holds the sink locks it writes.
-func (f *rdpFilter) decide(from rdpSide, ch rdpChannel, msg []byte, discarded bool, flags uint32) error {
+// Format Data Response of discarded data bytes discarded past its bound, and
+// sends what it decides, holding mu until it holds the sink locks it writes.
+func (f *rdpFilter) decide(from rdpSide, ch rdpChannel, msg []byte, discarded int, flags uint32) error {
 	f.mu.Lock()
 	var frames []rdpFrame
 	var err error

@@ -564,16 +564,17 @@ Bind: a new connection over the control connection's carrier, first frame
 After `MuxBindAck`, roles reverse relative to the port mux: the edge is the
 HTTP/2 server and the agent the client, with prior knowledge (no ALPN). The
 agent advertises `SETTINGS_MAX_FRAME_SIZE` 16 KiB and an initial stream window
-of 128 KiB, and raises the connection window by 21 x 128 KiB. It pings a silent
+of 128 KiB, and raises the connection window by 22 x 128 KiB. It pings a silent
 connection every 30 s, closes it when a ping goes unanswered for 15 s, and
 closes it when a write makes no progress for 15 s. It bounds each response's
 header list to 4416 bytes as HTTP/2 counts it (name, value and 32 bytes per
 field: 4 KiB plus Go's allowance for 10 fields) and advertises that as
 `SETTINGS_MAX_HEADER_LIST_SIZE`. It sends `User-Agent: localport-agent` and
-asks for no compression. The edge allows 21 concurrent streams: the accept
-stream, 16 session streams, 2 recording segment requests, 1 recording open and
-1 recording complete or failed open (see
-[Session recording](#session-recording)). The edge refuses a
+asks for no compression. The edge allows 22 concurrent streams: the accept
+stream, 16 session streams, 2 recording segment requests, 1 recording open, 1
+recording complete or failed open (see
+[Session recording](#session-recording)), and 1 clipboard notice batch (see
+[Clipboard notices](#clipboard-notices)). The edge refuses a
 17th session on one mux with the end reason `agent_closed`.
 
 Accept stream: the agent's first request is `POST /v1/session-accept` with no
@@ -1286,6 +1287,65 @@ past that it ends without it, and the recording completes `incomplete` with
 reason `recording_failed` once the stalled handoff returns. A connection
 refused for its recording key, or a channel refused because its Strict
 recording did not open, is worth one fresh certificate.
+
+## Clipboard notices
+
+Each clipboard transfer decision on a desktop connection is reported to the
+edge, which stores it as an access-log row of the team; the text itself is
+never sent. A decision is:
+
+- `vnc`: every ClientCutText (`paste`) and ServerCutText (`copy`), with its
+  length: `allowed`, `denied_policy` when the certificate does not allow the
+  direction, `denied_size` past 1 MiB.
+- `rdp`: every Format Data Response the requester was owed (`copy` from the
+  server, `paste` from the client), with its data length: `allowed`,
+  `denied_policy`, `denied_size` past 1 MiB (also when discarded past the
+  reassembly bound); every Format Data Request the agent answers itself,
+  length 0: `denied_policy` for a refused direction, `denied_format` for a
+  format the agent did not forward; every File Contents Request, length 0:
+  `denied_format`. A responder's own `CB_RESPONSE_FAIL` is not a decision.
+
+The agent queues notices per device (at most 1,024) and sends them on the
+device's session mux as `POST /v1/clipboard`, one request at a time, when 64
+are queued or 2 s after the last attempt. The body is JSON:
+
+```json
+{"notices": [{"id": "<UUIDv7>", "session_id": "<UUID>", "kind": "rdp",
+  "direction": "copy", "outcome": "allowed", "bytes": 1229, "time": 1790000000000}]}
+```
+
+- `id`: a version 7 UUID the agent mints when it queues the notice, in queue
+  order (a 12-bit per-millisecond sequence keeps ids increasing, also when
+  the clock steps back). The edge stores it as the row id.
+- `session_id`: the canonical UUID of the stream the connection runs on now
+  (a resume stream's after a resume), as a recording's `session_id`.
+- `kind`: `vnc` or `rdp`; `direction`: `copy` or `paste`; `outcome`:
+  `allowed`, `denied_policy`, `denied_size` or `denied_format`; `bytes`: the
+  text size the decision was about; `time`: the decision time in Unix
+  milliseconds.
+- `dropped`: on a count notice only, which has no `direction`, `outcome` or
+  `bytes`: how many decisions of that session a full queue refused. Counts
+  travel after the notice that empties the queue, so their ids are newer.
+
+At most 64 notices per batch. The edge answers `204` once it read the batch,
+whatever each notice's fate; `400` for a malformed batch or one over 64,
+which the agent drops; `408` for a body that did not arrive in time and `503`
+while another batch of the mux is in flight, both sent again. A batch that
+was not answered `204` or `400` is sent again unchanged before any later
+notice. When the session mux stops, after its sessions ended and before its
+conn closes, the agent sends what the device has queued, bounded by 2 s.
+
+The edge records a notice when its session is live on that mux, or ended on
+the device within the last 10 minutes on that edge, and is a desktop session
+of the notice's `kind`, and its time lies between 1 minute before the
+session's admission and 1 minute after the edge clock. A notice not newer
+than the last one the edge counted for its session (a batch sent again) is
+ignored. Any other notice is dropped and counted in the edge log. The first
+100 notices of a session become `clipboard` rows; later ones, and count
+notices, are summed per minute into one `clipboard_fold` row per session.
+Notices are lost when the agent exits before sending them, when the flush at
+mux stop passes its bound, and when they reach the edge more than 10 minutes
+after the session ended, at another edge, or after an edge restart.
 
 ## Native SSH clients (`localport ssh`)
 

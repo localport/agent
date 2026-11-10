@@ -127,6 +127,9 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 		return deviceRecordingClient(a, identifier)
 	})
 	uploads := runner.uploads
+	runner.notices = tunnel.NewClipboardNotices(func(identifier string) (*tunnel.ClipboardClient, error) {
+		return deviceClipboardClient(a, identifier)
+	})
 	// With noMux no session runs, so the launcher is not probed.
 	runner.probed, runner.noMux = noMux, noMux
 	defer func() {
@@ -163,14 +166,17 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 	})
 	defer stopWithParent()
 
-	// The uploader outlives the devices: it stops after a.Run returns, so the
-	// final segments of the sessions the devices end are handed over first.
-	upCtx, stopUploads := context.WithCancel(context.Background())
-	defer stopUploads()
-	var renewing sync.WaitGroup
+	// The uploader and the clipboard notice senders outlive the devices: they
+	// stop after a.Run returns, so the final segments and notices of the
+	// sessions the devices end are handed over first.
+	var outliving []func(context.Context)
 	if uploads != nil {
-		renewing.Go(func() { uploads.Run(upCtx) })
+		outliving = append(outliving, uploads.Run)
 	}
+	outliving = append(outliving, runner.notices.Run)
+	stopOutliving := runOutliving(outliving...)
+	defer stopOutliving()
+	var renewing sync.WaitGroup
 	for _, s := range runner.served {
 		s.start(ctx)
 	}
@@ -186,7 +192,7 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 		s.end()
 	}
 	runner.served = nil
-	stopUploads()
+	stopOutliving()
 	renderer.Shutdown()
 
 	var regErr *tunnel.RegistrationError
@@ -194,6 +200,21 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 		return fmt.Errorf("%s [%s]", regErr.Error(), regErr.Code)
 	}
 	return runErr
+}
+
+// runOutliving runs each of runs on its own goroutine with a context of its
+// own, and returns the stop that cancels it and waits for every run to
+// return; stop is idempotent.
+func runOutliving(runs ...func(context.Context)) (stop func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	for _, run := range runs {
+		wg.Go(func() { run(ctx) })
+	}
+	return func() {
+		cancel()
+		wg.Wait()
+	}
 }
 
 // errNoDeviceStarts means every listed device was skipped.
@@ -273,7 +294,7 @@ type deviceSessionState struct {
 // cannot be held, as when another process serves the same identity, or when
 // the device has logins and this process is not an account the session
 // launcher serves.
-func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.DeviceSpec, uploads *recording.Uploader, logEvent func(string)) (*deviceSessionState, error) {
+func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.DeviceSpec, uploads *recording.Uploader, notices *tunnel.ClipboardNotices, logEvent func(string)) (*deviceSessionState, error) {
 	keys, err := store.TicketKeys(ref)
 	if err != nil {
 		return nil, err
@@ -324,12 +345,23 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 		RDPTarget:      spec.RDPTarget,
 		DesktopKeys:    desktopKeys,
 		OnEvent:        logEvent,
+		OnClipboard:    clipboardReporter(notices, ref.Identity),
 		Uploader:       uploads,
 		Identifier:     ref.Identity,
 		Device:         ref.String(),
 		Launcher:       sessionLauncher,
 	})
+	spec.ClipboardNotices = notices
 	return &deviceSessionState{refresher: refresher, lock: lock}, nil
+}
+
+// clipboardReporter queues a device's clipboard decisions on notices; nil
+// when notices is nil.
+func clipboardReporter(notices *tunnel.ClipboardNotices, identifier string) func(session.ClipboardDecision) {
+	if notices == nil {
+		return nil
+	}
+	return func(d session.ClipboardDecision) { notices.Note(identifier, tunnel.ClipboardNotice(d)) }
 }
 
 // hintRevoked returns the HintRevoked hook of one device: the edge's revoked
@@ -391,6 +423,16 @@ func deviceRecordingClient(a *agent.Agent, identifier string) (recording.Client,
 		return nil, err
 	}
 	return c, nil
+}
+
+// deviceClipboardClient returns the clipboard notice client of the running
+// device tunnel of identifier, or tunnel.ErrNoClipboardClient.
+func deviceClipboardClient(a *agent.Agent, identifier string) (*tunnel.ClipboardClient, error) {
+	t := deviceTunnel(a.Tunnels(), identifier)
+	if t == nil {
+		return nil, tunnel.ErrNoClipboardClient
+	}
+	return t.ClipboardClient()
 }
 
 // deviceTunnel returns the device tunnel in tunnels whose identity is

@@ -84,6 +84,9 @@ type DeviceSpec struct {
 	FullDiskAccess string
 	// SessionHandler serves the device's sessions; nil leaves them off.
 	SessionHandler tunnel.SessionHandler
+	// ClipboardNotices queues the clipboard notices of the device's desktop
+	// sessions; nil sends none.
+	ClipboardNotices *tunnel.ClipboardNotices
 	// HintRevoked receives the ticket key ids a RegisterAck names revoked.
 	HintRevoked func(kids []string)
 }

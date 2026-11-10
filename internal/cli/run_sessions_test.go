@@ -68,7 +68,7 @@ func TestDeviceSessionsUseTheRegisteredCertificate(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := config.DeviceSpec{Name: "gw-01", Credential: reg, Capabilities: []string{"terminal"}, Logins: []string{me.Username}}
-	state, err := deviceSessions(store, sessionsRef, &spec, nil, nil)
+	state, err := deviceSessions(store, sessionsRef, &spec, nil, nil, nil)
 	if err != nil || spec.SessionHandler == nil {
 		t.Fatalf("deviceSessions = %v, %v; want a session server", state, err)
 	}
@@ -207,7 +207,7 @@ func TestDeviceSessionsNeedTheSessionsLock(t *testing.T) {
 	spec := config.DeviceSpec{
 		Name: "gw-01", Credential: identity.NewDeviceRegistrar(store, sessionsRef, nil), Capabilities: []string{"terminal"},
 	}
-	state, err := deviceSessions(store, sessionsRef, &spec, nil, nil)
+	state, err := deviceSessions(store, sessionsRef, &spec, nil, nil, nil)
 	if !errors.Is(err, session.ErrSessionsLocked) || state != nil {
 		t.Fatalf("deviceSessions = %v, %v; want ErrSessionsLocked", state, err)
 	}
@@ -223,7 +223,7 @@ func TestDeviceSessionsNeedTheSessionsLock(t *testing.T) {
 func TestDeviceSessionsNeedACapability(t *testing.T) {
 	store := sessionsStore(t)
 	spec := config.DeviceSpec{Name: "gw-01", Credential: identity.NewDeviceRegistrar(store, sessionsRef, nil)}
-	state, err := deviceSessions(store, sessionsRef, &spec, nil, nil)
+	state, err := deviceSessions(store, sessionsRef, &spec, nil, nil, nil)
 	if err != nil || state != nil || spec.SessionHandler != nil {
 		t.Fatalf("deviceSessions = %v, %v, handler %v; want none", state, err, spec.SessionHandler)
 	}

@@ -32,6 +32,8 @@ type fakeSessionEdge struct {
 	sessions chan *edgeStream
 	// recording, when set before the mux starts, serves /v1/recording/*.
 	recording http.HandlerFunc
+	// clipboard, when set before the mux starts, serves /v1/clipboard.
+	clipboard http.HandlerFunc
 	// stall, when set before the mux starts, holds each session stream before
 	// its response headers until it closes; stalled receives the request
 	// context of each held stream.
@@ -84,7 +86,7 @@ func (e *fakeSessionEdge) serveConn(conn net.Conn) {
 		Handler:   e,
 		Protocols: &protocols,
 		HTTP2: &http.HTTP2Config{
-			MaxConcurrentStreams: 21,
+			MaxConcurrentStreams: 22,
 			MaxReadFrameSize:     16 << 10,
 		},
 	}
@@ -135,6 +137,8 @@ func (e *fakeSessionEdge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	case e.recording != nil && strings.HasPrefix(r.URL.Path, "/v1/recording/"):
 		e.recording(w, r)
+	case e.clipboard != nil && r.URL.Path == clipboardPath:
+		e.clipboard(w, r)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -1052,8 +1056,8 @@ func TestSessionMuxClientSettings(t *testing.T) {
 		case *http2.WindowUpdateFrame:
 			if f.StreamID == 0 {
 				window = true
-				if f.Increment != 21*128<<10 {
-					t.Errorf("connection WINDOW_UPDATE = %d, want 21 x 128 KiB", f.Increment)
+				if f.Increment != 22*128<<10 {
+					t.Errorf("connection WINDOW_UPDATE = %d, want 22 x 128 KiB", f.Increment)
 				}
 			}
 		}
