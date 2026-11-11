@@ -53,7 +53,7 @@ func runRun(version string, args []string) error {
 	who := currentInvoker(*system || *asService)
 	// Under the Windows service control manager everything, config loading
 	// included, runs inside the manager's control loop.
-	if underSCM, err := service.RunUnderSCM(func(ctx context.Context, running func()) error {
+	if underSCM, err := service.RunUnderSCM(version, func(ctx context.Context, running func()) error {
 		return runEnrolledDevices(ctx, version, who, *asService, true, running)
 	}); underSCM || err != nil {
 		return err
@@ -314,7 +314,10 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 	// Loaded once, here, before the hook is set, so a hint in the first
 	// RegisterAck finds the held set. An unreadable file leaves the set empty;
 	// the refresher, where one runs, fetches at once and reports the remedy.
-	if err := keys.Load(); err != nil {
+	switch err := keys.Load(); {
+	case errors.Is(err, identity.ErrRecordingKeyDropped):
+		logEvent(fmt.Sprintf("identity: %s: %v; the next key fetch or renewal stores it again", ref, err))
+	case err != nil:
 		logEvent(fmt.Sprintf("identity: cannot read the ticket keys of %s: %v", ref, err))
 	}
 	if len(spec.Capabilities) == 0 || spec.Credential == nil {

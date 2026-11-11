@@ -33,7 +33,7 @@ func Default() (Manager, error) {
 		if !ok1 || !ok2 {
 			return nil, fmt.Errorf("%w: OpenRC runs, but rc-service or rc-update is missing", ErrUnsupported)
 		}
-		return openrc{initDir: openrcInitDir, rcService: rcService, rcUpdate: rcUpdate, logDir: openrcAgentLogDir, account: LookupAccount, run: execRun}, nil
+		return openrc{initDir: openrcInitDir, runlevelDir: openrcRunlevelDir, rcService: rcService, rcUpdate: rcUpdate, logDir: openrcAgentLogDir, account: LookupAccount, run: execRun}, nil
 	}
 	if comm, err := os.ReadFile("/proc/1/comm"); err == nil && string(bytes.TrimSpace(comm)) == "procd" {
 		ubus, ok := firstExisting("/bin/ubus", "/usr/bin/ubus", "/sbin/ubus")

@@ -579,3 +579,22 @@ func TestLaunchdMainPID(t *testing.T) {
 		}
 	}
 }
+
+// Only launchctl print's not-found exit (113, checked on macOS 2026-11-12)
+// means an unloaded label; any other failure is an error, for MainPID and
+// for loaded.
+func TestLaunchdPrintFailuresOtherThanNotFoundAreErrors(t *testing.T) {
+	p := printCmd(LaunchdLabel)
+	failed := &CommandError{ExitCode: 5, Err: errors.New("exit status 5")}
+	r := &recorder{fail: map[string]error{p: failed}}
+	if _, err := newLaunchd(t, r).MainPID(context.Background()); !errors.Is(err, failed) {
+		t.Fatalf("MainPID on exit 5 = %v, want the failure", err)
+	}
+	if _, err := newLaunchd(t, r).loaded(context.Background(), LaunchdLabel); !errors.Is(err, failed) {
+		t.Fatalf("loaded on exit 5 = %v, want the failure", err)
+	}
+	r = &recorder{fail: map[string]error{p: &CommandError{ExitCode: 113, Err: errors.New("exit status 113")}}}
+	if ok, err := newLaunchd(t, r).loaded(context.Background(), LaunchdLabel); err != nil || ok {
+		t.Fatalf("loaded on exit 113 = %v, %v; want not loaded", ok, err)
+	}
+}

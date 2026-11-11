@@ -113,7 +113,12 @@ type Info struct {
 }
 
 // EventHandler observes tunnel lifecycle events. A nil handler is allowed.
+// The label argument of every method is the tunnel's EventKey: the device
+// identity of a device tunnel, the label of a tunnel.
 type EventHandler interface {
+	// OnStart runs once when Run starts, before any other event of the
+	// tunnel, naming the display label of the EventKey key.
+	OnStart(key, label string)
 	OnStateChange(label string, from, to State)
 	OnConnected(label string, info Info)
 	OnDisconnected(label string, err error)
@@ -422,6 +427,9 @@ func (t *Tunnel) dialTarget(port uint16) (net.Conn, int, error) {
 // the edge refuses the tunnel permanently.
 func (t *Tunnel) Run(ctx context.Context) error {
 	defer t.closeConn()
+	if h := t.opts.Handler; h != nil {
+		h.OnStart(t.EventKey(), t.opts.Label)
+	}
 	attempt := 0
 	var failingSince time.Time
 	for {
@@ -458,7 +466,7 @@ func (t *Tunnel) Run(ctx context.Context) error {
 				failingSince = time.Now()
 				if prev != t.opts.Edge {
 					if h := t.opts.Handler; h != nil {
-						h.OnRedirect(t.opts.Label, prev, t.opts.Edge)
+						h.OnRedirect(t.EventKey(), prev, t.opts.Edge)
 					}
 				}
 			}
@@ -525,6 +533,16 @@ func (t *Tunnel) Label() string { return t.opts.Label }
 
 // Identity is the device identity of a device tunnel, empty on a tunnel.
 func (t *Tunnel) Identity() string { return t.opts.Identity }
+
+// EventKey names this tunnel in EventHandler calls: the device identity of a
+// device tunnel, which stays unique when two fleets use one device name, and
+// the label otherwise.
+func (t *Tunnel) EventKey() string {
+	if t.opts.Identity != "" {
+		return t.opts.Identity
+	}
+	return t.opts.Label
+}
 
 // Stats returns the cumulative byte and connection counters.
 func (t *Tunnel) Stats() Stats {
@@ -759,7 +777,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 				return fmt.Errorf("refusing redirect to untrusted host %q", sanitizeDisplay(rd.EdgeAddr))
 			}
 			if h := t.opts.Handler; h != nil {
-				h.OnRedirect(t.opts.Label, addr, rd.EdgeAddr)
+				h.OnRedirect(t.EventKey(), addr, rd.EdgeAddr)
 			}
 			addr = rd.EdgeAddr
 
@@ -1021,7 +1039,7 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 		// ones.
 		t.closeConnsForPorts(removed)
 		if h := t.opts.Handler; h != nil {
-			h.OnPortsUpdate(t.opts.Label, t.ports.List())
+			h.OnPortsUpdate(t.EventKey(), t.ports.List())
 		}
 
 	case proto.MsgHeartbeat:
@@ -1136,7 +1154,7 @@ func (t *Tunnel) newInspectorFor(protocolName string, port uint16) *httpInspecto
 }
 
 func (t *Tunnel) buildInspector(port uint16) *httpInspector {
-	label := t.opts.Label
+	label := t.EventKey()
 	handler := t.opts.Handler
 	return newHTTPInspector(func(r RequestInfo) {
 		r.Port = port
@@ -1194,7 +1212,7 @@ func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
 	}
 	closeEvt := func(in, out int64, err error) {
 		if h := t.opts.Handler; h != nil {
-			h.OnDataClose(t.opts.Label, connID, t.opts.Local, remote, in, out, time.Since(ac.startedAt), err)
+			h.OnDataClose(t.EventKey(), connID, t.opts.Local, remote, in, out, time.Since(ac.startedAt), err)
 		}
 	}
 	if dialer == nil {
@@ -1237,7 +1255,7 @@ func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
 func (t *Tunnel) serveData(ac *activeConn, connID string, edge, local net.Conn, remote string, target connTarget) {
 	closeEvt := func(in, out int64, err error) {
 		if h := t.opts.Handler; h != nil {
-			h.OnDataClose(t.opts.Label, connID, ac.local, remote, in, out, time.Since(ac.startedAt), err)
+			h.OnDataClose(t.EventKey(), connID, ac.local, remote, in, out, time.Since(ac.startedAt), err)
 		}
 	}
 
@@ -1253,7 +1271,7 @@ func (t *Tunnel) serveData(ac *activeConn, connID string, edge, local net.Conn, 
 	defer t.removeActiveConn(connID)
 
 	if h := t.opts.Handler; h != nil {
-		h.OnDataConn(t.opts.Label, DataConnInfo{
+		h.OnDataConn(t.EventKey(), DataConnInfo{
 			ConnID:   connID,
 			Target:   ac.local,
 			Remote:   remote,
@@ -1406,7 +1424,7 @@ func (t *Tunnel) setState(s State) {
 	old := State(t.state.Swap(int32(s)))
 	if old != s {
 		if h := t.opts.Handler; h != nil {
-			h.OnStateChange(t.opts.Label, old, s)
+			h.OnStateChange(t.EventKey(), old, s)
 		}
 	}
 }
@@ -1447,21 +1465,21 @@ func (t *Tunnel) emitConnected() {
 	t.mu.RUnlock()
 	info.Device = t.IsDevice()
 	info.Ports = t.Ports()
-	h.OnConnected(t.opts.Label, info)
+	h.OnConnected(t.EventKey(), info)
 }
 func (t *Tunnel) emitDisconnected(err error) {
 	if h := t.opts.Handler; h != nil {
-		h.OnDisconnected(t.opts.Label, err)
+		h.OnDisconnected(t.EventKey(), err)
 	}
 }
 func (t *Tunnel) emitError(err error) {
 	if h := t.opts.Handler; h != nil {
-		h.OnError(t.opts.Label, err)
+		h.OnError(t.EventKey(), err)
 	}
 }
 func (t *Tunnel) emitShutdown(reason, code string, limit proto.LimitType, retryable bool) {
 	if h := t.opts.Handler; h != nil {
-		h.OnShutdownPolicy(t.opts.Label, reason, code, limit, retryable)
+		h.OnShutdownPolicy(t.EventKey(), reason, code, limit, retryable)
 	}
 }
 

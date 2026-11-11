@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -194,6 +195,59 @@ func TestEnsureIdentityDir(t *testing.T) {
 	}
 }
 
+// convertFixture is a user config whose directory holds a root-style
+// identity tree and an old recordings spool.
+func convertFixture(t *testing.T) (config.LocalConfigFile, string) {
+	t.Helper()
+	t.Setenv(identity.HomeEnv, t.TempDir())
+	file, err := config.UserLocalConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(file.Path)
+	idDir := filepath.Join(dir, "identity")
+	for _, d := range []string{filepath.Join(idDir, "team", "device-a.gw"), filepath.Join(dir, "recordings", "0b6f")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return file, idDir
+}
+
+// The conversion takes run.lock after stopping the service, so a root `run`
+// still holding it cannot write into the tree being handed over; the refusal
+// names the stopped service's remedy and nothing moves.
+func TestConvertIdentityTreeTakesTheRunLock(t *testing.T) {
+	file, idDir := convertFixture(t)
+	saved := serviceRunLockWait
+	serviceRunLockWait = 200 * time.Millisecond
+	t.Cleanup(func() { serviceRunLockWait = saved })
+	release, err := config.LockRun(file, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	err = convertIdentityTree(t.Context(), file, idDir, self(), &fakeManager{installed: true}, "/usr/bin/localport")
+	if !errors.Is(err, config.ErrRunLocked) || !strings.Contains(err.Error(), serviceInstallCommand) {
+		t.Fatalf("convertIdentityTree with run.lock held = %v, want ErrRunLocked with the %q hint", err, serviceInstallCommand)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(file.Path), "recordings", "0b6f")); err != nil {
+		t.Fatalf("the spool moved while run.lock was held: %v", err)
+	}
+}
+
+// An install that fails after the tree was handed over names the stopped
+// service's remedy, as every earlier failure does.
+func TestConvertIdentityTreeInstallFailureNamesTheRemedy(t *testing.T) {
+	file, idDir := convertFixture(t)
+	failing := errors.New("systemctl failed")
+	m := &fakeManager{installed: true, installErr: failing}
+	err := convertIdentityTree(t.Context(), file, idDir, self(), m, "/usr/bin/localport")
+	if !errors.Is(err, failing) || !strings.Contains(err.Error(), serviceInstallCommand) {
+		t.Fatalf("convertIdentityTree = %v, want the install error with the %q hint", err, serviceInstallCommand)
+	}
+}
+
 // The account stays while the identity directory still holds credentials,
 // so they keep their owner's uid.
 func TestRemoveAgentAccountKeepsAnAccountWithCredentials(t *testing.T) {
@@ -201,11 +255,46 @@ func TestRemoveAgentAccountKeepsAnAccountWithCredentials(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "identity", "team", "client-a"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeAgentAccount(t.Context(), dir); err != nil {
+	if err := removeAgentAccount(t.Context(), config.LocalConfigFile{Path: filepath.Join(dir, "agent.yaml")}); err != nil {
 		t.Fatalf("removeAgentAccount = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "identity", "team", "client-a")); err != nil {
 		t.Fatalf("the credentials went: %v", err)
+	}
+}
+
+// Before the account goes, the device directory and the lock files that stay
+// are given to group root, so a group reusing the gid gains nothing. Root
+// only: chgrp to root needs it.
+func TestRootRemoveAgentAccountGivesTheRemainingFilesToGroupRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chgrp to root needs root")
+	}
+	dir := t.TempDir()
+	file := config.LocalConfigFile{Path: filepath.Join(dir, "agent.yaml")}
+	for _, p := range []string{file.LockPath(), file.RunLockPath()} {
+		if err := os.WriteFile(p, nil, 0o660); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const agentGID = 4242
+	for _, p := range []string{dir, file.LockPath(), file.RunLockPath()} {
+		if err := os.Lchown(p, 0, agentGID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saved := removeAccount
+	t.Cleanup(func() { removeAccount = saved })
+	removeAccount = func(context.Context) error {
+		for _, p := range []string{dir, file.LockPath(), file.RunLockPath()} {
+			if gid := statGID(t, p); gid != 0 {
+				t.Errorf("%s has gid %d when the account is removed, want 0", p, gid)
+			}
+		}
+		return nil
+	}
+	if err := removeAgentAccount(t.Context(), file); err != nil {
+		t.Fatalf("removeAgentAccount = %v", err)
 	}
 }
 

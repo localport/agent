@@ -79,3 +79,23 @@ func TestApplySwapsOnlyTheNamedDevice(t *testing.T) {
 func specs(s ...config.DeviceSpec) func() []config.DeviceSpec {
 	return func() []config.DeviceSpec { return s }
 }
+
+// deviceOptions carries the spec into the tunnel: the identity (which keys
+// session recordings and UI events), name, edge, host and session settings.
+func TestDeviceOptionsCarryTheSpec(t *testing.T) {
+	spec := config.DeviceSpec{
+		Name: "gw-01", Identity: "tun12345.gw-01", Host: "10.0.0.5", Edge: "eu.edge.localport.dev:443",
+		Capabilities: []string{"terminal"}, Logins: []string{"pi"}, Desktop: []string{"vnc"},
+		SessionAuth: "pam", RunAsAgent: true, FullDiskAccess: "granted",
+	}
+	opts := deviceOptions(spec)
+	if opts.Identity != spec.Identity || opts.Label != spec.Name || opts.ClientName != spec.Name || opts.Host != spec.Host || opts.Edge != spec.Edge {
+		t.Fatalf("options identity=%q label=%q client=%q host=%q edge=%q", opts.Identity, opts.Label, opts.ClientName, opts.Host, opts.Edge)
+	}
+	if len(opts.Capabilities) != 1 || len(opts.Logins) != 1 || len(opts.Desktop) != 1 || opts.SessionAuth != "pam" || !opts.RunAsAgent || opts.FullDiskAccess != "granted" {
+		t.Fatalf("session settings not carried: %+v", opts)
+	}
+	if opts.Credential != nil {
+		t.Fatal("a spec without a registrar must leave the credential interface nil")
+	}
+}

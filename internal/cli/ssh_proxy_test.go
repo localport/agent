@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -47,6 +48,9 @@ type proxyEdge struct {
 	mints   []identity.SessionRequest
 	streams []*websocket.Conn
 	serial  uint64
+	// refuse holds close reasons for the next streams, one per stream, each
+	// sent after the certificate is read.
+	refuse []string
 }
 
 func newProxyEdge(t *testing.T) *proxyEdge {
@@ -100,6 +104,13 @@ func (e *proxyEdge) serveStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e.mu.Lock()
+	if len(e.refuse) > 0 {
+		reason := e.refuse[0]
+		e.refuse = e.refuse[1:]
+		e.mu.Unlock()
+		_ = ws.Close(4000, reason)
+		return
+	}
 	e.streams = append(e.streams, ws)
 	e.mu.Unlock()
 	stream := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
@@ -181,9 +192,9 @@ func startProxyWith(t *testing.T, e *proxyEdge, mint sessionMinter) (*ssh.Client
 	done := make(chan error, 1)
 	go func() {
 		defer proxySide.Close()
-		done <- target.proxy(context.Background(), proxySide, proxySide, &websocket.DialOptions{HTTPClient: e.http.Client()}, mint)
+		done <- target.proxy(context.Background(), "pi", proxySide, proxySide, &websocket.DialOptions{HTTPClient: e.http.Client()}, mint)
 	}()
-	f := target.files()
+	f := target.files("pi")
 	key, _ := loadOrCreateClientKey(f.key)
 	raw, _ := os.ReadFile(f.cert)
 	cert, _ := parseUserCertificate(raw)
@@ -313,11 +324,140 @@ func TestResumeMintRetryable(t *testing.T) {
 		{"rate limited", &identity.APIError{Status: http.StatusTooManyRequests}, true},
 		{"SE032", &identity.APIError{Status: http.StatusServiceUnavailable}, true},
 		{"SE036", &identity.APIError{Status: http.StatusForbidden}, false},
+		{"truncated answer", fmt.Errorf("read /v1/sessions response: %w", io.ErrUnexpectedEOF), true},
 		{"local", errors.New("credential expired"), false},
+		{"local signing failure", fmt.Errorf("sign session request: %w", errors.New("key unavailable")), false},
 	} {
-		if got := resumeMintRetryable(fmt.Errorf("wrapped: %w", c.err)); got != c.want {
+		if got := identity.Retryable(fmt.Errorf("wrapped: %w", c.err)); got != c.want {
 			t.Errorf("%s: retryable = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// A retryable refusal of the presented certificate before the connection runs
+// gets one new certificate and one more try (docs/COMMUNICATION.md).
+func TestSSHProxyRetriesARetryableRefusalOnce(t *testing.T) {
+	for _, reason := range []string{"edge_full", "no_session_mux", "wrong_edge", "edge_shutdown"} {
+		t.Run(reason, func(t *testing.T) {
+			e := newProxyEdge(t)
+			e.refuse = []string{reason}
+			client, _ := startProxy(t, e)
+			defer client.Close()
+			if !alive(client) {
+				t.Fatal("the connection did not run after the retry")
+			}
+			mints, _ := e.state()
+			if len(mints) != 2 || mints[1].ResumeCertificate != "" || mints[1].Login != "pi" {
+				t.Fatalf("mints = %+v, want the ssh-cert mint and one new certificate for pi", mints)
+			}
+		})
+	}
+}
+
+// runProxyAlone runs ssh-proxy for pi with no SSH client and returns its
+// result.
+func runProxyAlone(t *testing.T, e *proxyEdge) error {
+	t.Helper()
+	target := newSSHTarget(t)
+	if err := target.ensureCert(context.Background(), "pi", e.mint, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	local, remote := net.Pipe()
+	defer local.Close()
+	done := make(chan error, 1)
+	go func() {
+		defer remote.Close()
+		done <- target.proxy(context.Background(), "pi", remote, remote, &websocket.DialOptions{HTTPClient: e.http.Client()}, e.mint)
+	}()
+	return proxyResult(t, done)
+}
+
+// The retry happens once, and a final refusal gets none.
+func TestSSHProxyRetriesNoMoreThanOnce(t *testing.T) {
+	for reasons, wantMints := range map[[2]string]int{{"edge_full", "edge_full"}: 2, {"device_offline", ""}: 1} {
+		e := newProxyEdge(t)
+		e.refuse = []string{reasons[0], reasons[1]}
+		err := runProxyAlone(t, e)
+		if err == nil || !strings.Contains(err.Error(), reasons[0]) {
+			t.Fatalf("%v: proxy = %v, want the session ended with %s", reasons, err, reasons[0])
+		}
+		if mints, _ := e.state(); len(mints) != wantMints {
+			t.Fatalf("%v: %d mints, want %d", reasons, len(mints), wantMints)
+		}
+	}
+}
+
+// A first mint that never answers is bounded below sshLockWait, so a
+// concurrent ssh-cert waiting for the lock is not outlasted.
+func TestSSHCertBoundsAHungMint(t *testing.T) {
+	saved := sshMintTimeout
+	sshMintTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { sshMintTimeout = saved })
+	if sshMintTimeout >= sshLockWait || saved >= sshLockWait {
+		t.Fatal("the mint deadline must stay below sshLockWait")
+	}
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	hung := func(ctx context.Context, _ identity.SessionRequest) (*identity.SessionCertificate, error) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-stop:
+			return nil, errors.New("test ended")
+		}
+	}
+	ended := make(chan error, 1)
+	go func() { ended <- newSSHTarget(t).ensureCert(context.Background(), "pi", hung, time.Now()) }()
+	select {
+	case err := <-ended:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ensureCert = %v, want the mint deadline", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ensureCert still waits on a hung mint")
+	}
+}
+
+// A resume mint that never answers is bounded by the window: resume gives up
+// within it instead of waiting on the hung call.
+func TestResumeEndsWithinTheWindowWhenTheMintHangs(t *testing.T) {
+	_, caKey, _ := ed25519.GenerateKey(rand.Reader)
+	ca, err := ssh.NewSignerFromKey(caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, clientKey, _ := ed25519.GenerateKey(rand.Reader)
+	key, err := ssh.NewSignerFromKey(clientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := &ssh.Certificate{Key: key.PublicKey(), CertType: ssh.UserCert, ValidPrincipals: []string{"alice"}, ValidBefore: ssh.CertTimeInfinity}
+	if err := original.SignCert(rand.Reader, ca); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	hung := func(ctx context.Context, _ identity.SessionRequest) (*identity.SessionCertificate, error) {
+		select {
+		case <-ctx.Done():
+			return nil, &url.Error{Op: "Post", URL: "https://api", Err: ctx.Err()}
+		case <-stop:
+			return nil, errors.New("test ended")
+		}
+	}
+	const window = 300 * time.Millisecond
+	ended := make(chan error, 1)
+	go func() {
+		_, _, err := sshTarget{host: "gw-01.example"}.resume(context.Background(), window, nil, original, key, hung, nil)
+		ended <- err
+	}()
+	select {
+	case err := <-ended:
+		if err == nil || !strings.Contains(err.Error(), "not resumed within") {
+			t.Fatalf("resume = %v, want the window refusal", err)
+		}
+	case <-time.After(window + 2*time.Second):
+		t.Fatal("resume still waits on a hung mint past its window")
 	}
 }
 

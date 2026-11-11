@@ -277,28 +277,55 @@ func (s *Store) ListWithSkipped() ([]Ref, []Skipped, error) {
 // Remove deletes a credential's directory. LOCAL ONLY: the certificate stays
 // valid until it is revoked. Callers must say so, or an operator reads the
 // deletion as a withdrawal of access.
-func (s *Store) Remove(ref Ref) error {
+func (s *Store) Remove(ctx context.Context, ref Ref) error {
 	dir := s.dir(ref)
 	if _, err := os.Stat(dir); err != nil {
 		return fmt.Errorf("no credential at %s: %w", dir, err)
 	}
-	if err := os.RemoveAll(dir); err != nil {
+	if err := removeCredentialDir(ctx, dir); err != nil {
 		return fmt.Errorf("remove credential %s: %w", ref, err)
 	}
 	s.forgetTicketKeys(dir)
 	return nil
 }
 
+// removeCredentialDir deletes a credential directory under its renewal lock,
+// waiting up to saveLockWait for a renewal in flight. Every entry but the lock
+// file goes while the lock is held; the lock file and the directory go after
+// the release, as Windows may refuse to delete a directory holding an open
+// file. A path that is not a real directory (a symlink) is removed itself,
+// never followed.
+func removeCredentialDir(ctx context.Context, dir string) error {
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		return os.RemoveAll(dir)
+	}
+	release, err := waitLockFile(ctx, filepath.Join(dir, lockFile), saveLockWait, ErrRenewalInProgress)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	for i := 0; err == nil && i < len(entries); i++ {
+		if entries[i].Name() != lockFile {
+			err = os.RemoveAll(filepath.Join(dir, entries[i].Name()))
+		}
+	}
+	release()
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(dir)
+}
+
 // RemoveDevices deletes every device credential directory, readable or not,
 // and returns their paths. Other credentials and the team directories stay.
-// Local only, as Remove.
-func (s *Store) RemoveDevices() ([]string, error) {
+// Local only, as Remove; each waits for its renewal lock as Remove does.
+func (s *Store) RemoveDevices(ctx context.Context) ([]string, error) {
 	dirs, err := filepath.Glob(filepath.Join(s.Root, "*", string(KindDevice)+"-*"))
 	if err != nil {
 		return nil, fmt.Errorf("read identity store: %w", err)
 	}
 	for i, dir := range dirs {
-		if err := os.RemoveAll(dir); err != nil {
+		if err := removeCredentialDir(ctx, dir); err != nil {
 			return dirs[:i], fmt.Errorf("remove %s: %w", dir, err)
 		}
 		s.forgetTicketKeys(dir)
@@ -441,13 +468,14 @@ func (s *Store) SaveIssued(ctx context.Context, m Material) (Ref, error) {
 	return s.Save(context.WithoutCancel(ctx), m)
 }
 
-// saveLocked is Save for a caller that already holds the renewal lock.
-func (s *Store) saveLocked(m Material) (Ref, error) {
-	ref, dir, err := s.prepare(&m)
+// saveLocked is Save for a caller that already holds the renewal lock. m.Meta
+// is completed in place, so the caller's Material names the files as stored.
+func (s *Store) saveLocked(m *Material) (Ref, error) {
+	ref, dir, err := s.prepare(m)
 	if err != nil {
 		return Ref{}, err
 	}
-	return ref, s.commitCurrent(dir, &m)
+	return ref, s.commitCurrent(dir, m)
 }
 
 // commitCurrent writes m's files and commits them as the current credential.

@@ -29,6 +29,9 @@ import (
 	"github.com/localport/agent/internal/sessionhelper"
 )
 
+// version is set at build time (-X main.version); the crash report names it.
+var version = "dev"
+
 func main() {
 	logger := log.New(os.Stderr, "", 0)
 	// The file server runs as the login: the helper passes the event pipe's
@@ -68,7 +71,7 @@ func main() {
 	case "helper":
 		os.Exit(sessionhelper.Run(logger.Printf))
 	case "launcher":
-		underSCM, err := service.RunLauncherUnderSCM(func(ctx context.Context, running func()) error {
+		underSCM, err := service.RunLauncherUnderSCM(version, func(ctx context.Context, running func()) error {
 			return runLauncher(ctx, running, logger)
 		})
 		if err == nil && !underSCM {

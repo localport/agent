@@ -12,7 +12,6 @@ import (
 	"io"
 	"io/fs"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -28,6 +27,7 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/session"
@@ -39,7 +39,8 @@ const (
 	// sshCertMinRemaining is the validity a cached certificate must still
 	// have to be reused; below it ssh-cert mints a new one.
 	sshCertMinRemaining = 60 * time.Second
-	// sshLockWait bounds how long ssh-cert waits for a concurrent one.
+	// sshLockWait bounds how long ssh-cert waits for a concurrent one. The
+	// lock holder's mint ends sooner (sshMintTimeout).
 	sshLockWait = 30 * time.Second
 	// sshDialTimeout bounds the WebSocket dial and the certificate write.
 	sshDialTimeout = 30 * time.Second
@@ -47,6 +48,11 @@ const (
 	// offers mlkem768x25519-sha256, the device's post-quantum key exchange.
 	sshPQMinMajor, sshPQMinMinor = 9, 9
 )
+
+// sshMintTimeout bounds the mint ssh-cert makes under the shared lock, below
+// sshLockWait so a concurrent ssh-cert waiting for the lock outlasts it. A
+// variable so tests can shorten it.
+var sshMintTimeout = sshLockWait - 5*time.Second
 
 // sessionMinter asks the control plane for a session certificate.
 type sessionMinter func(ctx context.Context, req identity.SessionRequest) (*identity.SessionCertificate, error)
@@ -77,15 +83,17 @@ func (t sshTarget) mintWithAPI(ctx context.Context, req identity.SessionRequest)
 }
 
 // sshFiles are the client files of a target. The client key, its
-// certificate and the edge URL are per credential and device; known_hosts and
-// the lock are shared, so one lock covers every write ssh reads.
+// certificate and the edge URL are per credential, device and login, so runs
+// for two logins never replace each other's certificate; known_hosts and the
+// lock are shared, so one lock covers every write ssh reads.
 type sshFiles struct {
 	key, cert, url, knownHosts, lock string
 }
 
-func (t sshTarget) files() sshFiles {
+// files are the client files of login, which checkSSHLogin has accepted.
+func (t sshTarget) files(login string) sshFiles {
 	root, _ := t.store.StateRoot()
-	key := filepath.Join(root, "ssh", t.ref.Path(), t.host)
+	key := filepath.Join(t.clientDir(root), login+"@"+t.host)
 	return sshFiles{
 		key:        key,
 		cert:       key + "-cert.pub",
@@ -93,6 +101,21 @@ func (t sshTarget) files() sshFiles {
 		knownHosts: filepath.Join(root, "known_hosts"),
 		lock:       filepath.Join(root, "ssh", ".lock"),
 	}
+}
+
+// clientDir holds the target's per-login client files under the state root.
+func (t sshTarget) clientDir(root string) string {
+	return filepath.Join(root, "ssh", t.ref.Path())
+}
+
+// checkSSHLogin refuses a login that cannot name a client file: outside the
+// login grammar (config.ValidLogin), or holding a character Windows file
+// names refuse.
+func checkSSHLogin(login string) error {
+	if !config.ValidLogin(login) || strings.ContainsAny(login, `\<>"|?*`) {
+		return fmt.Errorf("%q is not a login localport can keep a certificate for", security.SanitizeDisplay(login))
+	}
+	return nil
 }
 
 // deviceHostPattern is a lowercase DNS name of two or more labels; the host
@@ -131,7 +154,10 @@ func resolveSSHTarget(identityArg, rawHost string, interactive bool) (sshTarget,
 // the certificate, each atomically and all under the shared lock, so
 // concurrent connections mint once and never see the key change.
 func (t sshTarget) ensureCert(ctx context.Context, login string, mint sessionMinter, now time.Time) error {
-	f := t.files()
+	if err := checkSSHLogin(login); err != nil {
+		return err
+	}
+	f := t.files(login)
 	base, follow := t.store.StateRoot()
 	if err := security.EnsurePrivateDir(base, filepath.Dir(f.key), follow); err != nil {
 		return fmt.Errorf("ssh client directory: %w", err)
@@ -149,12 +175,14 @@ func (t sshTarget) ensureCert(ctx context.Context, login string, mint sessionMin
 	if cachedCertFresh(f, t.host, signer.PublicKey(), login, now) {
 		return nil
 	}
-	resp, err := mint(ctx, identity.SessionRequest{
+	mintCtx, cancel := context.WithTimeout(ctx, sshMintTimeout)
+	resp, err := mint(mintCtx, identity.SessionRequest{
 		DeviceHost:      t.host,
 		Kind:            sshSessionKind,
 		Login:           login,
 		ClientSSHPubKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey()))),
 	})
+	cancel()
 	if err != nil {
 		return fmt.Errorf("session certificate for %s@%s: %w", login, t.host, err)
 	}
@@ -431,8 +459,11 @@ func knownHostKey(path, alias string) (ssh.PublicKey, error) {
 // a resumable reason it mints a resume certificate (never written to the
 // certificate file, which OpenSSH and later runs keep using) and resumes on a
 // new stream within sshResumeWindow. The end of in is a deliberate close.
-func (t sshTarget) proxy(ctx context.Context, in io.Reader, out io.Writer, opts *websocket.DialOptions, mint sessionMinter) error {
-	f := t.files()
+func (t sshTarget) proxy(ctx context.Context, login string, in io.Reader, out io.Writer, opts *websocket.DialOptions, mint sessionMinter) error {
+	if err := checkSSHLogin(login); err != nil {
+		return err
+	}
+	f := t.files(login)
 	rawURL, err := os.ReadFile(f.url)
 	if err != nil {
 		return fmt.Errorf("no session certificate for %s; run: localport ssh-cert --identity %s <login> %s", t.host, t.ref, t.host)
@@ -457,20 +488,19 @@ func (t sshTarget) proxy(ctx context.Context, in io.Reader, out io.Writer, opts 
 	if err != nil {
 		return fmt.Errorf("device host key: %w", err)
 	}
-	stream, err := dialSession(ctx, strings.TrimSpace(string(rawURL)), cert.Marshal(), opts)
+	stream, cr, reason, err := openSession(ctx, strings.TrimSpace(string(rawURL)), cert, certSigner, hostKey, opts)
+	if err != nil && slices.Contains(sshRetryEnds, reason) {
+		// One new certificate and one more try, before the connection runs.
+		// Like a resume certificate it stays in memory: the file keeps the
+		// one OpenSSH presents to the device.
+		if cert, certSigner, rawURL, err = t.mintAgain(ctx, login, key, mint); err != nil {
+			return fmt.Errorf("session ended: %s; a new certificate: %w", reason, err)
+		}
+		stream, cr, _, err = openSession(ctx, string(rawURL), cert, certSigner, hostKey, opts)
+	}
 	if err != nil {
 		return err
 	}
-	_ = stream.SetDeadline(time.Now().Add(sshDialTimeout))
-	cr, err := session.Hello(stream, certSigner, hostKey)
-	if err != nil {
-		_ = stream.Close()
-		if reason, ok := stream.closeReason(); ok {
-			return fmt.Errorf("session ended: %s", security.SanitizeDisplay(reason))
-		}
-		return fmt.Errorf("session prelude: %w", err)
-	}
-	_ = stream.SetDeadline(time.Time{})
 
 	go func() {
 		_, _ = io.Copy(cr.Conn, in)
@@ -488,7 +518,7 @@ func (t sshTarget) proxy(ctx context.Context, in io.Reader, out io.Writer, opts 
 			<-copied
 			return fmt.Errorf("session ended: %s", security.SanitizeDisplay(reason))
 		}
-		if stream, pos, err = t.resume(ctx, cr, cert, key, mint, opts); err != nil {
+		if stream, pos, err = t.resume(ctx, sshResumeWindow, cr, cert, key, mint, opts); err != nil {
 			cr.Conn.End(errSessionEnded)
 			<-copied
 			return err
@@ -506,76 +536,74 @@ func (t sshTarget) proxy(ctx context.Context, in io.Reader, out io.Writer, opts 
 
 var errSessionEnded = errors.New("ssh-proxy: session ended")
 
-// resumeMintRetryable reports whether a resume mint may succeed later: no
-// answer (the network is still down), a rate limit, or a server-side
-// unavailability such as SE032 during a re-pin. Any other answer is final.
-func resumeMintRetryable(err error) bool {
-	var api *identity.APIError
-	if errors.As(err, &api) {
-		return api.Status == http.StatusTooManyRequests || api.Status >= 500
+// sshRetryEnds are the edge close reasons of a refused first stream after
+// which ssh-proxy mints one new certificate and tries once more
+// (docs/COMMUNICATION.md, end reasons).
+var sshRetryEnds = []string{"edge_full", "no_session_mux", "wrong_edge", "edge_shutdown"}
+
+// openSession dials edgeURL with cert and runs the prelude against the pinned
+// hostKey. On a refusal it returns the edge's close reason, when one came,
+// with the error.
+func openSession(ctx context.Context, edgeURL string, cert *ssh.Certificate, signer ssh.Signer, hostKey ssh.PublicKey, opts *websocket.DialOptions) (*sessionStream, *session.ClientResumable, string, error) {
+	stream, err := dialSession(ctx, edgeURL, cert.Marshal(), opts)
+	if err != nil {
+		return nil, nil, "", err
 	}
-	var transport *url.Error
-	var netErr net.Error
-	return errors.As(err, &transport) || errors.As(err, &netErr)
+	_ = stream.SetDeadline(time.Now().Add(sshDialTimeout))
+	cr, err := session.Hello(stream, signer, hostKey)
+	if err != nil {
+		_ = stream.Close()
+		if reason, ok := stream.closeReason(); ok {
+			return nil, nil, reason, fmt.Errorf("session ended: %s", security.SanitizeDisplay(reason))
+		}
+		return nil, nil, "", fmt.Errorf("session prelude: %w", err)
+	}
+	_ = stream.SetDeadline(time.Time{})
+	return stream, cr, "", nil
+}
+
+// mintAgain mints a new certificate for login and key under sshMintTimeout,
+// returning it, its signer and its edge URL.
+func (t sshTarget) mintAgain(ctx context.Context, login string, key ssh.Signer, mint sessionMinter) (*ssh.Certificate, ssh.Signer, []byte, error) {
+	mintCtx, cancel := context.WithTimeout(ctx, sshMintTimeout)
+	resp, err := mint(mintCtx, identity.SessionRequest{
+		DeviceHost:      t.host,
+		Kind:            sshSessionKind,
+		Login:           login,
+		ClientSSHPubKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key.PublicKey()))),
+	})
+	cancel()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	cert, _, edgeURL, err := checkSessionCertificate(resp, key.PublicKey(), login, time.Now())
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	signer, err := ssh.NewCertSigner(cert, key)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return cert, signer, []byte(edgeURL), nil
 }
 
 // resume mints a resume certificate for original and resumes cr on a new
-// stream, retrying with backoff within sshResumeWindow. A mint refusal or a
-// final agent refusal ends the session.
-func (t sshTarget) resume(ctx context.Context, cr *session.ClientResumable, original *ssh.Certificate, key ssh.Signer, mint sessionMinter, opts *websocket.DialOptions) (*sessionStream, uint64, error) {
-	deadline := time.Now().Add(sshResumeWindow)
-	login := original.ValidPrincipals[0]
+// stream, retrying with backoff within window (sshResumeWindow in
+// production). Each mint is bounded by the time left in the window. A mint
+// refusal or a final agent refusal ends the session.
+func (t sshTarget) resume(ctx context.Context, window time.Duration, cr *session.ClientResumable, original *ssh.Certificate, key ssh.Signer, mint sessionMinter, opts *websocket.DialOptions) (*sessionStream, uint64, error) {
+	deadline := time.Now().Add(window)
 	backoff := 500 * time.Millisecond
 	for {
-		resp, err := mint(ctx, identity.SessionRequest{
-			DeviceHost:        t.host,
-			Kind:              sshSessionKind,
-			Login:             login,
-			ClientSSHPubKey:   strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key.PublicKey()))),
-			ResumeCertificate: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(original))),
-		})
-		if err != nil {
-			if !resumeMintRetryable(err) {
-				return nil, 0, fmt.Errorf("resume the session: %w", err)
-			}
-			if time.Now().Add(backoff).After(deadline) {
-				return nil, 0, fmt.Errorf("session ended: not resumed within %s: %w", sshResumeWindow, err)
-			}
-			select {
-			case <-ctx.Done():
-				return nil, 0, ctx.Err()
-			case <-time.After(backoff):
-			}
-			backoff = min(2*backoff, sshResumeBackoffMax)
-			continue
+		stream, pos, retry, err := t.resumeAttempt(ctx, deadline, cr, original, key, mint, opts)
+		if !retry {
+			return stream, pos, err
 		}
-		resumeCert, _, edgeURL, err := checkSessionCertificate(resp, key.PublicKey(), login, time.Now())
-		if err != nil {
-			return nil, 0, fmt.Errorf("resume the session: %w", err)
-		}
-		signer, err := ssh.NewCertSigner(resumeCert, key)
-		if err != nil {
-			return nil, 0, fmt.Errorf("resume the session: %w", err)
-		}
-		stream, err := dialSession(ctx, edgeURL, resumeCert.Marshal(), opts)
-		if err == nil {
-			_ = stream.SetDeadline(time.Now().Add(sshDialTimeout))
-			var pos uint64
-			if pos, err = cr.Resume(stream, signer); err == nil {
-				_ = stream.SetDeadline(time.Time{})
-				return stream, pos, nil
-			}
-			_ = stream.Close()
-			var refused *session.ResumeError
-			if errors.As(err, &refused) && !refused.Retryable() {
-				return nil, 0, fmt.Errorf("session ended: %s", refused.Code)
-			}
-			if reason, closed := stream.closeReason(); closed && !slices.Contains(sshResumableEnds, reason) {
-				return nil, 0, fmt.Errorf("session ended: %s", security.SanitizeDisplay(reason))
-			}
+		if ctx.Err() != nil {
+			return nil, 0, ctx.Err()
 		}
 		if time.Now().Add(backoff).After(deadline) {
-			return nil, 0, fmt.Errorf("session ended: not resumed within %s: %w", sshResumeWindow, err)
+			return nil, 0, fmt.Errorf("session ended: not resumed within %s: %w", window, err)
 		}
 		select {
 		case <-ctx.Done():
@@ -586,20 +614,72 @@ func (t sshTarget) resume(ctx context.Context, cr *session.ClientResumable, orig
 	}
 }
 
+// resumeAttempt makes one mint, dial and resume. retry reports whether a
+// later attempt may succeed; err is final when retry is false. The mint runs
+// under deadline; the dial does not, since the stream lives on ctx.
+func (t sshTarget) resumeAttempt(ctx context.Context, deadline time.Time, cr *session.ClientResumable, original *ssh.Certificate, key ssh.Signer, mint sessionMinter, opts *websocket.DialOptions) (stream *sessionStream, pos uint64, retry bool, err error) {
+	login := original.ValidPrincipals[0]
+	mintCtx, cancel := context.WithDeadline(ctx, deadline)
+	resp, err := mint(mintCtx, identity.SessionRequest{
+		DeviceHost:        t.host,
+		Kind:              sshSessionKind,
+		Login:             login,
+		ClientSSHPubKey:   strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key.PublicKey()))),
+		ResumeCertificate: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(original))),
+	})
+	cancel()
+	if err != nil {
+		if !identity.Retryable(err) {
+			return nil, 0, false, fmt.Errorf("resume the session: %w", err)
+		}
+		return nil, 0, true, err
+	}
+	resumeCert, _, edgeURL, err := checkSessionCertificate(resp, key.PublicKey(), login, time.Now())
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("resume the session: %w", err)
+	}
+	signer, err := ssh.NewCertSigner(resumeCert, key)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("resume the session: %w", err)
+	}
+	stream, err = dialSession(ctx, edgeURL, resumeCert.Marshal(), opts)
+	if err != nil {
+		return nil, 0, true, err
+	}
+	_ = stream.SetDeadline(time.Now().Add(sshDialTimeout))
+	if pos, err = cr.Resume(stream, signer); err == nil {
+		_ = stream.SetDeadline(time.Time{})
+		return stream, pos, false, nil
+	}
+	_ = stream.Close()
+	var refused *session.ResumeError
+	if errors.As(err, &refused) && !refused.Retryable() {
+		return nil, 0, false, fmt.Errorf("session ended: %s", refused.Code)
+	}
+	if reason, closed := stream.closeReason(); closed && !slices.Contains(sshResumableEnds, reason) {
+		return nil, 0, false, fmt.Errorf("session ended: %s", security.SanitizeDisplay(reason))
+	}
+	return nil, 0, true, err
+}
+
 // sshConfigOptions are the client options of a target, shared by the
 // ssh-config block and `localport ssh`. exe is the localport command.
 func (t sshTarget) sshConfigOptions(exe string) ([][2]string, error) {
-	f := t.files()
-	for _, p := range []string{exe, f.key, f.knownHosts} {
+	root, _ := t.store.StateRoot()
+	dir := t.clientDir(root)
+	knownHosts := t.files("").knownHosts
+	for _, p := range []string{exe, dir, knownHosts} {
 		if strings.ContainsAny(p, "\"\n\r") {
 			return nil, fmt.Errorf("path %q holds a quote or line break, which ssh_config cannot carry", p)
 		}
 	}
+	// ssh expands %r to the login, naming the per-login files of files().
+	key := sshConfigValueWithLogin(dir, "@"+t.host)
 	return [][2]string{
 		{"ProxyCommand", sshCommandLine(exe, "ssh-proxy", t.ref.String())},
-		{"IdentityFile", sshConfigValue(f.key)},
-		{"CertificateFile", sshConfigValue(f.cert)},
-		{"UserKnownHostsFile", sshConfigValue(f.knownHosts)},
+		{"IdentityFile", key},
+		{"CertificateFile", sshConfigValueWithLogin(dir, "@"+t.host+"-cert.pub")},
+		{"UserKnownHostsFile", sshConfigValue(knownHosts)},
 		{"HostKeyAlias", t.host},
 		{"StrictHostKeyChecking", "yes"},
 		{"IdentitiesOnly", "yes"},
@@ -615,7 +695,17 @@ func sshCommandLine(exe, command, ref string) string {
 
 // sshConfigValue doubles % and quotes a value holding a space or tab.
 func sshConfigValue(s string) string {
-	s = strings.ReplaceAll(s, "%", "%%")
+	return sshConfigQuote(strings.ReplaceAll(s, "%", "%%"))
+}
+
+// sshConfigValueWithLogin is the path dir/%r<suffix>: dir and suffix with
+// every % doubled, and %r, which ssh expands to the login, between them.
+func sshConfigValueWithLogin(dir, suffix string) string {
+	escape := func(s string) string { return strings.ReplaceAll(s, "%", "%%") }
+	return sshConfigQuote(escape(dir+string(filepath.Separator)) + "%r" + escape(suffix))
+}
+
+func sshConfigQuote(s string) string {
 	if strings.ContainsAny(s, " \t") {
 		return `"` + s + `"`
 	}
@@ -734,7 +824,7 @@ func runSSHCert(args []string) error {
 
 // runSSHProxy is `localport ssh-proxy`: ssh_config's ProxyCommand.
 func runSSHProxy(args []string) error {
-	identityArg, _, host, err := parseSSHHelperArgs("ssh-proxy", args)
+	identityArg, login, host, err := parseSSHHelperArgs("ssh-proxy", args)
 	if err != nil {
 		return err
 	}
@@ -742,7 +832,7 @@ func runSSHProxy(args []string) error {
 	if err != nil {
 		return err
 	}
-	return t.proxy(context.Background(), os.Stdin, os.Stdout, nil, t.mintWithAPI)
+	return t.proxy(context.Background(), login, os.Stdin, os.Stdout, nil, t.mintWithAPI)
 }
 
 // runSSHConfig is `localport ssh-config`: it prints an ssh_config block per

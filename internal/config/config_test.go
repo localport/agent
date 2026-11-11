@@ -75,7 +75,10 @@ func TestLoadRefusesAFleetToken(t *testing.T) {
 		"version: 1\nfleets:\n",
 		// An unset variable fails interpolation; the fleet is the real error.
 		"version: 1\nfleets:\n  - token: ${LOCALPORT_TEST_UNSET_FLEET_TOKEN:?set it}\n",
+		// The key appears only after interpolation.
+		"version: 1\n${LOCALPORT_TEST_FLEETS_KEY}:\n  - token: t\n",
 	} {
+		t.Setenv("LOCALPORT_TEST_FLEETS_KEY", "fleets")
 		if _, err := Load(writeConfig(t, body)); !errors.Is(err, ErrFleetTokenRetired) {
 			t.Fatalf("Load(%q) = %v, want ErrFleetTokenRetired", body, err)
 		}

@@ -462,7 +462,7 @@ func (s *Server) serveNew(h *handler, stream net.Conn, hello *helloMsg, id [16]b
 		return
 	}
 	started = true
-	go s.serveConn(ch, e, id, serial, cert.Key)
+	go s.serveConn(ch, e, id, serial, cert)
 	defer s.release(e)
 	s.serveStream(e, stream, 0)
 }
@@ -797,7 +797,7 @@ func (s *Server) proofFailed(e *resumable) int {
 // serveConn runs one connection: the SSH handshake on its ResumableConn,
 // bounded by handshakeTimeout, then run. It owns the session slot serveNew
 // took and removes the connection when it ends.
-func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64, certKey ssh.PublicKey) {
+func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64, admitted *ssh.Certificate) {
 	defer s.releaseSlot()
 	defer s.removeConn(e, h)
 	defer func() {
@@ -808,7 +808,7 @@ func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64,
 	handshake := time.AfterFunc(handshakeTimeout, func() { e.rc.End(errHandshakeTimeout) })
 	secret := &connSecret{}
 	defer secret.clear()
-	cfg, err := s.serverConfig(serial, secret, certKey, func(d time.Duration) { handshake.Reset(d) })
+	cfg, err := s.serverConfig(serial, secret, admitted, func(d time.Duration) { handshake.Reset(d) })
 	if err != nil {
 		handshake.Stop()
 		s.log("session: %v", err)
@@ -861,19 +861,22 @@ func (c *connSecret) clear() { clear(c.password) }
 const passwordPrompt = "Windows password: "
 
 // serverConfig is one connection's SSH server configuration. Its callbacks
-// keep no state across connections: the identity is built in
-// VerifiedPublicKeyCallback, after possession of the certificate's key is
-// proven, and returned as the connection's Permissions. For a password login
-// that step is a partial success whose only next method is one
-// keyboard-interactive prompt, so the prompt exists only after a verified
-// certificate; its answer goes to secret. Userauth must present certKey, the
-// key the prelude bound the connection to.
-func (s *Server) serverConfig(serial uint64, secret *connSecret, certKey ssh.PublicKey, rearmHandshake func(time.Duration)) (*ssh.ServerConfig, error) {
+// keep no state across connections. Userauth proves possession of the key of
+// admitted, the certificate the edge and the prelude admitted: the client may
+// present that key plain or in any certificate over it (OpenSSH presents the
+// certificate file it loaded before ssh-proxy started, which may predate a
+// certificate the proxy minted after a refusal). The identity is built from
+// admitted alone, verified again for the user at VerifiedPublicKeyCallback,
+// and returned as the connection's Permissions; nothing in the presented
+// certificate is trusted. For a password login that step is a partial
+// success whose only next method is one keyboard-interactive prompt, so the
+// prompt exists only after the key is proven; its answer goes to secret.
+func (s *Server) serverConfig(serial uint64, secret *connSecret, admitted *ssh.Certificate, rearmHandshake func(time.Duration)) (*ssh.ServerConfig, error) {
 	hostKey, device, err := s.hostIdentity()
 	if err != nil {
 		return nil, err
 	}
-	bound := certKey.Marshal()
+	bound := admitted.Key.Marshal()
 	cfg := &ssh.ServerConfig{
 		Config: ssh.Config{
 			KeyExchanges: []string{ssh.KeyExchangeMLKEM768X25519, ssh.KeyExchangeCurve25519},
@@ -883,17 +886,16 @@ func (s *Server) serverConfig(serial uint64, secret *connSecret, certKey ssh.Pub
 		ServerVersion: serverVersion,
 		MaxAuthTries:  3,
 		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			cert, ok := key.(*ssh.Certificate)
-			if !ok {
-				return nil, refuseCert("a plain key, not a certificate")
+			if cert, ok := key.(*ssh.Certificate); ok {
+				key = cert.Key
 			}
-			if !bytes.Equal(cert.Key.Marshal(), bound) {
-				return nil, refuseCert("a certificate for another key than the prelude's")
+			if !bytes.Equal(key.Marshal(), bound) {
+				return nil, refuseCert("a key other than the prelude's")
 			}
 			return &ssh.Permissions{}, nil
 		},
-		VerifiedPublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey, _ *ssh.Permissions, _ string) (*ssh.Permissions, error) {
-			adm, err := s.admit(key.(*ssh.Certificate), meta.User(), device, serial)
+		VerifiedPublicKeyCallback: func(meta ssh.ConnMetadata, _ ssh.PublicKey, _ *ssh.Permissions, _ string) (*ssh.Permissions, error) {
+			adm, err := s.admit(admitted, meta.User(), device, serial)
 			if err != nil {
 				s.log("session: userauth refused: %v", err)
 				return nil, err

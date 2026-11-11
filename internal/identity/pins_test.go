@@ -162,6 +162,34 @@ func TestDesktopPinResetKeepsAFileInAnUntrustedDirectory(t *testing.T) {
 	}
 }
 
+// The discard decision uses the trust result of the read it follows: a
+// directory made private after an untrusted read does not turn the refusal
+// into a removal of a valid pin file.
+func TestDesktopPinResetDecidesTrustOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory modes are Unix trust rules")
+	}
+	store := deviceTicketKeys(t)
+	pins := store.mustDesktopPins(t)
+	mustPin(t, pins, "127.0.0.1:5900", "a")
+	dir := store.Dir(deviceRef)
+	if err := os.Chmod(dir, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	pins.afterRead = func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Error(err)
+		}
+	}
+	if _, err := pins.Reset(context.Background(), "vnc"); !errors.Is(err, ErrDesktopPinsUnreadable) {
+		t.Fatalf("Reset after an untrusted read = %v, want ErrDesktopPinsUnreadable", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, desktopPinsFile)); err != nil {
+		t.Fatalf("Reset removed a valid pin file after an untrusted read: %v", err)
+	}
+}
+
 // Concurrent first-use pins with different keys, from two stores on one
 // directory (as two processes would be), pin exactly one key.
 func TestConcurrentDesktopPins(t *testing.T) {
@@ -226,7 +254,7 @@ func TestStoreRemoveDeletesTheDesktopPins(t *testing.T) {
 	store := deviceTicketKeys(t)
 	pins := store.mustDesktopPins(t)
 	mustPin(t, pins, "127.0.0.1:5900", "a")
-	if err := store.Remove(deviceRef); err != nil {
+	if err := store.Remove(context.Background(), deviceRef); err != nil {
 		t.Fatal(err)
 	}
 	if store.mustDesktopPins(t) == pins {

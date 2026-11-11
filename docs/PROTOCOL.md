@@ -1373,11 +1373,15 @@ WebSocket URL on the device's edge; and the device host key
 (`ecdsa-sha2-nistp256`). Transport failures, `5xx` and `429` are retried
 within the retry budget.
 
-Files, under the state root (the directory holding `identity/`): the client
-key `ssh/<team>/<kind>-<identity>/<device-host>` (ed25519, OpenSSH format,
+Files, under the state root (the directory holding `identity/`): per
+credential, device and login, the client key
+`ssh/<team>/<kind>-<identity>/<login>@<device-host>` (ed25519, OpenSSH format,
 0600, generated on first use, never sent), its certificate beside it as
-`<device-host>-cert.pub`, the edge URL as `<device-host>.url`, and
-`known_hosts`, one line per device host. `ssh-cert` mints only when the stored
+`<login>@<device-host>-cert.pub` and the edge URL as `<login>@<device-host>.url`,
+so runs for two logins never replace each other's certificate; and
+`known_hosts`, one line per device host. A login the device's login rule refuses
+(`config.ValidLogin`), or one holding a character Windows forbids in a file
+name, is refused. `ssh-cert` mints only when the stored
 certificate is not for this key and login, or has under 60 s left. It checks
 the answer (a user certificate for the client key and exactly the login,
 not expired, an `ecdsa-sha2-nistp256` host key, a `wss` URL) before writing,
@@ -1401,8 +1405,8 @@ refusal, is printed as `localport: session ended: <reason>`.
 
     Host <device-host>
       ProxyCommand localport ssh-proxy --identity <ref> %r %h
-      IdentityFile <key>
-      CertificateFile <key>-cert.pub
+      IdentityFile <client dir>/%r@<device-host>
+      CertificateFile <client dir>/%r@<device-host>-cert.pub
       UserKnownHostsFile <state root>/known_hosts
       HostKeyAlias <device-host>
       StrictHostKeyChecking yes

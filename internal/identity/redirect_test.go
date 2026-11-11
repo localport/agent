@@ -38,7 +38,7 @@ func TestClientDoesNotFollowRedirect(t *testing.T) {
 		t.Fatalf("err = %v, want the redirect refusal", err)
 	}
 	// a retry would resend the credential.
-	if isRetryable(err) {
+	if Retryable(err) {
 		t.Fatal("a refused redirect is retried")
 	}
 	if reached.Load() != 0 || sawCredential.Load() {

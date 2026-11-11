@@ -38,6 +38,9 @@ func (a *App) Run(args []string) error {
 		return runSet(args[1:])
 	case "service":
 		return runService(args[1:])
+	case "system":
+		// The Windows installer's internal steps; not in `localport help`.
+		return runSystem(args[1:])
 	case "status":
 		return runStatus(args[1:])
 	case "access":

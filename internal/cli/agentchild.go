@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -189,9 +190,10 @@ func runPurgeChild() error {
 }
 
 // purgeStore deletes the device credentials of store and its recording
-// spool, printing each deletion.
+// spool, printing each deletion. Each credential's removal waits a bounded
+// time for a renewal in flight (an `identity renew` run).
 func purgeStore(store *identity.Store) error {
-	removed, err := store.RemoveDevices()
+	removed, err := store.RemoveDevices(context.Background())
 	for _, d := range removed {
 		fmt.Fprintf(os.Stderr, "  deleted %s\n", d)
 	}

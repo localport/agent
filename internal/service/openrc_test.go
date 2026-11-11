@@ -13,12 +13,13 @@ import (
 func newOpenRC(t *testing.T, r *recorder) openrc {
 	dir := t.TempDir()
 	return openrc{
-		initDir:   filepath.Join(dir, "init.d"),
-		rcService: "rc-service",
-		rcUpdate:  "rc-update",
-		logDir:    filepath.Join(dir, "log"),
-		account:   func() (Account, error) { return Account{UID: os.Getuid(), GID: os.Getgid()}, nil },
-		run:       r.run,
+		initDir:     filepath.Join(dir, "init.d"),
+		runlevelDir: filepath.Join(dir, "runlevels"),
+		rcService:   "rc-service",
+		rcUpdate:    "rc-update",
+		logDir:      filepath.Join(dir, "log"),
+		account:     func() (Account, error) { return Account{UID: os.Getuid(), GID: os.Getgid()}, nil },
+		run:         r.run,
 	}
 }
 
@@ -71,6 +72,18 @@ func TestOpenRCScripts(t *testing.T) {
 	}
 }
 
+// linkRunlevel links name into runlevel as rc-update add does.
+func linkRunlevel(t *testing.T, o openrc, runlevel, name string) {
+	t.Helper()
+	dir := filepath.Join(o.runlevelDir, runlevel)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(o.script(name), filepath.Join(dir, name)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOpenRCInstallSequence(t *testing.T) {
 	r := &recorder{}
 	o := newOpenRC(t, r)
@@ -103,16 +116,24 @@ func TestOpenRCInstallSequence(t *testing.T) {
 		t.Fatalf("Reload = %v, commands %q", err, r.calls)
 	}
 
+	// rc-update del exits 1 alike for "not in that runlevel" and for a real
+	// failure, so Uninstall deletes only where a runlevel links the service
+	// and every del failure is an error.
+	linkRunlevel(t, o, "default", OpenRCService)
 	r.calls = nil
-	r.fail = map[string]error{"rc-update del " + OpenRCLauncherService: &CommandError{ExitCode: 1, Err: errors.New("exit status 1")}}
+	failed := &CommandError{ExitCode: 1, Err: errors.New("exit status 1")}
+	r.fail = map[string]error{"rc-update del " + OpenRCService + " default": failed}
+	if err := o.Uninstall(context.Background()); !errors.Is(err, failed) {
+		t.Fatalf("Uninstall with a failing del = %v, want the failure", err)
+	}
+	r.calls, r.fail = nil, nil
 	if err := o.Uninstall(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	want = []string{
 		"rc-service " + OpenRCService + " stop",
-		"rc-update del " + OpenRCService,
+		"rc-update del " + OpenRCService + " default",
 		"rc-service " + OpenRCLauncherService + " stop",
-		"rc-update del " + OpenRCLauncherService,
 	}
 	if !slices.Equal(r.calls, want) {
 		t.Fatalf("uninstall commands = %q, want %q", r.calls, want)
@@ -149,5 +170,12 @@ func TestOpenRCMainPID(t *testing.T) {
 	r := &recorder{fail: map[string]error{status: &CommandError{ExitCode: -1, Err: context.DeadlineExceeded}}}
 	if _, err := newOpenRC(t, r).MainPID(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("status timeout: MainPID = %v, want the timeout", err)
+	}
+	// Exit 1 is rc-service's failure (an unknown service, eerrorx), not a
+	// service state: an error, never "not running".
+	failed := &CommandError{ExitCode: 1, Err: errors.New("exit status 1")}
+	r = &recorder{fail: map[string]error{status: failed}}
+	if _, err := newOpenRC(t, r).MainPID(context.Background()); !errors.Is(err, failed) {
+		t.Errorf("status exit 1: MainPID = %v, want the failure", err)
 	}
 }

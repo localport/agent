@@ -183,7 +183,7 @@ func headerSingle(s snap, ts tState) []string {
 	localLine := pal.ForegroundDim(padRight("Local", labelW)) + pal.Foreground(local)
 	lines = append(lines, localLine)
 
-	st := s.stats[ts.name]
+	st := s.stats[ts.key]
 	bandwidth := pal.ForegroundDim("↓ ") + pal.Foreground(HumanBytes(st.BytesIn)) +
 		pal.ForegroundDim("   ↑ ") + pal.Foreground(HumanBytes(st.BytesOut))
 	lines = append(lines,
@@ -243,7 +243,7 @@ func deviceHeader(s snap, ts tState, row func(label, value string) string, label
 			pal.Warning("none: any port the dashboard allows (set --allow-ports)"))
 	}
 
-	st := s.stats[ts.name]
+	st := s.stats[ts.key]
 	lines = append(lines,
 		pal.ForegroundDim(padRight("Bandwidth", labelW))+
 			pal.ForegroundDim("\u2193 ")+pal.Foreground(HumanBytes(st.BytesIn))+
@@ -418,10 +418,10 @@ func renderConnections(s snap, capacity int) []string {
 // requests for a single http tunnel and live connections otherwise.
 func panelDivider(s snap) (label, count string) {
 	if len(s.tunnels) == 1 && s.tunnels[0].device {
-		return "connections", strconv.FormatInt(s.stats[s.tunnels[0].name].ConnectionsServed, 10)
+		return "connections", strconv.FormatInt(s.stats[s.tunnels[0].key].ConnectionsServed, 10)
 	}
 	if len(s.tunnels) == 1 && httpProto(s.tunnels[0].proto) {
-		return "requests", strconv.FormatInt(s.stats[s.tunnels[0].name].RequestsServed, 10)
+		return "requests", strconv.FormatInt(s.stats[s.tunnels[0].key].RequestsServed, 10)
 	}
 	total := 0
 	for _, list := range s.conns {
@@ -437,9 +437,9 @@ func bottomCount(ts tState, s snap) int {
 		return len(ts.events)
 	}
 	if httpProto(ts.proto) {
-		return len(s.reqs[ts.name])
+		return len(s.reqs[ts.key])
 	}
-	return len(s.conns[ts.name])
+	return len(s.conns[ts.key])
 }
 
 func bottomEmptyMsg(ts tState, pal Palette) string {
@@ -459,9 +459,9 @@ func bottomRows(ts tState, s snap, capacity, cols int, pal Palette) []string {
 		return renderDeviceLog(ts, capacity, cols, pal)
 	}
 	if httpProto(ts.proto) {
-		return renderRequestTable(s.reqs[ts.name], capacity, cols, pal)
+		return renderRequestTable(s.reqs[ts.key], capacity, cols, pal)
 	}
-	return renderConnTable(s.conns[ts.name], capacity, cols, pal)
+	return renderConnTable(s.conns[ts.key], capacity, cols, pal)
 }
 
 func connectingPhrase(ts tState, spin string, pal Palette) string {

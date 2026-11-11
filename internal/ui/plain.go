@@ -25,8 +25,11 @@ type Plain struct {
 	mu    sync.Mutex
 	stats map[string]*plainStats
 
-	// allowed is each device's --allow-ports, set once by Banner.
+	// allowed is each device's --allow-ports and names each device's display
+	// name, both keyed on the device identity (its EventKey) and set once by
+	// Banner.
 	allowed map[string]ports.Ceiling
+	names   map[string]string
 
 	// Usage ticker lifecycle. The goroutine is started lazily on the
 	// first data event so single-shot invocations don't spawn it.
@@ -64,6 +67,7 @@ func NewPlain() *Plain {
 		out:     os.Stderr,
 		stats:   make(map[string]*plainStats),
 		allowed: make(map[string]ports.Ceiling),
+		names:   make(map[string]string),
 		stop:    make(chan struct{}),
 		reqLog:  make(chan reqLogLine, 1024),
 	}
@@ -79,14 +83,30 @@ func (p *Plain) Banner(version string, cfg *config.Config) {
 	}
 	for _, d := range cfg.Devices {
 		msg := "device host=" + d.Host
+		key := d.Identity
+		if key == "" {
+			key = d.Name
+		}
+		p.mu.Lock()
+		p.names[key] = d.Name
 		if d.AllowPorts != nil {
 			msg += " allow_ports=" + d.AllowPorts.String()
-			p.mu.Lock()
-			p.allowed[d.Name] = d.AllowPorts
-			p.mu.Unlock()
+			p.allowed[key] = d.AllowPorts
 		}
-		p.line("startup", d.Name, msg)
+		p.mu.Unlock()
+		p.line("startup", key, msg)
 	}
+}
+
+// OnStart records the display name of key, for a tunnel Banner did not name
+// (one added by a reload).
+func (p *Plain) OnStart(key, label string) {
+	if key == label || label == "" {
+		return
+	}
+	p.mu.Lock()
+	p.names[key] = label
+	p.mu.Unlock()
 }
 
 // Shutdown is idempotent. Callers invoke it from the signal handler, after Run
@@ -360,9 +380,14 @@ func withCode(msg, code string) string {
 	return msg + " [" + code + "]"
 }
 
+// line prints one event; label is an EventKey, shown as its device name when
+// Banner named one.
 func (p *Plain) line(event, label, msg string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if name, ok := p.names[label]; ok {
+		label = name
+	}
 	ts := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	if label != "" {
 		fmt.Fprintf(p.out, "%s %s [%s] %s\n", ts, event, label, msg)

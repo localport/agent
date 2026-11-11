@@ -616,6 +616,51 @@ func TestUserauthRefusals(t *testing.T) {
 	})
 }
 
+// Userauth proves the key the prelude admitted; the admission (login, kind,
+// options) comes from the admitted certificate, never from the one userauth
+// presents. A client whose file holds an earlier certificate over the same key
+// (ssh-proxy retried with a new one) logs in; another key or user does not.
+func TestUserauthIsBoundToTheAdmittedKeyAndCertificate(t *testing.T) {
+	f := newSSHFixture(t, func(c *ServerConfig) { c.Capabilities = []string{"terminal", "files"} })
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	admitted := f.defaults()
+	admitted.key = key
+	admittedSigner, _ := f.mint(t, admitted)
+
+	earlier := admitted
+	earlier.serial = admitted.serial + 1
+	earlier.kind = "ssh"
+	earlier.after, earlier.before = time.Now().Add(-10*time.Minute), time.Now().Add(-time.Minute)
+	earlierSigner, _ := f.mint(t, earlier)
+	plainSigner, _ := ssh.NewSignerFromKey(key)
+
+	for name, auth := range map[string]ssh.Signer{"an earlier certificate": earlierSigner, "the plain key": plainSigner} {
+		client, err := f.dial(t, admitted.serial, admittedSigner, func(c *ssh.ClientConfig) {
+			c.Auth = []ssh.AuthMethod{ssh.PublicKeys(auth)}
+		})
+		if err != nil {
+			t.Fatalf("userauth with %s over the admitted key = %v", name, err)
+		}
+		// The admitted certificate is a terminal one: exec, which the earlier
+		// ssh certificate would allow, stays refused.
+		sess, _ := client.NewSession()
+		var exitErr *ssh.ExitError
+		if err := sess.Run("id"); err == nil || errors.As(err, &exitErr) {
+			t.Fatalf("%s: exec = %v, want the terminal admission's refusal", name, err)
+		}
+	}
+
+	_, otherKey, _ := ed25519.GenerateKey(rand.Reader)
+	other := admitted
+	other.key = otherKey
+	otherSigner, _ := f.mint(t, other)
+	if _, err := f.dial(t, admitted.serial, admittedSigner, func(c *ssh.ClientConfig) {
+		c.Auth = []ssh.AuthMethod{ssh.PublicKeys(otherSigner)}
+	}); err == nil {
+		t.Fatal("a certificate over another key passed userauth")
+	}
+}
+
 // A certificate of a CA key the agent does not hold yet passes after one key
 // refresh that brings it.
 func TestUserauthRefreshesForAnUnknownCA(t *testing.T) {

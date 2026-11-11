@@ -61,6 +61,15 @@ func storedDevice(t *testing.T) config.LocalDevice {
 
 var piInvoker = invoker{privileged: false, current: "pi", goos: "linux"}
 
+// asUnprivileged runs the test's commands as an unprivileged invoker, so a
+// root test run uses LOCALPORT_HOME instead of the system store and config.
+func asUnprivileged(t *testing.T) {
+	t.Helper()
+	saved := privilegedProcess
+	privilegedProcess = func() bool { return false }
+	t.Cleanup(func() { privilegedProcess = saved })
+}
+
 // A re-enrolment without flags keeps the device's ports, capabilities and
 // logins.
 func TestFlaglessReEnrolKeepsTheStoredSettings(t *testing.T) {
@@ -148,6 +157,7 @@ func TestANewIdentityAppends(t *testing.T) {
 // setup and login check the store directory before spending their one-time
 // secret: a store path that is not a directory fails here, never at the unroutable API.
 func TestSetupAndLoginCheckTheStoreBeforeTheSpend(t *testing.T) {
+	asUnprivileged(t)
 	for name, run := range map[string]func() error{
 		"setup": func() error { return runSetup([]string{"lps_x", "--api", "https://127.0.0.1:1", "--wait", "0"}) },
 		"login": func() error { return runLogin([]string{"--api", "https://127.0.0.1:1"}) },
@@ -180,6 +190,39 @@ func TestAMergeWriteFailureIsNotAConflict(t *testing.T) {
 	}
 	if !sameDevice(inForce, stored) {
 		t.Fatalf("in force %+v, want the stored entry", inForce)
+	}
+	if errors.Is(err, errDeviceNotRecorded) {
+		t.Fatal("a stored device keeps its config entry, so its credential is in use")
+	}
+}
+
+// A new identity whose entry cannot be written is reported as unrecorded, and
+// connect removes its credential, so no credential is left that nothing uses.
+func TestAnAppendWriteFailureForgetsTheNewCredential(t *testing.T) {
+	stored := storedDevice(t)
+	file := storedConfig(t, stored)
+	failing := errors.New("no space left on device")
+	writeLocal = func(config.LocalConfigFile, *config.LocalConfig, identity.Ref) error { return failing }
+	t.Cleanup(func() { writeLocal = config.WriteLocal })
+	fs, flags := parseDeviceFlags(t)
+	newRef := deviceRef("factory.gw-02")
+	_, err := recordDevice(file, fs, flags, piInvoker, newRef, config.LocalDevice{})
+	if !errors.Is(err, errDeviceNotRecorded) || !errors.Is(err, failing) {
+		t.Fatalf("recordDevice = %v, want errDeviceNotRecorded wrapping the write error", err)
+	}
+
+	store := &identity.Store{Root: filepath.Join(os.Getenv(identity.HomeEnv), "identity")}
+	if err := os.MkdirAll(store.Dir(newRef), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.Dir(newRef), "meta.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := forgetUnrecorded(store, false, newRef); err != nil {
+		t.Fatalf("forgetUnrecorded = %v", err)
+	}
+	if _, err := os.Lstat(store.Dir(newRef)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("credential directory after forgetUnrecorded: %v", err)
 	}
 }
 
@@ -216,6 +259,7 @@ func TestAMissingStoredFilesRootIsNotAFlagConflict(t *testing.T) {
 // connect checks the store directory and the local config before it spends
 // the join token: both fail here, never at the unroutable API.
 func TestConnectChecksTheStoreAndConfigBeforeTheSpend(t *testing.T) {
+	asUnprivileged(t)
 	args := []string{"lpj_x", "--api", "https://127.0.0.1:1", "--wait", "0"}
 
 	home := t.TempDir()
@@ -276,5 +320,30 @@ func TestConnectNoMuxReachesTheDevice(t *testing.T) {
 		if got != want {
 			t.Fatalf("connect %q served with noMux %v, want %v", args, got, want)
 		}
+	}
+}
+
+// connect removes the credential it just saved when the local config write
+// fails, so no enrolled credential is left without a config entry.
+func TestConnectForgetsTheCredentialWhenTheConfigWriteFails(t *testing.T) {
+	t.Setenv(identity.HomeEnv, t.TempDir())
+	ref := deviceRef("factory.gw-03")
+	fakeEnrol(t, ref)
+	saveIssued = func(store *identity.Store, _ context.Context, _ identity.Material) (identity.Ref, error) {
+		if err := os.MkdirAll(store.Dir(ref), 0o700); err != nil {
+			return identity.Ref{}, err
+		}
+		return ref, os.WriteFile(filepath.Join(store.Dir(ref), "meta.json"), []byte("{}"), 0o600)
+	}
+	failing := errors.New("no space left on device")
+	writeLocal = func(config.LocalConfigFile, *config.LocalConfig, identity.Ref) error { return failing }
+	t.Cleanup(func() { writeLocal = config.WriteLocal })
+
+	if err := runConnect("test", connectArgs); !errors.Is(err, errDeviceNotRecorded) || !errors.Is(err, failing) {
+		t.Fatalf("runConnect = %v, want errDeviceNotRecorded wrapping the write error", err)
+	}
+	store := &identity.Store{Root: filepath.Join(os.Getenv(identity.HomeEnv), "identity")}
+	if _, err := os.Lstat(store.Dir(ref)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("credential directory after the failed config write: %v", err)
 	}
 }

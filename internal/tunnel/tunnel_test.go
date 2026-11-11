@@ -411,6 +411,7 @@ func (h handlerFunc) OnDataConn(string, DataConnInfo)                           
 func (h handlerFunc) OnHTTPRequest(string, RequestInfo)                              {}
 func (h handlerFunc) OnRedirect(string, string, string)                              {}
 func (h handlerFunc) OnPortsUpdate(string, []proto.DevicePort)                       {}
+func (h handlerFunc) OnStart(string, string)                                         {}
 func (h handlerFunc) OnShutdownPolicy(string, string, string, proto.LimitType, bool) {}
 func (h handlerFunc) OnDataClose(string, string, string, string, int64, int64, time.Duration, error) {
 }

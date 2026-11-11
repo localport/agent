@@ -333,8 +333,10 @@ func savedDevice(t *testing.T, ca *testCA, notBefore, notAfter time.Time) (*Stor
 	return store, key
 }
 
-// renewServer answers /v1/devices/renew after checking the old-key proof
-// (skipped when oldKey is nil), and refuses every other path.
+// renewServer answers the renewal route of ca's identity kind
+// (/v1/devices/renew for a device, /v1/mtls/certs/renew otherwise) after
+// checking the old-key proof (skipped when oldKey is nil), and refuses every
+// other path.
 // before, when given, runs first in every request.
 func renewServer(t *testing.T, ca *testCA, oldKey *ecdsa.PrivateKey, before ...func()) (*httptest.Server, *[]string) {
 	t.Helper()
@@ -344,7 +346,11 @@ func renewServer(t *testing.T, ca *testCA, oldKey *ecdsa.PrivateKey, before ...f
 			f()
 		}
 		paths = append(paths, r.URL.Path)
-		if r.URL.Path != "/v1/devices/renew" {
+		route := "/v1/devices/renew"
+		if !strings.Contains(ca.uri, "/device/") {
+			route = "/v1/mtls/certs/renew"
+		}
+		if r.URL.Path != route {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -430,6 +436,55 @@ func TestExpiredDeviceCertificateRenewsAtTheDeviceRoute(t *testing.T) {
 	due, ok, err = r.due(cur.Meta)
 	if err != nil || !ok || time.Until(due) < 24*time.Hour {
 		t.Fatalf("due after renewal = %s ok=%v err=%v, want the pending renew_after", due, ok, err)
+	}
+}
+
+// The Material a renewal returns names the certificate and key files it was
+// stored under, for the pending (device) and the direct (user) branch.
+func TestRenewalReturnsTheMaterialAsStored(t *testing.T) {
+	for name, uri := range map[string]string{
+		"device": deviceURI,
+		"user":   "spiffe://01kpq7x2abcd34.mtls.localport.dev/user/0mkppnsc7lsdcv",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ca := newTestCA(t)
+			ca.uri = uri
+			key := testKey(t)
+			store := &Store{Root: t.TempDir()}
+			meta := Meta{APIURL: "https://api.localport.io", Source: SourceToken}
+			if name == "device" {
+				meta.Device = &DeviceInfo{Host: "gw-01.factory.eu.localport.dev", Region: "eu"}
+			}
+			ref, err := store.Save(context.Background(), Material{
+				CertPEM: ca.sign(t, &key.PublicKey, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour)),
+				Key:     fileKey{key},
+				Meta:    meta,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv, _ := renewServer(t, ca, key)
+			cur, err := store.Load(ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, err := (&Renewer{Store: store, Ref: ref}).renewLocked(context.Background(), &Client{BaseURL: srv.URL, HTTP: srv.Client()}, cur)
+			if err != nil {
+				t.Fatalf("renew: %v", err)
+			}
+			load := store.Load
+			if name == "device" {
+				load = store.LoadPending
+			}
+			stored, err := load(ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if next.Meta.Cert == "" || next.Meta.Cert != stored.Meta.Cert || next.Meta.Key.File != stored.Meta.Key.File || next.Meta.Serial != stored.Meta.Serial {
+				t.Fatalf("returned meta cert=%q key=%q serial=%q, stored cert=%q key=%q serial=%q",
+					next.Meta.Cert, next.Meta.Key.File, next.Meta.Serial, stored.Meta.Cert, stored.Meta.Key.File, stored.Meta.Serial)
+			}
+		})
 	}
 }
 
@@ -532,7 +587,7 @@ func TestPendingIsRefusedWhenTheCurrentCredentialChanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.savePending(*next, "not-the-current-serial"); !errors.Is(err, ErrCredentialReplaced) {
+	if _, err := store.savePending(next, "not-the-current-serial"); !errors.Is(err, ErrCredentialReplaced) {
 		t.Fatalf("savePending = %v, want ErrCredentialReplaced", err)
 	}
 	if _, err := store.LoadPending(deviceRef); !errors.Is(err, ErrNoPending) {
@@ -652,6 +707,43 @@ func TestPendingOfAReplacedCredentialIsIgnored(t *testing.T) {
 	}
 	if _, err := store.LoadPending(deviceRef); !errors.Is(err, ErrNoPending) {
 		t.Fatalf("LoadPending = %v, want ErrNoPending", err)
+	}
+}
+
+// Remove and RemoveDevices wait for the renewal lock, so a renewal in flight
+// does not write a credential into a directory being deleted.
+func TestRemoveWaitsForARenewalInFlight(t *testing.T) {
+	for name, remove := range map[string]func(*Store) error{
+		"Remove":        func(s *Store) error { return s.Remove(context.Background(), deviceRef) },
+		"RemoveDevices": func(s *Store) error { _, err := s.RemoveDevices(context.Background()); return err },
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, _ := savedDevice(t, newTestCA(t), time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+			release, held, err := (&Renewer{Store: store, Ref: deviceRef}).lock()
+			if err != nil || !held {
+				t.Fatalf("lock: held=%v err=%v", held, err)
+			}
+			var releaseOnce sync.Once
+			unlock := func() { releaseOnce.Do(release) }
+			t.Cleanup(unlock)
+			removed := make(chan error, 1)
+			go func() { removed <- remove(store) }()
+			select {
+			case err := <-removed:
+				t.Fatalf("%s returned (%v) while a renewal held the lock", name, err)
+			case <-time.After(300 * time.Millisecond):
+			}
+			if _, err := store.Load(deviceRef); err != nil {
+				t.Fatalf("credential changed under the renewal lock: %v", err)
+			}
+			unlock()
+			if err := <-removed; err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if _, err := os.Lstat(store.Dir(deviceRef)); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("credential directory still present: %v", err)
+			}
+		})
 	}
 }
 

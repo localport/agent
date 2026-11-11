@@ -207,3 +207,36 @@ func TestExecuteReportsExitErrorCode(t *testing.T) {
 		t.Fatalf("Execute = %v, %d, want a service-specific exit %d", specific, code, ExitRunLocked)
 	}
 }
+
+// restartingService reports the states in order, then Stopped, and counts
+// each Stop control.
+type restartingService struct {
+	fakeService
+	states []svc.State
+	stops  int
+}
+
+func (r *restartingService) Query() (svc.Status, error) {
+	if len(r.states) == 0 {
+		return svc.Status{State: svc.Stopped}, nil
+	}
+	state := r.states[0]
+	r.states = r.states[1:]
+	return svc.Status{State: state}, nil
+}
+
+func (r *restartingService) Control(svc.Cmd) (svc.Status, error) {
+	r.stops++
+	return svc.Status{}, nil
+}
+
+// A recovery restart during the stop wait is stopped again, not waited out.
+func TestStopStopsARecoveryRestartAgain(t *testing.T) {
+	s := &restartingService{states: []svc.State{svc.Running, svc.StopPending, svc.Running, svc.StopPending}}
+	if err := stop(context.Background(), LauncherName, s); err != nil {
+		t.Fatal(err)
+	}
+	if s.stops != 2 {
+		t.Fatalf("Stop sent %d times, want 2 (the first and once after the restart)", s.stops)
+	}
+}

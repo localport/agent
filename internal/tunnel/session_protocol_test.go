@@ -120,6 +120,8 @@ func (r *recorder) OnShutdownPolicy(_, reason, _ string, _ proto.LimitType, _ bo
 	r.shutdown = append(r.shutdown, reason)
 }
 
+func (r *recorder) OnStart(string, string) {}
+
 func (r *recorder) OnPortsUpdate(_ string, ports []proto.DevicePort) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

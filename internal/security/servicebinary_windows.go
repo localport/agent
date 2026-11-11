@@ -3,7 +3,9 @@
 package security
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"unsafe"
 
@@ -12,18 +14,44 @@ import (
 
 // Rights that let a trustee replace the entry at a path (winnt.h): DELETE,
 // WRITE_DAC, WRITE_OWNER, GENERIC_ALL and GENERIC_WRITE, and on a directory
-// FILE_DELETE_CHILD. Adding entries (FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY) is
-// not one: it cannot replace the binary, and C:\ grants it to every user.
+// FILE_DELETE_CHILD.
 const binaryReplaceRights windows.ACCESS_MASK = 0x40 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000
 
 // binaryDataRights are FILE_WRITE_DATA and FILE_APPEND_DATA, which change the
 // binary itself.
 const binaryDataRights windows.ACCESS_MASK = 0x2 | 0x4
 
+// binaryDirAddRights are FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY (the same
+// bits as binaryDataRights, read on a directory). On the binary's own
+// directory they let a trustee plant a DLL the loader finds first or an
+// <exe>.local redirection directory, so they count there. Above it they do
+// not: C:\ grants both to every user, and they replace nothing there.
+const binaryDirAddRights windows.ACCESS_MASK = 0x2 | 0x4
+
+// CheckPackageManagerBinary refuses path, the resolved executable the device
+// service would run, when winget (portable package) or Scoop installed it,
+// with ErrPackageManagerExecutable naming the manager. Scoop's roots are its
+// SCOOP and SCOOP_GLOBAL settings and their defaults, %USERPROFILE%\scoop and
+// %ProgramData%\scoop.
+func CheckPackageManagerBinary(path string) error {
+	roots := []string{os.Getenv("SCOOP"), os.Getenv("SCOOP_GLOBAL")}
+	if home := os.Getenv("USERPROFILE"); home != "" {
+		roots = append(roots, filepath.Join(home, "scoop"))
+	}
+	if data := os.Getenv("ProgramData"); data != "" {
+		roots = append(roots, filepath.Join(data, "scoop"))
+	}
+	if manager := packageManagerOf(path, roots); manager != "" {
+		return fmt.Errorf("%w: %s installed %s", ErrPackageManagerExecutable, manager, path)
+	}
+	return nil
+}
+
 // CheckServiceBinary refuses path, the resolved executable the device service
 // runs, unless the file and every directory above it are owned by SYSTEM,
 // Administrators or TrustedInstaller and no other trustee holds a right that
-// replaces an entry, or on the file itself one that writes its data.
+// replaces an entry, on the file itself one that writes its data, or on its
+// directory one that adds an entry.
 // Inherit-only ACEs are ignored. The invoking user and the service's own
 // account are never trusted here, unlike the private file checks.
 func CheckServiceBinary(path string) error {
@@ -37,8 +65,11 @@ func CheckServiceBinary(path string) error {
 	path = filepath.Clean(path)
 	for p := path; ; p = filepath.Dir(p) {
 		rights := binaryReplaceRights
-		if p == path {
+		switch p {
+		case path:
 			rights |= binaryDataRights
+		case filepath.Dir(path):
+			rights |= binaryDirAddRights
 		}
 		if err := checkBinaryEntry(p, p == path, rights, trusted); err != nil {
 			return err
@@ -47,6 +78,56 @@ func CheckServiceBinary(path string) error {
 			return nil
 		}
 	}
+}
+
+// CheckServiceDir is CheckServiceBinary for the directory a service binary
+// will be installed in: dir with the add rights and every directory above it
+// with the replace rights, so a binary placed there passes the binary rule.
+func CheckServiceDir(dir string) error {
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("%w: %s is not an absolute path", ErrUnsafeExecutable, dir)
+	}
+	trusted, err := binaryTrustees()
+	if err != nil {
+		return err
+	}
+	dir = filepath.Clean(dir)
+	for p := dir; ; p = filepath.Dir(p) {
+		rights := binaryReplaceRights
+		if p == dir {
+			rights |= binaryDirAddRights
+		}
+		if err := checkBinaryEntry(p, false, rights, trusted); err != nil {
+			return err
+		}
+		if filepath.Dir(p) == p {
+			return nil
+		}
+	}
+}
+
+// installDirSDDL is a new install directory's descriptor, as Program Files
+// grants: owner Administrators, SYSTEM and Administrators full, Users read
+// and execute, all inherited.
+const installDirSDDL = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
+
+// EnsureInstallDir creates dir with installDirSDDL when it is missing; an
+// existing directory is left as it is for CheckServiceDir to judge. Its
+// parent must exist.
+func EnsureInstallDir(dir string) error {
+	sd, err := windows.SecurityDescriptorFromString(installDirSDDL)
+	if err != nil {
+		return fmt.Errorf("build security descriptor: %w", err)
+	}
+	p, err := windows.UTF16PtrFromString(dir)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	sa := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	if err := windows.CreateDirectory(p, sa); err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	return nil
 }
 
 func binaryTrustees() ([]*windows.SID, error) {

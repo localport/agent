@@ -38,7 +38,8 @@ var ErrPendingLost = errcode.New(errcode.PendingLost)
 //   - A registration presents the pending certificate whenever one exists, so
 //     a restart after the control plane promoted it registers with it.
 //   - Once a pending certificate was presented, the one before it is never
-//     presented again: the control plane may already have superseded it.
+//     presented again: the control plane may already have superseded it. A
+//     current certificate that is neither (a new enrolment) is presented.
 //   - Store.Promote, which deletes the previous key, runs only after a
 //     RegisterAck on the pending certificate, and is retried until it lands
 //     or the store reports the pending certificate replaced or gone.
@@ -55,8 +56,10 @@ type DeviceRegistrar struct {
 	client *Client
 
 	mu sync.Mutex
-	// attempted is the serial of the last pending certificate presented.
-	attempted string
+	// attempted is the serial of the last pending certificate presented, and
+	// attemptedFrom the serial it was renewed from: the one never presented
+	// again.
+	attempted, attemptedFrom string
 	// unpromoted is a serial the edge acknowledged that Promote has not made
 	// current yet.
 	unpromoted  string
@@ -115,14 +118,20 @@ func (r *DeviceRegistrar) Present() (*Presentation, error) {
 	defer r.mu.Unlock()
 	serial := chosen.Meta.Serial
 	if !pending && r.attempted != "" && serial != r.attempted {
-		return nil, ErrPendingLost
+		// A current serial other than the attempted one and its predecessor
+		// is a new enrolment (Save drops pending.json), which starts over.
+		if r.attemptedFrom == "" || serial == r.attemptedFrom {
+			return nil, ErrPendingLost
+		}
+		r.log("identity: %s was enrolled again; registering with certificate %s", r.ref, serial)
+		r.attempted, r.attemptedFrom = "", ""
 	}
 	cert, err := chosen.TLSCertificate()
 	if err != nil {
 		return nil, fmt.Errorf("device credential %s: %w", r.ref, err)
 	}
 	if pending {
-		r.attempted = serial
+		r.attempted, r.attemptedFrom = serial, chosen.Meta.RenewedFrom
 	}
 	if r.cacheSerial != serial {
 		r.cache = tls.NewLRUClientSessionCache(4)

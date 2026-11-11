@@ -49,7 +49,7 @@ func prepareSystemLayout(ctx context.Context, file config.LocalConfigFile, m ser
 		return err
 	}
 	if convert {
-		if err := convertIdentityTree(ctx, dir, idDir, acct, m, exe); err != nil {
+		if err := convertIdentityTree(ctx, file, idDir, acct, m, exe); err != nil {
 			return err
 		}
 	}
@@ -94,8 +94,10 @@ func ensureIdentityDir(path string, acct service.Account) (convert bool, err err
 }
 
 // convertIdentityTree hands a root-owned identity tree to acct, with the
-// agent service stopped meanwhile so nothing writes into it.
-func convertIdentityTree(ctx context.Context, dir, idDir string, acct service.Account, m service.Manager, exe string) error {
+// agent service stopped and run.lock held meanwhile so nothing writes into
+// it. Every failure after the stop names the reinstall remedy.
+func convertIdentityTree(ctx context.Context, file config.LocalConfigFile, idDir string, acct service.Account, m service.Manager, exe string) error {
+	dir := filepath.Dir(file.Path)
 	installed := false
 	if m != nil {
 		var err error
@@ -114,15 +116,25 @@ func convertIdentityTree(ctx context.Context, dir, idDir string, acct service.Ac
 		}
 		return fmt.Errorf("%w\n  %s is stopped; fix the cause, then run: %s", err, m.Name(), serviceInstallCommand)
 	}
-	if err := moveSpool(filepath.Join(dir, "recordings"), filepath.Join(idDir, "recordings")); err != nil {
+	// run.lock keeps any other agent (a manual root `run`) from writing
+	// root-owned files into the tree while it changes hands. It is released
+	// before Install, whose service takes it.
+	release, err := config.LockRunContext(ctx, file, serviceRunLockWait)
+	if err != nil {
 		return stopped(err)
 	}
-	if err := chownTree(idDir, acct.UID, acct.GID); err != nil {
+	err = moveSpool(filepath.Join(dir, "recordings"), filepath.Join(idDir, "recordings"))
+	if err == nil {
+		err = chownTree(idDir, acct.UID, acct.GID)
+	}
+	if err = errors.Join(err, release()); err != nil {
 		return stopped(err)
 	}
 	fmt.Fprintf(os.Stderr, "  handed %s to the account %s\n", idDir, service.AgentAccount)
 	if installed {
-		return m.Install(ctx, exe)
+		if err := m.Install(ctx, exe); err != nil {
+			return stopped(err)
+		}
 	}
 	return nil
 }
@@ -195,8 +207,11 @@ func walkTree(fd int, path string, uid, gid int, apply bool) error {
 // store: when the identity directory holds nothing more it removes it, the
 // agent's log directory and the account. While the directory still holds
 // credentials (machine credentials from setup) the account keeps them, so a
-// reinstall finds them under the same uid.
-func removeAgentAccount(ctx context.Context, dir string) error {
+// reinstall finds them under the same uid. The device directory and the lock
+// files that stay carry the account's group; they move to group root before
+// the group goes, so a group that later reuses the gid gains nothing.
+func removeAgentAccount(ctx context.Context, file config.LocalConfigFile) error {
+	dir := filepath.Dir(file.Path)
 	idDir := filepath.Join(dir, "identity")
 	switch err := os.Remove(idDir); {
 	case err == nil, errors.Is(err, fs.ErrNotExist):
@@ -211,7 +226,12 @@ func removeAgentAccount(ctx context.Context, dir string) error {
 	if err := os.RemoveAll(service.AgentLogDir); err != nil {
 		return fmt.Errorf("remove %s: %w", service.AgentLogDir, err)
 	}
-	if err := service.RemoveAccount(ctx); errors.Is(err, service.ErrNoAccountTool) {
+	for _, path := range []string{dir, file.LockPath(), file.RunLockPath()} {
+		if err := os.Lchown(path, -1, 0); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("give %s to group root before removing the account %s: %w", path, service.AgentAccount, err)
+		}
+	}
+	if err := removeAccount(ctx); errors.Is(err, service.ErrNoAccountTool) {
 		fmt.Fprintf(os.Stderr, "  kept the account %s: this host has no userdel or deluser; the package that created it removes it\n", service.AgentAccount)
 		return nil
 	} else if err != nil {
@@ -220,6 +240,9 @@ func removeAgentAccount(ctx context.Context, dir string) error {
 	fmt.Fprintf(os.Stderr, "  removed the account %s\n", service.AgentAccount)
 	return nil
 }
+
+// removeAccount deletes the agent account; tests replace it.
+var removeAccount = service.RemoveAccount
 
 // rewriteSystemConfig rewrites an existing agent.yaml under its lock, so
 // one written before the agent account existed becomes root:localport 0640.

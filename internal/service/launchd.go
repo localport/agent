@@ -194,9 +194,8 @@ func (l launchd) Uninstall(ctx context.Context) error {
 // launchd does not know, or one in any state but running, reports 0.
 func (l launchd) MainPID(ctx context.Context) (int, error) {
 	out, err := l.run(ctx, launchctlPath, "print", target(LaunchdLabel))
-	var cmdErr *CommandError
 	switch {
-	case errors.As(err, &cmdErr) && cmdErr.ExitCode > 0:
+	case launchdNotFound(err):
 		return 0, nil
 	case err != nil:
 		return 0, err
@@ -222,19 +221,27 @@ func (l launchd) MainPID(ctx context.Context) (int, error) {
 	return pid, nil
 }
 
-// loaded reports whether launchd knows label; print exits non-zero for one
-// it does not.
+// loaded reports whether launchd knows label; print exits
+// launchctlNotFound for one it does not, and any other failure is an error.
 func (l launchd) loaded(ctx context.Context, label string) (bool, error) {
 	_, err := l.run(ctx, launchctlPath, "print", target(label))
-	var cmdErr *CommandError
 	switch {
 	case err == nil:
 		return true, nil
-	case errors.As(err, &cmdErr) && cmdErr.ExitCode > 0:
+	case launchdNotFound(err):
 		return false, nil
 	default:
 		return false, err
 	}
+}
+
+// launchctlNotFound is launchctl print's exit status for a label launchd
+// does not know (113, in the gui/ and system/ domains).
+const launchctlNotFound = 113
+
+func launchdNotFound(err error) bool {
+	var cmdErr *CommandError
+	return errors.As(err, &cmdErr) && cmdErr.ExitCode == launchctlNotFound
 }
 
 // bootoutIfLoaded boots label out when launchd has it loaded and waits, at

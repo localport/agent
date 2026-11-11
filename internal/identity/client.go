@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	mrand "math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -133,12 +134,15 @@ func (e *APIError) RetryAfter() (time.Duration, bool) {
 	return e.retryAfter, e.retryAfter > 0
 }
 
-// isRetryable reports whether a retry could succeed. Transport failures, 5xx
-// and 429 are retryable. Other 4xx responses are refusals.
+// Retryable reports whether a retry of a control-plane call could succeed:
+// a 429 or 5xx answer, a transport failure (DNS, dial, TLS, timeout, reset)
+// or a truncated response body. Other 4xx answers are refusals, and local
+// failures (signing, request encoding) and a malformed success body are
+// final, since repeating the call repeats them.
 //
 // Cancellation is checked by retry on ctx. http.Client.Timeout also matches
 // context.DeadlineExceeded, so the error cannot tell the two apart.
-func isRetryable(err error) bool {
+func Retryable(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -146,9 +150,9 @@ func isRetryable(err error) bool {
 	if errors.As(err, &apiErr) {
 		return apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= 500
 	}
-	// No status means a transport failure such as DNS, dial, TLS, timeout,
-	// reset or truncated body.
-	return true
+	var transport *url.Error
+	var netErr net.Error
+	return errors.As(err, &transport) || errors.As(err, &netErr) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 const (
@@ -176,11 +180,11 @@ func retry(ctx context.Context, budget time.Duration, onWait RetryNotice, fn fun
 		if err == nil {
 			return nil
 		}
-		// Check ctx. See isRetryable.
+		// Check ctx. See Retryable.
 		if ctx.Err() != nil {
 			return err
 		}
-		if !isRetryable(err) {
+		if !Retryable(err) {
 			return err
 		}
 
@@ -301,7 +305,7 @@ func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue
 		return fmt.Errorf("read %s response: %w", path, err)
 	}
 	if isRedirect(resp.StatusCode) {
-		// an APIError with the 3xx status is terminal for isRetryable, so the
+		// an APIError with the 3xx status is terminal for Retryable, so the
 		// credential is not resent.
 		return &APIError{
 			Path:    path,

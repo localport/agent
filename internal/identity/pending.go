@@ -95,9 +95,10 @@ func (s *Store) readPair(ref Ref) (cur Meta, pending *Meta, err error) {
 // serial is renewedFrom. It stores the certificate only; m.DeviceKeys is the
 // caller's to pass to TicketKeys.Replace. The caller holds the renewal lock.
 // A pending credential already present is replaced, as the control plane
-// revokes it when it issues the next one.
-func (s *Store) savePending(m Material, renewedFrom string) (Ref, error) {
-	ref, dir, err := s.prepare(&m)
+// revokes it when it issues the next one. m.Meta is completed in place, so
+// the caller's Material names the files as stored.
+func (s *Store) savePending(m *Material, renewedFrom string) (Ref, error) {
+	ref, dir, err := s.prepare(m)
 	if err != nil {
 		return Ref{}, err
 	}
@@ -109,7 +110,7 @@ func (s *Store) savePending(m Material, renewedFrom string) (Ref, error) {
 	if cur.Serial != renewedFrom {
 		return Ref{}, ErrCredentialReplaced
 	}
-	if err := writeKeyMaterial(dir, &m); err != nil {
+	if err := writeKeyMaterial(dir, m); err != nil {
 		return Ref{}, err
 	}
 	if err := writeMeta(dir, pendingFile, m.Meta); err != nil {

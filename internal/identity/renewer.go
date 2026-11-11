@@ -98,12 +98,12 @@ func (r *Renewer) renewLocked(ctx context.Context, client *Client, cur *Material
 		return nil, err
 	}
 	if cur.Meta.Kind != KindDevice {
-		if _, err := r.Store.saveLocked(*next); err != nil {
+		if _, err := r.Store.saveLocked(next); err != nil {
 			return nil, err
 		}
 		return next, nil
 	}
-	ref, err := r.Store.savePending(*next, cur.Meta.Serial)
+	ref, err := r.Store.savePending(next, cur.Meta.Serial)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +178,7 @@ func (r *Renewer) RenewPending(ctx context.Context) (*Material, error) {
 	if err != nil {
 		return nil, err
 	}
-	ref, err := r.Store.savePending(*next, cur.Meta.Serial)
+	ref, err := r.Store.savePending(next, cur.Meta.Serial)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +292,7 @@ func (r *Renewer) Run(ctx context.Context) {
 			if asked, ok := serverRetryAfter(err); ok && asked > base {
 				base = min(asked, maxRetry)
 			}
-			wait := withJitter(base)
+			wait := renewalWait(base)
 			r.log("identity: renewal failed, retrying in %s: %v", wait.Round(time.Second), err)
 			if !sleepCtx(ctx, wait) {
 				return
@@ -313,6 +313,14 @@ func nextRetry(d time.Duration) time.Duration {
 		return maxRetry
 	}
 	return d
+}
+
+// renewalWait is the wait before the next renewal attempt: base plus up to
+// half of base, never earlier than base (a Retry-After is honoured). The
+// spread grows with the backoff, so devices refused together at a long
+// backoff do not return in step.
+func renewalWait(base time.Duration) time.Duration {
+	return base + jitter(base/2)
 }
 
 // sleepCtx reports whether the sleep completed rather than being cancelled.

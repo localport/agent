@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -15,7 +17,13 @@ const (
 	OpenRCService         = "localport-device"
 	OpenRCLauncherService = "localport-session"
 	openrcInitDir         = "/etc/init.d"
+	openrcRunlevelDir     = "/etc/runlevels"
 )
+
+// openrcNotRunning are the exit statuses of `rc-service <name> status` for a
+// service that is not started: stopped 3, stopping 4, starting 8, inactive
+// 16, crashed 32 (openrc-run.sh _status). Exit 1 is rc-service's own failure.
+var openrcNotRunning = []int{3, 4, 8, 16, 32}
 
 // The OpenRC logs: supervise-daemon opens an output_log once, so each
 // process opens and rotates its own (--log-file), as under launchd.
@@ -29,6 +37,9 @@ const (
 // services in the default runlevel.
 type openrc struct {
 	initDir string
+	// runlevelDir holds a directory per runlevel with a link per service in
+	// it (/etc/runlevels).
+	runlevelDir string
 	// rcService and rcUpdate are the absolute paths of rc-service and
 	// rc-update.
 	rcService, rcUpdate string
@@ -52,11 +63,12 @@ func (o openrc) Check() ([]string, error) { return nil, checkOwned(o.paths()...)
 func (o openrc) Installed() (bool, error) { return owned(o.script(OpenRCService)) }
 
 // MainPID asks the agent's script for the child pid supervise-daemon
-// records; a service that is not started reports 0 (status exits non-zero).
+// records; a service status reports as not started (openrcNotRunning)
+// reports 0, and any other failure is an error.
 func (o openrc) MainPID(ctx context.Context) (int, error) {
 	if _, err := o.run(ctx, o.rcService, OpenRCService, "status"); err != nil {
 		var cmdErr *CommandError
-		if errors.As(err, &cmdErr) && cmdErr.ExitCode > 0 {
+		if errors.As(err, &cmdErr) && slices.Contains(openrcNotRunning, cmdErr.ExitCode) {
 			return 0, nil
 		}
 		return 0, err
@@ -148,10 +160,12 @@ func (o openrc) Uninstall(ctx context.Context) error {
 		if _, err := o.run(ctx, o.rcService, name, "stop"); err != nil {
 			return err
 		}
-		if _, err := o.run(ctx, o.rcUpdate, "del", name); err != nil {
-			var cmdErr *CommandError
-			// del exits non-zero when the service is in no runlevel.
-			if !errors.As(err, &cmdErr) || cmdErr.ExitCode <= 0 {
+		runlevels, err := o.runlevelsOf(name)
+		if err != nil {
+			return err
+		}
+		for _, runlevel := range runlevels {
+			if _, err := o.run(ctx, o.rcUpdate, "del", name, runlevel); err != nil {
 				return err
 			}
 		}
@@ -160,6 +174,29 @@ func (o openrc) Uninstall(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// runlevelsOf lists the runlevels that link name. rc-update del exits 1
+// alike for "not in that runlevel" and for a real failure, so Uninstall
+// deletes only where a link exists and treats every failure as an error.
+func (o openrc) runlevelsOf(name string) ([]string, error) {
+	levels, err := os.ReadDir(o.runlevelDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", o.runlevelDir, err)
+	}
+	var in []string
+	for _, level := range levels {
+		switch _, err := os.Lstat(filepath.Join(o.runlevelDir, level.Name(), name)); {
+		case err == nil:
+			in = append(in, level.Name())
+		case !errors.Is(err, os.ErrNotExist):
+			return nil, fmt.Errorf("inspect runlevel %s: %w", level.Name(), err)
+		}
+	}
+	return in, nil
 }
 
 // openrcScripts are the init scripts for the agent at exe and the launcher

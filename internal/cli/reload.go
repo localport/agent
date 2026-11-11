@@ -172,11 +172,22 @@ func (r *deviceRunner) isConfigured(identifier string) bool {
 	return devices != nil && slices.ContainsFunc(*devices, func(d config.LocalDevice) bool { return d.Identity.Identity == identifier })
 }
 
+// notifyReload subscribes to reload signals; tests replace it.
+var notifyReload = reloadSignals
+
 // watchReload runs reload on every reload signal until ctx ends. A config
-// that fails to load keeps the running devices and is logged.
+// that fails to load keeps the running devices and is logged. It subscribes
+// first, so a signal sent before the agent runs is queued (not lost, and on
+// Unix not the default SIGHUP exit), and handles it once the agent has
+// started.
 func (r *deviceRunner) watchReload(ctx context.Context, a *agent.Agent, load func() ([]config.LocalDevice, error)) {
 	sig, stop := notifyReload()
 	defer stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-a.Started():
+	}
 	for {
 		select {
 		case <-ctx.Done():

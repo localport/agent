@@ -87,6 +87,24 @@ func TestLockRunRecordsTheHolderPID(t *testing.T) {
 	}
 }
 
+// Release clears the record before unlocking, so a process that takes the
+// lock next never shows its predecessor's PID before it records its own:
+// connect's check would otherwise match a stopped service's PID that its
+// manager still reports.
+func TestLockRunReleaseClearsTheHolderPID(t *testing.T) {
+	f := testRunFile(t)
+	release, err := LockRun(f, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	if pid, err := RunLockHolder(f); err != nil || pid != 0 {
+		t.Fatalf("RunLockHolder after release = %d, %v, want 0", pid, err)
+	}
+}
+
 // A cancelled context ends the wait for run.lock at once.
 func TestLockRunContextEndsTheWaitWithTheContext(t *testing.T) {
 	f := testRunFile(t)

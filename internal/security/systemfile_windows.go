@@ -80,6 +80,71 @@ func lockRights(perm os.FileMode) (string, windows.ACCESS_MASK) {
 	return "", 0
 }
 
+// serviceCrashAccess is modify (read, write, execute, delete; SDDL 0x1301bf):
+// the device service creates, rotates and removes its own crash files.
+const serviceCrashAccess = fileGenericRead | fileGenericWrite | fileGenericExecute | windows.DELETE
+
+// crashSDDL is a crash directory's descriptor: owner Administrators, SYSTEM
+// and Administrators full, and with deviceService the device service modify,
+// every entry inherited by files and subdirectories.
+func crashSDDL(deviceService bool) string {
+	sddl := "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+	if deviceService {
+		sddl += fmt.Sprintf("(A;OICI;%#x;;;%s)", uint32(serviceCrashAccess), ServiceSID(WindowsServiceName))
+	}
+	return sddl
+}
+
+// EnsureCrashDir creates the crash directory dir and its parents when missing
+// and sets its owner and protected DACL (crashSDDL): the device service's
+// directory with deviceService, the session launcher's without, which the
+// device service cannot reach at all. An elevated Administrator only. A
+// directory owned by anyone but SYSTEM or Administrators is refused.
+func EnsureCrashDir(dir string, deviceService bool) error {
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(dir), err)
+	}
+	sd, err := windows.SecurityDescriptorFromString(crashSDDL(deviceService))
+	if err != nil {
+		return fmt.Errorf("build security descriptor: %w", err)
+	}
+	p, err := windows.UTF16PtrFromString(dir)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	sa := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	if err := windows.CreateDirectory(p, sa); err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	h, err := openSystemHandle(dir, windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES, windows.OPEN_EXISTING, nil, true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+	if err := checkSystemOwner(h, dir); err != nil {
+		return err
+	}
+	return applySystemDescriptor(h, dir, sd)
+}
+
+// CheckCrashDir refuses the crash directory dir unless it is a directory, not
+// a reparse point, owned by SYSTEM or Administrators, and its DACL grants the
+// device service at most modify (deviceService) or nothing, and nobody else
+// anything. Files inside are not owner-checked: the device service creates
+// its own.
+func CheckCrashDir(dir string, deviceService bool) error {
+	h, err := openSystemHandle(dir, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES, windows.OPEN_EXISTING, nil, true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+	access := windows.ACCESS_MASK(0)
+	if deviceService {
+		access = serviceCrashAccess
+	}
+	return checkSystemObject(h, dir, access)
+}
+
 // CheckSystemDir refuses dir unless it is a directory, not a reparse point,
 // owned by SYSTEM or Administrators, and its DACL grants the device service
 // at most read and traverse and nobody else anything. It changes nothing.

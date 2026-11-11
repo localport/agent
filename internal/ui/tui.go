@@ -50,6 +50,9 @@ type TUI struct {
 // tState holds per-tunnel state from EventHandler callbacks. Live counters and
 // remote addresses are read from the tunnel at render time.
 type tState struct {
+	// key is the tunnel's EventKey (device identity or tunnel label), which
+	// events and live counters are keyed on; name is what the row shows.
+	key         string
 	name        string
 	tunnelName  string
 	region      string
@@ -144,14 +147,28 @@ func (t *TUI) SetTunnelProvider(p func() []*tunnel.Tunnel) {
 func (t *TUI) Banner(version string, cfg *config.Config) {
 	t.mu.Lock()
 	t.version = version
-	add := func(name, protocol, local string, device bool, allowed ports.Ceiling) {
+	t.registerLocked(cfg)
+	t.cols, t.rows = TermSize(t.out)
+	t.mu.Unlock()
+
+	t.start()
+}
+
+// registerLocked adds a row per configured tunnel and device. The caller holds
+// mu.
+func (t *TUI) registerLocked(cfg *config.Config) {
+	add := func(key, name, protocol, local string, device bool, allowed ports.Ceiling) {
 		if name == "" {
 			name = "default"
 		}
-		if _, ok := t.tunnels[name]; !ok {
-			t.order = append(t.order, name)
+		if key == "" {
+			key = name
 		}
-		t.tunnels[name] = &tState{
+		if _, ok := t.tunnels[key]; !ok {
+			t.order = append(t.order, key)
+		}
+		t.tunnels[key] = &tState{
+			key:     key,
 			name:    name,
 			proto:   protocol,
 			local:   local,
@@ -164,18 +181,14 @@ func (t *TUI) Banner(version string, cfg *config.Config) {
 		if t.edge == "" {
 			t.edge = spec.Edge
 		}
-		add(spec.Name, spec.Protocol, spec.Local, false, nil)
+		add(spec.Name, spec.Name, spec.Protocol, spec.Local, false, nil)
 	}
 	for _, device := range cfg.Devices {
 		if t.edge == "" {
 			t.edge = device.Edge
 		}
-		add(device.Name, "", device.Host, true, device.AllowPorts)
+		add(device.Identity, device.Name, "", device.Host, true, device.AllowPorts)
 	}
-	t.cols, t.rows = TermSize(t.out)
-	t.mu.Unlock()
-
-	t.start()
 }
 
 func (t *TUI) start() {
@@ -503,17 +516,34 @@ func (t *TUI) OnShutdownPolicy(label, reason, code string, lt proto.LimitType, _
 
 // Internals.
 
-func (t *TUI) ensure(label string) *tState {
-	if label == "" {
-		label = "default"
+// OnStart names the row of key (a tunnel added by a reload has none yet).
+func (t *TUI) OnStart(key, label string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if ts := t.ensure(key); label != "" {
+		ts.name = label
 	}
-	ts, ok := t.tunnels[label]
+}
+
+// ensure returns the row of the tunnel whose EventKey is key, adding one
+// named key when neither Banner nor OnStart registered it.
+func (t *TUI) ensure(key string) *tState {
+	key = rowKey(key)
+	ts, ok := t.tunnels[key]
 	if !ok {
-		ts = &tState{name: label, state: tunnel.StateIdle}
-		t.tunnels[label] = ts
-		t.order = append(t.order, label)
+		ts = &tState{key: key, name: key, state: tunnel.StateIdle}
+		t.tunnels[key] = ts
+		t.order = append(t.order, key)
 	}
 	return ts
+}
+
+// rowKey is the row key of an EventKey; an unnamed tunnel is "default".
+func rowKey(key string) string {
+	if key == "" {
+		return "default"
+	}
+	return key
 }
 
 func (t *TUI) snapshot() snap {
@@ -539,10 +569,10 @@ func (t *TUI) snapshot() snap {
 	reqs := make(map[string][]tunnel.RequestInfo, len(tunnels))
 	if t.provider != nil {
 		for _, tun := range t.provider() {
-			label := tun.Label()
-			conns[label] = tun.ActiveConnections()
-			stats[label] = tun.Stats()
-			reqs[label] = tun.RecentRequests()
+			key := rowKey(tun.EventKey())
+			conns[key] = tun.ActiveConnections()
+			stats[key] = tun.Stats()
+			reqs[key] = tun.RecentRequests()
 		}
 	}
 

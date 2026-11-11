@@ -102,7 +102,7 @@ func (s *Store) DesktopPins(ref Ref) (*DesktopPins, error) {
 // Lookup returns the key pinned for kind at target; held is false when none
 // is pinned, or the pin names another target.
 func (p *DesktopPins) Lookup(kind, target string) (key [32]byte, held bool, err error) {
-	pins, err := p.read()
+	pins, _, err := p.read()
 	if err != nil {
 		return key, false, err
 	}
@@ -188,18 +188,18 @@ func (p *DesktopPins) updateOrDiscard(ctx context.Context, discard bool, change 
 		return false, err
 	}
 	defer release()
-	pins, err := p.read()
+	pins, dirTrusted, err := p.read()
+	if p.afterRead != nil {
+		p.afterRead()
+	}
 	if err != nil {
-		if !discard || p.store.trusted(p.dir) != nil {
+		if !discard || !dirTrusted {
 			return false, err
 		}
-		if rmErr := os.Remove(filepath.Join(p.dir, desktopPinsFile)); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+		if rmErr := removeSharedFile(ctx, filepath.Join(p.dir, desktopPinsFile), pinsLockWait); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
 			return false, fmt.Errorf("%w: remove: %w", err, rmErr)
 		}
 		pins, discarded = map[string]desktopPin{}, true
-	}
-	if p.afterRead != nil {
-		p.afterRead()
 	}
 	if !change(pins) {
 		return discarded, nil
@@ -207,29 +207,49 @@ func (p *DesktopPins) updateOrDiscard(ctx context.Context, discard bool, change 
 	return discarded, p.write(pins)
 }
 
+// removeSharedFile removes path, retrying a Windows sharing violation (another
+// process holds the file open without delete sharing) every lockPollInterval
+// for up to wait. Other errors return at once.
+func removeSharedFile(ctx context.Context, path string, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		err := os.Remove(path)
+		if !isSharingViolation(err) || time.Now().Add(lockPollInterval).After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(lockPollInterval):
+		}
+	}
+}
+
 // read returns the validated pins; an absent file is an empty set. The
-// directory passes the same trust checks as the credential's.
-func (p *DesktopPins) read() (map[string]desktopPin, error) {
+// directory passes the same trust checks as the credential's; dirTrusted
+// reports that check, so a caller deciding on the file acts on the same
+// result.
+func (p *DesktopPins) read() (pins map[string]desktopPin, dirTrusted bool, err error) {
 	if err := p.store.trusted(p.dir); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrDesktopPinsUnreadable, err)
+		return nil, false, fmt.Errorf("%w: %w", ErrDesktopPinsUnreadable, err)
 	}
 	raw, err := security.ReadPrivateFile(filepath.Join(p.dir, desktopPinsFile))
 	if errors.Is(err, fs.ErrNotExist) {
-		return map[string]desktopPin{}, nil
+		return map[string]desktopPin{}, true, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrDesktopPinsUnreadable, err)
+		return nil, true, fmt.Errorf("%w: %w", ErrDesktopPinsUnreadable, err)
 	}
-	pins := map[string]desktopPin{}
+	pins = map[string]desktopPin{}
 	if err := json.Unmarshal(raw, &pins); err != nil {
-		return nil, fmt.Errorf("%w: parse: %w", ErrDesktopPinsUnreadable, err)
+		return nil, true, fmt.Errorf("%w: parse: %w", ErrDesktopPinsUnreadable, err)
 	}
 	for kind, pin := range pins {
 		if b, err := hex.DecodeString(pin.KeySHA256); err != nil || len(b) != 32 || kind == "" || pin.Target == "" {
-			return nil, fmt.Errorf("%w: invalid pin for %q", ErrDesktopPinsUnreadable, security.SanitizeDisplay(kind))
+			return nil, true, fmt.Errorf("%w: invalid pin for %q", ErrDesktopPinsUnreadable, security.SanitizeDisplay(kind))
 		}
 	}
-	return pins, nil
+	return pins, true, nil
 }
 
 func (p *DesktopPins) write(pins map[string]desktopPin) error {

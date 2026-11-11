@@ -31,16 +31,22 @@ type Agent struct {
 	// ctx and handler are Run's, for the tunnels Apply starts.
 	ctx     context.Context
 	handler tunnel.EventHandler
+	// started is closed once Run holds ctx, so Apply no longer refuses.
+	started chan struct{}
 }
 
 // ErrNotRunning refuses an Apply before Run or after every tunnel ended.
 var ErrNotRunning = errors.New("the agent is not running")
 
 func New(cfg *config.Config) *Agent {
-	a := &Agent{cfg: cfg, exited: map[*tunnel.Tunnel]chan struct{}{}}
+	a := &Agent{cfg: cfg, exited: map[*tunnel.Tunnel]chan struct{}{}, started: make(chan struct{})}
 	a.idle = sync.NewCond(&a.mu)
 	return a
 }
+
+// Started is closed once Run has started its endpoints and Apply accepts
+// changes. Run is called once per Agent.
+func (a *Agent) Started() <-chan struct{} { return a.started }
 
 // Run starts every endpoint with handler and blocks until all return.
 //
@@ -88,6 +94,7 @@ func (a *Agent) Run(ctx context.Context, handler tunnel.EventHandler) error {
 	for _, device := range a.cfg.Devices {
 		a.startLocked(deviceOptions(device))
 	}
+	close(a.started)
 	for a.live > 0 {
 		a.idle.Wait()
 	}

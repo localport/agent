@@ -173,7 +173,9 @@ func runIdentityRemove(args []string) error {
 	}
 
 	dir := store.Dir(ref)
-	if err := store.Remove(ref); err != nil {
+	ctx, cancel := signalContext(nil)
+	defer cancel()
+	if err := store.Remove(ctx, ref); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "  removed %s\n", ref)

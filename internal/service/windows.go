@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -472,17 +474,132 @@ func stop(ctx context.Context, name string, s winService) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("stop service %s: %w", WindowsName, ctx.Err())
+			return fmt.Errorf("stop service %s: %w", name, ctx.Err())
 		case <-tick.C:
 		}
 		status, err := s.Query()
 		if err != nil {
-			return fmt.Errorf("query service %s: %w", WindowsName, err)
+			return fmt.Errorf("query service %s: %w", name, err)
 		}
-		if status.State == svc.Stopped {
+		switch status.State {
+		case svc.Stopped:
 			return nil
+		case svc.Running:
+			// A recovery action restarted the service during the wait.
+			if _, err := s.Control(svc.Stop); err != nil && !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) {
+				return fmt.Errorf("stop service %s: %w", name, err)
+			}
 		}
 	}
+}
+
+// ownedServiceNames are the services the installer stops and starts around a
+// commit, the launcher after the device service that uses it.
+var ownedServiceNames = []string{WindowsName, LauncherName}
+
+// StopOwned stops each owned service that is not stopped, waiting until it
+// is, and returns the names it stopped. A service missing is skipped; one
+// localport did not create under either name is refused.
+func StopOwned(ctx context.Context) ([]string, error) {
+	var stopped []string
+	for _, name := range ownedServiceNames {
+		err := openService(name, func(_ *mgr.Mgr, s *mgr.Service) error {
+			if s == nil {
+				return nil
+			}
+			if _, err := ownedService(name, s); err != nil {
+				return err
+			}
+			status, err := s.Query()
+			if err != nil {
+				return fmt.Errorf("query service %s: %w", name, err)
+			}
+			if status.State == svc.Stopped {
+				return nil
+			}
+			if err := stop(ctx, name, scmService{s}); err != nil {
+				return err
+			}
+			stopped = append(stopped, name)
+			return nil
+		})
+		if err != nil {
+			return stopped, err
+		}
+	}
+	return stopped, nil
+}
+
+// StartOwned starts names, or with none every owned service, the launcher
+// first; a service already running or missing is skipped.
+func StartOwned(names []string) error {
+	if names == nil {
+		names = ownedServiceNames
+	}
+	var errs []error
+	for _, name := range []string{LauncherName, WindowsName} {
+		if !slices.Contains(names, name) {
+			continue
+		}
+		errs = append(errs, openService(name, func(_ *mgr.Mgr, s *mgr.Service) error {
+			if s == nil {
+				return nil
+			}
+			if _, err := ownedService(name, s); err != nil {
+				return err
+			}
+			if err := s.Start(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
+				return fmt.Errorf("start service %s: %w", name, err)
+			}
+			return nil
+		}))
+	}
+	return errors.Join(errs...)
+}
+
+// ForeignServicesIn lists the services localport did not create whose
+// program is inside dir; uninstalling dir would break them.
+func ForeignServicesIn(dir string) ([]string, error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		return nil, fmt.Errorf("connect to the service control manager: %w", err)
+	}
+	defer func() { _ = m.Disconnect() }()
+	names, err := m.ListServices()
+	if err != nil {
+		return nil, fmt.Errorf("list services: %w", err)
+	}
+	prefix := strings.ToLower(strings.TrimRight(filepath.Clean(dir), `\`)) + `\`
+	var foreign []string
+	for _, name := range names {
+		s, err := m.OpenService(name)
+		if err != nil {
+			continue // a service deleted meanwhile, or one this account cannot read
+		}
+		cfg, err := s.Config()
+		s.Close()
+		if err != nil || strings.Contains(cfg.Description, Marker) {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(imagePath(cfg.BinaryPathName)), prefix) {
+			foreign = append(foreign, name)
+		}
+	}
+	return foreign, nil
+}
+
+// imagePath is the program of a service command line: the quoted first
+// argument, or the text up to the first space.
+func imagePath(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if strings.HasPrefix(cmd, `"`) {
+		if end := strings.Index(cmd[1:], `"`); end >= 0 {
+			return cmd[1 : end+1]
+		}
+		return cmd[1:]
+	}
+	program, _, _ := strings.Cut(cmd, " ")
+	return program
 }
 
 // RunUnderSCM reports whether the service control manager started this
@@ -494,17 +611,50 @@ func stop(ctx context.Context, name string, s winService) error {
 // and then SERVICE_RUNNING accepting Stop and Shutdown, which cancel serve's
 // context. Standard error and the log package's output go to the Event Log
 // under the source WindowsName while serve runs. The device service also
-// accepts SERVICE_CONTROL_PARAMCHANGE, delivered on ParamChanges.
-func RunUnderSCM(serve func(ctx context.Context, running func()) error) (bool, error) {
-	return runUnderSCM(WindowsName, serve, notifyParamChange)
+// accepts SERVICE_CONTROL_PARAMCHANGE, delivered on ParamChanges. Before
+// serve, a fatal error of the previous run is kept and reported, and the Go
+// runtime's fatal output goes to the service's crash directory (CrashDir).
+// version is the agent version the crash report names.
+func RunUnderSCM(version string, serve func(ctx context.Context, running func()) error) (bool, error) {
+	return runUnderSCM(WindowsName, version, serve, notifyParamChange)
 }
 
 // RunLauncherUnderSCM is RunUnderSCM for the session launcher service.
-func RunLauncherUnderSCM(serve func(ctx context.Context, running func()) error) (bool, error) {
-	return runUnderSCM(LauncherName, serve, nil)
+func RunLauncherUnderSCM(version string, serve func(ctx context.Context, running func()) error) (bool, error) {
+	return runUnderSCM(LauncherName, version, serve, nil)
 }
 
-func runUnderSCM(name string, serve func(ctx context.Context, running func()) error, paramChange func()) (bool, error) {
+// Event Log event IDs of crash capture.
+const (
+	eventCrashKept    = 3
+	eventCrashWarning = 4
+)
+
+// CrashRoot is the directory holding each service's crash directory,
+// %ProgramData%\localport-device\crash; "" when %ProgramData% is unset.
+func CrashRoot() string {
+	data := os.Getenv("ProgramData")
+	if data == "" {
+		return ""
+	}
+	return filepath.Join(data, "localport-device", "crash")
+}
+
+// CrashDir is the crash directory of the service name and whether the device
+// service may write it: crash\device for the device service, crash\launcher
+// (the device service has no access) for the session launcher.
+func CrashDir(name string) (dir string, deviceService bool) {
+	root := CrashRoot()
+	if root == "" {
+		return "", false
+	}
+	if name == LauncherName {
+		return filepath.Join(root, "launcher"), false
+	}
+	return filepath.Join(root, "device"), true
+}
+
+func runUnderSCM(name, version string, serve func(ctx context.Context, running func()) error, paramChange func()) (bool, error) {
 	isService, err := svc.IsWindowsService()
 	if err != nil {
 		return false, fmt.Errorf("detect the service control manager: %w", err)
@@ -515,12 +665,20 @@ func runUnderSCM(name string, serve func(ctx context.Context, running func()) er
 	h := &scmHandler{name: name, serve: serve, paramChange: paramChange}
 	// Without the Event Log the service still runs; the manager records its
 	// exit code.
+	warn, report := func(string) {}, func(string) {}
 	if elog, err := eventlog.Open(name); err == nil {
 		defer elog.Close()
 		h.log = elog
+		warn = func(msg string) { _ = elog.Warning(eventCrashWarning, msg) }
+		report = func(msg string) { _ = elog.Error(eventCrashKept, msg) }
 		if restore, err := stderrToEventLog(elog); err == nil {
 			defer restore()
 		}
+	}
+	if dir, deviceService := CrashDir(name); dir != "" {
+		captureCrashes(dir, name, version, func(d string) error { return security.CheckCrashDir(d, deviceService) }, warn, report)
+	} else {
+		warn(name + ": crash capture is off: %ProgramData% is not set")
 	}
 	if err := svc.Run(name, h); err != nil {
 		return true, fmt.Errorf("run service %s: %w", name, err)

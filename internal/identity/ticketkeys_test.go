@@ -114,23 +114,46 @@ func TestReplaceValidatesTheRecordingKey(t *testing.T) {
 	}
 }
 
-// A ticket_keys.json whose recording key does not parse is refused on read,
-// and memory keeps the key held before.
-func TestTicketKeysLoadRefusesACorruptRecordingKey(t *testing.T) {
+// A ticket_keys.json whose recording key does not parse still loads its
+// ticket keys: the recording key is dropped (reported by ErrRecordingKeyDropped),
+// memory keeps the key held before, a fresh process holds none, and the next
+// Replace repairs the file.
+func TestTicketKeysLoadDropsACorruptRecordingKey(t *testing.T) {
 	store := deviceTicketKeys(t)
 	keys := store.mustTicketKeys(deviceRef)
 	if err := keys.Replace(context.Background(), keys.Generation(), keySet(tk1)); err != nil {
 		t.Fatal(err)
 	}
 	want, _ := base64.RawURLEncoding.DecodeString(testRecordingKey(1))
-	body := fmt.Sprintf(`{"keys":[],"revoked":[],"recording_key":%q}`, base64.RawURLEncoding.EncodeToString(make([]byte, 64)))
-	if err := security.WritePrivateFileAtomic(filepath.Join(store.Dir(deviceRef), ticketKeysFile), []byte(body)); err != nil {
+	body, err := json.Marshal(ticketKeysRecord{Keys: []TicketKey{tk2}, RecordingKey: base64.RawURLEncoding.EncodeToString(make([]byte, 64))})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := keys.Load(); !errors.Is(err, ErrTicketKeysUnreadable) {
-		t.Fatalf("Load = %v, want ErrTicketKeysUnreadable", err)
+	if err := security.WritePrivateFileAtomic(filepath.Join(store.Dir(deviceRef), ticketKeysFile), body); err != nil {
+		t.Fatal(err)
 	}
+	if err := keys.Load(); !errors.Is(err, ErrRecordingKeyDropped) {
+		t.Fatalf("Load = %v, want ErrRecordingKeyDropped", err)
+	}
+	assertKIDs(t, keys, []string{"k2"}, []string{"k1"})
 	assertHeldRecordingKey(t, keys, want)
+
+	fresh := (&Store{Root: store.Root}).mustTicketKeys(deviceRef)
+	if err := fresh.Load(); !errors.Is(err, ErrRecordingKeyDropped) {
+		t.Fatalf("fresh Load = %v, want ErrRecordingKeyDropped", err)
+	}
+	assertKIDs(t, fresh, []string{"k2"}, nil)
+	if _, _, ok := fresh.RecordingKey(); ok {
+		t.Fatal("a fresh process holds the dropped recording key")
+	}
+
+	if err := fresh.Replace(context.Background(), fresh.Generation(), keySet(tk1)); err != nil {
+		t.Fatalf("Replace over the dropped key: %v", err)
+	}
+	if rec := fresh.loaded(t); rec.RecordingKey != testRecordingKey(1) {
+		t.Fatalf("file recording key = %q after Replace, want it repaired", rec.RecordingKey)
+	}
+	assertHeldRecordingKey(t, fresh, want)
 }
 
 func assertHeldRecordingKey(t *testing.T, keys *TicketKeys, want []byte) {
@@ -293,7 +316,7 @@ func TestStoreRemoveDeletesTheTicketKeys(t *testing.T) {
 	if err := keys.Replace(context.Background(), keys.Generation(), keySet(tk1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Remove(deviceRef); err != nil {
+	if err := store.Remove(context.Background(), deviceRef); err != nil {
 		t.Fatal(err)
 	}
 	fresh := store.mustTicketKeys(deviceRef)

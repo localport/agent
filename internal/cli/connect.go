@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -165,6 +166,9 @@ func runConnect(version string, args []string) (retErr error) {
 	ref := res.Ref
 
 	inForce, err := recordDevice(file, fs, device, who, ref, d)
+	if errors.Is(err, errDeviceNotRecorded) {
+		return errors.Join(err, forgetUnrecorded(store, viaChild, ref))
+	}
 	// The device is in the config whenever its entry is in force, even when
 	// recordDevice kept the stored settings; the service must then restart
 	// to load the new credential.
@@ -358,14 +362,20 @@ func holdRunLock(ctx context.Context, file config.LocalConfigFile, command strin
 }
 
 // unsafeBinaryRemedy follows a security.ErrUnsafeExecutable refusal.
-const unsafeBinaryRemedy = `install localport into a directory only root or Administrators can write, then call it by its absolute path: run the install script under sudo (it installs to /usr/local/bin, or /opt/localport/bin when /usr/local/bin is not root-owned) and use sudo /usr/local/bin/localport connect ..., or run install.ps1 elevated and use & "$env:ProgramFiles\Localport\localport.exe" connect ...; a Homebrew, Scoop, winget or user-profile install cannot run the device service`
+const unsafeBinaryRemedy = `install localport into a directory only root or Administrators can write, then call it by its absolute path: run the install script under sudo (it installs to /usr/local/bin, or /opt/localport/bin when /usr/local/bin is not root-owned) and use sudo /usr/local/bin/localport connect ..., or on Windows run the Localport installer (or install.ps1 elevated, which runs it) and use & "$env:ProgramFiles\Localport\localport.exe" connect ...; a Homebrew, Scoop, winget portable or user-profile install cannot run the device service`
 
-// serviceExecutable is the resolved running binary, refused unless only root
-// or Administrators can replace it.
+// packageManagerRemedy follows a security.ErrPackageManagerExecutable refusal.
+const packageManagerRemedy = `install the device with the Localport installer (localport-setup-<version>-windows-amd64.exe, the winget installer package, or install.ps1 run elevated), then use & "$env:ProgramFiles\Localport\localport.exe" connect ...`
+
+// serviceExecutable is the resolved running binary, refused when a package
+// manager installed it or unless only root or Administrators can replace it.
 func serviceExecutable() (string, error) {
 	exe, err := service.Executable()
 	if err != nil {
 		return "", err
+	}
+	if err := security.CheckPackageManagerBinary(exe); err != nil {
+		return "", fmt.Errorf("%w\n  %s", err, packageManagerRemedy)
 	}
 	if err := checkServiceBinary(exe); err != nil {
 		return "", fmt.Errorf("%w\n  %s", err, unsafeBinaryRemedy)
@@ -416,6 +426,25 @@ func mayHaveSpent(err error) bool {
 // device's stored settings, which stay in force.
 var errMergeConflict = errcode.New(errcode.MergeConflict)
 
+// errDeviceNotRecorded means a newly enrolled identity has no entry in the
+// local config: its saved credential would be used by nothing.
+var errDeviceNotRecorded = errors.New("the device has no config entry")
+
+// forgetUnrecorded removes the credential of a new identity whose config
+// entry was not written, in the agent account's store when viaChild.
+func forgetUnrecorded(store *identity.Store, viaChild bool, ref identity.Ref) error {
+	var err error
+	if viaChild {
+		err = runAsAgentAccount([]string{"identity", "remove", ref.String()}, nil, io.Discard)
+	} else if err = store.Remove(context.Background(), ref); err == nil {
+		fmt.Fprintf(os.Stderr, "  removed %s, which no config entry uses\n", ref)
+	}
+	if err != nil {
+		return fmt.Errorf("the credential of %s was not removed: %w\n  remove it with: localport identity remove %s", ref, err, ref)
+	}
+	return nil
+}
+
 // recordDevice records an enrolled device in the local config, under its
 // lock. A stored entry with the same identity takes the flags given as set
 // does (each given flag overrides, the rest keep their stored values); a new
@@ -438,7 +467,7 @@ func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFl
 		fresh.Identity = ref
 		local.Devices = append(local.Devices, fresh)
 		if err := writeLocal(file, local, ref); err != nil {
-			return config.LocalDevice{}, fmt.Errorf("device %s is enrolled, but the local config was not written: %w\n  %s", ref, err, joinTokenSpent)
+			return config.LocalDevice{}, fmt.Errorf("device %s is enrolled, but the local config was not written: %w: %w\n  %s", ref, errDeviceNotRecorded, err, joinTokenSpent)
 		}
 		return fresh, nil
 	}

@@ -58,8 +58,9 @@ const (
 	DesktopPinsUnreadable Code = "AG008"
 	DesktopPinsBusy       Code = "AG009"
 
-	UnsafeExecutable Code = "AG011"
-	UntrustedPath    Code = "AG012"
+	UnsafeExecutable         Code = "AG011"
+	UntrustedPath            Code = "AG012"
+	PackageManagerExecutable Code = "AG013"
 
 	RunLocked            Code = "AG021"
 	FleetTokenRetired    Code = "AG022"
@@ -91,6 +92,14 @@ const (
 	RecordingUnavailable Code = "AG063"
 
 	NoTransport Code = "AG071"
+
+	InstallerNotElevated Code = "AG081"
+	InstallDirUnsafe     Code = "AG082"
+	ServicesNotStopped   Code = "AG083"
+	InstallNotCommitted  Code = "AG084"
+	ServicesNotRestored  Code = "AG085"
+	ForeignServiceInDir  Code = "AG086"
+	MachinePathNotSet    Code = "AG087"
 )
 
 // NewJoinCommand is the remedy for every lost or unusable device credential.
@@ -109,6 +118,7 @@ var registry = []Entry{
 
 	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
 	{UntrustedPath, "Untrusted credential path", "untrusted credential path"},
+	{PackageManagerExecutable, "Package manager executable", "a localport installed by a package manager cannot run as the device service"},
 
 	{RunLocked, "Devices already running", "localport is already running the devices of this config"},
 	{FleetTokenRetired, "Fleet token retired", "fleet tokens are retired: create the device in the dashboard and run the command it shows"},
@@ -140,6 +150,14 @@ var registry = []Entry{
 	{RecordingUnavailable, "Recording unavailable", "recording unavailable"},
 
 	{NoTransport, "No transport", "no transport available: every candidate failed (check edge reachability and firewall)"},
+
+	{InstallerNotElevated, "Installer step not elevated", "this installer step needs an elevated Administrator"},
+	{InstallDirUnsafe, "Install directory unsafe", "the install directory can be changed by someone other than SYSTEM and Administrators"},
+	{ServicesNotStopped, "Device services did not stop", "the device services did not stop"},
+	{InstallNotCommitted, "Install not committed", "the new localport executables were not put in place; the previous ones are restored"},
+	{ServicesNotRestored, "Device services not re-registered", "the device services were not registered for the installed executables"},
+	{ForeignServiceInDir, "Foreign service in the install directory", "a service localport did not create runs a program in the install directory"},
+	{MachinePathNotSet, "Machine PATH not updated", "the machine PATH was not updated"},
 }
 
 // New returns the sentinel of a registered code. An unregistered code is a

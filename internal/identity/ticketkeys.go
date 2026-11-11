@@ -29,6 +29,11 @@ var ErrTicketKeysBusy = errcode.New(errcode.TicketKeysBusy)
 // user, or content that fails to decode or validate.
 var ErrTicketKeysUnreadable = errcode.New(errcode.TicketKeysUnreadable)
 
+// ErrRecordingKeyDropped means Load found a recording key in ticket_keys.json
+// that does not parse: the ticket keys loaded, the recording key was skipped,
+// and the next Replace (key fetch or renewal) writes a valid one.
+var ErrRecordingKeyDropped = errors.New("the stored team recording key does not parse and was skipped")
+
 // keysLockWait bounds the wait for .keys.lock. Its holders do file I/O only.
 const keysLockWait = 10 * time.Second
 
@@ -151,21 +156,27 @@ func (s *Store) forgetTicketKeys(dir string) {
 
 // Load reads ticket_keys.json into memory. An absent file is an empty set; a
 // file it cannot read returns ErrTicketKeysUnreadable and leaves memory
-// unchanged.
+// unchanged. A recording key that does not parse is skipped: the ticket keys
+// load, the recording key held before (if any) stays, and Load returns
+// ErrRecordingKeyDropped for the caller to log.
 func (t *TicketKeys) Load() error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 	_, pubs, recKey, err := t.read()
-	if err != nil {
+	dropped := errors.Is(err, ErrRecordingKeyDropped)
+	if err != nil && !dropped {
 		return err
 	}
 	if t.afterRead != nil {
 		t.afterRead()
 	}
 	t.mu.Lock()
+	if dropped {
+		recKey = t.recordingKey
+	}
 	t.publishLocked(pubs, recKey)
 	t.mu.Unlock()
-	return nil
+	return err
 }
 
 // RecordingKey returns a copy of the team recording public key (the bytes of
@@ -274,8 +285,9 @@ func (t *TicketKeys) Replace(ctx context.Context, generation uint64, set DeviceK
 	}
 	defer release()
 
+	// A dropped recording key is what this write repairs.
 	cur, _, _, err := t.read()
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrRecordingKeyDropped) {
 		return err
 	}
 	if t.afterRead != nil {
@@ -313,7 +325,10 @@ func (t *TicketKeys) publishLocked(pubs map[string]ed25519.PublicKey, recKey hel
 
 // read returns the validated file and its decoded keys; an absent file is an
 // empty record with no recording key. The directory passes the same trust
-// checks as the credential's. Every refusal wraps ErrTicketKeysUnreadable.
+// checks as the credential's. Every refusal wraps ErrTicketKeysUnreadable. A
+// recording key that does not parse is not a refusal: the record and ticket
+// keys come back with no recording key and an error wrapping
+// ErrRecordingKeyDropped.
 func (t *TicketKeys) read() (ticketKeysRecord, map[string]ed25519.PublicKey, heldRecordingKey, error) {
 	if err := t.store.trusted(t.dir); err != nil {
 		return ticketKeysRecord{}, nil, heldRecordingKey{}, fmt.Errorf("%w: %w", ErrTicketKeysUnreadable, err)
@@ -335,7 +350,7 @@ func (t *TicketKeys) read() (ticketKeysRecord, map[string]ed25519.PublicKey, hel
 	}
 	recKey, err := parseRecordingKey(rec.RecordingKey)
 	if err != nil {
-		return ticketKeysRecord{}, nil, heldRecordingKey{}, fmt.Errorf("%w: %w", ErrTicketKeysUnreadable, err)
+		return rec, pubs, heldRecordingKey{}, fmt.Errorf("%w: %w", ErrRecordingKeyDropped, err)
 	}
 	return rec, pubs, recKey, nil
 }

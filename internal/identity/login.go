@@ -167,7 +167,7 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 			ticker.Reset(interval)
 		case code == codeAuthorizationPending:
 			lastUnreachable = nil
-		case isRetryable(err):
+		case Retryable(err):
 			// Retryable failure. The code stays valid, so keep polling.
 			lastUnreachable = err
 		default:

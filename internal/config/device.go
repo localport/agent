@@ -667,7 +667,10 @@ func LockRunContext(ctx context.Context, f LocalConfigFile, wait time.Duration) 
 	if err := recordHolder(lock); err != nil {
 		return nil, errors.Join(fmt.Errorf("record the holder of %s: %w", path, err), unlockAndClose(lock))
 	}
-	return func() error { return unlockAndClose(lock) }, nil
+	// The record is cleared while the lock is still held, so the next holder
+	// never shows this PID before it records its own. A holder that dies
+	// leaves its PID, which no manager reports as a running service.
+	return func() error { return errors.Join(lock.Truncate(0), unlockAndClose(lock)) }, nil
 }
 
 // runLockPIDOffset is where the holder writes its PID. Byte 0 is the range
@@ -683,8 +686,8 @@ func recordHolder(lock *os.File) error {
 }
 
 // RunLockHolder returns the PID the holder of run.lock recorded, or 0 when
-// none is recorded yet. Callers read it only while LockRun fails, because an
-// unheld file still names its last holder.
+// none is recorded yet. Callers read it only while LockRun fails, because a
+// holder that died without releasing leaves its PID behind.
 func RunLockHolder(f LocalConfigFile) (int, error) {
 	file, err := os.Open(f.RunLockPath())
 	if err != nil {

@@ -131,9 +131,11 @@ func uninstallService(who invoker, purge bool) error {
 // deletion (m is nil without a supported service manager), and while
 // another process holds run.lock after runLockWait. It holds run.lock, then
 // the config's lock, through the deletion, so no run serves and no set or
-// connect writes meanwhile. The lock files and the directory stay, so a
-// concurrent command never locks an unlinked file; a missing directory is
-// left missing.
+// connect writes meanwhile. On Windows it also deletes both services' crash
+// directories (service.CrashRoot), which only a purge removes; the services
+// are gone by then, so nothing writes there. The lock files and the
+// directory stay, so a concurrent command never locks an unlinked file; a
+// missing directory is left missing.
 func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duration) (retErr error) {
 	file, err := who.localConfigFile()
 	if err != nil {
@@ -186,9 +188,15 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 		return err
 	}
 	if viaChild {
-		if err := removeAgentAccount(context.Background(), dir); err != nil {
+		if err := removeAgentAccount(context.Background(), file); err != nil {
 			return err
 		}
+	}
+	if root := service.CrashRoot(); root != "" && file.System {
+		if err := os.RemoveAll(root); err != nil {
+			return fmt.Errorf("remove %s: %w", root, err)
+		}
+		fmt.Fprintf(os.Stderr, "  deleted %s\n", root)
 	}
 	fmt.Fprintf(os.Stderr, "  %s, %s and %s remain\n%s\n", file.LockPath(), file.RunLockPath(), dir, stillValid)
 	return nil

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -87,6 +88,54 @@ func TestNoRegistrationWithTheOldCertificateAfterAPendingAttempt(t *testing.T) {
 	p, err := reg.Present()
 	if !errors.Is(err, ErrPendingLost) {
 		t.Fatalf("Present = %+v, %v; want ErrPendingLost rather than the old certificate %s", p, err, old.Meta.Serial)
+	}
+}
+
+// A re-enrolment by another process after a pending attempt replaces the
+// credential the attempt was renewed from; the new certificate is presented.
+func TestReEnrolmentAfterAPendingAttemptIsPresented(t *testing.T) {
+	ca := newTestCA(t)
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+	srv, _ := renewServer(t, ca, oldKey)
+	cur, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Renewer{Store: store, Ref: deviceRef}).renewLocked(context.Background(), &Client{BaseURL: srv.URL, HTTP: srv.Client()}, cur); err != nil {
+		t.Fatal(err)
+	}
+	reenrolled := 0
+	reg := NewDeviceRegistrar(store, deviceRef, func(event string) {
+		if strings.Contains(event, "was enrolled again") {
+			reenrolled++
+		}
+	})
+	if p, err := reg.Present(); err != nil || !p.Pending {
+		t.Fatalf("Present = %+v, %v; want the pending certificate", p, err)
+	}
+
+	key := testKey(t)
+	if _, err := store.Save(context.Background(), Material{
+		CertPEM: ca.sign(t, &key.PublicKey, time.Now().Add(-time.Minute), time.Now().Add(30*24*time.Hour)),
+		Key:     fileKey{key},
+		Meta:    Meta{APIURL: "https://api.localport.io", Source: SourceToken, Device: &DeviceInfo{Host: "gw-01.factory.eu.localport.dev", Region: "eu"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	enrolled, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The re-enrolment starts the attempt tracking over, so the next
+	// registration is an ordinary one.
+	for range 2 {
+		p, err := reg.Present()
+		if err != nil || p.Pending || p.Serial != enrolled.Meta.Serial {
+			t.Fatalf("Present = %+v, %v; want the re-enrolled certificate %s", p, err, enrolled.Meta.Serial)
+		}
+	}
+	if reenrolled != 1 {
+		t.Fatalf("re-enrolment reported %d times over two registrations, want 1", reenrolled)
 	}
 }
 

@@ -344,7 +344,7 @@ func (t *Tunnel) Begin(remote string, target connTarget, localConn net.Conn) *ac
 	t.totalConns.Add(1)
 
 	if h := t.opts.Handler; h != nil {
-		h.OnDataConn(t.opts.Label, DataConnInfo{
+		h.OnDataConn(t.EventKey(), DataConnInfo{
 			ConnID:   ac.id,
 			Target:   local,
 			Remote:   remote,
@@ -364,7 +364,7 @@ func (t *Tunnel) End(ac *activeConn, err error) {
 	t.removeActiveConn(ac.id)
 
 	if h := t.opts.Handler; h != nil {
-		h.OnDataClose(t.opts.Label, ac.id, ac.local, ac.remote,
+		h.OnDataClose(t.EventKey(), ac.id, ac.local, ac.remote,
 			ac.bytesIn.Load(), ac.bytesOut.Load(), time.Since(ac.startedAt), err)
 	}
 }

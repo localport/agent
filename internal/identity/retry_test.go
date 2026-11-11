@@ -3,10 +3,14 @@ package identity
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -19,8 +23,12 @@ func TestRetryClassification(t *testing.T) {
 		want bool
 	}{
 		{"nil is not an error", nil, false},
-		{"dial failure", errors.New("dial tcp: connection refused"), true},
-		{"unexpected EOF", io.ErrUnexpectedEOF, true},
+		{"dial failure", &url.Error{Op: "Post", URL: "https://api", Err: errors.New("dial tcp: connection refused")}, true},
+		{"connection reset reading the body", fmt.Errorf("read /v1/x response: %w", &net.OpError{Op: "read", Err: errors.New("connection reset")}), true},
+		{"truncated body", fmt.Errorf("read /v1/x response: %w", io.ErrUnexpectedEOF), true},
+		{"local signing failure is final", fmt.Errorf("sign renewal: %w", errors.New("key unavailable")), false},
+		{"malformed 200 body is final", fmt.Errorf("parse /v1/x response: %w", &json.SyntaxError{Offset: 1}), false},
+		{"request encoding is final", fmt.Errorf("encode request: %w", errors.New("unsupported value")), false},
 		{"500", &APIError{Status: http.StatusInternalServerError}, true},
 		{"502", &APIError{Status: http.StatusBadGateway}, true},
 		{"503", &APIError{Status: http.StatusServiceUnavailable}, true},
@@ -36,8 +44,8 @@ func TestRetryClassification(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isRetryable(tc.err); got != tc.want {
-				t.Fatalf("isRetryable(%v) = %v, want %v", tc.err, got, tc.want)
+			if got := Retryable(tc.err); got != tc.want {
+				t.Fatalf("Retryable(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}
@@ -46,7 +54,7 @@ func TestRetryClassification(t *testing.T) {
 // Wrapped errors classify the same as unwrapped ones.
 func TestRetryClassificationSeesThroughWrapping(t *testing.T) {
 	wrapped := errors.Join(errors.New("while renewing"), &APIError{Status: http.StatusForbidden})
-	if isRetryable(wrapped) {
+	if Retryable(wrapped) {
 		t.Fatal("a wrapped 403 must stay terminal")
 	}
 }
@@ -90,7 +98,7 @@ func TestRetrySucceedsAfterATransientFailure(t *testing.T) {
 	err := retry(context.Background(), 30*time.Second, nil, func() error {
 		attempts++
 		if attempts < 2 {
-			return errors.New("connection reset")
+			return &url.Error{Op: "Post", URL: "https://api", Err: errors.New("connection reset")}
 		}
 		return nil
 	})
@@ -107,7 +115,9 @@ func TestRetryStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
 
-	err := retry(ctx, time.Hour, nil, func() error { return errors.New("unreachable") })
+	err := retry(ctx, time.Hour, nil, func() error {
+		return &url.Error{Op: "Post", URL: "https://api", Err: errors.New("unreachable")}
+	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
@@ -129,6 +139,24 @@ func TestJitterIsBoundedAndVaries(t *testing.T) {
 	}
 	if jitter(0) != 0 {
 		t.Fatal("jitter(0) must be 0")
+	}
+}
+
+// The renewal wait never fires before its base and spreads over half of it,
+// so the spread grows with the backoff instead of stopping at retryMaxDelay.
+func TestRenewalWaitSpreadGrowsWithTheBackoff(t *testing.T) {
+	for _, base := range []time.Duration{minRetry, 10 * time.Minute, maxRetry} {
+		lo, hi := base+base/2, base
+		for range 200 {
+			got := renewalWait(base)
+			if got < base || got > base+base/2 {
+				t.Fatalf("renewalWait(%s) = %s, outside [%s, %s]", base, got, base, base+base/2)
+			}
+			lo, hi = min(lo, got), max(hi, got)
+		}
+		if spread := hi - lo; spread < base/4 {
+			t.Fatalf("renewalWait(%s) spread %s over 200 draws, want at least %s", base, spread, base/4)
+		}
 	}
 }
 

@@ -37,6 +37,45 @@ func setDACL(t *testing.T, path, sddl string) {
 	}
 }
 
+// The device crash directory admits the device service with modify; the
+// launcher's admits it with nothing; any other trustee, or more access,
+// refuses either.
+func TestCrashDirs(t *testing.T) {
+	requireElevated(t)
+	root := filepath.Join(t.TempDir(), "crash")
+	device, launcher := filepath.Join(root, "device"), filepath.Join(root, "launcher")
+	if err := EnsureCrashDir(device, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureCrashDir(launcher, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckCrashDir(device, true); err != nil {
+		t.Fatalf("CheckCrashDir(device) = %v", err)
+	}
+	if err := CheckCrashDir(launcher, false); err != nil {
+		t.Fatalf("CheckCrashDir(launcher) = %v", err)
+	}
+	svc := ServiceSID(WindowsServiceName)
+	for name, tc := range map[string]struct {
+		dir           string
+		deviceService bool
+		sddl          string
+	}{
+		"service ACE on the launcher directory": {launcher, false, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;" + svc + ")"},
+		"service full control on the device":    {device, true, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + svc + ")"},
+		"Users on the device directory":         {device, true, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;BU)"},
+	} {
+		setDACL(t, tc.dir, tc.sddl)
+		if err := CheckCrashDir(tc.dir, tc.deviceService); !errors.Is(err, ErrUntrustedPath) {
+			t.Errorf("%s: CheckCrashDir = %v, want ErrUntrustedPath", name, err)
+		}
+		if err := EnsureCrashDir(tc.dir, tc.deviceService); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // agent.yaml is read-only to the device service. A config the service could
 // write is refused, so the launcher never acts on one a compromised agent
 // rewrote.

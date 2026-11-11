@@ -13,6 +13,11 @@ import (
 	"syscall"
 )
 
+// CheckPackageManagerBinary is CheckServiceBinary's Windows companion; no
+// package manager root is refused here, as the ownership rule already refuses
+// a user-owned Homebrew prefix.
+func CheckPackageManagerBinary(string) error { return nil }
+
 // CheckServiceBinary refuses path, the resolved executable the device service
 // runs, unless the file and every directory above it are owned by root and
 // writable by nobody else: no other-write bit, and a group-write bit only for

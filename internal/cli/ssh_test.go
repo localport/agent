@@ -126,7 +126,7 @@ func TestSSHCertMintsOnceAndReusesWhileFresh(t *testing.T) {
 	if err := target.ensureCert(ctx, "pi", m.mint, now); err != nil {
 		t.Fatal(err)
 	}
-	f := target.files()
+	f := target.files("pi")
 	key, err := os.ReadFile(f.key)
 	if err != nil {
 		t.Fatal(err)
@@ -150,10 +150,33 @@ func TestSSHCertMintsOnceAndReusesWhileFresh(t *testing.T) {
 	if again, _ := os.ReadFile(f.key); string(again) != string(key) {
 		t.Fatal("the client key changed")
 	}
-	raw, _ := os.ReadFile(f.cert)
+	raw, _ := os.ReadFile(target.files("root").cert)
 	cert, err := parseUserCertificate(raw)
 	if err != nil || cert.ValidPrincipals[0] != "root" {
 		t.Fatalf("certificate = %v, %v; want the root one", cert, err)
+	}
+	// Each login keeps its own certificate: pi's still serves, so neither run
+	// re-mints the other's (concurrent `ssh root@` and `ssh alice@`).
+	if err := target.ensureCert(ctx, "pi", m.mint, now.Add(time.Minute)); err != nil || m.calls != 3 {
+		t.Fatalf("pi after root: calls = %d, %v; want 3", m.calls, err)
+	}
+	raw, _ = os.ReadFile(f.cert)
+	if cert, err := parseUserCertificate(raw); err != nil || cert.ValidPrincipals[0] != "pi" {
+		t.Fatalf("pi's certificate = %v, %v; want pi's", cert, err)
+	}
+}
+
+// A login that cannot name a client file is refused before any mint.
+func TestSSHCertRefusesALoginThatCannotNameAFile(t *testing.T) {
+	target := newSSHTarget(t)
+	m := newFakeMint(t, time.Now())
+	for _, login := range []string{"..", "a/b", `dom\user`, "a*b", ""} {
+		if err := target.ensureCert(context.Background(), login, m.mint, time.Now()); err == nil {
+			t.Errorf("login %q accepted", login)
+		}
+	}
+	if m.calls != 0 {
+		t.Fatalf("calls = %d, want no mint", m.calls)
 	}
 }
 
@@ -165,7 +188,7 @@ func TestKnownHostsHoldsExactlyTheMintedHostKey(t *testing.T) {
 	now := time.Now()
 	m := newFakeMint(t, now)
 	stale, other := testHostKey(t), testHostKey(t)
-	f := target.files()
+	f := target.files("pi")
 	if err := os.MkdirAll(filepath.Dir(f.knownHosts), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +256,7 @@ func TestSSHCertRefusesAMismatchedResponse(t *testing.T) {
 			if err := target.ensureCert(context.Background(), "pi", m.mint, now); err == nil {
 				t.Fatal("accepted")
 			}
-			f := target.files()
+			f := target.files("pi")
 			for _, p := range []string{f.cert, f.url, f.knownHosts} {
 				if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
 					t.Errorf("%s written: %v", filepath.Base(p), err)
@@ -245,17 +268,19 @@ func TestSSHCertRefusesAMismatchedResponse(t *testing.T) {
 
 func TestSSHConfigBlock(t *testing.T) {
 	target := newSSHTarget(t)
-	f := target.files()
+	f := target.files("%r")
 	block, err := target.sshConfigBlock("/opt/local port/100%/localport")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ref := target.ref.String()
+	// ssh expands %r to the login, naming files("<login>").
+	keep := func(path string) string { return strings.ReplaceAll(sshConfigValue(path), "%%r@", "%r@") }
 	for _, want := range []string{
 		"Host " + testDeviceHost + "\n",
 		`  ProxyCommand "/opt/local port/100%%/localport" ssh-proxy --identity ` + ref + " %r %h\n",
-		"  IdentityFile " + sshConfigValue(f.key) + "\n",
-		"  CertificateFile " + sshConfigValue(f.cert) + "\n",
+		"  IdentityFile " + keep(f.key) + "\n",
+		"  CertificateFile " + keep(f.cert) + "\n",
 		"  UserKnownHostsFile " + sshConfigValue(f.knownHosts) + "\n",
 		"  HostKeyAlias " + testDeviceHost + "\n",
 		"  StrictHostKeyChecking yes\n",

@@ -13,6 +13,7 @@ import (
 func deviceState() tState {
 	at := time.Date(2026, 9, 17, 15, 4, 5, 0, time.UTC)
 	return tState{
+		key:        "01kpq7x2abcd34/device/tun1-plc-01",
 		name:       "plc-01",
 		tunnelName: "factory",
 		region:     "ap",
@@ -40,7 +41,7 @@ func deviceSnap(ts tState) snap {
 		rows:    30,
 		palette: NewPalette(ColorOff),
 		tunnels: []tState{ts},
-		stats:   map[string]tunnel.Stats{ts.name: {BytesIn: 1400000, BytesOut: 430000, ConnectionsServed: 12}},
+		stats:   map[string]tunnel.Stats{ts.key: {BytesIn: 1400000, BytesOut: 430000, ConnectionsServed: 12}},
 		conns:   map[string][]tunnel.ActiveConn{},
 		reqs:    map[string][]tunnel.RequestInfo{},
 	}
