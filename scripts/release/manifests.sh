@@ -1,24 +1,34 @@
 #!/usr/bin/env bash
 # Opens pull requests that update the Homebrew formula and the Scoop manifest
-# to a published release.
+# to a published release, or only renders the manifests.
 #
 #   scripts/release/manifests.sh <dist-dir>
+#   scripts/release/manifests.sh render <dist-dir> <out-dir>
+#
+# render writes localport.rb, localport.json and the winget manifests
+# (winget/, the first submission's files; later versions go through komac)
+# to <out-dir> and opens nothing.
 #
 # Environment:
 #   VERSION    release tag, vX.Y.Z
-#   GH_TOKEN   a token that may create branches and pull requests on
-#              localport/homebrew-tap and localport/scoop-bucket
+#   GH_TOKEN   (not for render) a token that may create branches and pull
+#              requests on localport/homebrew-tap and localport/scoop-bucket
 #
 # Hashes come from <dist-dir>/checksums.txt, already verified by the caller.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-dist="$(cd "${1:?usage: manifests.sh <dist-dir>}" && pwd)"
+mode=propose
+if [ "${1:-}" = render ]; then
+	mode=render
+	shift
+fi
+dist="$(cd "${1:?usage: manifests.sh [render] <dist-dir> [<out-dir>]}" && pwd)"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 : "${VERSION:?VERSION is required (vX.Y.Z)}"
-: "${GH_TOKEN:?GH_TOKEN is required}"
+[ "$mode" = render ] || : "${GH_TOKEN:?GH_TOKEN is required}"
 [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "manifests track stable releases only; $VERSION is not vX.Y.Z"
 version="${VERSION#v}"
 
@@ -36,8 +46,22 @@ render() {
 		-e "s|@SHA256_LINUX_ARM64@|$(sum localport-linux-arm64)|" \
 		-e "s|@SHA256_LINUX_AMD64@|$(sum localport-linux-amd64)|" \
 		-e "s|@SHA256_WINDOWS_AMD64@|$(sum localport-windows-amd64.exe)|" \
+		-e "s|@SHA256_WINDOWS_AMD64_ZIP@|$(sum localport-windows-amd64.zip)|" \
+		-e "s|@SHA256_WINDOWS_AMD64_SETUP@|$(sum "localport-setup-$version-windows-amd64.exe")|" \
 		"$1"
 }
+
+if [ "$mode" = render ]; then
+	out="$(mkdir -p "${2:?render needs an output directory}" && cd "$2" && pwd)"
+	mkdir -p "$out/winget"
+	render "$root/packaging/homebrew/localport.rb.in" >"$out/localport.rb"
+	render "$root/packaging/scoop/localport.json.in" >"$out/localport.json"
+	for t in "$root"/packaging/windows/winget/*.yaml.in; do
+		name="$(basename "$t" .in)"
+		render "$t" >"$out/winget/$name"
+	done
+	exit 0
+fi
 
 # propose <repo> <path> <rendered file>
 propose() {

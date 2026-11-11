@@ -57,6 +57,67 @@ jobs:
           cache-dependency-path: go.sum
       - run: go test ./...
 
+  # The NSIS installer built unsigned exactly as the release builds it, then
+  # installed, upgraded and uninstalled on the elevated runner.
+  windows-installer:
+    name: Windows installer
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      VERSION: v0.0.0-ci
+      NSIS_VERSION: "3.13"
+      # SHA-256 of the official download, as in release.yml.
+      NSIS_ZIP_SHA256: ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build
+        run: |
+          scripts/release/winres.sh "$VERSION"
+          mkdir stage
+          for c in localport localport-session; do
+            go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "stage/$c.exe" "./cmd/$c"
+          done
+          cp LICENSE NOTICE THIRD_PARTY_NOTICES stage/
+      - name: Install NSIS
+        run: |
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/nsis.zip" \
+            "https://downloads.sourceforge.net/project/nsis/NSIS%203/$NSIS_VERSION/nsis-$NSIS_VERSION.zip"
+          echo "$NSIS_ZIP_SHA256  $RUNNER_TEMP/nsis.zip" | sha256sum --check --strict -
+          pwsh -NoProfile -Command "Expand-Archive -LiteralPath \"$RUNNER_TEMP/nsis.zip\" -DestinationPath \"$RUNNER_TEMP/nsis\""
+          echo "MAKENSIS=$RUNNER_TEMP/nsis/nsis-$NSIS_VERSION/makensis.exe" >>"$GITHUB_ENV"
+      - name: Package
+        run: |
+          scripts/release/windows-package.sh uninstaller stage
+          SOURCE_DATE_EPOCH=0 scripts/release/windows-package.sh installer stage out
+      - name: Install, upgrade, uninstall
+        shell: pwsh
+        run: scripts/ci/test-windows-installer.ps1 -Installer "out/localport-setup-0.0.0-ci-windows-amd64.exe" -Version "0.0.0-ci"
+
+  # The installer script compiles with NSIS built from source and the Scoop
+  # and winget manifests validate against their pinned schemas.
+  packaging:
+    name: Packaging check
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - run: make check-packaging
+
   vet:
     name: Vet (all platforms)
     runs-on: ubuntu-latest

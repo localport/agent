@@ -9,3 +9,6 @@ dist/
 *.key
 *.pem
 *.p12
+
+# Generated VERSIONINFO resources (make winres)
+cmd/*/rsrc_windows_*.syso

@@ -3,18 +3,22 @@
     "description": "Secure tunnels and identity-based remote access to devices",
     "homepage": "https://localport.io",
     "license": "Apache-2.0",
+    "notes": "Scoop installs the localport command for your account. To run a fleet device as a Windows service, install it with the Localport installer instead: https://localport.io/docs/installation",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/localport/agent/releases/download/v@VERSION@/localport-windows-amd64.exe#/localport.exe",
-            "hash": "@SHA256_WINDOWS_AMD64@"
+            "url": "https://github.com/localport/agent/releases/download/v@VERSION@/localport-windows-amd64.zip",
+            "hash": "@SHA256_WINDOWS_AMD64_ZIP@"
         }
     },
-    "bin": "localport.exe",
+    "bin": [
+        "localport.exe",
+        "localport-session.exe"
+    ],
     "checkver": "github",
     "autoupdate": {
         "architecture": {
             "64bit": {
-                "url": "https://github.com/localport/agent/releases/download/v$version/localport-windows-amd64.exe#/localport.exe"
+                "url": "https://github.com/localport/agent/releases/download/v$version/localport-windows-amd64.zip"
             }
         },
         "hash": {

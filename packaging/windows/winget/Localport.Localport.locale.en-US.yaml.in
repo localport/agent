@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.28.0.schema.json
+PackageIdentifier: Localport.Localport
+PackageVersion: @VERSION@
+PackageLocale: en-US
+Publisher: Localport
+PublisherUrl: https://localport.io
+PackageName: Localport
+PackageUrl: https://localport.io
+License: Apache-2.0
+LicenseUrl: https://github.com/localport/agent/blob/main/LICENSE
+ShortDescription: Secure tunnels and identity-based remote access to devices
+Moniker: localport
+Tags:
+  - remote-access
+  - ssh
+  - tunnel
+ReleaseNotesUrl: https://github.com/localport/agent/releases/tag/v@VERSION@
+ManifestType: defaultLocale
+ManifestVersion: 1.28.0

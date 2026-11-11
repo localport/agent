@@ -53,12 +53,12 @@ DARWIN_NAMES = $(foreach a,$(SESSION_DARWIN),localport-darwin-$(a) localport-ses
 
 DIST = dist
 
-.PHONY: build build-all build-session-linux build-session-armv6 build-session-darwin build-darwin sign-darwin dist release-sign release-dryrun packages repo repo-apk clean test test-root vet-all smoke lint fmt vet notices notices-check
+.PHONY: winres check-packaging build build-all build-session-linux build-session-armv6 build-session-darwin build-darwin sign-darwin dist release-sign release-dryrun packages repo repo-apk clean test test-root vet-all smoke lint fmt vet notices notices-check
 
 build:
 	$(GO_BUILD) -o bin/localport ./cmd/localport
 
-build-all:
+build-all: winres
 	@for p in $(PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; ext=; \
 		[ "$$os" = windows ] && ext=.exe; \
@@ -68,6 +68,16 @@ build-all:
 			GOOS=$$os GOARCH=$$arch $(GO_BUILD) -o bin/localport-session-$$os-$$arch$$ext ./cmd/localport-session || exit 1; \
 		fi; \
 	done
+
+# VERSIONINFO resources of the Windows executables; see scripts/release/winres.sh.
+winres:
+	@./scripts/release/winres.sh '$(VERSION)'
+
+# Compiles the Windows installer (both NSIS passes) and validates the Scoop
+# and winget manifests against their pinned schemas in the packaging image
+# (packaging/windows/Dockerfile). Needs Docker.
+check-packaging:
+	./scripts/release/check-packaging.sh
 
 # The Docker builds in SESSION_LINUX; CI runs one entry per job by setting
 # SESSION_LINUX.

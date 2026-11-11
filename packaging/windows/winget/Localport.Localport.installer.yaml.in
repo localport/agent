@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.28.0.schema.json
+# The machine installer registers no service by itself; `localport connect`
+# run elevated does. The zip is the command-line package for any scope.
+PackageIdentifier: Localport.Localport
+PackageVersion: @VERSION@
+MinimumOSVersion: 10.0.17763.0
+Installers:
+  - Architecture: x64
+    InstallerType: nullsoft
+    Scope: machine
+    ElevationRequirement: elevatesSelf
+    UpgradeBehavior: install
+    InstallerUrl: https://github.com/localport/agent/releases/download/v@VERSION@/localport-setup-@VERSION@-windows-amd64.exe
+    InstallerSha256: @SHA256_WINDOWS_AMD64_SETUP@
+    AppsAndFeaturesEntries:
+      - DisplayName: Localport
+        Publisher: Localport
+        DisplayVersion: @VERSION@
+  - Architecture: x64
+    InstallerType: zip
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: localport.exe
+        PortableCommandAlias: localport
+      - RelativeFilePath: localport-session.exe
+        PortableCommandAlias: localport-session
+    InstallerUrl: https://github.com/localport/agent/releases/download/v@VERSION@/localport-windows-amd64.zip
+    InstallerSha256: @SHA256_WINDOWS_AMD64_ZIP@
+ManifestType: installer
+ManifestVersion: 1.28.0

@@ -1,0 +1,24 @@
+{
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "@VERSION4@",
+          "product_version": "@VERSION4@"
+        },
+        "info": {
+          "0409": {
+            "CompanyName": "Localport",
+            "FileDescription": "@DESCRIPTION@",
+            "FileVersion": "@VERSION@",
+            "InternalName": "@NAME@",
+            "LegalCopyright": "Copyright Localport. Apache-2.0.",
+            "OriginalFilename": "@NAME@.exe",
+            "ProductName": "Localport",
+            "ProductVersion": "@VERSION@"
+          }
+        }
+      }
+    }
+  }
+}
