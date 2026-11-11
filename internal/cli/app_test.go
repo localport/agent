@@ -37,19 +37,6 @@ func TestAppAccessRefusesAudienceWithCredentialFile(t *testing.T) {
 	}
 }
 
-// The flat tunnel fallthrough also errors, so the test checks the message
-// names the new verb.
-func TestAppOldTunnelVerbNamesItsReplacement(t *testing.T) {
-	app := New("1.2.3", "abc123", "2026-04-13")
-	err := app.Run([]string{"tunnel", "--config", "localport.yaml"})
-	if err == nil {
-		t.Fatal("the retired verb must error")
-	}
-	if !strings.Contains(err.Error(), "localport connect") {
-		t.Fatalf("the error must name the new verb, got: %v", err)
-	}
-}
-
 // A config file describes everything that runs, so an endpoint flag beside it
 // must be refused rather than silently dropped. Per-run switches still apply.
 func TestAppConfigRefusesEndpointFlags(t *testing.T) {

@@ -102,19 +102,6 @@ type fileConfig struct {
 	Tunnels []tunnelFile `yaml:"tunnels,omitempty"`
 }
 
-// fleetProbe finds a `fleets` key of any shape, so a retired fleet token is
-// refused with ErrFleetTokenRetired instead of an interpolation or schema
-// error about it.
-type fleetProbe struct {
-	Fleets yaml.Node `yaml:"fleets"`
-}
-
-// hasFleets reports whether raw parses as YAML with a `fleets` key.
-func hasFleets(raw []byte) bool {
-	var probe fleetProbe
-	return yaml.Unmarshal(raw, &probe) == nil && probe.Fleets.Kind != 0
-}
-
 type tunnelFile struct {
 	Name     string `yaml:"name"`
 	Token    string `yaml:"token"`
@@ -129,19 +116,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	// Probed before interpolation, which fails on an unset ${FLEET_TOKEN},
-	// and after it, for a key that only interpolation produces. A file that
-	// does not parse here is reported by the decode below.
-	if hasFleets(raw) {
-		return nil, ErrFleetTokenRetired
-	}
-
 	expanded, resolved, err := interpolate(string(raw))
 	if err != nil {
 		return nil, err
-	}
-	if hasFleets([]byte(expanded)) {
-		return nil, ErrFleetTokenRetired
 	}
 
 	// Unknown keys are errors, so a misspelled key is reported rather than

@@ -85,3 +85,24 @@ func TestUnderIdentityDir(t *testing.T) {
 		t.Error("an unset %ProgramData% must trust nothing")
 	}
 }
+
+// The Scoop roots come from SCOOP, SCOOP_GLOBAL and the defaults under
+// USERPROFILE and ProgramData; a binary outside every root passes.
+func TestCheckPackageManagerBinaryReadsTheScoopRoots(t *testing.T) {
+	t.Setenv("USERPROFILE", `C:\Users\ana`)
+	t.Setenv("ProgramData", `C:\ProgramData`)
+	t.Setenv("SCOOP", `D:\s`)
+	t.Setenv("SCOOP_GLOBAL", `E:\g`)
+	for path, refused := range map[string]bool{
+		`C:\Users\ana\scoop\apps\localport\current\localport.exe`:              true,
+		`C:\ProgramData\scoop\apps\localport\current\localport.exe`:            true,
+		`D:\s\apps\localport\current\localport.exe`:                            true,
+		`E:\g\apps\localport\current\localport.exe`:                            true,
+		`C:\Program Files\WinGet\Packages\Localport.Localport_x\localport.exe`: true,
+		`C:\Program Files\Localport\localport.exe`:                             false,
+	} {
+		if err := CheckPackageManagerBinary(path); errors.Is(err, ErrPackageManagerExecutable) != refused {
+			t.Errorf("CheckPackageManagerBinary(%s) = %v, want refused %v", path, err, refused)
+		}
+	}
+}

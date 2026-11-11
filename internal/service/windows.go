@@ -569,7 +569,6 @@ func ForeignServicesIn(dir string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list services: %w", err)
 	}
-	prefix := strings.ToLower(strings.TrimRight(filepath.Clean(dir), `\`)) + `\`
 	var foreign []string
 	for _, name := range names {
 		s, err := m.OpenService(name)
@@ -581,25 +580,27 @@ func ForeignServicesIn(dir string) ([]string, error) {
 		if err != nil || strings.Contains(cfg.Description, Marker) {
 			continue
 		}
-		if strings.HasPrefix(strings.ToLower(imagePath(cfg.BinaryPathName)), prefix) {
+		if imageInside(cfg.BinaryPathName, dir) {
 			foreign = append(foreign, name)
 		}
 	}
 	return foreign, nil
 }
 
-// imagePath is the program of a service command line: the quoted first
-// argument, or the text up to the first space.
-func imagePath(cmd string) string {
-	cmd = strings.TrimSpace(cmd)
-	if strings.HasPrefix(cmd, `"`) {
-		if end := strings.Index(cmd[1:], `"`); end >= 0 {
-			return cmd[1 : end+1]
-		}
-		return cmd[1:]
+// imageInside reports whether the program of the service command line cmd
+// is inside dir. The program starts the line, after an opening quote when it
+// is quoted. An unquoted line is matched as a whole, since its program can
+// hold spaces (C:\Program Files\...) and the manager resolves it by trying
+// each one. %VARS% are expanded and the \??\ prefix of a native path is
+// dropped. Matching ignores case.
+func imageInside(cmd, dir string) bool {
+	cmd = strings.TrimPrefix(strings.TrimSpace(cmd), `"`)
+	if expanded, err := registry.ExpandString(cmd); err == nil {
+		cmd = expanded
 	}
-	program, _, _ := strings.Cut(cmd, " ")
-	return program
+	cmd = strings.TrimPrefix(cmd, `\??\`)
+	prefix := strings.TrimRight(filepath.Clean(dir), `\`) + `\`
+	return len(cmd) >= len(prefix) && strings.EqualFold(cmd[:len(prefix)], prefix)
 }
 
 // RunUnderSCM reports whether the service control manager started this

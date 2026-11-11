@@ -24,10 +24,6 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
-// ErrFleetTokenRetired refuses a shared fleet token wherever one is offered.
-// Every device enrols with its own credential.
-var ErrFleetTokenRetired = errcode.New(errcode.FleetTokenRetired)
-
 // ErrHostCapability refuses terminal, files or forwarding on a device with a
 // host: they act on the machine running the agent only.
 var ErrHostCapability = errcode.New(errcode.HostCapability)
@@ -57,8 +53,8 @@ var ErrDesktopWithoutTarget = errcode.New(errcode.DesktopWithoutTarget)
 var ErrFilesRootMissing = errcode.New(errcode.FilesRootMissing)
 
 // ErrInvalidLocalConfig wraps every refusal of the local config's content:
-// syntax, schema, version and each validation rule. ErrFleetTokenRetired and
-// the file and directory checks are reported on their own.
+// syntax, schema, version and each validation rule. The file and directory
+// checks are reported on their own.
 var ErrInvalidLocalConfig = errcode.New(errcode.InvalidLocalConfig)
 
 func invalidLocal(err error) error { return fmt.Errorf("%w: %w", ErrInvalidLocalConfig, err) }
@@ -182,13 +178,10 @@ func UserLocalConfig() (LocalConfigFile, error) {
 	return LocalConfigFile{Path: filepath.Join(home, localConfigName), Base: home, FollowBase: true}, nil
 }
 
-// localFile is the YAML schema of the local config. Fleets is decoded, in any
-// shape, only to refuse it with ErrFleetTokenRetired rather than as an
-// unknown key.
+// localFile is the YAML schema of the local config.
 type localFile struct {
 	Version int               `yaml:"version"`
 	Devices []localDeviceFile `yaml:"devices"`
-	Fleets  yaml.Node         `yaml:"fleets,omitempty"`
 }
 
 type localDeviceFile struct {
@@ -237,10 +230,10 @@ func LoadLocal(f LocalConfigFile) (*LocalConfig, error) {
 
 func parseLocal(raw []byte, goos string) (*LocalConfig, error) {
 	cfg, err := decodeLocal(raw, goos)
-	if err != nil && !errors.Is(err, ErrFleetTokenRetired) {
+	if err != nil {
 		return nil, invalidLocal(err)
 	}
-	return cfg, err
+	return cfg, nil
 }
 
 func decodeLocal(raw []byte, goos string) (*LocalConfig, error) {
@@ -256,9 +249,6 @@ func decodeLocal(raw []byte, goos string) (*LocalConfig, error) {
 	var extra yaml.Node
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, errors.New("local config holds more than one YAML document")
-	}
-	if lf.Fleets.Kind != 0 {
-		return nil, ErrFleetTokenRetired
 	}
 	if lf.Version != LocalConfigVersion {
 		return nil, fmt.Errorf("unsupported local config version %d: this agent reads version %d", lf.Version, LocalConfigVersion)

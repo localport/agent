@@ -14,7 +14,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/localport/agent/internal/config"
-	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/service"
 )
 
@@ -25,16 +24,10 @@ func needsSystemLayout(file config.LocalConfigFile) bool { return needsAgentChil
 // prepareSystemLayout readies the machine-wide state for the agent account,
 // as root, before the agent service runs or a child touches the store: the
 // account (service.EnsureAccount), the device directory root:localport 0750
-// with run.lock root:localport 0660 (config.EnsureSystemRunLock), the
-// identity directory owned by the account with mode 0700, and agent.yaml
-// root:localport 0640. An identity tree root owns, left by an agent that ran
-// as root, is converted in place: the agent service (m, when installed) is
-// stopped, the old <device dir>/recordings spool moves into the identity
-// directory, the tree is chowned through directory descriptors without
-// following any link, and the service is installed again for exe so its
-// devices keep running as the account. It is idempotent, and a converted
-// tree's contents are never touched.
-func prepareSystemLayout(ctx context.Context, file config.LocalConfigFile, m service.Manager, exe string) error {
+// with run.lock root:localport 0660 (config.EnsureSystemRunLock) and the
+// identity directory owned by the account with mode 0700. agent.yaml gets
+// root:localport 0640 from config.WriteLocal. It is idempotent.
+func prepareSystemLayout(ctx context.Context, file config.LocalConfigFile) error {
 	acct, err := service.EnsureAccount(ctx)
 	if err != nil {
 		return err
@@ -42,163 +35,39 @@ func prepareSystemLayout(ctx context.Context, file config.LocalConfigFile, m ser
 	if err := config.EnsureSystemRunLock(file); err != nil {
 		return err
 	}
-	dir := filepath.Dir(file.Path)
-	idDir := filepath.Join(dir, "identity")
-	convert, err := ensureIdentityDir(idDir, acct)
-	if err != nil {
-		return err
-	}
-	if convert {
-		if err := convertIdentityTree(ctx, file, idDir, acct, m, exe); err != nil {
-			return err
-		}
-	}
-	return rewriteSystemConfig(file)
+	return ensureIdentityDir(filepath.Join(filepath.Dir(file.Path), "identity"), acct)
 }
 
 // ensureIdentityDir creates the identity directory owned by acct, mode
-// 0700, or secures an existing one acct owns. It reports true for an
-// existing directory root owns, which needs conversion, and refuses any
-// other owner or a link.
-func ensureIdentityDir(path string, acct service.Account) (convert bool, err error) {
+// 0700, or secures an existing one acct owns. It refuses any other owner,
+// root's included, and a link.
+func ensureIdentityDir(path string, acct service.Account) error {
 	created := true
 	if err := os.Mkdir(path, 0o700); errors.Is(err, fs.ErrExist) {
 		created = false
 	} else if err != nil {
-		return false, fmt.Errorf("create %s: %w", path, err)
+		return fmt.Errorf("create %s: %w", path, err)
 	}
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return false, fmt.Errorf("open %s: %w", path, err)
+		return fmt.Errorf("open %s: %w", path, err)
 	}
 	defer unix.Close(fd)
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		return false, fmt.Errorf("inspect %s: %w", path, err)
+		return fmt.Errorf("inspect %s: %w", path, err)
 	}
 	switch {
 	case int(st.Uid) == acct.UID:
-	case st.Uid == 0 && !created:
-		return true, nil
-	case st.Uid == 0:
+	case st.Uid == 0 && created:
 		if err := unix.Fchown(fd, acct.UID, acct.GID); err != nil {
-			return false, fmt.Errorf("chown %s: %w", path, err)
+			return fmt.Errorf("chown %s: %w", path, err)
 		}
 	default:
-		return false, fmt.Errorf("%s is owned by uid %d, neither root nor the account %s; move it aside, then run the command again", path, st.Uid, service.AgentAccount)
+		return fmt.Errorf("%s is owned by uid %d, not the account %s; move it aside, then run the command again", path, st.Uid, service.AgentAccount)
 	}
 	if err := unix.Fchmod(fd, 0o700); err != nil {
-		return false, fmt.Errorf("secure %s: %w", path, err)
-	}
-	return false, nil
-}
-
-// convertIdentityTree hands a root-owned identity tree to acct, with the
-// agent service stopped and run.lock held meanwhile so nothing writes into
-// it. Every failure after the stop names the reinstall remedy.
-func convertIdentityTree(ctx context.Context, file config.LocalConfigFile, idDir string, acct service.Account, m service.Manager, exe string) error {
-	dir := filepath.Dir(file.Path)
-	installed := false
-	if m != nil {
-		var err error
-		if installed, err = m.Installed(); err != nil {
-			return err
-		}
-	}
-	if installed {
-		if err := m.Stop(ctx); err != nil {
-			return fmt.Errorf("stop %s before handing %s to the account %s: %w", m.Name(), idDir, service.AgentAccount, err)
-		}
-	}
-	stopped := func(err error) error {
-		if !installed {
-			return err
-		}
-		return fmt.Errorf("%w\n  %s is stopped; fix the cause, then run: %s", err, m.Name(), serviceInstallCommand)
-	}
-	// run.lock keeps any other agent (a manual root `run`) from writing
-	// root-owned files into the tree while it changes hands. It is released
-	// before Install, whose service takes it.
-	release, err := config.LockRunContext(ctx, file, serviceRunLockWait)
-	if err != nil {
-		return stopped(err)
-	}
-	err = moveSpool(filepath.Join(dir, "recordings"), filepath.Join(idDir, "recordings"))
-	if err == nil {
-		err = chownTree(idDir, acct.UID, acct.GID)
-	}
-	if err = errors.Join(err, release()); err != nil {
-		return stopped(err)
-	}
-	fmt.Fprintf(os.Stderr, "  handed %s to the account %s\n", idDir, service.AgentAccount)
-	if installed {
-		if err := m.Install(ctx, exe); err != nil {
-			return stopped(err)
-		}
-	}
-	return nil
-}
-
-// chownTree chowns path and everything below it to uid:gid. Each directory
-// is opened relative to its parent's descriptor with O_NOFOLLOW and each
-// entry is inspected with AT_SYMLINK_NOFOLLOW. A first pass changes nothing
-// and refuses a symlink or anything but a directory or regular file, as the
-// agent never writes one. The second pass chowns each directory after its
-// entries, so a walk that stops partway leaves path owned by root and the
-// next run converts again.
-func chownTree(path string, uid, gid int) error {
-	for _, apply := range []bool{false, true} {
-		fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if err != nil {
-			return fmt.Errorf("open %s: %w", path, err)
-		}
-		if err := walkTree(fd, path, uid, gid, apply); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// walkTree inspects (and with apply chowns) the directory fd, named path in
-// errors, and its entries; it closes fd.
-func walkTree(fd int, path string, uid, gid int, apply bool) error {
-	dir := os.NewFile(uintptr(fd), path)
-	defer dir.Close()
-	names, err := dir.Readdirnames(-1)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-	for _, name := range names {
-		child := filepath.Join(path, name)
-		var st unix.Stat_t
-		if err := unix.Fstatat(fd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return fmt.Errorf("inspect %s: %w", child, err)
-		}
-		switch st.Mode & syscall.S_IFMT {
-		case syscall.S_IFREG:
-			if !apply {
-				continue
-			}
-			if err := unix.Fchownat(fd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-				return fmt.Errorf("chown %s: %w", child, err)
-			}
-		case syscall.S_IFDIR:
-			sub, err := unix.Openat(fd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-			if err != nil {
-				return fmt.Errorf("open %s: %w", child, err)
-			}
-			if err := walkTree(sub, child, uid, gid, apply); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("%s is not a regular file or directory; move it aside, then run the command again", child)
-		}
-	}
-	if !apply {
-		return nil
-	}
-	if err := unix.Fchown(fd, uid, gid); err != nil {
-		return fmt.Errorf("chown %s: %w", path, err)
+		return fmt.Errorf("secure %s: %w", path, err)
 	}
 	return nil
 }
@@ -243,21 +112,3 @@ func removeAgentAccount(ctx context.Context, file config.LocalConfigFile) error 
 
 // removeAccount deletes the agent account; tests replace it.
 var removeAccount = service.RemoveAccount
-
-// rewriteSystemConfig rewrites an existing agent.yaml under its lock, so
-// one written before the agent account existed becomes root:localport 0640.
-func rewriteSystemConfig(file config.LocalConfigFile) error {
-	if _, err := os.Lstat(file.Path); errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	unlock, err := config.LockLocal(file)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	cfg, err := config.LoadLocal(file)
-	if err != nil {
-		return err
-	}
-	return config.WriteLocal(file, cfg, identity.Ref{})
-}

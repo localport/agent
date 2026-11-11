@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,225 +11,510 @@ import (
 	"testing"
 )
 
+// fakeInstallHost is a machine with two owned services, an uninstall entry
+// and a machine Path, each failure injectable by name.
 type fakeInstallHost struct {
 	notElevated bool
 	dirErr      error
-	stopErr     error
-	stopped     []string
-	started     [][]string
-	installed   bool
-	reregErr    error
-	reregs      []string
-	foreign     []string
-	uninstalls  []bool
-	path        string
-	expandable  bool
-	writes      int
-	broadcasts  int
-	systemRoot  string
+	lockErr     error
+	locks       int
+
+	// services: the definition the snapshot records, which restore writes
+	// back, and the names running.
+	definition string
+	existed    bool
+	running    []string
+	installed  []string
+	deleted    int
+	restores   int
+	purges     int
+
+	key        json.RawMessage
+	path       string
+	expandable bool
+	broadcasts int
+	queued     []string
+	warnings   []string
+
+	// fail names the operations that fail: stop, start, restore, install,
+	// delete, key (restoring or deleting the entry), keywrite, path, purge,
+	// foreign.
+	fail    map[string]bool
+	foreign []string
+	// onKeyWrite runs after a successful uninstall entry write.
+	onKeyWrite func()
+}
+
+var errInjected = errors.New("injected failure")
+
+func (f *fakeInstallHost) failing(op string) error {
+	if f.fail[op] {
+		return errInjected
+	}
+	return nil
 }
 
 func (f *fakeInstallHost) elevated() bool                 { return !f.notElevated }
 func (f *fakeInstallHost) prepareInstallDir(string) error { return f.dirErr }
+func (f *fakeInstallHost) lockServiceConfig(context.Context) (func(), bool, error) {
+	if f.lockErr != nil {
+		return nil, false, f.lockErr
+	}
+	f.locks++
+	return func() {}, false, nil
+}
+func (f *fakeInstallHost) snapshotServices() (json.RawMessage, []string, bool, error) {
+	raw, _ := json.Marshal(f.definition)
+	return raw, slices.Clone(f.running), f.existed, nil
+}
 func (f *fakeInstallHost) stopServices(context.Context) ([]string, error) {
-	return f.stopped, f.stopErr
+	if err := f.failing("stop"); err != nil {
+		return nil, err
+	}
+	stopped := f.running
+	f.running = nil
+	return stopped, nil
 }
 func (f *fakeInstallHost) startServices(_ context.Context, names []string) error {
-	f.started = append(f.started, names)
+	if err := f.failing("start"); err != nil {
+		return err
+	}
+	for _, n := range names {
+		if !slices.Contains(f.running, n) {
+			f.running = append(f.running, n)
+		}
+	}
 	return nil
 }
-func (f *fakeInstallHost) servicesInstalled() (bool, error) { return f.installed, nil }
-func (f *fakeInstallHost) reregister(_ context.Context, dir string) error {
-	f.reregs = append(f.reregs, dir)
-	return f.reregErr
+func (f *fakeInstallHost) restoreServices(_ context.Context, raw json.RawMessage) error {
+	f.restores++
+	if err := f.failing("restore"); err != nil {
+		return err
+	}
+	f.running = nil
+	return json.Unmarshal(raw, &f.definition)
 }
-func (f *fakeInstallHost) foreignServicesIn(string) ([]string, error) { return f.foreign, nil }
-func (f *fakeInstallHost) uninstallServices(purge bool) error {
-	f.uninstalls = append(f.uninstalls, purge)
+func (f *fakeInstallHost) installServices(_ context.Context, exe string) error {
+	f.installed = append(f.installed, exe)
+	// A failing install has already rewritten the definitions, as a
+	// failure partway through `service install` would.
+	f.definition = "new:" + exe
+	if err := f.failing("install"); err != nil {
+		return err
+	}
+	f.running = []string{"localport-session", "localport-device"}
+	return nil
+}
+func (f *fakeInstallHost) deleteServices(context.Context) error {
+	if err := f.failing("delete"); err != nil {
+		return err
+	}
+	f.deleted++
+	f.definition, f.existed, f.running = "", false, nil
+	return nil
+}
+func (f *fakeInstallHost) purge(context.Context) error { f.purges++; return f.failing("purge") }
+func (f *fakeInstallHost) foreignServicesIn(string) ([]string, error) {
+	return f.foreign, f.failing("foreign")
+}
+func (f *fakeInstallHost) readUninstallKey() (json.RawMessage, error) { return f.key, nil }
+func (f *fakeInstallHost) restoreUninstallKey(raw json.RawMessage) error {
+	if err := f.failing("key"); err != nil {
+		return err
+	}
+	if raw == nil && f.fail["keydelete"] {
+		return errInjected
+	}
+	f.key = raw
+	return nil
+}
+func (f *fakeInstallHost) writeUninstallKey(dir, version string, _ uint32) error {
+	if err := f.failing("keywrite"); err != nil {
+		return err
+	}
+	f.key = json.RawMessage(`"` + version + `@` + filepath.ToSlash(dir) + `"`)
+	if f.onKeyWrite != nil {
+		f.onKeyWrite()
+	}
 	return nil
 }
 func (f *fakeInstallHost) readPath() (string, bool, error) { return f.path, f.expandable, nil }
 func (f *fakeInstallHost) writePath(v string, expandable bool) error {
-	f.path, f.expandable, f.writes = v, expandable, f.writes+1
+	if err := f.failing("path"); err != nil {
+		return err
+	}
+	f.path, f.expandable = v, expandable
 	return nil
 }
 func (f *fakeInstallHost) broadcastEnvironment() error { f.broadcasts++; return nil }
 func (f *fakeInstallHost) expand(s string) string {
-	root := f.systemRoot
-	if root == "" {
-		root = `C:\Windows`
-	}
-	return strings.ReplaceAll(s, "%SystemRoot%", root)
+	return strings.ReplaceAll(s, "%SystemRoot%", `C:\Windows`)
 }
+func (f *fakeInstallHost) deleteAtReboot(p string) error { f.queued = append(f.queued, p); return nil }
+func (f *fakeInstallHost) warn(msg string)               { f.warnings = append(f.warnings, msg) }
 
-func absDir(t *testing.T) string { t.Helper(); return t.TempDir() }
-
-// Every step refuses unless elevated, before it does anything.
-func TestSystemStepsRefuseWithoutElevation(t *testing.T) {
-	dir := absDir(t)
-	for _, args := range [][]string{{"preflight", dir}, {"stop", dir}, {"commit", dir, ".staging-x"}, {"reregister", dir}, {"preuninstall", dir}, {"path", "add", dir}} {
-		h := &fakeInstallHost{notElevated: true, installed: true}
-		if err := runSystemSteps(context.Background(), h, args); !errors.Is(err, errInstallerNotElevated) {
-			t.Errorf("%v = %v, want errInstallerNotElevated", args, err)
-		}
-		if len(h.reregs)+len(h.uninstalls)+h.writes != 0 {
-			t.Errorf("%v acted without elevation", args)
-		}
-	}
-}
-
-func TestSystemPreflightAndStop(t *testing.T) {
-	dir := absDir(t)
-	unsafe := errors.New("Users can add files")
-	if err := runSystemSteps(context.Background(), &fakeInstallHost{dirErr: unsafe}, []string{"preflight", dir}); !errors.Is(err, errInstallDirUnsafe) || !errors.Is(err, unsafe) {
-		t.Fatalf("preflight = %v, want errInstallDirUnsafe", err)
-	}
-	if err := runSystemSteps(context.Background(), &fakeInstallHost{}, []string{"preflight", "relative"}); err == nil {
-		t.Fatal("preflight accepted a relative directory")
-	}
-	h := &fakeInstallHost{stopped: []string{"localport-device"}, stopErr: errors.New("timeout")}
-	if err := runSystemSteps(context.Background(), h, []string{"stop", dir}); !errors.Is(err, errServicesNotStopped) {
-		t.Fatalf("stop = %v, want errServicesNotStopped", err)
-	}
-	if len(h.started) != 1 || !slices.Equal(h.started[0], []string{"localport-device"}) {
-		t.Fatalf("started after a failed stop = %v, want what it stopped", h.started)
-	}
-}
-
-func stage(t *testing.T, dir, staging, release string) {
+// installed is a machine running release v1 from dir with both services up.
+func installedHost(t *testing.T) (*fakeInstallHost, string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(dir, staging), 0o755); err != nil {
-		t.Fatal(err)
+	dir := t.TempDir()
+	for _, name := range productFiles {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("v1"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	for _, name := range installBinaries {
-		if err := os.WriteFile(filepath.Join(dir, staging, name), []byte(release), 0o755); err != nil {
+	return &fakeInstallHost{
+		definition: "v1", existed: true, running: []string{"localport-session", "localport-device"},
+		key: json.RawMessage(`"1.0.0"`), path: `C:\Windows;` + dir, expandable: true,
+		fail: map[string]bool{},
+	}, dir
+}
+
+const testTxn = "nsA1b2.tmp"
+
+// stageRelease runs begin and extracts release into its staging directory,
+// as NSIS does.
+func stageRelease(t *testing.T, h *fakeInstallHost, dir, release string) {
+	t.Helper()
+	if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"begin", dir, testTxn}); err != nil {
+		t.Fatalf("begin = %v", err)
+	}
+	for _, name := range productFiles {
+		if err := os.WriteFile(filepath.Join(dir, txnRoot, testTxn, "staging", name), []byte(release), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 }
 
-func readBinaries(t *testing.T, dir string) []string {
+func readProduct(t *testing.T, dir string) []string {
 	t.Helper()
 	var out []string
-	for _, name := range installBinaries {
+	for _, name := range productFiles {
 		raw, _ := os.ReadFile(filepath.Join(dir, name))
 		out = append(out, string(raw))
 	}
 	return out
 }
 
-// Commit puts both staged executables in place and cleans leftovers of
-// earlier runs; a failure on the second restores both previous files and
-// restarts the owned services.
-func TestSystemCommit(t *testing.T) {
-	dir := absDir(t)
-	stage(t, dir, ".staging-old", "v1")
-	if err := os.WriteFile(filepath.Join(dir, "localport.exe.old"), []byte("v0"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := runSystemSteps(context.Background(), &fakeInstallHost{}, []string{"commit", dir, ".staging-old"}); err != nil {
-		t.Fatal(err)
-	}
-	stage(t, dir, ".staging-left", "stale")
-	stage(t, dir, ".staging-new", "v2")
-	if err := runSystemSteps(context.Background(), &fakeInstallHost{}, []string{"commit", dir, ".staging-new"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := readBinaries(t, dir); !slices.Equal(got, []string{"v2", "v2"}) {
-		t.Fatalf("binaries = %v, want v2", got)
-	}
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), stagingPrefix) || strings.HasSuffix(e.Name(), ".old") {
-			t.Errorf("leftover %s", e.Name())
-		}
-	}
+func allOf(n int, v string) []string { return slices.Repeat([]string{v}, n) }
 
-	// The second executable cannot be moved: a directory sits in its place.
-	stage(t, dir, ".staging-bad", "v3")
-	session := filepath.Join(dir, ".staging-bad", installBinaries[1])
-	if err := os.Remove(session); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(session, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	h := &fakeInstallHost{installed: true}
-	if err := runSystemSteps(context.Background(), h, []string{"commit", dir, ".staging-bad"}); !errors.Is(err, errInstallNotCommitted) {
-		t.Fatalf("commit with a bad staged file = %v, want errInstallNotCommitted", err)
-	}
-	if got := readBinaries(t, dir); !slices.Equal(got, []string{"v2", "v2"}) {
-		t.Fatalf("binaries after a refused commit = %v, want v2 kept", got)
-	}
-	if len(h.started) != 1 {
-		t.Fatalf("services started %d times after a refused commit, want 1", len(h.started))
-	}
-
-	// The rename of the second file fails after the first moved.
-	stage(t, dir, ".staging-held", "v4")
-	if err := os.Mkdir(filepath.Join(dir, installBinaries[1]+".old"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, installBinaries[1]+".old", "x"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := runSystemSteps(context.Background(), &fakeInstallHost{}, []string{"commit", dir, ".staging-held"}); !errors.Is(err, errInstallNotCommitted) {
-		t.Fatalf("commit with the second move refused = %v", err)
-	}
-	if got := readBinaries(t, dir); !slices.Equal(got, []string{"v2", "v2"}) {
-		t.Fatalf("binaries after a rolled-back commit = %v, want both v2", got)
+func assertNoTransaction(t *testing.T, dir string) {
+	t.Helper()
+	if entries, _ := os.ReadDir(filepath.Join(dir, txnRoot)); len(entries) != 0 {
+		t.Fatalf("transaction directories left: %v", entries)
 	}
 }
 
-// Commit takes only a staging directory directly inside the install
-// directory, even when the path it names holds staged files.
-func TestSystemCommitRefusesStagingOutsideTheDirectory(t *testing.T) {
-	base := t.TempDir()
-	dir := filepath.Join(base, "install")
-	if err := os.Mkdir(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	stage(t, base, ".staging-outside", "foreign")
-	for _, staging := range []string{"../.staging-outside", filepath.Join(base, ".staging-outside"), "staged"} {
-		if err := runSystemSteps(context.Background(), &fakeInstallHost{}, []string{"commit", dir, staging}); err == nil {
-			t.Errorf("commit accepted staging %q", staging)
+// Every step refuses unless elevated, before it does anything.
+func TestSystemStepsRefuseWithoutElevation(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"begin", dir, testTxn}, {"apply", dir, testTxn}, {"rollback", dir}, {"uninstall", dir}} {
+		h := &fakeInstallHost{notElevated: true}
+		if err := runSystemSteps(context.Background(), h, "v2", args); !errors.Is(err, errInstallerNotElevated) {
+			t.Errorf("%v = %v, want errInstallerNotElevated", args, err)
 		}
-	}
-	if got := readBinaries(t, dir); !slices.Equal(got, []string{"", ""}) {
-		t.Fatalf("binaries = %v, want none installed", got)
+		if h.locks != 0 {
+			t.Errorf("%v took the lock without elevation", args)
+		}
 	}
 }
 
-// Reregister runs only with owned services; preuninstall refuses a foreign
-// service inside the directory and passes --purge on.
-func TestSystemReregisterAndPreuninstall(t *testing.T) {
-	dir := absDir(t)
-	h := &fakeInstallHost{}
-	if err := runSystemSteps(context.Background(), h, []string{"reregister", dir}); err != nil || len(h.reregs) != 0 {
-		t.Fatalf("reregister without services = %v, %v", err, h.reregs)
+// Bad arguments and unknown steps carry the installer step code.
+func TestSystemStepErrorsCarryACode(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{nil, {"begin", dir}, {"begin", "relative", testTxn}, {"begin", dir, "../x"}, {"apply", dir, "ns.tmp/.."}, {"rollback"}, {"bogus", dir, testTxn}} {
+		if err := runSystemSteps(context.Background(), &fakeInstallHost{}, "v2", args); !errors.Is(err, errInstallerStepInvalid) {
+			t.Errorf("%v = %v, want errInstallerStepInvalid", args, err)
+		}
 	}
-	h = &fakeInstallHost{installed: true, reregErr: errors.New("sc failed")}
-	if err := runSystemSteps(context.Background(), h, []string{"reregister", dir}); !errors.Is(err, errServicesNotRestored) || !slices.Equal(h.reregs, []string{dir}) {
-		t.Fatalf("reregister = %v, %v", err, h.reregs)
+}
+
+// begin refuses an unsafe directory and a busy service configuration lock.
+func TestSystemBeginRefuses(t *testing.T) {
+	dir := t.TempDir()
+	unsafe := errors.New("Users can add files")
+	if err := runSystemSteps(context.Background(), &fakeInstallHost{dirErr: unsafe}, "v2", []string{"begin", dir, testTxn}); !errors.Is(err, errInstallDirUnsafe) || !errors.Is(err, unsafe) {
+		t.Fatalf("begin = %v, want errInstallDirUnsafe", err)
 	}
-	h = &fakeInstallHost{foreign: []string{"OtherSvc"}}
-	if err := runSystemSteps(context.Background(), h, []string{"preuninstall", dir}); !errors.Is(err, errForeignServiceInDir) || len(h.uninstalls) != 0 {
-		t.Fatalf("preuninstall with a foreign service = %v, uninstalls %v", err, h.uninstalls)
+	assertNoTransaction(t, dir)
+	busy := errors.Join(errServiceConfigBusy, errors.New("held"))
+	if err := runSystemSteps(context.Background(), &fakeInstallHost{lockErr: busy}, "v2", []string{"apply", dir, testTxn}); !errors.Is(err, errServiceConfigBusy) {
+		t.Fatalf("apply with the lock held = %v", err)
 	}
-	h = &fakeInstallHost{}
-	if err := runSystemSteps(context.Background(), h, []string{"preuninstall", dir, "--purge"}); err != nil || !slices.Equal(h.uninstalls, []bool{true}) {
-		t.Fatalf("preuninstall --purge = %v, %v", err, h.uninstalls)
+}
+
+// A successful upgrade replaces every product file, records the entry,
+// leaves Path alone when it already holds the directory, re-registers the
+// services for the installed exe and leaves no transaction behind.
+func TestSystemApplyUpgrades(t *testing.T) {
+	h, dir := installedHost(t)
+	stageRelease(t, h, dir, "v2")
+	if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn}); err != nil {
+		t.Fatal(err)
 	}
+	if got := readProduct(t, dir); !slices.Equal(got, allOf(len(productFiles), "v2")) {
+		t.Fatalf("product files = %v", got)
+	}
+	if !slices.Equal(h.installed, []string{filepath.Join(dir, "localport.exe")}) || len(h.running) != 2 {
+		t.Fatalf("services installed %v, running %v", h.installed, h.running)
+	}
+	if !strings.HasPrefix(string(h.key), `"2.0.0@`) || h.path != `C:\Windows;`+dir || h.broadcasts != 0 {
+		t.Fatalf("key %s, path %q, broadcasts %d", h.key, h.path, h.broadcasts)
+	}
+	assertNoTransaction(t, dir)
+}
+
+// A first install adds dir to Path (kept REG_SZ when it was) and announces
+// it once; with no services it registers none.
+func TestSystemApplyFirstInstall(t *testing.T) {
+	dir := t.TempDir()
+	h := &fakeInstallHost{path: `C:\Tools`, fail: map[string]bool{}}
+	stageRelease(t, h, dir, "v2")
+	if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn}); err != nil {
+		t.Fatal(err)
+	}
+	if h.path != `C:\Tools;`+dir || h.expandable || h.broadcasts != 1 || len(h.installed) != 0 {
+		t.Fatalf("path %q (expandable %v), broadcasts %d, installed %v", h.path, h.expandable, h.broadcasts, h.installed)
+	}
+	assertNoTransaction(t, dir)
+}
+
+// A failure at any action puts the machine back as it was: every product
+// file from v1, the entry, Path, the service definitions, and the services
+// that were running started again.
+func TestSystemApplyRollsBackEveryAction(t *testing.T) {
+	for _, op := range []string{"stop", "move", "key", "path", "install"} {
+		t.Run(op, func(t *testing.T) {
+			h, dir := installedHost(t)
+			h.path = `C:\Windows` // so the apply adds dir and its undo is exercised
+			stageRelease(t, h, dir, "v2")
+			want := map[string]error{"stop": errServicesNotStopped, "move": errInstallNotCommitted, "key": errUninstallEntryNotSet, "path": errMachinePathNotSet, "install": errServicesNotRestored}[op]
+			if op == "key" {
+				op = "keywrite"
+			}
+			if op == "move" {
+				// The second file cannot be set aside: a directory holds its
+				// backup name.
+				if err := os.MkdirAll(filepath.Join(dir, txnRoot, testTxn, "backup", productFiles[1], "x"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				h.fail[op] = true
+			}
+			err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn})
+			if !errors.Is(err, want) || errors.Is(err, errInstallMixed) {
+				t.Fatalf("apply = %v, want %v", err, want)
+			}
+			if got := readProduct(t, dir); !slices.Equal(got, allOf(len(productFiles), "v1")) {
+				t.Fatalf("product files after rollback = %v", got)
+			}
+			if h.definition != "v1" || string(h.key) != `"1.0.0"` || h.path != `C:\Windows` {
+				t.Fatalf("after rollback: definition %q, key %s, path %q", h.definition, h.key, h.path)
+			}
+			if op != "stop" && !slices.Contains(h.running, "localport-device") {
+				t.Fatalf("running after rollback = %v, want the services that ran", h.running)
+			}
+			if op == "move" {
+				// The test's own blocker stays; nothing else does.
+				return
+			}
+			assertNoTransaction(t, dir)
+		})
+	}
+}
+
+// A rollback that cannot finish keeps the journal and reports AG090; the
+// next run retries it before anything else.
+func TestSystemRollbackFailureIsRetried(t *testing.T) {
+	h, dir := installedHost(t)
+	stageRelease(t, h, dir, "v2")
+	h.fail["install"], h.fail["restore"] = true, true
+	if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn}); !errors.Is(err, errInstallMixed) {
+		t.Fatalf("apply = %v, want errInstallMixed", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, txnRoot, testTxn, journalFile)); err != nil {
+		t.Fatalf("journal after a failed rollback: %v", err)
+	}
+	h.fail["restore"] = false
+	if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"rollback", dir}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readProduct(t, dir); !slices.Equal(got, allOf(len(productFiles), "v1")) || h.definition != "v1" {
+		t.Fatalf("after the retried rollback: files %v, definition %q", got, h.definition)
+	}
+	assertNoTransaction(t, dir)
+}
+
+// writeJournal leaves transaction txn as a run killed at phase left it:
+// localport.exe already set aside and v2 in its place.
+func writeJournal(t *testing.T, dir, phase string) {
+	t.Helper()
+	txnDir := filepath.Join(dir, txnRoot, testTxn)
+	for _, d := range []string{"staging", "backup"} {
+		if err := os.MkdirAll(filepath.Join(txnDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current := filepath.Join(dir, "localport.exe")
+	backup := filepath.Join(txnDir, "backup", "localport.exe")
+	if err := os.Rename(current, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(current, []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ := json.Marshal("v1")
+	j := journal{Op: opInstall, Txn: testTxn, Phase: phase, Services: snap, Running: []string{"localport-device"}, Key: json.RawMessage(`"1.0.0"`), KeyFound: true,
+		Actions: []txnAction{
+			{Kind: actStop, Names: []string{"localport-device"}, Done: true},
+			{Kind: actMove, From: current, To: backup, Done: true},
+			{Kind: actMove, From: filepath.Join(txnDir, "staging", "localport.exe"), To: current, Done: true},
+		}}
+	raw, _ := json.Marshal(j)
+	if err := os.WriteFile(filepath.Join(txnDir, journalFile), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An interrupted transaction is resolved by the next run: one applying is
+// rolled back, one committed is finished, one begun is dropped.
+func TestSystemRecoversAnInterruptedTransaction(t *testing.T) {
+	t.Run("applying", func(t *testing.T) {
+		h, dir := installedHost(t)
+		h.running = nil
+		writeJournal(t, dir, phaseApplying)
+		if err := runSystemSteps(context.Background(), h, "v2", []string{"begin", dir, "nsNext.tmp"}); err != nil {
+			t.Fatal(err)
+		}
+		if got := readProduct(t, dir); got[0] != "v1" || !slices.Contains(h.running, "localport-device") {
+			t.Fatalf("after recovery: localport.exe %q, running %v", got[0], h.running)
+		}
+		if _, err := os.Stat(filepath.Join(dir, txnRoot, testTxn)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("interrupted transaction left: %v", err)
+		}
+	})
+	t.Run("committed", func(t *testing.T) {
+		h, dir := installedHost(t)
+		writeJournal(t, dir, phaseCommitted)
+		if err := runSystemSteps(context.Background(), h, "v2", []string{"rollback", dir}); err != nil {
+			t.Fatal(err)
+		}
+		if got := readProduct(t, dir); got[0] != "v2" {
+			t.Fatalf("a committed transaction was undone: localport.exe %q", got[0])
+		}
+		assertNoTransaction(t, dir)
+	})
+	t.Run("begun", func(t *testing.T) {
+		h, dir := installedHost(t)
+		stageRelease(t, h, dir, "v2")
+		if err := runSystemSteps(context.Background(), h, "v2", []string{"rollback", dir}); err != nil {
+			t.Fatal(err)
+		}
+		if got := readProduct(t, dir); !slices.Equal(got, allOf(len(productFiles), "v1")) {
+			t.Fatalf("product files = %v", got)
+		}
+		assertNoTransaction(t, dir)
+	})
+}
+
+// A backup Windows will not delete (an image still running) is queued for
+// deletion at reboot and blocks nothing.
+func TestSystemQueuesABackupItCannotDelete(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root deletes from a read-only directory")
+	}
+	h, dir := installedHost(t)
+	stageRelease(t, h, dir, "v2")
+	backup := filepath.Join(dir, txnRoot, testTxn, "backup")
+	// The rename into the backup directory happens before it turns
+	// read-only, so the apply's own moves are unaffected.
+	h.afterMovesHook(t, backup)
+	if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn}); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.queued) == 0 || !strings.HasPrefix(h.queued[0], backup) {
+		t.Fatalf("queued for reboot = %v, want the backups", h.queued)
+	}
+	stageNext := &fakeInstallHost{fail: map[string]bool{}, path: h.path}
+	if err := runSystemSteps(context.Background(), stageNext, "v3", []string{"begin", dir, "nsNext.tmp"}); err != nil {
+		t.Fatalf("the next begin with a queued backup = %v", err)
+	}
+}
+
+// afterMovesHook makes the backup directory read-only once the uninstall
+// entry is written, the action after the last move.
+func (f *fakeInstallHost) afterMovesHook(t *testing.T, backup string) {
+	t.Helper()
+	f.onKeyWrite = func() {
+		if err := os.Chmod(backup, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(backup, 0o700) })
+	}
+}
+
+// Uninstall removes services, Path entry, entry and files, then purges; a
+// foreign service inside the directory refuses it; a failure rolls back.
+func TestSystemUninstall(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		h, dir := installedHost(t)
+		if err := runSystemSteps(context.Background(), h, "v1", []string{"uninstall", dir, "--purge"}); err != nil {
+			t.Fatal(err)
+		}
+		if h.deleted != 1 || h.key != nil || h.path != `C:\Windows` || h.purges != 1 || h.broadcasts != 1 {
+			t.Fatalf("deleted %d, key %s, path %q, purges %d, broadcasts %d", h.deleted, h.key, h.path, h.purges, h.broadcasts)
+		}
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("install directory after uninstall: %v", err)
+		}
+	})
+	t.Run("foreign", func(t *testing.T) {
+		h, dir := installedHost(t)
+		h.foreign = []string{"OtherSvc"}
+		if err := runSystemSteps(context.Background(), h, "v1", []string{"uninstall", dir}); !errors.Is(err, errForeignServiceInDir) || h.deleted != 0 {
+			t.Fatalf("uninstall = %v, deleted %d", err, h.deleted)
+		}
+	})
+	t.Run("no purge", func(t *testing.T) {
+		h, dir := installedHost(t)
+		if err := runSystemSteps(context.Background(), h, "v1", []string{"uninstall", dir}); err != nil || h.purges != 0 {
+			t.Fatalf("uninstall = %v, purges %d", err, h.purges)
+		}
+	})
+	t.Run("rollback restores Path exactly", func(t *testing.T) {
+		h, dir := installedHost(t)
+		h.path = `C:\Windows;` + dir + `;C:\Tools`
+		h.fail["keydelete"] = true
+		if err := runSystemSteps(context.Background(), h, "v1", []string{"uninstall", dir}); !errors.Is(err, errUninstallNotPrepared) {
+			t.Fatalf("uninstall = %v", err)
+		}
+		if h.path != `C:\Windows;`+dir+`;C:\Tools` || string(h.key) != `"1.0.0"` {
+			t.Fatalf("after rollback: path %q, key %s", h.path, h.key)
+		}
+	})
+	t.Run("rollback", func(t *testing.T) {
+		h, dir := installedHost(t)
+		h.fail["path"] = true
+		err := runSystemSteps(context.Background(), h, "v1", []string{"uninstall", dir, "--purge"})
+		if !errors.Is(err, errUninstallNotPrepared) {
+			t.Fatalf("uninstall = %v", err)
+		}
+		if got := readProduct(t, dir); !slices.Equal(got, allOf(len(productFiles), "v1")) || h.definition != "v1" || h.path != `C:\Windows;`+dir || h.purges != 0 {
+			t.Fatalf("after rollback: files %v, definition %q, path %q, purges %d", got, h.definition, h.path, h.purges)
+		}
+		if !slices.Contains(h.running, "localport-device") {
+			t.Fatalf("running after rollback = %v", h.running)
+		}
+		assertNoTransaction(t, dir)
+	})
 }
 
 // Path edits keep every other entry and the value's type, match case- and
 // separator-insensitively and after expansion, and are idempotent.
-func TestSystemPath(t *testing.T) {
-	dir := absDir(t)
+func TestSystemPathEdits(t *testing.T) {
+	expand := (&fakeInstallHost{}).expand
+	dir := `C:\Program Files\Localport`
 	long := strings.Repeat(`C:\x;`, 2000) + `%SystemRoot%\system32`
-	for _, tc := range []struct {
-		name, op, before, after string
-	}{
+	for _, tc := range []struct{ name, op, before, after string }{
 		{"add", "add", `%SystemRoot%\system32;C:\Tools`, `%SystemRoot%\system32;C:\Tools;` + dir},
 		{"re-add", "add", `C:\Tools;` + strings.ToUpper(dir) + `\`, `C:\Tools;` + strings.ToUpper(dir) + `\`},
 		{"add to empty", "add", ``, dir},
@@ -237,24 +523,50 @@ func TestSystemPath(t *testing.T) {
 		{"remove absent", "remove", `C:\Tools`, `C:\Tools`},
 		{"long value kept", "add", long, long + ";" + dir},
 	} {
-		h := &fakeInstallHost{path: tc.before, expandable: true}
-		if err := runSystemSteps(context.Background(), h, []string{"path", tc.op, dir}); err != nil {
-			t.Fatalf("%s: %v", tc.name, err)
+		got := pathWithout(tc.before, dir, expand)
+		if tc.op == "add" {
+			got = pathWith(tc.before, dir, expand)
 		}
-		if h.path != tc.after || !h.expandable {
-			t.Errorf("%s: Path = %q (expandable %v), want %q", tc.name, h.path, h.expandable, tc.after)
-		}
-		if changed := tc.before != tc.after; (h.writes == 1) != changed || (h.broadcasts == 1) != changed {
-			t.Errorf("%s: writes %d, broadcasts %d", tc.name, h.writes, h.broadcasts)
+		if got != tc.after {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.after)
 		}
 	}
-	// An entry that expands to the directory counts as present.
-	h := &fakeInstallHost{path: `C:\Tools;%SystemRoot%`, systemRoot: dir}
-	if err := runSystemSteps(context.Background(), h, []string{"path", "add", dir}); err != nil || h.writes != 0 {
-		t.Fatalf("an entry expanding to the directory was added again: %v, %q", err, h.path)
+	// An entry that expands to the directory is the directory.
+	if got := pathWith(`C:\Tools;%LP%`, dir, func(s string) string { return strings.ReplaceAll(s, "%LP%", dir) }); got != `C:\Tools;%LP%` {
+		t.Fatalf("an entry expanding to the directory was added again: %q", got)
 	}
-	h = &fakeInstallHost{path: `C:\Tools`}
-	if err := runSystemSteps(context.Background(), h, []string{"path", "add", filepath.Join(dir, "missing")}); !errors.Is(err, errMachinePathNotSet) || h.writes != 0 {
-		t.Fatalf("add of a missing directory = %v, writes %d", err, h.writes)
-	}
+}
+
+// apply refuses a transaction that is not a begun install, and a release
+// missing a staged file, before it changes anything.
+func TestSystemApplyRefusesBeforeAnyChange(t *testing.T) {
+	t.Run("not begun", func(t *testing.T) {
+		h, dir := installedHost(t)
+		writeJournal(t, dir, phaseApplying)
+		if err := runSystemSteps(context.Background(), h, "v2", []string{"apply", dir, testTxn}); !errors.Is(err, errInstallerStepInvalid) {
+			t.Fatalf("apply of an applying transaction = %v", err)
+		}
+		if h.restores != 0 || h.key == nil || string(h.key) != `"1.0.0"` {
+			t.Fatalf("apply changed state: restores %d, key %s", h.restores, h.key)
+		}
+	})
+	t.Run("staged directory", func(t *testing.T) {
+		h, dir := installedHost(t)
+		stageRelease(t, h, dir, "v2")
+		// A directory where a staged file belongs would move into place.
+		notice := filepath.Join(dir, txnRoot, testTxn, "staging", "NOTICE")
+		if err := os.Remove(notice); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(notice, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := runSystemSteps(context.Background(), h, "v2", []string{"apply", dir, testTxn}); !errors.Is(err, errInstallNotCommitted) {
+			t.Fatalf("apply = %v", err)
+		}
+		if got := readProduct(t, dir); !slices.Equal(got, allOf(len(productFiles), "v1")) || len(h.running) != 2 || string(h.key) != `"1.0.0"` {
+			t.Fatalf("after a refused apply: files %v, running %v, key %s", got, h.running, h.key)
+		}
+		assertNoTransaction(t, dir)
+	})
 }

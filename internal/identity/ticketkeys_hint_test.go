@@ -221,20 +221,3 @@ func TestRenewalStartedBeforeAHintDoesNotSettleIt(t *testing.T) {
 	}
 	assertKIDs(t, keys, []string{"k1"}, nil)
 }
-
-// A ticket_keys.json holding a revoked list loads; the list is ignored.
-func TestTicketKeysLoadIgnoresALegacyRevokedList(t *testing.T) {
-	store := deviceTicketKeys(t)
-	keys := store.mustTicketKeys(deviceRef)
-	if err := keys.Replace(context.Background(), keys.Generation(), keySet(tk1)); err != nil {
-		t.Fatal(err)
-	}
-	legacy := fmt.Sprintf(`{"keys":[{"kid":"k1","public_key":%q}],"revoked":["k2"],"recording_key":""}`, tk1.PublicKey)
-	if err := os.WriteFile(filepath.Join(store.Dir(deviceRef), ticketKeysFile), []byte(legacy), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := keys.Load(); err != nil {
-		t.Fatalf("Load of a legacy file: %v", err)
-	}
-	assertKIDs(t, keys, []string{"k1"}, nil)
-}

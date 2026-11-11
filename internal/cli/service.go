@@ -61,6 +61,18 @@ func runService(args []string) (err error) {
 // already in the local config, and starts it. It spends no token, so it
 // recovers from an install that failed after connect enrolled.
 func installService(who invoker) error {
+	unlock, _, err := lockServiceConfig(context.Background())
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return installServiceLocked(who, "")
+}
+
+// installServiceLocked is installService for a caller holding the service
+// configuration lock. exe is the binary the services run, or "" for the
+// running one; the installer passes the installed localport.exe.
+func installServiceLocked(who invoker, exe string) error {
 	file, err := who.localConfigFile()
 	if err != nil {
 		return err
@@ -74,18 +86,16 @@ func installService(who invoker) error {
 	}
 	if needsSystemLayout(file) {
 		// Before prepareService, whose run.lock check needs the account's
-		// group (on Windows its system DACL); an earlier install is
-		// converted here.
-		m, exe := platformManager()
-		if err := prepareSystemLayout(context.Background(), file, m, exe); err != nil {
+		// group (on Windows its system DACL).
+		if err := prepareSystemLayout(context.Background(), file); err != nil {
 			return err
 		}
 	}
-	svc, err := prepareService(file)
+	svc, err := prepareService(file, exe)
 	if err != nil {
 		return err
 	}
-	if err := svc.install(); err != nil {
+	if err := svc.installLocked(); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "  installed and started %s for the devices in %s\n", svc.manager.Name(), file.Path)
@@ -108,7 +118,13 @@ func uninstallService(who invoker, purge bool) error {
 	case err != nil:
 		return err
 	default:
-		switch err := m.Uninstall(context.Background()); {
+		unlock, _, lockErr := lockServiceConfig(context.Background())
+		if lockErr != nil {
+			return lockErr
+		}
+		err := m.Uninstall(context.Background())
+		unlock()
+		switch {
 		case errors.Is(err, service.ErrNotInstalled):
 			fmt.Fprintf(os.Stderr, "  %v\n", err)
 		case err != nil:

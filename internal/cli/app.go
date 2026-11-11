@@ -40,7 +40,7 @@ func (a *App) Run(args []string) error {
 		return runService(args[1:])
 	case "system":
 		// The Windows installer's internal steps; not in `localport help`.
-		return runSystem(args[1:])
+		return runSystem(a.version, args[1:])
 	case "status":
 		return runStatus(args[1:])
 	case "access":
@@ -53,10 +53,6 @@ func (a *App) Run(args []string) error {
 		return runSSHCert(args[1:])
 	case "ssh-proxy":
 		return runSSHProxy(args[1:])
-	case "tunnel":
-		// Without this case the flat tunnel form would reject "tunnel" with a
-		// missing --local error.
-		return fmt.Errorf(`"tunnel" is now "connect": localport connect --config <file>`)
 	case "setup":
 		return runSetup(args[1:])
 	case "identity":

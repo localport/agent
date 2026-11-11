@@ -24,22 +24,6 @@ func parseDeviceFlags(t *testing.T, args ...string) (*flag.FlagSet, *deviceFlags
 	return fs, flags
 }
 
-// -t/--token is refused with the retired-token message before anything else.
-// The unroutable --api keeps a regression from reaching a real control plane.
-func TestConnectRefusesAFleetToken(t *testing.T) {
-	// A regression must not touch the real home store or config.
-	t.Setenv(identity.HomeEnv, t.TempDir())
-	for _, args := range [][]string{
-		{"-t", "tok", "--api", "https://127.0.0.1:1"},
-		{"--token=tok", "--api", "https://127.0.0.1:1"},
-		{"lpj_join", "--api", "https://127.0.0.1:1", "--wait", "0", "--token", "tok"},
-	} {
-		if err := runConnect("test", args); !errors.Is(err, config.ErrFleetTokenRetired) {
-			t.Errorf("connect %v = %v, want ErrFleetTokenRetired", args, err)
-		}
-	}
-}
-
 // Flag parsing stops at the first argument that is not a flag, so anything
 // after a second positional would be dropped while the token is spent.
 func TestConnectRefusesAnArgumentBeyondTheJoinToken(t *testing.T) {

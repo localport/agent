@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -108,5 +109,27 @@ func TestCaptureCrashesSkipsAnUntrustedDirectory(t *testing.T) {
 	}
 	if raw, _ := os.ReadFile(filepath.Join(dir, crashFile)); string(raw) != "panic: x\n" {
 		t.Fatal("an untrusted directory was changed")
+	}
+}
+
+// A crash that cannot be kept stays as it is: arming would truncate it.
+func TestCaptureCrashesLeavesACrashItCannotKeep(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory the test cannot rename in: a Unix non-root run")
+	}
+	dir := t.TempDir()
+	writeCrash(t, dir, crashFile, "panic: x\n", time.Now())
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	var warnings []string
+	captureCrashes(dir, "localport-device", "1.4.0", func(string) error { return nil },
+		func(s string) { warnings = append(warnings, s) }, func(string) { t.Fatal("reported a crash it did not keep") })
+	if raw, _ := os.ReadFile(filepath.Join(dir, crashFile)); string(raw) != "panic: x\n" {
+		t.Fatalf("current.crash = %q, want the unkept crash", raw)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "crash capture is off") {
+		t.Fatalf("warnings = %q", warnings)
 	}
 }

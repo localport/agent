@@ -42,9 +42,6 @@ func runConnect(version string, args []string) (retErr error) {
 		logRequests = fs.Bool("log-requests", false, "log one line per HTTP request in headless mode (--config)")
 		foreground  = fs.Bool("foreground", false, "run the device in this terminal instead of installing the service (root or Administrator); as root on Linux and macOS it runs every device in the machine-wide config")
 	)
-	// -t/--token is parsed only to refuse it with the retired-token message.
-	retiredToken := fs.String("token", "", "retired: fleet tokens are replaced by join tokens")
-	fs.StringVar(retiredToken, "t", "", "retired: fleet tokens are replaced by join tokens")
 	device := addDeviceFlags(fs)
 	fs.Usage = func() { usageConnect(fs) }
 
@@ -55,9 +52,6 @@ func runConnect(version string, args []string) (retErr error) {
 	}
 	if err := fs.Parse(rest); err != nil {
 		return err
-	}
-	if tokenFlagGiven(fs) {
-		return config.ErrFleetTokenRetired
 	}
 	positional := fs.Args()
 	if joinToken == "" && len(positional) > 0 {
@@ -120,14 +114,13 @@ func runConnect(version string, args []string) (retErr error) {
 	if needsSystemLayout(file) {
 		// First: the service check below locks run.lock, which needs the
 		// account's group (on Windows its system DACL).
-		m, exe := platformManager()
-		if err := prepareSystemLayout(context.Background(), file, m, exe); err != nil {
+		if err := prepareSystemLayout(context.Background(), file); err != nil {
 			return err
 		}
 	}
 	var svc *deviceService
 	if who.privileged && !*foreground {
-		if svc, err = prepareService(file); err != nil {
+		if svc, err = prepareService(file, ""); err != nil {
 			return err
 		}
 	}
@@ -203,21 +196,6 @@ func runConnect(version string, args []string) (retErr error) {
 	return serveEnrolled(context.Background(), version, store, []config.LocalDevice{inForce}, *noUI, *noMux, nil)
 }
 
-// platformManager is the manager and executable a conversion stops and
-// reinstalls an installed service with, so its devices keep running; nil
-// without a supported service manager or an acceptable executable.
-func platformManager() (service.Manager, string) {
-	m, err := newServiceManager()
-	if err != nil {
-		return nil, ""
-	}
-	exe, err := serviceExecutable()
-	if err != nil {
-		return nil, ""
-	}
-	return m, exe
-}
-
 // storeEnrolledKeys writes the enrolment's ticket key set. The credential is
 // already stored, so a failure warns and enrolment goes on: the device holds
 // no ticket keys until ticket_keys.json loads, and an identity.KeyRefresher
@@ -272,7 +250,7 @@ const serviceInstallCommand = "sudo localport service install (an elevated promp
 // write, an executable someone other than root could replace, or a manual
 // run holding run.lock, which would keep the started service from serving.
 // It lists the systemd drop-ins that extend the service.
-func prepareService(file config.LocalConfigFile) (*deviceService, error) {
+func prepareService(file config.LocalConfigFile, exe string) (*deviceService, error) {
 	m, err := newServiceManager()
 	if err != nil {
 		return nil, fmt.Errorf("%w\n  run the device in the foreground with --foreground", err)
@@ -281,7 +259,11 @@ func prepareService(file config.LocalConfigFile) (*deviceService, error) {
 	if err != nil {
 		return nil, err
 	}
-	exe, err := serviceExecutable()
+	if exe == "" {
+		exe, err = serviceExecutable()
+	} else {
+		err = checkServiceExecutable(exe)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -367,20 +349,31 @@ const unsafeBinaryRemedy = `install localport into a directory only root or Admi
 // packageManagerRemedy follows a security.ErrPackageManagerExecutable refusal.
 const packageManagerRemedy = `install the device with the Localport installer (localport-setup-<version>-windows-amd64.exe, the winget installer package, or install.ps1 run elevated), then use & "$env:ProgramFiles\Localport\localport.exe" connect ...`
 
+// runningExecutable is service.Executable, a variable so tests name the
+// binary a package manager installed.
+var runningExecutable = service.Executable
+
 // serviceExecutable is the resolved running binary, refused when a package
 // manager installed it or unless only root or Administrators can replace it.
 func serviceExecutable() (string, error) {
-	exe, err := service.Executable()
+	exe, err := runningExecutable()
 	if err != nil {
 		return "", err
 	}
+	return exe, checkServiceExecutable(exe)
+}
+
+// checkServiceExecutable refuses exe as the device service binary when a
+// package manager installed it or someone other than root or Administrators
+// can replace it.
+func checkServiceExecutable(exe string) error {
 	if err := security.CheckPackageManagerBinary(exe); err != nil {
-		return "", fmt.Errorf("%w\n  %s", err, packageManagerRemedy)
+		return fmt.Errorf("%w\n  %s", err, packageManagerRemedy)
 	}
 	if err := checkServiceBinary(exe); err != nil {
-		return "", fmt.Errorf("%w\n  %s", err, unsafeBinaryRemedy)
+		return fmt.Errorf("%w\n  %s", err, unsafeBinaryRemedy)
 	}
-	return exe, nil
+	return nil
 }
 
 // errServiceInstalled refuses deleting the devices while the device
@@ -408,9 +401,20 @@ func installedDeviceService() (service.Manager, bool, error) {
 	return m, installed, nil
 }
 
-// install writes, enables and (re)starts the device service. Each service
-// manager command has its own timeout.
+// install writes, enables and (re)starts the device service, holding the
+// service configuration lock. Each service manager command has its own
+// timeout.
 func (s *deviceService) install() error {
+	unlock, _, err := lockServiceConfig(context.Background())
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.installLocked()
+}
+
+// installLocked is install for a caller holding the lock.
+func (s *deviceService) installLocked() error {
 	return s.manager.Install(context.Background(), s.exe)
 }
 
@@ -563,12 +567,6 @@ func prepareDevice(fs *flag.FlagSet, flags *deviceFlags, who invoker) (config.Lo
 	return d, nil
 }
 
-func tokenFlagGiven(fs *flag.FlagSet) bool {
-	given := false
-	fs.Visit(func(f *flag.Flag) { given = given || f.Name == "token" || f.Name == "t" })
-	return given
-}
-
 // runConfigFile runs every tunnel in a config file.
 func runConfigFile(version, path string, noUI, noMux, noInspect, logRequests bool) error {
 	cfg, err := config.Load(path)
@@ -644,7 +642,6 @@ func usageConnect(fs *flag.FlagSet) {
   beside it:
     localport connect --config localport.yaml
 
-  -t/--token is refused: fleet tokens are retired.
 
 Flags:
 `)

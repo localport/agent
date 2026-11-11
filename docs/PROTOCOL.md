@@ -613,15 +613,19 @@ stream:
    the stream's start, and the handshake and userauth within 10 s of the
    connection's start, apart from a keyboard-interactive prompt, which has
    5 minutes of its own.
-2. Userauth: `publickey` with an SSH user certificate only, at most 3 attempts.
-   After the client proves possession of the certificate's key, the agent
-   accepts it only when all of these hold; every refusal is a userauth failure
-   and is logged:
+2. Userauth: `publickey`, at most 3 attempts, bound to the admitted
+   certificate, the one the first connect's prelude admitted. The client proves
+   possession of that certificate's key, presented plain or in any
+   certificate over it (OpenSSH presents the certificate file it loaded at
+   start, which can predate the one `ssh-proxy` minted after a refusal);
+   another key is refused. Nothing in the presented certificate is used: the
+   agent builds the identity from the admitted certificate and accepts it only
+   when all of these hold for it; every refusal is a userauth failure and is
+   logged:
 
    | Check |
    | ----- |
    | a registration was acknowledged (its key is the host key) |
-   | a user certificate for the key the first connect's prelude bound the connection to |
    | a user certificate whose serial is the notice's serial |
    | signed by a session CA key the agent holds (`ticket_keys.json`); an unknown CA key triggers one key fetch (at most 3 s, at most once per 5 minutes) and one retry |
    | valid now within 30 s of skew, for the user name as its principal |
@@ -1587,8 +1591,7 @@ of backups and configuration management.
   .pins.lock          serializes desktop_pins.json writers (the agent and
                       `set --rdp-reset-pin`, `--vnc-reset-pin`); taken alone
   .sessions.lock      held by the one process that serves the device's
-                      sessions; taking it removes the session_jti.log and
-                      .jti.lock files older agents left
+                      sessions
 ```
 
 Before every read and write, each directory from the base (`LOCALPORT_HOME`,

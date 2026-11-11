@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,26 +61,6 @@ func TestLoadRefusesBadFiles(t *testing.T) {
 				t.Fatal("want the file refused")
 			}
 		})
-	}
-}
-
-// A fleet section is refused with the retired-token message, whatever it
-// holds, before the version is looked at.
-func TestLoadRefusesAFleetToken(t *testing.T) {
-	for _, body := range []string{
-		"version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n",
-		"version: 1\ntunnels:\n  - name: api\n    token: t\n    upstream: http://localhost:8080\nfleets:\n  - token: t\n",
-		"version: 1\nfleets: {}\n",
-		"version: 1\nfleets:\n",
-		// An unset variable fails interpolation; the fleet is the real error.
-		"version: 1\nfleets:\n  - token: ${LOCALPORT_TEST_UNSET_FLEET_TOKEN:?set it}\n",
-		// The key appears only after interpolation.
-		"version: 1\n${LOCALPORT_TEST_FLEETS_KEY}:\n  - token: t\n",
-	} {
-		t.Setenv("LOCALPORT_TEST_FLEETS_KEY", "fleets")
-		if _, err := Load(writeConfig(t, body)); !errors.Is(err, ErrFleetTokenRetired) {
-			t.Fatalf("Load(%q) = %v, want ErrFleetTokenRetired", body, err)
-		}
 	}
 }
 

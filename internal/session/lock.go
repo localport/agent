@@ -1,23 +1,14 @@
 package session
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
 
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/security"
 )
 
-const (
-	sessionsLockFile = ".sessions.lock"
-	// legacyReplayFiles are the files of the ticket replay cache, which no
-	// session uses; LockSessions removes them.
-	legacyReplayLog  = "session_jti.log"
-	legacyReplayLock = ".jti.lock"
-)
+const sessionsLockFile = ".sessions.lock"
 
 // ErrSessionsLocked means another process serves this identity's sessions.
 var ErrSessionsLocked = errcode.New(errcode.SessionsLocked)
@@ -43,12 +34,6 @@ func LockSessions(dir string) (*SessionsLock, error) {
 			err = ErrSessionsLocked
 		}
 		return nil, err
-	}
-	for _, name := range []string{legacyReplayLog, legacyReplayLock} {
-		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			// Harmless leftovers; the lock is held either way.
-			continue
-		}
 	}
 	return &SessionsLock{release: func() {
 		_ = security.UnlockFile(f)

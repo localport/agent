@@ -63,7 +63,6 @@ const (
 	PackageManagerExecutable Code = "AG013"
 
 	RunLocked            Code = "AG021"
-	FleetTokenRetired    Code = "AG022"
 	HostCapability       Code = "AG023"
 	LoginsWithoutSession Code = "AG024"
 	SessionWithoutLogins Code = "AG025"
@@ -100,6 +99,11 @@ const (
 	ServicesNotRestored  Code = "AG085"
 	ForeignServiceInDir  Code = "AG086"
 	MachinePathNotSet    Code = "AG087"
+	InstallerStepInvalid Code = "AG088"
+	UninstallNotPrepared Code = "AG089"
+	InstallMixed         Code = "AG090"
+	ServiceConfigBusy    Code = "AG091"
+	UninstallEntryNotSet Code = "AG092"
 )
 
 // NewJoinCommand is the remedy for every lost or unusable device credential.
@@ -121,7 +125,6 @@ var registry = []Entry{
 	{PackageManagerExecutable, "Package manager executable", "a localport installed by a package manager cannot run as the device service"},
 
 	{RunLocked, "Devices already running", "localport is already running the devices of this config"},
-	{FleetTokenRetired, "Fleet token retired", "fleet tokens are retired: create the device in the dashboard and run the command it shows"},
 	{HostCapability, "Terminal, files or forwarding with a host", "terminal, files and forwarding act on this machine only and cannot be enabled with a host"},
 	{LoginsWithoutSession, "Logins without terminal or files", "logins apply only to a device that enables terminal or files"},
 	{SessionWithoutLogins, "Terminal or files without logins", "terminal and files need at least one login"},
@@ -153,11 +156,16 @@ var registry = []Entry{
 
 	{InstallerNotElevated, "Installer step not elevated", "this installer step needs an elevated Administrator"},
 	{InstallDirUnsafe, "Install directory unsafe", "the install directory can be changed by someone other than SYSTEM and Administrators"},
-	{ServicesNotStopped, "Device services did not stop", "the device services did not stop"},
-	{InstallNotCommitted, "Install not committed", "the new localport executables were not put in place; the previous ones are restored"},
-	{ServicesNotRestored, "Device services not re-registered", "the device services were not registered for the installed executables"},
+	{ServicesNotStopped, "Device services did not stop", "the device services did not stop; the install was undone"},
+	{InstallNotCommitted, "Install not committed", "a product file was not put in place; the install was undone"},
+	{ServicesNotRestored, "Device services not re-registered", "the device services were not registered for the new executables; the install was undone"},
 	{ForeignServiceInDir, "Foreign service in the install directory", "a service localport did not create runs a program in the install directory"},
-	{MachinePathNotSet, "Machine PATH not updated", "the machine PATH was not updated"},
+	{MachinePathNotSet, "Machine PATH not updated", "the machine PATH was not updated; the install was undone"},
+	{InstallerStepInvalid, "Installer step invalid", "the installer named an unknown step or wrong arguments"},
+	{UninstallNotPrepared, "Uninstall not prepared", "an uninstall step failed; the uninstall was undone"},
+	{InstallMixed, "Install rollback failed", "the install failed and undoing it also failed"},
+	{ServiceConfigBusy, "Service configuration busy", "another installer or service command is changing the device services"},
+	{UninstallEntryNotSet, "Uninstall entry not written", "the Add/Remove Programs entry was not written; the install was undone"},
 }
 
 // New returns the sentinel of a registered code. An unregistered code is a

@@ -35,8 +35,9 @@ const (
 // but the keptCrashes newest kept files, calls report once for the kept
 // crash with its time, the service, the agent version and the file (never
 // its text: the Application log is readable by every user), and arms crash
-// output on a fresh, empty current.crash. A failing step calls warn and the
-// service still runs.
+// output on a fresh, empty current.crash. A crash it cannot keep turns
+// capture off for this run, so it is not truncated. A failing step calls
+// warn and the service still runs.
 func captureCrashes(dir, service, version string, trusted func(string) error, warn, report func(string)) {
 	if err := trusted(dir); err != nil {
 		warn(fmt.Sprintf("%s: crash capture is off: %v", service, err))
@@ -44,8 +45,11 @@ func captureCrashes(dir, service, version string, trusted func(string) error, wa
 	}
 	kept, at, err := keepCrash(dir)
 	if err != nil {
-		warn(fmt.Sprintf("%s: keep the last crash: %v", service, err))
-	} else if kept != "" {
+		// Arming would truncate the crash that could not be kept.
+		warn(fmt.Sprintf("%s: crash capture is off: keep the last crash: %v", service, err))
+		return
+	}
+	if kept != "" {
 		report(fmt.Sprintf("%s %s stopped on a fatal error at %s; its output is in %s",
 			service, version, at.UTC().Format(time.RFC3339), kept))
 	}

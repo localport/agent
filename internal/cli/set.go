@@ -98,8 +98,7 @@ func applySettings(who invoker) error {
 	reloaded, err := reloadDeviceService()
 	switch {
 	case err != nil:
-		// A service installed by an older localport has no reload; installing
-		// it again converts it and applies the saved settings.
+		// Installing the service again applies the saved settings.
 		return fmt.Errorf("the settings are saved, but the device service did not reload: %w\n  apply them with: %s", err, serviceInstallCommand)
 	case reloaded:
 		fmt.Fprintf(os.Stderr, "  reloaded the device service\n")

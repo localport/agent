@@ -38,20 +38,20 @@ foreach ($round in 'install', 'upgrade') {
     foreach ($f in 'localport.exe', 'localport-session.exe', 'uninstall.exe', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES') {
         Assert (Test-Path (Join-Path $dir $f)) "$round installs $f"
     }
-    $left = Get-ChildItem -LiteralPath $dir -Force | Where-Object { $_.Name -like '.staging-*' -or $_.Name -like '*.old' }
-    Assert ($null -eq $left) "$round leaves no staging directory or .old file"
+    $left = @(Get-ChildItem -LiteralPath (Join-Path $dir '.localport-txn') -Force -ErrorAction SilentlyContinue)
+    Assert ($left.Count -eq 0) "$round leaves no transaction directory"
     $info = (Get-Item (Join-Path $dir 'localport.exe')).VersionInfo
     Assert ($info.ProductName -eq 'Localport' -and $info.ProductVersion -eq $Version) "$round localport.exe carries its VERSIONINFO ($($info.ProductVersion))"
     $k = Get-ItemProperty -LiteralPath $key
     Assert ($k.DisplayVersion -eq $Version -and $k.InstallLocation -eq $dir) "$round writes the uninstall key"
     Assert ($k.QuietUninstallString -eq "`"$dir\uninstall.exe`" /S") "$round writes the quiet uninstall command"
     Assert (@(Get-MachinePath | Where-Object { $_ -eq $dir }).Count -eq 1) "$round has the directory on the machine Path once"
-    & (Join-Path $dir 'localport.exe') system preflight $dir
-    Assert ($LASTEXITCODE -eq 0) "$round directory passes the service binary rule"
+    & (Join-Path $dir 'localport.exe') system rollback $dir
+    Assert ($LASTEXITCODE -eq 0) "$round leaves no open transaction (system rollback exits 0)"
 }
 
-# _?= keeps the uninstaller in place, so it runs synchronously; it cannot
-# delete itself then, and the directory stays with it.
+# _?= keeps the uninstaller in place, so it runs synchronously; its own
+# image is then queued for deletion at reboot, and the directory stays.
 $p = Start-Process -FilePath (Join-Path $dir 'uninstall.exe') -ArgumentList @('/S', "_?=$dir") -Wait -PassThru
 Assert ($p.ExitCode -eq 0) "uninstall exits 0"
 Assert (-not (Test-Path (Join-Path $dir 'localport.exe'))) 'uninstall removes localport.exe'

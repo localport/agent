@@ -1,8 +1,9 @@
 ; Localport Windows installer (NSIS 3.13, no third-party plugins).
 ;
-; The installer only extracts files, writes the uninstaller and the Add/Remove
-; Programs key, and runs the `localport system` steps (internal/cli/system.go)
-; from the new localport.exe, checking each exit status. It never enrols a
+; The installer only extracts files into a transaction's staging directory
+; and runs the `localport system` steps (internal/cli/system.go) from a copy
+; of the new localport.exe, checking each exit status; the steps make every
+; change to the machine as one transaction. It never enrols a
 ; device: services are registered by an elevated `localport connect` or
 ; `localport service install`, and re-registered here on upgrade.
 ;
@@ -115,7 +116,7 @@ SectionEnd
 
 !else
 
-Var Staging
+Var Txn
 
 Function .onInit
   !insertmacro Require64Bit
@@ -125,44 +126,35 @@ FunctionEnd
 
 Section "Install"
   ; Every step runs from the new localport.exe in $PLUGINSDIR, which NSIS
-  ; creates admin-only, so a first install needs no earlier binary.
+  ; creates admin-only, so a first install needs no earlier binary. The Go
+  ; steps make every change as one transaction (internal/cli/system.go);
+  ; NSIS only extracts the release into the transaction's staging directory.
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
   File "${SRCDIR}\localport.exe"
-  !insertmacro Step "$PLUGINSDIR\localport.exe" 'preflight "$INSTDIR"'
+  ; The transaction id is $PLUGINSDIR's base name, unique per run.
+  ${GetFileName} "$PLUGINSDIR" $Txn
+  !insertmacro Step "$PLUGINSDIR\localport.exe" 'begin "$INSTDIR" "$Txn"'
 
-  ; The staging directory's name is unique per run ($PLUGINSDIR's).
-  ${GetFileName} "$PLUGINSDIR" $R1
-  StrCpy $Staging ".staging-$R1"
-  SetOutPath "$INSTDIR\$Staging"
+  ClearErrors
+  SetOutPath "$INSTDIR\.localport-txn\$Txn\staging"
   File "${SRCDIR}\localport.exe"
   File "${SRCDIR}\localport-session.exe"
-
-  !insertmacro Step "$PLUGINSDIR\localport.exe" 'stop "$INSTDIR"'
-  !insertmacro Step "$PLUGINSDIR\localport.exe" 'commit "$INSTDIR" "$Staging"'
-
-  SetOutPath "$INSTDIR"
+  ; Signed in the first pass, embedded here.
+  File "${SRCDIR}\uninstall.exe"
   File "${SRCDIR}\LICENSE"
   File "${SRCDIR}\NOTICE"
   File "${SRCDIR}\THIRD_PARTY_NOTICES"
-  ; Signed in the first pass, embedded here.
-  File "${SRCDIR}\uninstall.exe"
-
-  WriteRegStr HKLM "${UNKEY}" "DisplayName" "${APP}"
-  WriteRegStr HKLM "${UNKEY}" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKLM "${UNKEY}" "Publisher" "${PUBLISHER}"
-  WriteRegStr HKLM "${UNKEY}" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "${UNKEY}" "DisplayIcon" '"$INSTDIR\localport.exe"'
-  WriteRegStr HKLM "${UNKEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
-  WriteRegStr HKLM "${UNKEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
-  WriteRegDWORD HKLM "${UNKEY}" "NoModify" 1
-  WriteRegDWORD HKLM "${UNKEY}" "NoRepair" 1
-  ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
-  IntFmt $0 "0x%08X" $0
-  WriteRegDWORD HKLM "${UNKEY}" "EstimatedSize" "$0"
-
-  !insertmacro Step "$INSTDIR\localport.exe" 'path add "$INSTDIR"'
-  !insertmacro Step "$INSTDIR\localport.exe" 'reregister "$INSTDIR"'
+  ${If} ${Errors}
+    ; Nothing outside staging changed yet; rollback removes the transaction.
+    SetOutPath "$PLUGINSDIR"
+    !insertmacro Step "$PLUGINSDIR\localport.exe" 'rollback "$INSTDIR"'
+    SetErrorLevel 84
+    Abort "extracting the release failed; nothing was changed"
+  ${EndIf}
+  SetOutPath "$PLUGINSDIR"
+  ; apply rolls every change back itself when any step fails.
+  !insertmacro Step "$PLUGINSDIR\localport.exe" 'apply "$INSTDIR" "$Txn"'
 SectionEnd
 
 !endif
@@ -178,27 +170,23 @@ Function un.onInit
 FunctionEnd
 
 Section "Uninstall"
+  ; Runs from a copy, so the transaction can move $INSTDIR\localport.exe.
+  InitPluginsDir
+  ClearErrors
+  CopyFiles /SILENT "$INSTDIR\localport.exe" "$PLUGINSDIR\localport.exe"
+  ${If} ${Errors}
+    SetErrorLevel 89
+    Abort "$INSTDIR\localport.exe is missing; nothing was changed"
+  ${EndIf}
+  SetOutPath "$PLUGINSDIR"
   ${GetParameters} $R0
   ClearErrors
   ${GetOptions} $R0 "/PURGE" $R1
   ${If} ${Errors}
-    !insertmacro Step "$INSTDIR\localport.exe" 'preuninstall "$INSTDIR"'
+    !insertmacro Step "$PLUGINSDIR\localport.exe" 'uninstall "$INSTDIR"'
   ${Else}
-    !insertmacro Step "$INSTDIR\localport.exe" 'preuninstall "$INSTDIR" --purge'
+    !insertmacro Step "$PLUGINSDIR\localport.exe" 'uninstall "$INSTDIR" --purge'
   ${EndIf}
-  !insertmacro Step "$INSTDIR\localport.exe" 'path remove "$INSTDIR"'
-
-  Delete "$INSTDIR\localport.exe"
-  Delete "$INSTDIR\localport-session.exe"
-  Delete "$INSTDIR\localport.exe.old"
-  Delete "$INSTDIR\localport-session.exe.old"
-  Delete "$INSTDIR\LICENSE"
-  Delete "$INSTDIR\NOTICE"
-  Delete "$INSTDIR\THIRD_PARTY_NOTICES"
-  Delete "$INSTDIR\uninstall.exe"
-  DeleteRegKey HKLM "${UNKEY}"
-  ; Only when empty: anything else in the directory is not ours to remove.
-  RMDir "$INSTDIR"
 SectionEnd
 
 !endif

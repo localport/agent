@@ -240,3 +240,25 @@ func TestStopStopsARecoveryRestartAgain(t *testing.T) {
 		t.Fatalf("Stop sent %d times, want 2 (the first and once after the restart)", s.stops)
 	}
 }
+
+// A command line names a program inside the directory whether quoted or not,
+// with spaces in its path, environment references or a native \??\ prefix;
+// a program elsewhere, or one whose path only shares a prefix, is outside.
+func TestImageInside(t *testing.T) {
+	t.Setenv("LOCALPORT_TEST_ROOT", `C:\Program Files`)
+	dir := `C:\Program Files\Localport`
+	for cmd, inside := range map[string]bool{
+		`"C:\Program Files\Localport\other.exe" run`:                        true,
+		`C:\Program Files\Localport\other.exe run`:                          true,
+		`c:\program files\localport\other.exe`:                              true,
+		`%LOCALPORT_TEST_ROOT%\Localport\other.exe`:                         true,
+		`\??\C:\Program Files\Localport\driver.sys`:                         true,
+		`"C:\Program Files\LocalportTools\x.exe"`:                           false,
+		`"C:\Windows\system32\svchost.exe" -k "C:\Program Files\Localport"`: false,
+		`C:\Program Files\Localport`:                                        false,
+	} {
+		if got := imageInside(cmd, dir); got != inside {
+			t.Errorf("imageInside(%q) = %v, want %v", cmd, got, inside)
+		}
+	}
+}

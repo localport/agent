@@ -132,19 +132,6 @@ devices:
 	}
 }
 
-func TestLocalConfigRefusesAFleetToken(t *testing.T) {
-	for _, body := range []string{
-		"version: 2\nfleets:\n  - token: t\n",
-		"version: 2\nfleets: {}\n",
-		"version: 2\nfleets:\n",
-		"version: 1\nfleets:\n  - token: t\n    devices:\n      - name: gw\n",
-	} {
-		if _, err := parseLocal([]byte(body), "linux"); !errors.Is(err, ErrFleetTokenRetired) {
-			t.Fatalf("parse(%q) = %v, want ErrFleetTokenRetired", body, err)
-		}
-	}
-}
-
 func TestLocalConfigRefusesAnOpenFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mode bits carry no policy on Windows; the DACL check is tested in security")
