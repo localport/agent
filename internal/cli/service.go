@@ -61,7 +61,7 @@ func runService(args []string) (err error) {
 // already in the local config, and starts it. It spends no token, so it
 // recovers from an install that failed after connect enrolled.
 func installService(who invoker) error {
-	unlock, _, err := lockServiceConfig(context.Background())
+	unlock, err := lockServiceDefinitions(context.Background())
 	if err != nil {
 		return err
 	}
@@ -118,7 +118,7 @@ func uninstallService(who invoker, purge bool) error {
 	case err != nil:
 		return err
 	default:
-		unlock, _, lockErr := lockServiceConfig(context.Background())
+		unlock, lockErr := lockServiceDefinitions(context.Background())
 		if lockErr != nil {
 			return lockErr
 		}

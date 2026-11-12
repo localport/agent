@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/localport/agent/internal/errcode"
+	"github.com/localport/agent/internal/service"
 )
 
 // `localport system <step>` is the Windows installer's internal command: the
@@ -44,6 +46,7 @@ var (
 	errInstallMixed         = errcode.New(errcode.InstallMixed)
 	errServiceConfigBusy    = errcode.New(errcode.ServiceConfigBusy)
 	errUninstallEntryNotSet = errcode.New(errcode.UninstallEntryNotSet)
+	errPurgeFailed          = errcode.New(errcode.PurgeFailed)
 )
 
 // productFiles are the files the installer puts in the install directory,
@@ -80,17 +83,21 @@ type installHost interface {
 	// prepareInstallDir creates dir admin-only when it is missing, then
 	// refuses it unless it passes the device service binary rule.
 	prepareInstallDir(dir string) error
+	// checkInstallDir refuses an existing dir that does not pass the device
+	// service binary rule, without changing it.
+	checkInstallDir(dir string) error
 	// lockServiceConfig takes the lock every writer of the service
-	// definitions holds; abandoned means its last holder died holding it.
-	lockServiceConfig(ctx context.Context) (unlock func(), abandoned bool, err error)
+	// definitions holds; every failure carries AG091.
+	lockServiceConfig(ctx context.Context) (unlock func(), err error)
 	// snapshotServices records the owned services' definitions and state:
 	// running lists those running, existed whether any exists.
 	snapshotServices() (snap json.RawMessage, running []string, existed bool, err error)
 	stopServices(ctx context.Context) ([]string, error)
 	startServices(ctx context.Context, names []string) error
 	// restoreServices writes snap's definitions back and leaves the owned
-	// services stopped.
-	restoreServices(ctx context.Context, snap json.RawMessage) error
+	// services stopped. A service whose recorded program fails the device
+	// service binary rule is deleted instead and listed in removed.
+	restoreServices(ctx context.Context, snap json.RawMessage) (removed []string, err error)
 	// installServices registers and starts the owned services for exe.
 	installServices(ctx context.Context, exe string) error
 	deleteServices(ctx context.Context) error
@@ -110,6 +117,11 @@ type installHost interface {
 	broadcastEnvironment() error
 	// deleteAtReboot queues path for deletion when Windows next starts.
 	deleteAtReboot(path string) error
+	// markOpen and markClosed add and remove dir in the machine's list of
+	// directories with an open transaction (after Windows Installer's
+	// InProgress key), which connect and the service commands check.
+	markOpen(dir string) error
+	markClosed(dir string) error
 	warn(msg string)
 }
 
@@ -148,16 +160,38 @@ func runSystemSteps(ctx context.Context, host installHost, version string, args 
 	return fmt.Errorf("%w: system: unknown step %q", errInstallerStepInvalid, step)
 }
 
+// systemExitError gives err the exit status of its installer code, the
+// code's number (AG083 exits 83), so the installer, install.ps1 and winget
+// can tell failures apart; an error without one exits 1.
+func systemExitError(err error) error {
+	var coded *errcode.Error
+	if err == nil || !errors.As(err, &coded) {
+		return err
+	}
+	n, convErr := strconv.Atoi(strings.TrimPrefix(string(coded.Code), "AG"))
+	if convErr != nil || n <= 0 || n > 255 {
+		return err
+	}
+	return &service.ExitError{Code: n, Err: err}
+}
+
 // withServiceLock runs fn holding the service configuration lock, after
-// recovering every transaction an earlier run left open in dir.
+// recovering every transaction an earlier run left open in dir. A journal is
+// read only from a directory that passes the admin-only rule, since its
+// replay registers and starts services.
 func withServiceLock(ctx context.Context, host installHost, dir string, fn func() error) error {
-	unlock, _, err := host.lockServiceConfig(ctx)
+	unlock, err := host.lockServiceConfig(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	if err := recoverTransactions(ctx, host, dir); err != nil {
-		return err
+	if exists(dir) {
+		if err := host.checkInstallDir(dir); err != nil {
+			return fmt.Errorf("%w: %s: %w", errInstallDirUnsafe, dir, err)
+		}
+		if err := recoverTransactions(ctx, host, dir); err != nil {
+			return err
+		}
 	}
 	return fn()
 }
@@ -171,6 +205,11 @@ func beginInstall(ctx context.Context, host installHost, dir, txn string) error 
 			return fmt.Errorf("%w: %s: %w", errInstallDirUnsafe, dir, err)
 		}
 		t := &transaction{host: host, dir: dir, j: journal{Op: opInstall, Txn: txn, Phase: phaseBegun}}
+		// Recovery removed every earlier transaction directory it could; one
+		// left under this id holds files of an earlier transaction.
+		if exists(t.txnDir()) {
+			return fmt.Errorf("%w: %s is left from an earlier transaction; restart Windows, then run the installer again", errInstallNotCommitted, t.txnDir())
+		}
 		for _, d := range []string{t.stagingDir(), t.backupDir()} {
 			if err := os.MkdirAll(d, 0o755); err != nil {
 				return fmt.Errorf("%w: %w", errInstallNotCommitted, err)
@@ -188,11 +227,14 @@ func beginInstall(ctx context.Context, host installHost, dir, txn string) error 
 // Path and re-registers the services that existed, then commits and cleans
 // up. Any failure rolls every change back.
 func applyInstall(ctx context.Context, host installHost, dir, txn, version string) error {
-	unlock, _, err := host.lockServiceConfig(ctx)
+	unlock, err := host.lockServiceConfig(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	if err := host.checkInstallDir(dir); err != nil {
+		return fmt.Errorf("%w: %s: %w", errInstallDirUnsafe, dir, err)
+	}
 	t, err := loadTransaction(host, dir, txn)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errInstallNotCommitted, err)
@@ -300,7 +342,9 @@ func runUninstall(ctx context.Context, host installHost, dir string, purge bool)
 		removeEmptyOrQueue(host, dir)
 		if purge {
 			// Irreversible, so after the commit point; the uninstall stands.
-			return host.purge(ctx)
+			if err := host.purge(ctx); err != nil {
+				return fmt.Errorf("%w: %w", errPurgeFailed, err)
+			}
 		}
 		return nil
 	})
@@ -343,6 +387,8 @@ type transaction struct {
 	host installHost
 	dir  string
 	j    journal
+	// removed lists the services a rollback deleted instead of restoring.
+	removed []string
 }
 
 func (t *transaction) txnDir() string     { return filepath.Join(t.dir, txnRoot, t.j.Txn) }
@@ -361,7 +407,32 @@ func loadTransaction(host installHost, dir, txn string) (*transaction, error) {
 	if t.j.Txn != txn {
 		return nil, fmt.Errorf("the journal of transaction %s names %q", txn, t.j.Txn)
 	}
+	if err := t.checkPaths(); err != nil {
+		return nil, fmt.Errorf("the journal of transaction %s: %w", txn, err)
+	}
 	return t, nil
+}
+
+// checkPaths refuses a journal whose actions name a path outside the
+// install directory, or a services action for another executable.
+func (t *transaction) checkPaths() error {
+	inside := func(p string) bool {
+		rel, err := filepath.Rel(t.dir, p)
+		return err == nil && filepath.IsAbs(p) && rel != "." && !strings.HasPrefix(rel, "..")
+	}
+	for _, a := range t.j.Actions {
+		switch a.Kind {
+		case actMove:
+			if !inside(a.From) || !inside(a.To) {
+				return fmt.Errorf("a move names %s and %s, not paths inside %s", a.From, a.To, t.dir)
+			}
+		case actServices:
+			if a.To != "" && a.To != filepath.Join(t.dir, "localport.exe") {
+				return fmt.Errorf("a services action names %s", a.To)
+			}
+		}
+	}
+	return nil
 }
 
 // save writes the journal atomically: a synced temporary file renamed over
@@ -394,6 +465,10 @@ func (t *transaction) save() error {
 // snapshot records the services and the uninstall entry, then moves the
 // transaction to phase applying.
 func (t *transaction) snapshot() (running []string, existed bool, err error) {
+	// Before the first change, so no change exists that the list misses.
+	if err := t.host.markOpen(t.dir); err != nil {
+		return nil, false, fmt.Errorf("record the open transaction: %w", err)
+	}
 	snap, running, existed, err := t.host.snapshotServices()
 	if err != nil {
 		return nil, false, err
@@ -480,14 +555,18 @@ func (t *transaction) editPath(ctx context.Context, edit string, code error) err
 // rollback's own failure under errInstallMixed when undoing failed too.
 func (t *transaction) fail(ctx context.Context, cause error) error {
 	if err := t.rollback(ctx); err != nil {
-		return errors.Join(cause, err)
+		// The rollback's AG090 first: its code is the step's exit status,
+		// since the machine is not back as it was.
+		return errors.Join(err, cause)
 	}
 	return cause
 }
 
 // rollback undoes every recorded action in reverse, then removes the
 // transaction directory. When an inverse fails the journal stays, so the
-// next run retries, and errInstallMixed is returned.
+// next run retries, and errInstallMixed is returned. A service deleted
+// instead of restored also returns errInstallMixed, after the transaction
+// is removed: nothing is left to retry, but the machine is not as it was.
 func (t *transaction) rollback(ctx context.Context) error {
 	var errs []error
 	for i := len(t.j.Actions) - 1; i >= 0; i-- {
@@ -499,13 +578,23 @@ func (t *transaction) rollback(ctx context.Context) error {
 		return fmt.Errorf("%w: transaction %s: %w", errInstallMixed, t.j.Txn, err)
 	}
 	removeOrQueue(t.host, t.txnDir())
+	t.closeMarker()
+	if len(t.removed) > 0 {
+		return fmt.Errorf("%w: transaction %s was undone, but services %s were removed instead of restored because the program they ran fails the device service binary rule; run `localport service install` as an Administrator", errInstallMixed, t.j.Txn, strings.Join(t.removed, ", "))
+	}
 	return nil
 }
 
 func (t *transaction) undo(ctx context.Context, a txnAction) error {
 	switch a.Kind {
 	case actStop:
-		return t.host.startServices(ctx, a.Names)
+		var names []string
+		for _, n := range a.Names {
+			if !slices.Contains(t.removed, n) {
+				names = append(names, n)
+			}
+		}
+		return t.host.startServices(ctx, names)
 	case actMove:
 		if !exists(a.To) || exists(a.From) {
 			return nil
@@ -538,7 +627,9 @@ func (t *transaction) undo(ctx context.Context, a txnAction) error {
 		}
 		return t.host.writePath(restored, expandable)
 	case actServices:
-		return t.host.restoreServices(ctx, t.j.Services)
+		removed, err := t.host.restoreServices(ctx, t.j.Services)
+		t.removed = mergeNames(t.removed, removed)
+		return err
 	}
 	return fmt.Errorf("unknown action %q", a.Kind)
 }
@@ -560,6 +651,7 @@ func (t *transaction) commit() error {
 // transaction, so failures only warn.
 func (t *transaction) finish() {
 	removeOrQueue(t.host, t.txnDir())
+	t.closeMarker()
 	for _, a := range t.j.Actions {
 		if a.Kind == actPath && a.Done {
 			if err := t.host.broadcastEnvironment(); err != nil {
@@ -583,6 +675,12 @@ func recoverTransactions(ctx context.Context, host installHost, dir string) erro
 		return fmt.Errorf("%w: %w", errInstallMixed, err)
 	}
 	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), leftoverPrefix) {
+			// Deleted once the program that held it has exited; one still
+			// in use stays queued for deletion at reboot.
+			_ = os.Remove(filepath.Join(dir, txnRoot, e.Name()))
+			continue
+		}
 		if !e.IsDir() || !txnName.MatchString(e.Name()) {
 			continue
 		}
@@ -609,9 +707,49 @@ func recoverTransactions(ctx context.Context, host installHost, dir string) erro
 	return nil
 }
 
-// removeOrQueue removes path and everything under it; an entry Windows
-// refuses to delete (an image still running) is queued for deletion at
-// reboot, after the entries inside it. Failures only warn.
+// closeMarker removes t.dir from the open-transaction list once no
+// transaction in it is still open. A failure only warns: the list then
+// names a directory the readers find nothing open in.
+func (t *transaction) closeMarker() {
+	if openInstallTransaction(t.dir) != "" {
+		return
+	}
+	if err := t.host.markClosed(t.dir); err != nil {
+		t.host.warn(fmt.Sprintf("the open-transaction record for %s was not removed: %v", t.dir, err))
+	}
+}
+
+// openInstallTransaction names a transaction in dir that an interrupted
+// installer or uninstaller left in phase applying, or returns "". Its
+// rollback writes the service definitions back from its snapshot, so a
+// service change made before that rollback would be undone by it. The
+// caller holds the service configuration lock and has checked dir
+// admin-only.
+func openInstallTransaction(dir string) string {
+	entries, err := os.ReadDir(filepath.Join(dir, txnRoot))
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !txnName.MatchString(e.Name()) {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, txnRoot, e.Name(), journalFile))
+		var j journal
+		if err == nil && json.Unmarshal(raw, &j) == nil && j.Phase == phaseApplying {
+			return e.Name()
+		}
+	}
+	return ""
+}
+
+// removeOrQueue removes the transaction directory path and everything under
+// it. A file Windows refuses to delete (an image still running) is renamed
+// to a unique leftover name in the parent .localport-txn directory, which a
+// running image allows, and queued for deletion at reboot there, so the
+// transaction directory itself goes and its id is free for a later
+// transaction. What can be neither deleted nor moved is queued in place.
+// Failures only warn.
 func removeOrQueue(host installHost, path string) {
 	var paths []string
 	_ = filepath.WalkDir(path, func(p string, _ fs.DirEntry, err error) error {
@@ -621,13 +759,36 @@ func removeOrQueue(host installHost, path string) {
 		return nil
 	})
 	for i := len(paths) - 1; i >= 0; i-- {
-		if err := os.Remove(paths[i]); err == nil || errors.Is(err, fs.ErrNotExist) {
+		p := paths[i]
+		if err := os.Remove(p); err == nil || errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		if err := host.deleteAtReboot(paths[i]); err != nil {
-			host.warn(fmt.Sprintf("%s was not deleted and could not be queued for deletion at reboot: %v", paths[i], err))
+		if leftover, err := moveAside(filepath.Dir(path), p); err == nil {
+			p = leftover
+		}
+		if err := host.deleteAtReboot(p); err != nil {
+			host.warn(fmt.Sprintf("%s was not deleted and could not be queued for deletion at reboot: %v", p, err))
 		}
 	}
+}
+
+// leftoverPrefix names a file moved aside by removeOrQueue.
+const leftoverPrefix = "leftover-"
+
+// moveAside renames the file p into dir under a unique leftover name.
+func moveAside(dir, p string) (string, error) {
+	if fi, err := os.Lstat(p); err != nil || fi.IsDir() {
+		return "", errors.New("not a file")
+	}
+	id := make([]byte, 8)
+	if _, err := rand.Read(id); err != nil {
+		return "", err
+	}
+	leftover := filepath.Join(dir, leftoverPrefix+hex.EncodeToString(id))
+	if err := os.Rename(p, leftover); err != nil {
+		return "", err
+	}
+	return leftover, nil
 }
 
 // removeEmptyOrQueue removes the directory path when it is empty, and

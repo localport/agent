@@ -75,19 +75,21 @@ Var LogFile
   ${EndIf}
 !macroend
 
-; RequireSingle refuses a second installer or uninstaller running at once.
+; RequireSingle refuses a second installer or uninstaller running at once,
+; exiting with Windows Installer's ERROR_INSTALL_ALREADY_RUNNING.
 !macro RequireSingle
   System::Call 'kernel32::CreateMutexW(p 0, i 0, w "${MUTEX}") p .r0 ?e'
   Pop $1
   ${If} $1 == 183 ; ERROR_ALREADY_EXISTS
-    SetErrorLevel 3
+    SetErrorLevel 1618
     Abort "another Localport installer or uninstaller is running"
   ${EndIf}
 !macroend
 
 !macro Require64Bit
   ${IfNot} ${RunningX64}
-    SetErrorLevel 2
+    ; ERROR_INSTALL_PLATFORM_UNSUPPORTED
+    SetErrorLevel 1633
     Abort "Localport needs 64-bit Windows"
   ${EndIf}
   SetRegView 64

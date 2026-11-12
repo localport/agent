@@ -104,6 +104,7 @@ const (
 	InstallMixed         Code = "AG090"
 	ServiceConfigBusy    Code = "AG091"
 	UninstallEntryNotSet Code = "AG092"
+	PurgeFailed          Code = "AG093"
 )
 
 // NewJoinCommand is the remedy for every lost or unusable device credential.
@@ -166,6 +167,7 @@ var registry = []Entry{
 	{InstallMixed, "Install rollback failed", "the install failed and undoing it also failed"},
 	{ServiceConfigBusy, "Service configuration busy", "another installer or service command is changing the device services"},
 	{UninstallEntryNotSet, "Uninstall entry not written", "the Add/Remove Programs entry was not written; the install was undone"},
+	{PurgeFailed, "Device state not purged", "the uninstall finished, but removing the device identities and config failed"},
 }
 
 // New returns the sentinel of a registered code. An unregistered code is a

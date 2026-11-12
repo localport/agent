@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/localport/agent/internal/service"
 )
 
 // fakeInstallHost is a machine with two owned services, an uninstall entry
@@ -35,6 +38,8 @@ type fakeInstallHost struct {
 	broadcasts int
 	queued     []string
 	warnings   []string
+	// marked is the open-transaction list.
+	marked []string
 
 	// fail names the operations that fail: stop, start, restore, install,
 	// delete, key (restoring or deleting the entry), keywrite, path, purge,
@@ -56,12 +61,13 @@ func (f *fakeInstallHost) failing(op string) error {
 
 func (f *fakeInstallHost) elevated() bool                 { return !f.notElevated }
 func (f *fakeInstallHost) prepareInstallDir(string) error { return f.dirErr }
-func (f *fakeInstallHost) lockServiceConfig(context.Context) (func(), bool, error) {
+func (f *fakeInstallHost) checkInstallDir(string) error   { return f.dirErr }
+func (f *fakeInstallHost) lockServiceConfig(context.Context) (func(), error) {
 	if f.lockErr != nil {
-		return nil, false, f.lockErr
+		return nil, f.lockErr
 	}
 	f.locks++
-	return func() {}, false, nil
+	return func() {}, nil
 }
 func (f *fakeInstallHost) snapshotServices() (json.RawMessage, []string, bool, error) {
 	raw, _ := json.Marshal(f.definition)
@@ -86,13 +92,18 @@ func (f *fakeInstallHost) startServices(_ context.Context, names []string) error
 	}
 	return nil
 }
-func (f *fakeInstallHost) restoreServices(_ context.Context, raw json.RawMessage) error {
+func (f *fakeInstallHost) restoreServices(_ context.Context, raw json.RawMessage) ([]string, error) {
 	f.restores++
 	if err := f.failing("restore"); err != nil {
-		return err
+		return nil, err
 	}
 	f.running = nil
-	return json.Unmarshal(raw, &f.definition)
+	if f.fail["unsafeprogram"] {
+		// The recorded program fails the binary rule: deleted, not restored.
+		f.definition, f.existed = "", false
+		return []string{"localport-device", "localport-session"}, nil
+	}
+	return nil, json.Unmarshal(raw, &f.definition)
 }
 func (f *fakeInstallHost) installServices(_ context.Context, exe string) error {
 	f.installed = append(f.installed, exe)
@@ -152,6 +163,17 @@ func (f *fakeInstallHost) expand(s string) string {
 }
 func (f *fakeInstallHost) deleteAtReboot(p string) error { f.queued = append(f.queued, p); return nil }
 func (f *fakeInstallHost) warn(msg string)               { f.warnings = append(f.warnings, msg) }
+func (f *fakeInstallHost) markOpen(dir string) error {
+	if err := f.failing("mark"); err != nil {
+		return err
+	}
+	f.marked = mergeNames(f.marked, []string{dir})
+	return nil
+}
+func (f *fakeInstallHost) markClosed(dir string) error {
+	f.marked = slices.DeleteFunc(f.marked, func(d string) bool { return d == dir })
+	return nil
+}
 
 // installed is a machine running release v1 from dir with both services up.
 func installedHost(t *testing.T) (*fakeInstallHost, string) {
@@ -328,8 +350,15 @@ func TestSystemRollbackFailureIsRetried(t *testing.T) {
 	h, dir := installedHost(t)
 	stageRelease(t, h, dir, "v2")
 	h.fail["install"], h.fail["restore"] = true, true
-	if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn}); !errors.Is(err, errInstallMixed) {
-		t.Fatalf("apply = %v, want errInstallMixed", err)
+	err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn})
+	if !errors.Is(err, errInstallMixed) || !errors.Is(err, errServicesNotRestored) {
+		t.Fatalf("apply = %v, want errInstallMixed and the failed action's errServicesNotRestored", err)
+	}
+	// The machine is not back as it was, so the exit status is AG090's,
+	// not the failed action's.
+	var exitErr *service.ExitError
+	if !errors.As(systemExitError(err), &exitErr) || exitErr.Code != 90 {
+		t.Fatalf("exit status of a failed rollback = %v, want 90", exitErr)
 	}
 	if _, err := os.Stat(filepath.Join(dir, txnRoot, testTxn, journalFile)); err != nil {
 		t.Fatalf("journal after a failed rollback: %v", err)
@@ -569,4 +598,233 @@ func TestSystemApplyRefusesBeforeAnyChange(t *testing.T) {
 		}
 		assertNoTransaction(t, dir)
 	})
+}
+
+// A journal is replayed only from a directory that passes the admin-only
+// rule: every step refuses an unsafe directory before reading one.
+func TestSystemStepsTrustNoJournalInAnUnsafeDirectory(t *testing.T) {
+	for _, args := range [][]string{{"begin", "", "nsNext.tmp"}, {"rollback", ""}, {"uninstall", ""}, {"apply", "", testTxn}} {
+		h, dir := installedHost(t)
+		writeJournal(t, dir, phaseApplying)
+		h.dirErr = errors.New("Users can add files")
+		args[1] = dir
+		if err := runSystemSteps(context.Background(), h, "v2", args); !errors.Is(err, errInstallDirUnsafe) {
+			t.Errorf("%s = %v, want errInstallDirUnsafe", args[0], err)
+		}
+		if h.restores != 0 || len(h.running) != 0 && !slices.Equal(h.running, []string{"localport-session", "localport-device"}) {
+			t.Errorf("%s replayed the journal: restores %d, running %v", args[0], h.restores, h.running)
+		}
+		if got := readProduct(t, dir); got[0] != "v2" {
+			t.Errorf("%s moved files back from an untrusted journal", args[0])
+		}
+	}
+}
+
+// A journal naming a path outside the install directory is refused, not
+// replayed.
+func TestSystemRefusesAJournalWithAForeignPath(t *testing.T) {
+	h, dir := installedHost(t)
+	writeJournal(t, dir, phaseApplying)
+	path := filepath.Join(dir, txnRoot, testTxn, journalFile)
+	raw, _ := os.ReadFile(path)
+	var j journal
+	if err := json.Unmarshal(raw, &j); err != nil {
+		t.Fatal(err)
+	}
+	j.Actions[1].To = filepath.Join(t.TempDir(), "elsewhere")
+	raw, _ = json.Marshal(j)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runSystemSteps(context.Background(), h, "v2", []string{"rollback", dir}); !errors.Is(err, errInstallMixed) || h.restores != 0 {
+		t.Fatalf("rollback = %v, restores %d; want a refusal before any replay", err, h.restores)
+	}
+}
+
+// begin refuses a transaction id whose directory an earlier transaction
+// left (recovery could not delete it), instead of mixing the two.
+func TestSystemBeginRefusesALeftoverTransactionDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root deletes from a read-only directory")
+	}
+	h, dir := installedHost(t)
+	stageRelease(t, h, dir, "v2")
+	h.afterMovesHook(t, filepath.Join(dir, txnRoot, testTxn, "backup"))
+	if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runSystemSteps(context.Background(), h, "v3", []string{"begin", dir, testTxn}); !errors.Is(err, errInstallNotCommitted) {
+		t.Fatalf("begin with the same id = %v, want errInstallNotCommitted", err)
+	}
+	if got := readProduct(t, dir); !slices.Equal(got, allOf(len(productFiles), "v2")) {
+		t.Fatalf("product files = %v after the refused begin", got)
+	}
+}
+
+// A file that cannot be deleted is moved aside under a leftover name in
+// .localport-txn, freeing its transaction directory; the next recovery
+// deletes the leftover once nothing holds it.
+func TestSystemMovesAnUndeletableFileAside(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, txnRoot)
+	held := filepath.Join(root, testTxn, "backup", "localport.exe")
+	if err := os.MkdirAll(filepath.Dir(held), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(held, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	leftover, err := moveAside(root, held)
+	if err != nil || !strings.HasPrefix(filepath.Base(leftover), leftoverPrefix) || filepath.Dir(leftover) != root || exists(held) {
+		t.Fatalf("moveAside = %q, %v", leftover, err)
+	}
+	if err := recoverTransactions(context.Background(), &fakeInstallHost{}, dir); err != nil {
+		t.Fatal(err)
+	}
+	if exists(leftover) {
+		t.Fatal("recovery kept a leftover nothing holds")
+	}
+}
+
+// A purge failing after the uninstall commits reports AG093; the uninstall
+// stands.
+func TestSystemUninstallPurgeFailureCarriesItsCode(t *testing.T) {
+	h, dir := installedHost(t)
+	h.fail["purge"] = true
+	if err := runSystemSteps(context.Background(), h, "v1", []string{"uninstall", dir, "--purge"}); !errors.Is(err, errPurgeFailed) {
+		t.Fatalf("uninstall --purge = %v, want errPurgeFailed", err)
+	}
+	if h.deleted != 1 || exists(filepath.Join(dir, "localport.exe")) {
+		t.Fatalf("the uninstall did not stand: deleted %d", h.deleted)
+	}
+}
+
+// A step's exit status is its code's number; an error without a code
+// exits 1.
+func TestSystemExitStatusIsTheCodeNumber(t *testing.T) {
+	var exitErr *service.ExitError
+	if err := systemExitError(fmt.Errorf("%w: held", errServiceConfigBusy)); !errors.As(err, &exitErr) || exitErr.Code != 91 || !errors.Is(err, errServiceConfigBusy) {
+		t.Fatalf("AG091 = %v", err)
+	}
+	plain := errors.New("plain")
+	if err := systemExitError(plain); err != plain {
+		t.Fatalf("an uncoded error = %v, want it unchanged", err)
+	}
+	if systemExitError(nil) != nil {
+		t.Fatal("nil became an error")
+	}
+}
+
+// Only a transaction in phase applying counts as open: its rollback would
+// rewrite the service definitions.
+func TestOpenInstallTransaction(t *testing.T) {
+	for phase, want := range map[string]string{phaseApplying: testTxn, phaseBegun: "", phaseCommitted: ""} {
+		_, dir := installedHost(t)
+		writeJournal(t, dir, phase)
+		if got := openInstallTransaction(dir); got != want {
+			t.Errorf("phase %s: open = %q, want %q", phase, got, want)
+		}
+	}
+	if got := openInstallTransaction(t.TempDir()); got != "" {
+		t.Errorf("no transaction directory: open = %q", got)
+	}
+}
+
+// A rollback whose recorded service program fails the binary rule deletes
+// those services instead of restoring them, finishes, starts none of them,
+// and still reports AG090: nothing is left to retry, but the machine is not
+// as it was.
+func TestSystemRollbackRemovesAServiceWithAnUnsafeProgram(t *testing.T) {
+	h, dir := installedHost(t)
+	stageRelease(t, h, dir, "v2")
+	h.fail["install"], h.fail["unsafeprogram"] = true, true
+	err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn})
+	var exitErr *service.ExitError
+	if !errors.Is(err, errInstallMixed) || !errors.As(systemExitError(err), &exitErr) || exitErr.Code != 90 {
+		t.Fatalf("apply = %v, want AG090 (exit 90)", err)
+	}
+	if !strings.Contains(err.Error(), "localport service install") {
+		t.Fatalf("apply = %v, want the remedy named", err)
+	}
+	if h.existed || len(h.running) != 0 {
+		t.Fatalf("services after rollback: existed %v, running %v; want removed and none started", h.existed, h.running)
+	}
+	if got := readProduct(t, dir); !slices.Equal(got, allOf(len(productFiles), "v1")) {
+		t.Fatalf("files after rollback = %v", got)
+	}
+	assertNoTransaction(t, dir)
+}
+
+// The open-transaction record names the directory from before the first
+// change until the transaction commits or is rolled back, and stays while a
+// failed rollback leaves the transaction open.
+func TestSystemOpenTransactionRecord(t *testing.T) {
+	t.Run("commit", func(t *testing.T) {
+		h, dir := installedHost(t)
+		stageRelease(t, h, dir, "v2")
+		var during []string
+		h.onKeyWrite = func() { during = slices.Clone(h.marked) }
+		if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn}); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(during, []string{dir}) || len(h.marked) != 0 {
+			t.Fatalf("record during apply %v, after %v; want [%s] then empty", during, h.marked, dir)
+		}
+	})
+	t.Run("record refused", func(t *testing.T) {
+		h, dir := installedHost(t)
+		stageRelease(t, h, dir, "v2")
+		h.fail["mark"] = true
+		if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn}); !errors.Is(err, errInstallNotCommitted) {
+			t.Fatalf("apply = %v, want errInstallNotCommitted", err)
+		}
+		if !slices.Equal(h.running, []string{"localport-session", "localport-device"}) || readProduct(t, dir)[0] != "v1" {
+			t.Fatal("apply changed the machine without a record")
+		}
+	})
+	t.Run("rollback", func(t *testing.T) {
+		h, dir := installedHost(t)
+		stageRelease(t, h, dir, "v2")
+		h.fail["path"] = true
+		h.path = `C:\Windows`
+		if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn}); !errors.Is(err, errMachinePathNotSet) {
+			t.Fatalf("apply = %v", err)
+		}
+		if len(h.marked) != 0 {
+			t.Fatalf("record after a rollback = %v", h.marked)
+		}
+	})
+	t.Run("failed rollback keeps it", func(t *testing.T) {
+		h, dir := installedHost(t)
+		stageRelease(t, h, dir, "v2")
+		h.fail["install"], h.fail["restore"] = true, true
+		if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn}); !errors.Is(err, errInstallMixed) {
+			t.Fatalf("apply = %v", err)
+		}
+		if !slices.Equal(h.marked, []string{dir}) {
+			t.Fatalf("record with the transaction still open = %v", h.marked)
+		}
+		h.fail["restore"] = false
+		if err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"rollback", dir}); err != nil || len(h.marked) != 0 {
+			t.Fatalf("retried rollback = %v, record %v", err, h.marked)
+		}
+	})
+	t.Run("uninstall", func(t *testing.T) {
+		h, dir := installedHost(t)
+		if err := runSystemSteps(context.Background(), h, "v1", []string{"uninstall", dir}); err != nil || len(h.marked) != 0 {
+			t.Fatalf("uninstall = %v, record %v", err, h.marked)
+		}
+	})
+}
+
+// The record keeps a directory while another transaction in it is still
+// open.
+func TestSystemRecordKeepsADirectoryWithAnotherOpenTransaction(t *testing.T) {
+	h, dir := installedHost(t)
+	writeJournal(t, dir, phaseApplying)
+	h.marked = []string{dir}
+	(&transaction{host: h, dir: dir}).closeMarker()
+	if !slices.Equal(h.marked, []string{dir}) {
+		t.Fatalf("record = %v, want the directory kept", h.marked)
+	}
 }

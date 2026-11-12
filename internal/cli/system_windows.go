@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 	"unsafe"
 
@@ -18,7 +19,7 @@ import (
 
 // runSystem is `localport system <step>` on Windows (see system.go).
 func runSystem(version string, args []string) error {
-	return runSystemSteps(context.Background(), windowsInstallHost{}, version, args)
+	return systemExitError(runSystemSteps(context.Background(), windowsInstallHost{}, version, args))
 }
 
 // windowsInstallHost is the installHost of a Windows machine.
@@ -29,6 +30,13 @@ const (
 	machineEnvironmentKey = `SYSTEM\CurrentControlSet\Control\Session Manager\Environment`
 	// uninstallKey is the Add/Remove Programs entry winget also reads.
 	uninstallKey = `Software\Microsoft\Windows\CurrentVersion\Uninstall\Localport`
+	// installerKey's openTransactionsValue (REG_MULTI_SZ) lists the
+	// install directories with an open transaction, as Windows Installer's
+	// InProgress key marks its own. Under HKLM\SOFTWARE only Administrators
+	// and SYSTEM can write it; readers only use it to find directories,
+	// each checked admin-only before its journal is read.
+	installerKey          = `SOFTWARE\Localport\Installer`
+	openTransactionsValue = "OpenTransactions"
 	// broadcastTimeout bounds the wait for each top-level window to take the
 	// environment change, as setx does.
 	broadcastTimeout = 5000 // milliseconds
@@ -43,7 +51,11 @@ func (windowsInstallHost) prepareInstallDir(dir string) error {
 	return security.CheckServiceDir(dir)
 }
 
-func (windowsInstallHost) lockServiceConfig(ctx context.Context) (func(), bool, error) {
+func (windowsInstallHost) checkInstallDir(dir string) error {
+	return security.CheckServiceDir(dir)
+}
+
+func (windowsInstallHost) lockServiceConfig(ctx context.Context) (func(), error) {
 	return lockServiceConfig(ctx)
 }
 
@@ -75,10 +87,10 @@ func (windowsInstallHost) startServices(_ context.Context, names []string) error
 	return service.StartOwned(names)
 }
 
-func (windowsInstallHost) restoreServices(ctx context.Context, raw json.RawMessage) error {
+func (windowsInstallHost) restoreServices(ctx context.Context, raw json.RawMessage) ([]string, error) {
 	snaps, err := service.UnmarshalSnapshots(raw)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	return service.RestoreOwned(ctx, snaps)
 }
@@ -292,6 +304,68 @@ func (windowsInstallHost) expand(s string) string {
 		return s
 	}
 	return expanded
+}
+
+// openTransactionDirs reads the open-transaction list; a missing key or
+// value is an empty list.
+func openTransactionDirs() ([]string, error) {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, installerKey, registry.QUERY_VALUE)
+	if errors.Is(err, registry.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open the installer record: %w", err)
+	}
+	defer k.Close()
+	dirs, _, err := k.GetStringsValue(openTransactionsValue)
+	if errors.Is(err, registry.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read the open-transaction record: %w", err)
+	}
+	return dirs, nil
+}
+
+func writeOpenTransactionDirs(dirs []string) error {
+	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, installerKey, registry.SET_VALUE|registry.QUERY_VALUE)
+	if err != nil {
+		return fmt.Errorf("create the installer record: %w", err)
+	}
+	defer k.Close()
+	if len(dirs) == 0 {
+		if err := k.DeleteValue(openTransactionsValue); err != nil && !errors.Is(err, registry.ErrNotExist) {
+			return fmt.Errorf("clear the open-transaction record: %w", err)
+		}
+		return nil
+	}
+	if err := k.SetStringsValue(openTransactionsValue, dirs); err != nil {
+		return fmt.Errorf("write the open-transaction record: %w", err)
+	}
+	return nil
+}
+
+func (windowsInstallHost) markOpen(dir string) error {
+	dirs, err := openTransactionDirs()
+	if err != nil {
+		return err
+	}
+	if slices.ContainsFunc(dirs, func(d string) bool { return equalFoldPath(d, dir) }) {
+		return nil
+	}
+	return writeOpenTransactionDirs(append(dirs, dir))
+}
+
+func (windowsInstallHost) markClosed(dir string) error {
+	dirs, err := openTransactionDirs()
+	if err != nil {
+		return err
+	}
+	kept := slices.DeleteFunc(slices.Clone(dirs), func(d string) bool { return equalFoldPath(d, dir) })
+	if len(kept) == len(dirs) {
+		return nil
+	}
+	return writeOpenTransactionDirs(kept)
 }
 
 // deleteAtReboot queues path for deletion at the next start of Windows

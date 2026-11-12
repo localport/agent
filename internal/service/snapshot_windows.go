@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"github.com/localport/agent/internal/security"
 )
 
 // ServiceSnapshot is one owned service's full definition and run state as
@@ -75,18 +78,27 @@ func SnapshotOwned() ([]ServiceSnapshot, error) {
 // RestoreOwned writes the snapshot's definitions back and leaves every owned
 // service stopped: a service that existed is created or rewritten to its
 // recorded configuration, privileges, recovery and Event Log source; one
-// that did not is stopped and deleted with its source. The caller starts the
-// services that were running once their files are back.
-func RestoreOwned(ctx context.Context, snaps []ServiceSnapshot) error {
+// that did not is stopped and deleted with its source. A service whose
+// recorded program no longer passes the device service binary rule (deleted,
+// or replaceable by another account) is deleted instead of restored, since
+// it would run that program as its account; removed names those services.
+// The caller starts the services that were running once their files are
+// back.
+func RestoreOwned(ctx context.Context, snaps []ServiceSnapshot) (removed []string, err error) {
 	var errs []error
 	for _, snap := range snaps {
-		errs = append(errs, restoreOne(ctx, snap))
+		gone, err := restoreOne(ctx, snap)
+		if gone {
+			removed = append(removed, snap.Name)
+		}
+		errs = append(errs, err)
 	}
-	return errors.Join(errs...)
+	return removed, errors.Join(errs...)
 }
 
-func restoreOne(ctx context.Context, snap ServiceSnapshot) error {
-	return openService(snap.Name, func(m *mgr.Mgr, s *mgr.Service) error {
+func restoreOne(ctx context.Context, snap ServiceSnapshot) (removed bool, err error) {
+	unsafeProgram := snap.Existed && security.CheckServiceBinary(programOf(snap.Config.BinaryPathName)) != nil
+	err = openService(snap.Name, func(m *mgr.Mgr, s *mgr.Service) error {
 		if s != nil {
 			if _, err := ownedService(snap.Name, s); err != nil {
 				return err
@@ -95,7 +107,7 @@ func restoreOne(ctx context.Context, snap ServiceSnapshot) error {
 				return err
 			}
 		}
-		if !snap.Existed {
+		if !snap.Existed || unsafeProgram {
 			if s == nil {
 				return nil
 			}
@@ -138,6 +150,19 @@ func restoreOne(ctx context.Context, snap ServiceSnapshot) error {
 		}
 		return nil
 	})
+	return unsafeProgram && err == nil, err
+}
+
+// programOf is the program of a service command line this package wrote:
+// the quoted first argument, or the text up to the first space.
+func programOf(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if rest, ok := strings.CutPrefix(cmd, `"`); ok {
+		program, _, _ := strings.Cut(rest, `"`)
+		return program
+	}
+	program, _, _ := strings.Cut(cmd, " ")
+	return program
 }
 
 // MarshalSnapshots and UnmarshalSnapshots carry snapshots in the install

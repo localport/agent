@@ -262,3 +262,16 @@ func TestImageInside(t *testing.T) {
 		}
 	}
 }
+
+// programOf reads the program of the command lines Install writes.
+func TestProgramOf(t *testing.T) {
+	for cmd, want := range map[string]string{
+		`"C:\Program Files\Localport\localport.exe" run --service`: `C:\Program Files\Localport\localport.exe`,
+		`C:\Localport\localport.exe run --service`:                 `C:\Localport\localport.exe`,
+		`  "C:\x\y.exe"`: `C:\x\y.exe`,
+	} {
+		if got := programOf(cmd); got != want {
+			t.Errorf("programOf(%q) = %q, want %q", cmd, got, want)
+		}
+	}
+}

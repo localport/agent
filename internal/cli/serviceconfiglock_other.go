@@ -4,8 +4,8 @@ package cli
 
 import "context"
 
-// lockServiceConfig is the Windows service configuration mutex; other
+// lockServiceDefinitions is the Windows service configuration lock; other
 // platforms serialize service changes through their service managers.
-func lockServiceConfig(context.Context) (unlock func(), abandoned bool, err error) {
-	return func() {}, false, nil
+func lockServiceDefinitions(context.Context) (unlock func(), err error) {
+	return func() {}, nil
 }

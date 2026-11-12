@@ -9,7 +9,12 @@ include them when you contact support.
 
 Codes are grouped by area: AG00x credentials and keys, AG01x file and binary
 checks, AG02x local config, AG03x commands, AG04x the device service, AG05x
-terminal sessions, AG06x recordings, AG07x network.
+terminal sessions, AG06x recordings, AG07x network, AG08x and AG09x the
+Windows installer. The Windows installer and uninstaller exit with the
+number of their code (`AG084` exits 84). Two refusals of the installer
+itself use the Windows Installer codes instead: exit 1618, another
+Localport installer or uninstaller is running (wait for it to finish, then
+run it again), and exit 1633, the machine is not running 64-bit Windows.
 
 | Code | Title | What to do |
 |---|---|---|
@@ -58,6 +63,7 @@ terminal sessions, AG06x recordings, AG07x network.
 | AG087 | Machine PATH not updated | The installer could not add its directory to the machine `Path`, so it undid the install: the previous files, settings and services are as they were. The message names the cause; fix it, then run the installer again. |
 | AG088 | Installer step invalid | The installer called a `localport system` step that this `localport.exe` does not know, or with the wrong arguments; the installer and its executable come from different releases. Nothing was changed. Download the installer again from the releases page and run it. |
 | AG089 | Uninstall not prepared | A step of the uninstall failed (listing or removing the device services, the `Path` entry, the Add/Remove Programs entry or a file), so the uninstaller undid it: the install is as it was. The message names the cause; fix it (for example, close a tool that holds a service open, or restart Windows), then uninstall again. |
-| AG090 | Install rollback failed | An install or uninstall failed and undoing it also failed, so the machine may be between two states. The journal under `<install directory>\.localport-txn\` is kept, and the next run of the installer or uninstaller finishes the undo before it does anything else. Run the installer again; the message names the step that could not be undone. |
-| AG091 | Service configuration busy | Another installer, uninstaller, `localport connect` or `localport service` command is changing the device services, and it did not finish within 2 minutes. Wait for it to finish, then run the command again. |
+| AG090 | Install rollback failed | An install or uninstall failed and undoing it also failed, so the machine may be between two states. The journal under `<install directory>\.localport-txn\` is kept, and the next run of the installer or uninstaller finishes the undo before it does anything else. Run the installer again; the message names the step that could not be undone. The undo also reports AG090 when it finished but removed a device service instead of restoring it, because the program that service ran was deleted or can be replaced by another account: run `localport service install` as an Administrator to register the service again. |
+| AG091 | Service configuration busy | Another installer, uninstaller, `localport connect` or `localport service` command is changing the device services and did not finish within 2 minutes, or an interrupted install is still open in the install directory (the message names it), or the lock could not be taken (the message names the cause). Wait for the other command to finish, or run the Localport installer again, which undoes an interrupted install first; then run the command again. |
 | AG092 | Uninstall entry not written | The installer could not write its Add/Remove Programs entry, so it undid the install: the previous files, settings and services are as they were. The message names the cause; fix it, then run the installer again. |
+| AG093 | Device state not purged | The uninstall finished, but removing the device identities and config it was asked to purge failed, so they stay under `%ProgramData%\localport-device`. The message names the cause; fix it, then delete that directory as an Administrator. The device certificates stay valid until the devices are removed in the dashboard. |

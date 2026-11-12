@@ -16,6 +16,40 @@ Installers:
       - DisplayName: Localport
         Publisher: Localport
         DisplayVersion: @VERSION@
+    # A failed installer step exits with its code's number (AG084 exits 84);
+    # docs/ERRORS.md names the cause and the remedy of each. The installer's
+    # own refusals use the Windows Installer codes, which winget maps only
+    # for MSI installers.
+    ExpectedReturnCodes:
+      - InstallerReturnCode: 1618
+        ReturnResponse: installInProgress
+      - InstallerReturnCode: 1633
+        ReturnResponse: systemNotSupported
+      - InstallerReturnCode: 81
+        ReturnResponse: custom
+        ReturnResponseUrl: https://github.com/localport/agent/blob/main/docs/ERRORS.md
+      - InstallerReturnCode: 82
+        ReturnResponse: custom
+        ReturnResponseUrl: https://github.com/localport/agent/blob/main/docs/ERRORS.md
+      - InstallerReturnCode: 83
+        ReturnResponse: packageInUse
+      - InstallerReturnCode: 84
+        ReturnResponse: fileInUse
+      - InstallerReturnCode: 85
+        ReturnResponse: custom
+        ReturnResponseUrl: https://github.com/localport/agent/blob/main/docs/ERRORS.md
+      - InstallerReturnCode: 87
+        ReturnResponse: custom
+        ReturnResponseUrl: https://github.com/localport/agent/blob/main/docs/ERRORS.md
+      - InstallerReturnCode: 88
+        ReturnResponse: invalidParameter
+      - InstallerReturnCode: 90
+        ReturnResponse: contactSupport
+      - InstallerReturnCode: 91
+        ReturnResponse: installInProgress
+      - InstallerReturnCode: 92
+        ReturnResponse: custom
+        ReturnResponseUrl: https://github.com/localport/agent/blob/main/docs/ERRORS.md
   - Architecture: x64
     InstallerType: zip
     NestedInstallerType: portable

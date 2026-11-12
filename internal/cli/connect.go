@@ -405,7 +405,7 @@ func installedDeviceService() (service.Manager, bool, error) {
 // service configuration lock. Each service manager command has its own
 // timeout.
 func (s *deviceService) install() error {
-	unlock, _, err := lockServiceConfig(context.Background())
+	unlock, err := lockServiceDefinitions(context.Background())
 	if err != nil {
 		return err
 	}
