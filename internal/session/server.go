@@ -3,9 +3,13 @@
 // runs an x/crypto/ssh server on it with the device key as host key, admits
 // the client by its SSH user certificate (signed by a session CA key, for the
 // serial the edge admitted, for this device, for a login the local config
-// enables), and serves its session channels through the root session
-// launcher: a terminal on a PTY, or a command (exec). It records the
-// connection when the certificate asks for it.
+// enables), and serves the channels the certificate's kind allows: session
+// channels through the root session launcher (a terminal on a PTY, a command
+// (exec) or the SFTP subsystem), local and remote port forwarding, and VNC or
+// RDP desktop channels relayed to the configured local target through a
+// protocol filter. When the certificate asks for recording, each session
+// channel opens its own recording and the connection's port forwards share
+// one forwards recording; a desktop connection is never recorded.
 package session
 
 import (

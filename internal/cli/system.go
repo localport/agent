@@ -95,9 +95,11 @@ type installHost interface {
 	stopServices(ctx context.Context) ([]string, error)
 	startServices(ctx context.Context, names []string) error
 	// restoreServices writes snap's definitions back and leaves the owned
-	// services stopped. A service whose recorded program fails the device
-	// service binary rule is deleted instead and listed in removed.
-	restoreServices(ctx context.Context, snap json.RawMessage) (removed []string, err error)
+	// services stopped. A service whose recorded program will fail the
+	// device service binary rule once the rollback is done is deleted
+	// instead and listed in removed; programAt maps a program path to the
+	// file that will be there, "" when none will be.
+	restoreServices(ctx context.Context, snap json.RawMessage, programAt func(string) string) (removed []string, err error)
 	// installServices registers and starts the owned services for exe.
 	installServices(ctx context.Context, exe string) error
 	deleteServices(ctx context.Context) error
@@ -119,9 +121,11 @@ type installHost interface {
 	deleteAtReboot(path string) error
 	// markOpen and markClosed add and remove dir in the machine's list of
 	// directories with an open transaction (after Windows Installer's
-	// InProgress key), which connect and the service commands check.
+	// InProgress key), which connect, the service commands and the other
+	// steps check; listOpen reads it.
 	markOpen(dir string) error
 	markClosed(dir string) error
+	listOpen() ([]string, error)
 	warn(msg string)
 }
 
@@ -192,6 +196,9 @@ func withServiceLock(ctx context.Context, host installHost, dir string, fn func(
 		if err := recoverTransactions(ctx, host, dir); err != nil {
 			return err
 		}
+	} else {
+		// Nothing can be open in a directory that is gone.
+		(&transaction{host: host, dir: dir}).closeMarker()
 	}
 	return fn()
 }
@@ -242,6 +249,9 @@ func applyInstall(ctx context.Context, host installHost, dir, txn, version strin
 	if t.j.Op != opInstall || t.j.Phase != phaseBegun {
 		return fmt.Errorf("%w: transaction %s is %s %s, not a begun install", errInstallerStepInvalid, txn, t.j.Op, t.j.Phase)
 	}
+	if err := refuseOtherOpenTransaction(host, dir); err != nil {
+		return err
+	}
 	for _, name := range productFiles {
 		if fi, err := os.Lstat(filepath.Join(t.stagingDir(), name)); err != nil || !fi.Mode().IsRegular() {
 			return t.fail(ctx, fmt.Errorf("%w: staged %s is missing or not a regular file: %v", errInstallNotCommitted, name, err))
@@ -289,6 +299,9 @@ func applyInstall(ctx context.Context, host installHost, dir, txn, version strin
 // point, purges the device state when asked.
 func runUninstall(ctx context.Context, host installHost, dir string, purge bool) error {
 	return withServiceLock(ctx, host, dir, func() error {
+		if err := refuseOtherOpenTransaction(host, dir); err != nil {
+			return err
+		}
 		foreign, err := host.foreignServicesIn(dir)
 		if err != nil {
 			return fmt.Errorf("%w: %w", errUninstallNotPrepared, err)
@@ -627,7 +640,7 @@ func (t *transaction) undo(ctx context.Context, a txnAction) error {
 		}
 		return t.host.writePath(restored, expandable)
 	case actServices:
-		removed, err := t.host.restoreServices(ctx, t.j.Services)
+		removed, err := t.host.restoreServices(ctx, t.j.Services, t.programAfterRollback)
 		t.removed = mergeNames(t.removed, removed)
 		return err
 	}
@@ -669,6 +682,7 @@ func (t *transaction) finish() {
 func recoverTransactions(ctx context.Context, host installHost, dir string) error {
 	entries, err := os.ReadDir(filepath.Join(dir, txnRoot))
 	if errors.Is(err, fs.ErrNotExist) {
+		(&transaction{host: host, dir: dir}).closeMarker()
 		return nil
 	}
 	if err != nil {
@@ -702,6 +716,80 @@ func recoverTransactions(ctx context.Context, host installHost, dir string) erro
 			}
 		default:
 			removeOrQueue(host, t.txnDir())
+		}
+	}
+	// A run killed after recording the directory but before phase applying
+	// leaves an entry no rollback or finish removes.
+	(&transaction{host: host, dir: dir}).closeMarker()
+	return nil
+}
+
+// programAfterRollback is the file that will be at program once every move
+// is undone, checked in its place because services are restored before the
+// files move back: it replays the move undos in reverse with the conditions
+// undo applies, and returns where that file is now, or "" when no file will
+// be at program.
+func (t *transaction) programAfterRollback(program string) string {
+	key := func(p string) string { return strings.ToLower(filepath.Clean(p)) }
+	// at maps a path, by key, to where the file that will be there is now.
+	at := map[string]string{}
+	for _, a := range t.j.Actions {
+		if a.Kind != actMove {
+			continue
+		}
+		for _, p := range []string{a.From, a.To} {
+			if exists(p) {
+				at[key(p)] = p
+			}
+		}
+	}
+	if exists(program) {
+		at[key(program)] = program
+	}
+	for i := len(t.j.Actions) - 1; i >= 0; i-- {
+		a := t.j.Actions[i]
+		if a.Kind != actMove {
+			continue
+		}
+		from, to := key(a.From), key(a.To)
+		if src, ok := at[to]; ok {
+			if _, taken := at[from]; !taken {
+				at[from] = src
+				delete(at, to)
+			}
+		}
+	}
+	return at[key(program)]
+}
+
+func equalFoldPath(a, b string) bool {
+	return pathEntryMatches(a, b, func(s string) string { return s })
+}
+
+// refuseOtherOpenTransaction refuses while the open-transaction record
+// lists another directory, passing the admin-only rule, with a transaction
+// at phase applying: its rollback restores the service definitions, so
+// this step's changes would be undone. As Windows Installer, no new
+// transaction starts until that one is resolved.
+func refuseOtherOpenTransaction(host installHost, dir string) error {
+	dirs, err := host.listOpen()
+	if err != nil {
+		return fmt.Errorf("%w: %w", errServiceConfigBusy, err)
+	}
+	return refuseOpenTransactionIn(dirs, dir, host.checkInstallDir)
+}
+
+// refuseOpenTransactionIn refuses with AG091 when a directory in dirs,
+// other than except and passing check (the admin-only rule), holds a
+// transaction at phase applying. Only the installer or uninstaller for that
+// directory undoes it, so the message names the directory.
+func refuseOpenTransactionIn(dirs []string, except string, check func(string) error) error {
+	for _, d := range dirs {
+		if (except != "" && equalFoldPath(d, except)) || !filepath.IsAbs(d) || check(d) != nil {
+			continue
+		}
+		if txn := openInstallTransaction(d); txn != "" {
+			return fmt.Errorf("%w: an interrupted install or uninstall (transaction %s) is open in %s; run the Localport installer, or the uninstaller, for that directory, which undoes it first", errServiceConfigBusy, txn, d)
 		}
 	}
 	return nil

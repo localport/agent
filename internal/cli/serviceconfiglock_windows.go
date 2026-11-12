@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"runtime"
 	"time"
 	"unsafe"
@@ -84,19 +83,12 @@ func lockServiceDefinitions(ctx context.Context) (func(), error) {
 		unlock()
 		return nil, fmt.Errorf("%w: %w", errServiceConfigBusy, err)
 	}
-	for _, dir := range dirs {
-		if !filepath.IsAbs(dir) || security.CheckServiceDir(dir) != nil {
-			continue
-		}
-		if txn := openInstallTransaction(dir); txn != "" {
-			unlock()
-			return nil, fmt.Errorf("%w: an interrupted install transaction %s is open in %s; run the Localport installer again, which undoes it first", errServiceConfigBusy, txn, dir)
-		}
+	if err := refuseOpenTransactionIn(dirs, "", security.CheckServiceDir); err != nil {
+		unlock()
+		return nil, err
 	}
 	return unlock, nil
 }
-
-func equalFoldPath(a, b string) bool { return pathEntryMatches(a, b, func(s string) string { return s }) }
 
 // takeServiceConfigMutex opens the private namespace and waits for the
 // mutex in it. The namespace handle stays open while the mutex is held.

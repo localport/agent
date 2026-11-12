@@ -90,8 +90,19 @@ func TestServiceConfigLockSurvivesItsCreatorClosing(t *testing.T) {
 		unlock()
 	}()
 	// The second writer has opened the namespace and is waiting on the
-	// mutex when the creator lets go.
-	<-waiting
+	// mutex when the creator lets go. A second writer that fails before it
+	// waits ends the test instead of blocking it.
+	select {
+	case <-waiting:
+	case err := <-secondHeld:
+		// A nil error means it took the lock the first writer holds; it
+		// then holds it until released.
+		close(secondRelease)
+		close(firstRelease)
+		<-firstDone
+		<-secondDone
+		t.Fatalf("second writer returned before waiting: %v", err)
+	}
 	serviceConfigWaiting = nil
 	close(firstRelease)
 	<-firstDone

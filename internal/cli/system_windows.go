@@ -35,7 +35,8 @@ const (
 	// InProgress key marks its own. Under HKLM\SOFTWARE only Administrators
 	// and SYSTEM can write it; readers only use it to find directories,
 	// each checked admin-only before its journal is read.
-	installerKey          = `SOFTWARE\Localport\Installer`
+	productKey            = `SOFTWARE\Localport`
+	installerKey          = productKey + `\Installer`
 	openTransactionsValue = "OpenTransactions"
 	// broadcastTimeout bounds the wait for each top-level window to take the
 	// environment change, as setx does.
@@ -87,12 +88,12 @@ func (windowsInstallHost) startServices(_ context.Context, names []string) error
 	return service.StartOwned(names)
 }
 
-func (windowsInstallHost) restoreServices(ctx context.Context, raw json.RawMessage) ([]string, error) {
+func (windowsInstallHost) restoreServices(ctx context.Context, raw json.RawMessage, programAt func(string) string) ([]string, error) {
 	snaps, err := service.UnmarshalSnapshots(raw)
 	if err != nil {
 		return nil, err
 	}
-	return service.RestoreOwned(ctx, snaps)
+	return service.RestoreOwned(ctx, snaps, programAt)
 }
 
 // installServices runs the `service install` path in process for exe, the
@@ -327,23 +328,50 @@ func openTransactionDirs() ([]string, error) {
 	return dirs, nil
 }
 
+// writeOpenTransactionDirs writes the list; an empty list removes the
+// installer key, which holds nothing else, and then the Localport key when
+// nothing else is in it, so an uninstall leaves no key behind.
 func writeOpenTransactionDirs(dirs []string) error {
-	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, installerKey, registry.SET_VALUE|registry.QUERY_VALUE)
+	if len(dirs) == 0 {
+		if err := registry.DeleteKey(registry.LOCAL_MACHINE, installerKey); err != nil && !errors.Is(err, registry.ErrNotExist) {
+			return fmt.Errorf("remove the open-transaction record: %w", err)
+		}
+		return removeEmptyKey(productKey)
+	}
+	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, installerKey, registry.SET_VALUE)
 	if err != nil {
 		return fmt.Errorf("create the installer record: %w", err)
 	}
 	defer k.Close()
-	if len(dirs) == 0 {
-		if err := k.DeleteValue(openTransactionsValue); err != nil && !errors.Is(err, registry.ErrNotExist) {
-			return fmt.Errorf("clear the open-transaction record: %w", err)
-		}
-		return nil
-	}
 	if err := k.SetStringsValue(openTransactionsValue, dirs); err != nil {
 		return fmt.Errorf("write the open-transaction record: %w", err)
 	}
 	return nil
 }
+
+func removeEmptyKey(path string) error {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.QUERY_VALUE|registry.ENUMERATE_SUB_KEYS)
+	if errors.Is(err, registry.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	info, err := k.Stat()
+	k.Close()
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	if info.SubKeyCount > 0 || info.ValueCount > 0 {
+		return nil
+	}
+	if err := registry.DeleteKey(registry.LOCAL_MACHINE, path); err != nil && !errors.Is(err, registry.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return nil
+}
+
+func (windowsInstallHost) listOpen() ([]string, error) { return openTransactionDirs() }
 
 func (windowsInstallHost) markOpen(dir string) error {
 	dirs, err := openTransactionDirs()

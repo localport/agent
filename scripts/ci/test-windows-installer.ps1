@@ -48,6 +48,7 @@ foreach ($round in 'install', 'upgrade') {
     Assert (@(Get-MachinePath | Where-Object { $_ -eq $dir }).Count -eq 1) "$round has the directory on the machine Path once"
     & (Join-Path $dir 'localport.exe') system rollback $dir
     Assert ($LASTEXITCODE -eq 0) "$round leaves no open transaction (system rollback exits 0)"
+    Assert (-not (Test-Path 'HKLM:\SOFTWARE\Localport\Installer')) "$round leaves no open-transaction record"
 }
 
 # _?= keeps the uninstaller in place, so it runs synchronously; its own
@@ -57,5 +58,6 @@ Assert ($p.ExitCode -eq 0) "uninstall exits 0"
 Assert (-not (Test-Path (Join-Path $dir 'localport.exe'))) 'uninstall removes localport.exe'
 Assert (-not (Test-Path (Join-Path $dir 'localport-session.exe'))) 'uninstall removes localport-session.exe'
 Assert (-not (Test-Path $key)) 'uninstall removes the uninstall key'
+Assert (-not (Test-Path 'HKLM:\SOFTWARE\Localport')) 'uninstall leaves no Localport registry key'
 Assert (@(Get-MachinePath | Where-Object { $_ -eq $dir }).Count -eq 0) 'uninstall removes the machine Path entry'
 Remove-Item -LiteralPath $dir -Recurse -Force

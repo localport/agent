@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -40,6 +41,10 @@ type fakeInstallHost struct {
 	warnings   []string
 	// marked is the open-transaction list.
 	marked []string
+	// programPath is a program path whose mapping each restore records in
+	// programsSeen.
+	programPath  string
+	programsSeen []string
 
 	// fail names the operations that fail: stop, start, restore, install,
 	// delete, key (restoring or deleting the entry), keywrite, path, purge,
@@ -92,7 +97,10 @@ func (f *fakeInstallHost) startServices(_ context.Context, names []string) error
 	}
 	return nil
 }
-func (f *fakeInstallHost) restoreServices(_ context.Context, raw json.RawMessage) ([]string, error) {
+func (f *fakeInstallHost) restoreServices(_ context.Context, raw json.RawMessage, programAt func(string) string) ([]string, error) {
+	if f.programPath != "" {
+		f.programsSeen = append(f.programsSeen, programAt(f.programPath))
+	}
 	f.restores++
 	if err := f.failing("restore"); err != nil {
 		return nil, err
@@ -169,6 +177,9 @@ func (f *fakeInstallHost) markOpen(dir string) error {
 	}
 	f.marked = mergeNames(f.marked, []string{dir})
 	return nil
+}
+func (f *fakeInstallHost) listOpen() ([]string, error) {
+	return slices.Clone(f.marked), f.failing("list")
 }
 func (f *fakeInstallHost) markClosed(dir string) error {
 	f.marked = slices.DeleteFunc(f.marked, func(d string) bool { return d == dir })
@@ -738,6 +749,7 @@ func TestSystemRollbackRemovesAServiceWithAnUnsafeProgram(t *testing.T) {
 	h, dir := installedHost(t)
 	stageRelease(t, h, dir, "v2")
 	h.fail["install"], h.fail["unsafeprogram"] = true, true
+	h.programPath = filepath.Join(dir, "localport.exe")
 	err := runSystemSteps(context.Background(), h, "v2.0.0", []string{"apply", dir, testTxn})
 	var exitErr *service.ExitError
 	if !errors.Is(err, errInstallMixed) || !errors.As(systemExitError(err), &exitErr) || exitErr.Code != 90 {
@@ -748,6 +760,10 @@ func TestSystemRollbackRemovesAServiceWithAnUnsafeProgram(t *testing.T) {
 	}
 	if h.existed || len(h.running) != 0 {
 		t.Fatalf("services after rollback: existed %v, running %v; want removed and none started", h.existed, h.running)
+	}
+	// The restore checked the file the rollback puts back, the backup.
+	if want := filepath.Join(dir, txnRoot, testTxn, "backup", "localport.exe"); !slices.Equal(h.programsSeen, []string{want}) {
+		t.Fatalf("restore checked %v, want [%s]", h.programsSeen, want)
 	}
 	if got := readProduct(t, dir); !slices.Equal(got, allOf(len(productFiles), "v1")) {
 		t.Fatalf("files after rollback = %v", got)
@@ -826,5 +842,110 @@ func TestSystemRecordKeepsADirectoryWithAnotherOpenTransaction(t *testing.T) {
 	(&transaction{host: h, dir: dir}).closeMarker()
 	if !slices.Equal(h.marked, []string{dir}) {
 		t.Fatalf("record = %v, want the directory kept", h.marked)
+	}
+}
+
+// Recovery clears the record of a directory whose transaction never
+// reached phase applying.
+func TestSystemRecoveryClearsTheRecordOfABegunTransaction(t *testing.T) {
+	h, dir := installedHost(t)
+	writeJournal(t, dir, phaseBegun)
+	h.marked = []string{dir}
+	if err := runSystemSteps(context.Background(), h, "v2", []string{"rollback", dir}); err != nil || len(h.marked) != 0 {
+		t.Fatalf("rollback = %v, record %v", err, h.marked)
+	}
+}
+
+// The program a restored service will run is checked as the file the
+// rollback puts back: the backup of a replaced file, none for a file the
+// transaction added, the file itself once the moves were already undone.
+func TestSystemProgramAfterRollback(t *testing.T) {
+	_, dir := installedHost(t)
+	writeJournal(t, dir, phaseApplying)
+	raw, _ := os.ReadFile(filepath.Join(dir, txnRoot, testTxn, journalFile))
+	tr := &transaction{dir: dir}
+	if err := json.Unmarshal(raw, &tr.j); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "localport.exe")
+	backup := filepath.Join(dir, txnRoot, testTxn, "backup", "localport.exe")
+	if got := tr.programAfterRollback(exe); got != backup {
+		t.Errorf("replaced file: %q, want the backup %q", got, backup)
+	}
+	if runtime.GOOS == "windows" {
+		if got := tr.programAfterRollback(strings.ToUpper(exe)); got != backup {
+			t.Errorf("case-different path: %q, want the backup", got)
+		}
+	}
+	if got := tr.programAfterRollback(filepath.Join(dir, "LICENSE")); got != filepath.Join(dir, "LICENSE") {
+		t.Errorf("untouched file: %q", got)
+	}
+	// A file the transaction added with nothing before it.
+	tr.j.Actions = tr.j.Actions[2:]
+	if got := tr.programAfterRollback(exe); got != "" {
+		t.Errorf("added file: %q, want none", got)
+	}
+	// An earlier rollback already moved both back.
+	tr.j.Actions = nil
+	writeJournalMovesUndone(t, tr, dir)
+	if got := tr.programAfterRollback(exe); got != exe {
+		t.Errorf("moves already undone: %q, want %q", got, exe)
+	}
+}
+
+// writeJournalMovesUndone leaves tr as a rollback that already undid its
+// moves: the old file back in place, the new one back in staging.
+func writeJournalMovesUndone(t *testing.T, tr *transaction, dir string) {
+	t.Helper()
+	exe := filepath.Join(dir, "localport.exe")
+	backup := filepath.Join(dir, txnRoot, testTxn, "backup", "localport.exe")
+	staged := filepath.Join(dir, txnRoot, testTxn, "staging", "localport.exe")
+	if err := os.Rename(exe, staged); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backup, exe); err != nil {
+		t.Fatal(err)
+	}
+	tr.j.Actions = []txnAction{
+		{Kind: actMove, From: exe, To: backup, Done: true},
+		{Kind: actMove, From: staged, To: exe, Done: true},
+	}
+}
+
+// apply and uninstall refuse while another directory has an interrupted
+// transaction, before any change.
+func TestSystemStepsRefuseWhileAnotherDirectoryIsOpen(t *testing.T) {
+	for _, step := range []string{"apply", "uninstall"} {
+		h, other := installedHost(t)
+		writeJournal(t, other, phaseApplying)
+		_, dir := installedHost(t)
+		stageRelease(t, h, dir, "v2")
+		h.marked = []string{other}
+		args := []string{step, dir}
+		if step == "apply" {
+			args = append(args, testTxn)
+		}
+		if err := runSystemSteps(context.Background(), h, "v2.0.0", args); !errors.Is(err, errServiceConfigBusy) || !strings.Contains(fmt.Sprint(err), other) {
+			t.Fatalf("%s = %v, want AG091 naming %s", step, err, other)
+		}
+		if readProduct(t, dir)[0] != "v1" || h.deleted != 0 || !slices.Equal(h.running, []string{"localport-session", "localport-device"}) {
+			t.Fatalf("%s changed the machine before refusing", step)
+		}
+	}
+}
+
+// Steps clear the record of a directory whose transaction directory, or
+// the whole directory, is gone.
+func TestSystemClearsTheRecordOfAGoneDirectory(t *testing.T) {
+	h, dir := installedHost(t)
+	gone := filepath.Join(t.TempDir(), "gone")
+	h.marked = []string{dir, gone}
+	for _, d := range []string{dir, gone} {
+		if err := runSystemSteps(context.Background(), h, "v2", []string{"rollback", d}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(h.marked) != 0 {
+		t.Fatalf("record = %v, want empty", h.marked)
 	}
 }

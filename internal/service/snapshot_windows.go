@@ -79,15 +79,16 @@ func SnapshotOwned() ([]ServiceSnapshot, error) {
 // service stopped: a service that existed is created or rewritten to its
 // recorded configuration, privileges, recovery and Event Log source; one
 // that did not is stopped and deleted with its source. A service whose
-// recorded program no longer passes the device service binary rule (deleted,
+// recorded program will not pass the device service binary rule (deleted,
 // or replaceable by another account) is deleted instead of restored, since
 // it would run that program as its account; removed names those services.
-// The caller starts the services that were running once their files are
-// back.
-func RestoreOwned(ctx context.Context, snaps []ServiceSnapshot) (removed []string, err error) {
+// programAt maps the recorded program to the file that will be at its path
+// once the caller's rollback is done, "" when none will be. The caller
+// starts the services that were running once their files are back.
+func RestoreOwned(ctx context.Context, snaps []ServiceSnapshot, programAt func(string) string) (removed []string, err error) {
 	var errs []error
 	for _, snap := range snaps {
-		gone, err := restoreOne(ctx, snap)
+		gone, err := restoreOne(ctx, snap, programAt)
 		if gone {
 			removed = append(removed, snap.Name)
 		}
@@ -96,8 +97,12 @@ func RestoreOwned(ctx context.Context, snaps []ServiceSnapshot) (removed []strin
 	return removed, errors.Join(errs...)
 }
 
-func restoreOne(ctx context.Context, snap ServiceSnapshot) (removed bool, err error) {
-	unsafeProgram := snap.Existed && security.CheckServiceBinary(programOf(snap.Config.BinaryPathName)) != nil
+func restoreOne(ctx context.Context, snap ServiceSnapshot, programAt func(string) string) (removed bool, err error) {
+	unsafeProgram := false
+	if snap.Existed {
+		program := programAt(programOf(snap.Config.BinaryPathName))
+		unsafeProgram = program == "" || security.CheckServiceBinary(program) != nil
+	}
 	err = openService(snap.Name, func(m *mgr.Mgr, s *mgr.Service) error {
 		if s != nil {
 			if _, err := ownedService(snap.Name, s); err != nil {
