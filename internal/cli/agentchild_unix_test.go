@@ -12,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/service"
 )
@@ -50,11 +52,11 @@ func TestAgentChildRefusesAnyOtherAccount(t *testing.T) {
 	t.Cleanup(func() { lookupAgentAccount = restore; asAgentChild = false })
 	lookupAgentAccount = func() (service.Account, error) { return service.Account{UID: os.Geteuid() + 1}, nil }
 	err := runAgentChild(New("test", "", ""), []string{"status"})
-	if err == nil || !strings.Contains(err.Error(), "started only by localport") || asAgentChild {
+	if !errors.Is(err, errcode.New(errcode.AgentChildOnly)) || asAgentChild {
 		t.Fatalf("runAgentChild as another account = %v (asAgentChild %v), want a refusal", err, asAgentChild)
 	}
 	lookupAgentAccount = func() (service.Account, error) { return service.Account{UID: os.Geteuid()}, nil }
-	if err := runAgentChild(New("test", "", ""), []string{"connect"}); err == nil || !strings.Contains(err.Error(), "unknown command") {
+	if err := runAgentChild(New("test", "", ""), []string{"connect"}); !errors.Is(err, errcode.New(errcode.AgentChildOnly)) || !strings.Contains(err.Error(), "unknown command") {
 		t.Fatalf("runAgentChild connect = %v, want unknown command", err)
 	}
 }

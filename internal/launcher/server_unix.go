@@ -116,7 +116,7 @@ func (s *Server) handle(conn *net.UnixConn) {
 	}
 	hreq, err := s.authorize(req)
 	if err != nil {
-		s.Log("launcher: refused %s for device %s login %q: %v", req.Kind, req.Device, req.Login, err)
+		s.Log("launcher: refused %s for device %q login %q: %v", req.Kind, req.Device, req.Login, err)
 		s.refuse(conn, CodeOf(err))
 		return
 	}
@@ -174,13 +174,13 @@ func (s *Server) run(conn *net.UnixConn, req HelperRequest, channel *os.File) {
 		return
 	}
 	if reply.Refused != "" {
-		s.refuse(conn, reply.Refused)
+		respond(conn, Response{Refused: &Refused{Code: reply.Refused}, Messages: reply.Messages})
 		s.logExit(cmd.Process.Pid, <-exited)
 		return
 	}
 	id := newSessionID()
 	s.Log("launcher: session %s: %s for %q, helper %d", id, req.Kind, req.Login, cmd.Process.Pid)
-	respond(conn, Response{Started: &Started{SessionID: id}})
+	respond(conn, Response{Started: &Started{SessionID: id}, Messages: reply.Messages})
 	e := <-exited
 	s.logExit(cmd.Process.Pid, e)
 	respond(conn, Response{Exit: &e})
@@ -198,7 +198,7 @@ func (s *Server) start(control *os.File, req HelperRequest) (HelperReply, error)
 	if err := WriteHelperRequest(control, req); err != nil {
 		return HelperReply{}, err
 	}
-	reply, err := ReadHelperReply(control)
+	reply, err := ReadHelperReply(control, nil)
 	if errors.Is(err, os.ErrDeadlineExceeded) {
 		return HelperReply{}, errHelperTimeout
 	}

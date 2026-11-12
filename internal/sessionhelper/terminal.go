@@ -4,8 +4,11 @@ package sessionhelper
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -14,6 +17,7 @@ import (
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 
+	"github.com/localport/agent/internal/childproc"
 	"github.com/localport/agent/internal/launcher"
 )
 
@@ -117,7 +121,7 @@ type sessionLeader struct {
 
 // observeExit is the terminal's exit observer; tests replace it before the
 // session starts.
-var observeExit = waitExited
+var observeExit = childproc.WaitExited
 
 // openPTY opens a PTY pair of the given size.
 func openPTY(cols, rows uint16) (master, slave *os.File, err error) {
@@ -131,6 +135,28 @@ func openPTY(cols, rows uint16) (master, slave *os.File, err error) {
 		return nil, nil, err
 	}
 	return master, slave, nil
+}
+
+// setPTYOwner gives the slave to the login, group tty (the login's group on
+// a host without one), mode 0620, as sshd's pty_setowner: other accounts
+// cannot open it, and write(1) reaches it through the tty group.
+func setPTYOwner(slave *os.File, uid, loginGID uint32) error {
+	gid := loginGID
+	g, err := user.LookupGroup("tty")
+	switch {
+	case err == nil:
+		n, err := strconv.ParseUint(g.Gid, 10, 32)
+		if err != nil {
+			return fmt.Errorf("tty group id %q: %w", g.Gid, err)
+		}
+		gid = uint32(n)
+	case !errors.As(err, new(user.UnknownGroupError)):
+		return fmt.Errorf("look up the tty group: %w", err)
+	}
+	if err := slave.Chown(int(uid), int(gid)); err != nil {
+		return err
+	}
+	return slave.Chmod(0o620)
 }
 
 // startTerminal starts plan on slave. On error nothing was started and the
@@ -147,7 +173,7 @@ func startTerminal(out *frameWriter, master, slave *os.File, plan spawnPlan, log
 		// Ctty is the child's fd 0, the slave.
 		SysProcAttr: &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0, Credential: plan.cred},
 	}
-	if err := cmd.Start(); err != nil {
+	if err := startChild(cmd); err != nil {
 		return nil, err
 	}
 	k := &terminal{
@@ -332,7 +358,7 @@ func (k *terminal) finish() {
 		}
 		k.procMu.Unlock()
 		// Before the master's close, which frees the slave's name for reuse.
-		if err := revokeSlave(k.slave.Name()); err != nil {
+		if err := childproc.RevokeTTY(k.slave.Name()); err != nil {
 			k.log("sessionhelper: revoke %s: %v", k.slave.Name(), err)
 		}
 		_ = k.master.Close()

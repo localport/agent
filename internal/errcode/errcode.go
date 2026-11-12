@@ -57,12 +57,14 @@ const (
 	NotRenewable          Code = "AG007"
 	DesktopPinsUnreadable Code = "AG008"
 	DesktopPinsBusy       Code = "AG009"
+	CredentialNotSaved    Code = "AG010"
 
 	UnsafeExecutable         Code = "AG011"
 	UntrustedPath            Code = "AG012"
 	PackageManagerExecutable Code = "AG013"
 
 	RunLocked            Code = "AG021"
+	SessionsNeedService  Code = "AG022"
 	HostCapability       Code = "AG023"
 	LoginsWithoutSession Code = "AG024"
 	SessionWithoutLogins Code = "AG025"
@@ -78,13 +80,19 @@ const (
 	MergeConflict    Code = "AG034"
 	ExtraArgument    Code = "AG035"
 	NoDefaultLogin   Code = "AG036"
+	AgentChildFailed Code = "AG037"
+	AgentChildStart  Code = "AG038"
+	AgentChildOnly   Code = "AG039"
 
 	ForeignUnit     Code = "AG041"
 	NotInstalled    Code = "AG042"
 	Unsupported     Code = "AG043"
 	MarkedForDelete Code = "AG044"
+	StoreNotPurged  Code = "AG045"
 
-	SessionsLocked Code = "AG053"
+	SessionsLocked  Code = "AG053"
+	LoginsDisabled  Code = "AG054"
+	LauncherVersion Code = "AG055"
 
 	SpoolFull            Code = "AG061"
 	DiskLow              Code = "AG062"
@@ -120,12 +128,14 @@ var registry = []Entry{
 	{NotRenewable, "Credential does not renew", "a sign-in credential does not renew; run `localport login` again"},
 	{DesktopPinsUnreadable, "Desktop target keys unreadable", "desktop_pins.json cannot be read"},
 	{DesktopPinsBusy, "Desktop target keys busy", "another process is changing this device's desktop target keys"},
+	{CredentialNotSaved, "Device credential not saved", "the issued device credential could not be saved in the credential store"},
 
 	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
 	{UntrustedPath, "Untrusted credential path", "untrusted credential path"},
 	{PackageManagerExecutable, "Package manager executable", "a localport installed by a package manager cannot run as the device service"},
 
 	{RunLocked, "Devices already running", "localport is already running the devices of this config"},
+	{SessionsNeedService, "Sessions need the device service", "terminal and files sessions run only under the installed device service, because the session launcher serves only its account"},
 	{HostCapability, "Terminal, files or forwarding with a host", "terminal, files and forwarding act on this machine only and cannot be enabled with a host"},
 	{LoginsWithoutSession, "Logins without terminal or files", "logins apply only to a device that enables terminal or files"},
 	{SessionWithoutLogins, "Terminal or files without logins", "terminal and files need at least one login"},
@@ -141,13 +151,19 @@ var registry = []Entry{
 	{MergeConflict, "Flags conflict with stored settings", "the flags conflict with this device's stored settings"},
 	{ExtraArgument, "Unexpected argument", "unexpected argument"},
 	{NoDefaultLogin, "No default login", "no default login"},
+	{AgentChildFailed, "Agent account step failed", "the step localport runs as the agent account failed (its error is above)"},
+	{AgentChildStart, "Agent account step not started", "localport could not start itself as the agent account localport"},
+	{AgentChildOnly, "Internal command", "this command is run only by localport itself, as the agent account"},
 
 	{ForeignUnit, "Foreign service definition", "a service definition not written by localport is in the way"},
 	{NotInstalled, "Device service not installed", "no device service is installed"},
 	{Unsupported, "No supported service manager", "this system has no service manager localport can install into (systemd, launchd or the Windows service manager)"},
 	{MarkedForDelete, "Windows service marked for deletion", "the device service is deleted, but Windows keeps it until every handle to it closes"},
+	{StoreNotPurged, "Device credentials not purged", "removing the device credentials and the recording spool failed"},
 
 	{SessionsLocked, "Device sessions locked", "another process serves this device's sessions"},
+	{LoginsDisabled, "Logins disabled", "/etc/nologin exists, so only root can log in"},
+	{LauncherVersion, "Session launcher from another release", "the session launcher service runs another localport release; restart it"},
 
 	{SpoolFull, "Recording spool full", "recording: spool is full"},
 	{DiskLow, "Disk space low for recordings", "recording: too little free disk space for the spool"},

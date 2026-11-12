@@ -4,38 +4,43 @@ package sessionhelper
 
 /*
 #cgo LDFLAGS: -lpam
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <security/pam_appl.h>
 #include <grp.h>
 #include <unistd.h>
 
+// lpPamMessage is pam_messages.go's collector of one module message.
+extern void lpPamMessage(uintptr_t collector, char *msg);
+
 // initgroups takes an int on macOS and a gid_t on Linux.
 static int lp_initgroups(const char *user, unsigned int gid) { return initgroups(user, gid); }
 
 // lp_conv answers no prompt: the session's identity was authenticated
 // upstream, so a module that asks for input fails the step (PAM_CONV_ERR).
-// Informational and error messages get empty replies.
+// Informational and error messages get empty replies; their text goes to
+// the collector the appdata names.
 static int lp_conv(int n, const struct pam_message **msg, struct pam_response **resp, void *data) {
-	(void)data;
 	if (n <= 0 || n > PAM_MAX_NUM_MSG) return PAM_CONV_ERR;
+	for (int i = 0; i < n; i++) {
+		int style = msg[i]->msg_style;
+		if (style != PAM_TEXT_INFO && style != PAM_ERROR_MSG) return PAM_CONV_ERR;
+	}
 	struct pam_response *r = calloc((size_t)n, sizeof(*r));
 	if (r == NULL) return PAM_BUF_ERR;
 	for (int i = 0; i < n; i++) {
-		int style = msg[i]->msg_style;
-		if (style != PAM_TEXT_INFO && style != PAM_ERROR_MSG) {
-			free(r);
-			return PAM_CONV_ERR;
-		}
+		if (data != NULL && msg[i]->msg != NULL) lpPamMessage((uintptr_t)data, (char *)msg[i]->msg);
 	}
 	*resp = r;
 	return PAM_SUCCESS;
 }
 
-static struct pam_conv lp_conversation = { lp_conv, NULL };
-
-static int lp_start(const char *service, const char *user, pam_handle_t **h) {
-	return pam_start(service, user, &lp_conversation, h);
+// lp_start passes collector as the conversation's appdata. pam_start keeps
+// its own copy of the pam_conv struct (Linux-PAM and OpenPAM).
+static int lp_start(const char *service, const char *user, uintptr_t collector, pam_handle_t **h) {
+	struct pam_conv conv = { lp_conv, (void *)collector };
+	return pam_start(service, user, &conv, h);
 }
 
 static int lp_set_item(pam_handle_t *h, int item, const char *v) {
@@ -48,6 +53,7 @@ import "C"
 
 import (
 	"fmt"
+	"runtime/cgo"
 	"unsafe"
 )
 
@@ -65,18 +71,23 @@ type pamSession struct {
 	cred   bool
 	opened bool
 	last   C.int
+	// collector is msgs as the conversation's appdata, deleted by end.
+	collector cgo.Handle
 }
 
 // openPAM runs the account stack, establishes credentials and opens the
-// session for login on tty (a device path such as /dev/pts/3). It sets this
-// process's supplementary groups to the login's before pam_setcred, so groups
-// a PAM module adds survive to the child, which keeps them (NoSetGroups).
-func openPAM(login, tty string, gid uint32) (*pamSession, error) {
+// session for login on tty (a device path such as /dev/pts/3), from rhost
+// (the client's IP, PAM_RHOST; empty when unknown). It sets this process's
+// supplementary groups to the login's before pam_setcred, so groups a PAM
+// module adds survive to the child, which keeps them (NoSetGroups). The
+// modules' informational and error messages go to msgs.
+func openPAM(login, tty, rhost string, gid uint32, msgs *pamMessages) (*pamSession, error) {
 	cService, cUser := C.CString(pamService), C.CString(login)
 	defer C.free(unsafe.Pointer(cService))
 	defer C.free(unsafe.Pointer(cUser))
-	p := &pamSession{}
-	if rc := C.lp_start(cService, cUser, &p.h); rc != C.PAM_SUCCESS {
+	p := &pamSession{collector: cgo.NewHandle(msgs)}
+	if rc := C.lp_start(cService, cUser, C.uintptr_t(p.collector), &p.h); rc != C.PAM_SUCCESS {
+		p.collector.Delete()
 		return nil, fmt.Errorf("pam_start: %d", int(rc))
 	}
 	if err := p.setItem(C.PAM_TTY, tty); err != nil {
@@ -86,6 +97,12 @@ func openPAM(login, tty string, gid uint32) (*pamSession, error) {
 	if err := p.setItem(C.PAM_RUSER, login); err != nil {
 		p.end()
 		return nil, err
+	}
+	if rhost != "" {
+		if err := p.setItem(C.PAM_RHOST, rhost); err != nil {
+			p.end()
+			return nil, err
+		}
 	}
 	switch rc := C.pam_acct_mgmt(p.h, 0); rc {
 	case C.PAM_SUCCESS:
@@ -169,6 +186,7 @@ func (p *pamSession) end() {
 	}
 	C.pam_end(p.h, p.last)
 	p.h = nil
+	p.collector.Delete()
 }
 
 func (p *pamSession) strerror(rc C.int) string {

@@ -3,17 +3,17 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 
 	"golang.org/x/sys/windows"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/security"
 )
 
 // errSessionsNeedDeviceService refuses terminal and files sessions in a
 // process the session launcher will not serve.
-var errSessionsNeedDeviceService = errors.New("terminal and files sessions run only under the installed device service, because the session launcher serves only its account")
+var errSessionsNeedDeviceService = errcode.New(errcode.SessionsNeedService)
 
 // checkSessionAccount reports whether this process runs as the only account
 // the launcher serves (launcher.Server.AgentSID).

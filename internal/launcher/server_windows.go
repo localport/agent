@@ -6,10 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -30,9 +29,11 @@ type Server struct {
 	// Probe reports what this host offers sessions.
 	Probe func() Probe
 	Log   func(format string, args ...any)
+	// afterFunc arms the helper start bound; nil is time.AfterFunc. Tests
+	// replace it with a fake clock.
+	afterFunc func(time.Duration, func()) startTimer
 
 	slots chan struct{}
-	wg    sync.WaitGroup
 }
 
 // Serve accepts connections on ln until ctx ends. Running helpers outlive
@@ -41,19 +42,29 @@ func (s *Server) Serve(ctx context.Context, ln *PipeListener) error {
 	s.slots = make(chan struct{}, maxHelpers)
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
+	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
-		if err != nil {
+		if errors.Is(err, net.ErrClosed) {
 			if ctx.Err() != nil {
 				return nil
 			}
 			return fmt.Errorf("launcher: accept: %w", err)
 		}
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			s.handle(conn)
-		}()
+		if err != nil {
+			// Any other failure is retried with a backoff, as net/http's
+			// Server does, so one bad instance never stops the launcher.
+			delay = min(max(2*delay, 5*time.Millisecond), time.Second)
+			s.Log("launcher: accept: %v; retrying in %v", err, delay)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil
+			}
+			continue
+		}
+		delay = 0
+		go s.handle(conn)
 	}
 }
 
@@ -107,7 +118,7 @@ func (s *Server) handle(conn *os.File) {
 	}
 	hreq, err := authorize(s.LoadConfig, "", req)
 	if err != nil {
-		s.Log("launcher: refused %s for device %s login %q: %v", req.Kind, req.Device, req.Login, err)
+		s.Log("launcher: refused %s for device %q login %q: %v", req.Kind, req.Device, req.Login, err)
 		s.refuse(conn, CodeOf(err))
 		return
 	}
@@ -143,20 +154,19 @@ func (s *Server) run(conn *os.File, req HelperRequest) {
 		s.refuse(conn, CodeSpawnFailed)
 		return
 	}
-	var timedOut atomic.Bool
-	timer := time.AfterFunc(helperStartTimeout, func() {
-		timedOut.Store(true)
-		_ = cmd.Process.Kill()
-	})
+	after := s.afterFunc
+	if after == nil {
+		after = func(d time.Duration, f func()) startTimer { return time.AfterFunc(d, f) }
+	}
+	watch := newStartWatch(after, func() { _ = cmd.Process.Kill() })
 	err = WriteHelperRequest(in, req)
 	clear(req.Password)
 	_ = in.Close()
 	var reply HelperReply
 	if err == nil {
-		reply, err = ReadHelperReply(out)
+		reply, err = ReadHelperReply(out, func(string) { watch.progress() })
 	}
-	timer.Stop()
-	if timedOut.Load() {
+	if watch.stop() {
 		err = errHelperTimeout
 	}
 	if err != nil {
@@ -168,12 +178,12 @@ func (s *Server) run(conn *os.File, req HelperRequest) {
 	}
 	if reply.Refused != "" {
 		_ = cmd.Wait()
-		s.refuse(conn, reply.Refused)
+		respond(conn, Response{Refused: &Refused{Code: reply.Refused}, Messages: reply.Messages})
 		return
 	}
 	id := newSessionID()
 	s.Log("launcher: session %s: %s for %q, helper %d", id, req.Kind, req.Login, cmd.Process.Pid)
-	respond(conn, Response{Started: &Started{SessionID: id}})
+	respond(conn, Response{Started: &Started{SessionID: id}, Messages: reply.Messages})
 	e := waitExit(cmd)
 	if e.Status != 0 {
 		s.Log("launcher: session %s: helper %d exited with status %d; a profile it loaded stays loaded until Windows unloads it", id, cmd.Process.Pid, e.Status)

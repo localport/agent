@@ -8,6 +8,7 @@ import (
 	"io"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/localport/agent/internal/config"
@@ -29,6 +30,10 @@ const (
 	// setup and process start (A10); the launcher kills a helper still
 	// starting after it.
 	helperStartTimeout = 30 * time.Second
+	// profileStartTimeout replaces helperStartTimeout once a Windows helper
+	// reports it is loading the login's profile, which can take minutes on
+	// a first logon or a roaming profile.
+	profileStartTimeout = 120 * time.Second
 	// maxHelpers bounds the helpers one launcher runs at once.
 	maxHelpers = 64
 	// replyTimeout bounds one response write, so an agent that stopped
@@ -37,10 +42,6 @@ const (
 	// CodeStartTimeout refuses a helper that did not start in time.
 	CodeStartTimeout = "start_timeout"
 )
-
-// StartTimeout bounds a session start at the client: the launcher's own
-// helper start bound plus slack for the connection.
-const StartTimeout = helperStartTimeout + 5*time.Second
 
 // HelperRequest is what the launcher sends a helper on its control channel:
 // the request after the config check, with the decision the config made. The
@@ -65,6 +66,9 @@ type HelperRequest struct {
 	// AgentAccount runs the session as the agent's own account without PAM
 	// (tier 3 opt-in). Login is then the agent account's name. Unix only.
 	AgentAccount bool `json:"agent_account,omitempty"`
+	// ClientAddr is the session client's `ip:port` (Request.ClientAddr),
+	// empty when unknown.
+	ClientAddr string `json:"client_addr,omitempty"`
 	// Pipe is the session channel pipe the helper opens (Windows).
 	Pipe string `json:"pipe,omitempty"`
 	// HasPassword announces a password trailer after the message (Windows).
@@ -75,10 +79,11 @@ type HelperRequest struct {
 }
 
 // HelperReply is the helper's one control message: started, or a refusal
-// code.
+// code, either with the PAM messages for the client (FitMessages).
 type HelperReply struct {
-	Started bool   `json:"started,omitempty"`
-	Refused string `json:"refused,omitempty"`
+	Started  bool     `json:"started,omitempty"`
+	Refused  string   `json:"refused,omitempty"`
+	Messages []string `json:"messages,omitempty"`
 }
 
 // errHelperTimeout is a helper that did not answer within helperStartTimeout.
@@ -118,7 +123,7 @@ func authorize(load func() (*config.LocalConfig, error), agentAccount string, re
 		return HelperRequest{}, Refusal(CodeKindNotEnabled)
 	}
 	h := HelperRequest{Kind: req.Kind, Login: req.Login, Cols: req.Cols, Rows: req.Rows, Term: req.Term, Command: req.Command,
-		Env: req.Env, Pipe: req.Pipe, HasPassword: req.HasPassword, Password: req.Password}
+		Env: req.Env, ClientAddr: req.ClientAddr, Pipe: req.Pipe, HasPassword: req.HasPassword, Password: req.Password}
 	if req.Kind == KindSFTP {
 		h.Root, h.FilesDownload, h.FilesUpload = d.FilesRoot, req.FilesDownload, req.FilesUpload
 	}
@@ -147,17 +152,87 @@ func WriteHelperRequest(control io.Writer, req HelperRequest) error {
 	return nil
 }
 
-// ReadHelperReply reads a helper's one reply: started, or a refusal.
-func ReadHelperReply(control io.Reader) (HelperReply, error) {
-	body, err := readBody(control)
-	if err != nil {
-		return HelperReply{}, err
+// ProgressProfile is the one HelperProgress stage: the Windows helper is
+// about to load the login's profile.
+const ProgressProfile = "profile"
+
+// HelperProgress is a message a Windows helper may send once before its
+// reply.
+type HelperProgress struct {
+	Stage string `json:"progress"`
+}
+
+// WriteHelperProgress writes a progress message on the control channel.
+func WriteHelperProgress(control io.Writer, stage string) error {
+	return writeMessage(control, HelperProgress{Stage: stage})
+}
+
+// ReadHelperReply reads a helper's reply: started, or a refusal. With
+// onProgress set, at most one ProgressProfile message may come first and is
+// passed to it; without, any progress message is refused.
+func ReadHelperReply(control io.Reader, onProgress func(stage string)) (HelperReply, error) {
+	progressed := false
+	for {
+		body, err := readBody(control)
+		if err != nil {
+			return HelperReply{}, err
+		}
+		var m struct {
+			HelperReply
+			Progress string `json:"progress"`
+		}
+		if err := decodeStrict(body, &m); err != nil {
+			return HelperReply{}, errors.New("bad helper reply")
+		}
+		if m.Progress != "" {
+			if onProgress == nil || progressed || m.Progress != ProgressProfile || m.Started || m.Refused != "" || len(m.Messages) > 0 {
+				return HelperReply{}, errors.New("bad helper progress")
+			}
+			progressed = true
+			onProgress(m.Progress)
+			continue
+		}
+		if m.Started == (m.Refused != "") {
+			return HelperReply{}, errors.New("bad helper reply")
+		}
+		return m.HelperReply, nil
 	}
-	var reply HelperReply
-	if err := decodeStrict(body, &reply); err != nil || reply.Started == (reply.Refused != "") {
-		return HelperReply{}, errors.New("bad helper reply")
+}
+
+// startTimer is the part of *time.Timer a start bound uses.
+type startTimer interface {
+	Stop() bool
+	Reset(time.Duration) bool
+}
+
+// startWatch bounds one helper start: helperStartTimeout, re-armed once to
+// profileStartTimeout on the profile progress. At the bound it calls kill.
+type startWatch struct {
+	timer    startTimer
+	timedOut atomic.Bool
+}
+
+func newStartWatch(after func(time.Duration, func()) startTimer, kill func()) *startWatch {
+	w := &startWatch{}
+	w.timer = after(helperStartTimeout, func() {
+		w.timedOut.Store(true)
+		kill()
+	})
+	return w
+}
+
+// progress re-arms the bound to profileStartTimeout. A bound that already
+// fired stays fired: the start has timed out.
+func (w *startWatch) progress() {
+	if w.timer.Stop() {
+		w.timer.Reset(profileStartTimeout)
 	}
-	return reply, nil
+}
+
+// stop ends the bound and reports whether it fired.
+func (w *startWatch) stop() bool {
+	w.timer.Stop()
+	return w.timedOut.Load()
 }
 
 // ReadHelperRequest reads the launcher's request on the helper's control
@@ -176,6 +251,9 @@ func ReadHelperRequest(control io.Reader) (HelperRequest, error) {
 	}
 	if req.Root != "" && (req.Kind != KindSFTP || !filepath.IsAbs(req.Root)) {
 		return HelperRequest{}, errors.New("bad helper request root")
+	}
+	if req.ClientAddr != "" && !ValidClientAddr(req.ClientAddr) {
+		return HelperRequest{}, errors.New("bad helper request client address")
 	}
 	if req.HasPassword {
 		if req.Password, err = readSecret(control); err != nil {

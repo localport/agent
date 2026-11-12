@@ -158,6 +158,7 @@ func (s *forwardServer) dial(m launcher.FwdMsg) {
 	d := net.Dialer{Timeout: forwardDialTimeout}
 	conn, err := d.DialContext(s.ctx, network, addr)
 	if err != nil {
+		s.log("forward: dial %s %q: %v", network, addr, err)
 		_ = s.refuse(m.ID, dialErrorCode(err))
 		return
 	}

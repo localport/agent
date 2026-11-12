@@ -121,21 +121,24 @@ func TestForwardServerDialPassesSockets(t *testing.T) {
 
 // TestForwardServerConcurrentDials checks that dials issued at once reach
 // the server with increasing ids: an id sent out of order ends the server.
+// The target is a unix socket: 320 TCP dials would leave 320 TIME_WAIT
+// ports, which exhaust macOS's one global ephemeral range under parallel
+// test load.
 func TestForwardServerConcurrentDials(t *testing.T) {
 	client := forwardPair(t)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	path := filepath.Join(shortTempDir(t), "s")
+	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
 	echo(t, ln)
-	port := uint16(ln.Addr().(*net.TCPAddr).Port)
 	for range 20 {
 		var wg sync.WaitGroup
 		errs := make(chan error, 16)
 		for range 16 {
 			wg.Go(func() {
-				conn, err := client.Dial(ctx(t), launcher.FwdTCP, "127.0.0.1", port, "")
+				conn, err := client.Dial(ctx(t), launcher.FwdUnix, "", 0, path)
 				if err != nil {
 					errs <- err
 					return

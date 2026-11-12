@@ -134,7 +134,17 @@ func (l *PipeListener) Accept() (*os.File, error) {
 		return nil, err
 	}
 	h := l.next
-	if err := connectPipe(h, l.stop); err != nil {
+	for {
+		err := connectPipe(h, l.stop)
+		if err == nil {
+			break
+		}
+		if errors.Is(err, errPipeClientGone) {
+			// A client that connected and closed before the connect: the
+			// instance is reset and waits for the next one.
+			_ = windows.DisconnectNamedPipe(h)
+			continue
+		}
 		_ = windows.CloseHandle(h)
 		l.next = 0
 		return nil, err
@@ -146,6 +156,14 @@ func (l *PipeListener) Accept() (*os.File, error) {
 	// The handle joins the runtime poller only now, so the completion of the
 	// connect above never reaches it.
 	return os.NewFile(uintptr(h), l.name), nil
+}
+
+// errPipeClientGone is a client that connected and closed its end before
+// the connect completed (ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED).
+var errPipeClientGone = errors.New("pipe client closed before the connect")
+
+func pipeClientGone(err error) bool {
+	return errors.Is(err, windows.ERROR_NO_DATA) || errors.Is(err, windows.ERROR_PIPE_NOT_CONNECTED)
 }
 
 // connectPipe waits for a client on h, or for stop.
@@ -160,6 +178,8 @@ func connectPipe(h, stop windows.Handle) error {
 	switch {
 	case err == nil, errors.Is(err, windows.ERROR_PIPE_CONNECTED):
 		return nil
+	case pipeClientGone(err):
+		return errPipeClientGone
 	case !errors.Is(err, windows.ERROR_IO_PENDING):
 		return fmt.Errorf("connect pipe: %w", err)
 	}
@@ -174,6 +194,9 @@ func connectPipe(h, stop windows.Handle) error {
 		return net.ErrClosed
 	}
 	if err := windows.GetOverlappedResult(h, &ov, &n, false); err != nil {
+		if pipeClientGone(err) {
+			return errPipeClientGone
+		}
 		return fmt.Errorf("connect pipe: %w", err)
 	}
 	return nil

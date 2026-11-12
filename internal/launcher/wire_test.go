@@ -93,6 +93,48 @@ func TestHelperRequestPasswordTrailer(t *testing.T) {
 	}
 }
 
+// A client address is an IP literal without a zone and a port 1-65535; a
+// probe carries none.
+func TestValidateClientAddr(t *testing.T) {
+	for addr, ok := range map[string]bool{
+		"":                  true,
+		"203.0.113.9:40022": true,
+		"[2001:db8::7]:22":  true,
+		"[fe80::1%eth0]:22": false,
+		"203.0.113.9:0":     false,
+		"203.0.113.9:70000": false,
+		"203.0.113.9":       false,
+		"host.example:22":   false,
+		"203.0.113.9:22\n":  false,
+	} {
+		r := Request{V: Version, Kind: KindTerminal, Device: "team/device/t.p", Login: "pi", Cols: 80, Rows: 24, Term: "xterm", ClientAddr: addr}
+		if err := r.Validate(); (err == nil) != ok || (err != nil && CodeOf(err) != CodeBadRequest) {
+			t.Errorf("client address %q: %v, valid want %v", addr, err, ok)
+		}
+	}
+	if err := (Request{V: Version, Kind: KindProbe, ClientAddr: "203.0.113.9:22"}).Validate(); CodeOf(err) != CodeBadRequest {
+		t.Errorf("probe with a client address: %v, want bad_request", err)
+	}
+}
+
+// A request of another version is refused as a version mismatch before its
+// fields are checked, so a newer agent's unknown field does not hide it, and
+// the client reports it as AG055 with the refusal still matchable.
+func TestVersionMismatch(t *testing.T) {
+	for _, body := range []string{`{"v":3,"kind":"terminal","future_field":1}`, `{"v":1,"kind":"probe"}`} {
+		if _, err := decodeRequest([]byte(body)); CodeOf(err) != CodeVersionMismatch {
+			t.Errorf("%s: %v, want version_mismatch", body, err)
+		}
+	}
+	err := clientRefusal(CodeVersionMismatch, nil)
+	if !errors.Is(err, ErrLauncherVersion) || CodeOf(err) != CodeVersionMismatch {
+		t.Fatalf("client error %v", err)
+	}
+	if errors.Is(clientRefusal(CodeBusy, nil), ErrLauncherVersion) {
+		t.Fatal("busy reported as a version mismatch")
+	}
+}
+
 // The request bound ends with the request: a later read on the conn waits for
 // data instead of failing at the expired deadline.
 func TestReadWithinClearsTheDeadline(t *testing.T) {

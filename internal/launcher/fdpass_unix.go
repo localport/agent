@@ -4,6 +4,7 @@ package launcher
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -95,24 +96,33 @@ func recvRequest(conn *net.UnixConn) (Request, *os.File, error) {
 	return req, fd, nil
 }
 
+// parseRights returns the descriptors of every SCM_RIGHTS message in oob.
+// The kernel installed them all on receipt, so a malformed message closes
+// every descriptor found before the error is returned.
 func parseRights(oob []byte) ([]int, error) {
-	if len(oob) == 0 {
-		return nil, nil
-	}
-	msgs, err := unix.ParseSocketControlMessage(oob)
-	if err != nil {
-		return nil, fmt.Errorf("launcher: control message: %w", err)
-	}
 	var fds []int
-	for _, m := range msgs {
-		if m.Header.Level != syscall.SOL_SOCKET || m.Header.Type != syscall.SCM_RIGHTS {
+	fail := func(err error) ([]int, error) {
+		for _, fd := range fds {
+			_ = unix.Close(fd)
+		}
+		return nil, err
+	}
+	for len(oob) >= unix.CmsgLen(0) {
+		hdr, data, rest, err := unix.ParseOneSocketControlMessage(oob)
+		if err != nil {
+			return fail(fmt.Errorf("launcher: control message: %w", err))
+		}
+		oob = rest
+		if hdr.Level != syscall.SOL_SOCKET || hdr.Type != syscall.SCM_RIGHTS {
 			continue
 		}
-		got, err := unix.ParseUnixRights(&m)
-		if err != nil {
-			return nil, fmt.Errorf("launcher: rights: %w", err)
+		for len(data) >= 4 {
+			fds = append(fds, int(int32(binary.NativeEndian.Uint32(data))))
+			data = data[4:]
 		}
-		fds = append(fds, got...)
+		if len(data) != 0 {
+			return fail(errors.New("launcher: rights: a partial descriptor"))
+		}
 	}
 	return fds, nil
 }

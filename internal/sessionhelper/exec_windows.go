@@ -4,8 +4,10 @@ package sessionhelper
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,16 +55,17 @@ func filesServerCommand(token windows.Token, root string, access FilesAccess) (a
 }
 
 // environment is the login's environment block (CreateEnvironmentBlock) with
-// the client's LANG and LC_* variables set over it, as a UTF-16 block ready
+// SSH_CLIENT and SSH_CONNECTION for clientAddr and the client's LANG and LC_*
+// variables set over it, as Win32-OpenSSH sets them, as a UTF-16 block ready
 // for CreateProcessAsUser with CREATE_UNICODE_ENVIRONMENT. Names compare
 // case-insensitively, as Windows compares them.
-func environment(token windows.Token, client map[string]string) ([]uint16, error) {
+func environment(token windows.Token, clientAddr string, client map[string]string) ([]uint16, error) {
 	var block *uint16
 	if err := windows.CreateEnvironmentBlock(&block, token, false); err != nil {
 		return nil, fmt.Errorf("CreateEnvironmentBlock: %w", err)
 	}
 	defer windows.DestroyEnvironmentBlock(block)
-	return mergeEnvironment(environmentStrings(block), client), nil
+	return mergeEnvironment(environmentStrings(block), launcher.OriginEnv(clientAddr), client), nil
 }
 
 // environmentStrings splits a NUL-separated, double-NUL-terminated block.
@@ -78,9 +81,19 @@ func environmentStrings(block *uint16) []string {
 	}
 }
 
-// mergeEnvironment sets each client variable over env and encodes the block.
-func mergeEnvironment(env []string, client map[string]string) []uint16 {
-	for name, value := range client {
+// mergeEnvironment sets each origin KEY=VALUE (launcher.OriginEnv), then
+// each client variable, over env and encodes the block.
+func mergeEnvironment(env, origin []string, client map[string]string) []uint16 {
+	vars := make([][2]string, 0, len(origin)+len(client))
+	for _, kv := range origin {
+		k, v, _ := strings.Cut(kv, "=")
+		vars = append(vars, [2]string{k, v})
+	}
+	for _, name := range slices.Sorted(maps.Keys(client)) {
+		vars = append(vars, [2]string{name, client[name]})
+	}
+	for _, nv := range vars {
+		name, value := nv[0], nv[1]
 		replaced := false
 		for i, kv := range env {
 			if k, _, ok := strings.Cut(kv, "="); ok && strings.EqualFold(k, name) {
@@ -174,24 +187,11 @@ func startPiped(token windows.Token, app, cmdLine string, env []uint16, withEven
 		closeAll()
 		return nil, err
 	}
-	process, thread, err := spawnPiped(token, app, cmdLine, env, child)
+	process, err := spawnInJob(token, job, app, cmdLine, env, [3]windows.Handle{child[0], child[1], child[2]}, child)
 	// The child holds its own references to its ends; ours close now, so
 	// EOF follows the child's exit.
 	for _, h := range child {
 		windows.CloseHandle(h)
-	}
-	if err == nil {
-		// In the job before its first instruction, then resumed.
-		if err = windows.AssignProcessToJobObject(job, process); err != nil {
-			err = fmt.Errorf("AssignProcessToJobObject: %w", err)
-			_ = windows.TerminateProcess(process, 1)
-			windows.CloseHandle(process)
-		} else if _, rErr := windows.ResumeThread(thread); rErr != nil {
-			err = fmt.Errorf("ResumeThread: %w", rErr)
-			_ = windows.TerminateProcess(process, 1)
-			windows.CloseHandle(process)
-		}
-		windows.CloseHandle(thread)
 	}
 	if err != nil {
 		windows.CloseHandle(ends[0][1])
@@ -213,16 +213,38 @@ func startPiped(token windows.Token, app, cmdLine string, env []uint16, withEven
 	return p, nil
 }
 
-// spawnPiped creates the suspended child; the caller puts it in the job and
-// resumes its thread.
-func spawnPiped(token windows.Token, appPath, cmdLine string, env []uint16, child []windows.Handle) (process, thread windows.Handle, err error) {
+// spawnInJob starts every process the helper runs: as token's user,
+// suspended, assigned to job before its first instruction, then resumed, so
+// no process it starts escapes the job. std are its standard handles and
+// inherit exactly the handles it inherits (each inheritable, none twice).
+func spawnInJob(token windows.Token, job windows.Handle, app, cmdLine string, env []uint16, std [3]windows.Handle, inherit []windows.Handle) (windows.Handle, error) {
+	process, thread, err := spawnSuspended(token, app, cmdLine, env, std, inherit)
+	if err != nil {
+		return 0, err
+	}
+	defer windows.CloseHandle(thread)
+	if err := windows.AssignProcessToJobObject(job, process); err != nil {
+		_ = windows.TerminateProcess(process, 1)
+		windows.CloseHandle(process)
+		return 0, fmt.Errorf("AssignProcessToJobObject: %w", err)
+	}
+	if _, err := windows.ResumeThread(thread); err != nil {
+		_ = windows.TerminateProcess(process, 1)
+		windows.CloseHandle(process)
+		return 0, fmt.Errorf("ResumeThread: %w", err)
+	}
+	return process, nil
+}
+
+// spawnSuspended creates the suspended child for spawnInJob.
+func spawnSuspended(token windows.Token, appPath, cmdLine string, env []uint16, std [3]windows.Handle, inherit []windows.Handle) (process, thread windows.Handle, err error) {
 	attrs, err := windows.NewProcThreadAttributeList(1)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer attrs.Delete()
-	if err := attrs.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&child[0]),
-		uintptr(len(child))*unsafe.Sizeof(child[0])); err != nil {
+	if err := attrs.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&inherit[0]),
+		uintptr(len(inherit))*unsafe.Sizeof(inherit[0])); err != nil {
 		return 0, 0, fmt.Errorf("handle list attribute: %w", err)
 	}
 	dir, err := token.GetUserProfileDirectory()
@@ -249,7 +271,7 @@ func spawnPiped(token windows.Token, appPath, cmdLine string, env []uint16, chil
 	si.StartupInfo.Cb = uint32(unsafe.Sizeof(si))
 	si.StartupInfo.Desktop = desktop
 	si.StartupInfo.Flags = windows.STARTF_USESTDHANDLES
-	si.StartupInfo.StdInput, si.StartupInfo.StdOutput, si.StartupInfo.StdErr = child[0], child[1], child[2]
+	si.StartupInfo.StdInput, si.StartupInfo.StdOutput, si.StartupInfo.StdErr = std[0], std[1], std[2]
 	var pi windows.ProcessInformation
 	if err := windows.CreateProcessAsUser(token, app, line, nil, nil, true,
 		windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT|windows.CREATE_SUSPENDED|windows.CREATE_NO_WINDOW,

@@ -14,8 +14,10 @@
 package sessionhelper
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -25,9 +27,11 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/launcher"
 )
 
@@ -39,12 +43,11 @@ const (
 // Run serves one session and returns the helper's exit status: 0 after a
 // session ran, 1 when it did not start.
 func Run(log func(string, ...any)) int {
-	// From the channel up: the helper keeps using 3 and 4, but the shell it
-	// execs must inherit neither. Those two are marked directly, so a host
-	// whose /dev/fd cannot be listed still keeps them from the shell.
+	// The helper keeps using 3 and 4; no child may inherit either. startChild
+	// marks every descriptor; these two are marked here as well so a host
+	// where it cannot list descriptors still keeps them from the children.
 	unix.CloseOnExec(channelFD)
 	unix.CloseOnExec(controlFD)
-	closeExtraFDs(channelFD)
 	channel := os.NewFile(channelFD, "session-channel")
 	control := os.NewFile(controlFD, "launcher-control")
 	if channel == nil || control == nil {
@@ -56,9 +59,12 @@ func Run(log func(string, ...any)) int {
 		log("sessionhelper: read the request: %v", err)
 		return 1
 	}
+	// msgs is what PAM modules say; both the refusal and the started reply
+	// carry it to the client.
+	msgs := &pamMessages{}
 	refuse := func(code string, err error) int {
 		log("sessionhelper: %s for %q: %v", code, req.Login, err)
-		_ = launcher.WriteHelperReply(control, launcher.HelperReply{Refused: code})
+		_ = launcher.WriteHelperReply(control, launcher.HelperReply{Refused: code, Messages: msgs.messages()})
 		return 1
 	}
 	if req.Kind != launcher.KindTerminal && req.Kind != launcher.KindExec && req.Kind != launcher.KindSFTP && req.Kind != launcher.KindForward {
@@ -92,6 +98,11 @@ func Run(log func(string, ...any)) int {
 		if master, slave, err = openPTY(uint16(req.Cols), uint16(req.Rows)); err != nil {
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
+		if err := setPTYOwner(slave, a.UID, a.GID); err != nil {
+			_ = master.Close()
+			_ = slave.Close()
+			return refuse(launcher.CodeSpawnFailed, err)
+		}
 		pamTTY = slave.Name()
 	}
 	closePTY := func() {
@@ -102,12 +113,23 @@ func Run(log func(string, ...any)) int {
 	}
 	var pam *pamSession
 	if pamAvailable && !req.AgentAccount {
-		pam, err = openPAM(a.Name, pamTTY, a.GID)
+		var nofile syscall.Rlimit
+		if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &nofile); err != nil {
+			closePTY()
+			return refuse(launcher.CodePAMFailed, err)
+		}
+		rhost, _, _ := launcher.SplitClientAddr(req.ClientAddr)
+		pam, err = openPAM(a.Name, pamTTY, rhost, a.GID, msgs)
 		if err != nil {
 			closePTY()
 			if errors.Is(err, errPAMAccount) {
 				return refuse(launcher.CodeAccountRefused, err)
 			}
+			return refuse(launcher.CodePAMFailed, err)
+		}
+		if err := keepPAMFileLimit(nofile); err != nil {
+			pam.close()
+			closePTY()
 			return refuse(launcher.CodePAMFailed, err)
 		}
 	}
@@ -118,7 +140,7 @@ func Run(log func(string, ...any)) int {
 	plan := spawnPlan{
 		path: shell,
 		args: shellArgs(shell, req),
-		env:  sessionEnv(a, shell, req.Term, loginDefsPath(a.UID), pamEnv, req.Env),
+		env:  sessionEnv(a, shell, req.Term, loginDefsPath(a.UID), req.ClientAddr, pamEnv, req.Env),
 		dir:  workDir(a.Home),
 		// With PAM the groups are already this process's: initgroups, then
 		// pam_setcred.
@@ -141,16 +163,17 @@ func Run(log func(string, ...any)) int {
 	if req.Kind == launcher.KindForward {
 		// The forward server takes the channel itself: it passes connected
 		// sockets to the agent as descriptors, so nothing is relayed here.
-		cmd, err := startForwardServer(channel, plan)
+		cmd, logDone, err := startForwardServer(channel, plan, req.Login, log)
 		if err != nil {
 			pam.close()
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
 		_ = channel.Close()
-		if err := launcher.WriteHelperReply(control, launcher.HelperReply{Started: true}); err != nil {
+		if err := launcher.WriteHelperReply(control, launcher.HelperReply{Started: true, Messages: msgs.messages()}); err != nil {
 			log("sessionhelper: reply started: %v", err)
 		}
 		_ = control.Close()
+		<-logDone
 		_ = cmd.Wait()
 		pam.close()
 		return 0
@@ -165,7 +188,7 @@ func Run(log func(string, ...any)) int {
 			closePTY()
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
-		ut = utmpLogin(slave.Name(), a.Name, t.cmd.Process.Pid)
+		ut = utmpLogin(slave.Name(), a.Name, utmpHost(req.ClientAddr), t.cmd.Process.Pid)
 		k = t
 	} else {
 		p, err := startPipeSession(out, plan, log)
@@ -175,7 +198,7 @@ func Run(log func(string, ...any)) int {
 		}
 		k = p
 	}
-	if err := launcher.WriteHelperReply(control, launcher.HelperReply{Started: true}); err != nil {
+	if err := launcher.WriteHelperReply(control, launcher.HelperReply{Started: true, Messages: msgs.messages()}); err != nil {
 		log("sessionhelper: reply started: %v", err)
 		k.finish()
 	}
@@ -219,25 +242,75 @@ type helperSession interface {
 
 // startForwardServer starts the forward server as plan's user with channel on
 // its descriptor 3; the server dials and listens as that user and passes
-// each connected socket to the agent over channel.
-func startForwardServer(channel *os.File, plan spawnPlan) (*exec.Cmd, error) {
+// each connected socket to the agent over channel. Its stderr is relayed to
+// log until logDone closes, which the caller waits for before cmd.Wait.
+func startForwardServer(channel *os.File, plan spawnPlan, login string, log func(string, ...any)) (cmd *exec.Cmd, logDone <-chan struct{}, err error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	cmd := &exec.Cmd{
+	cmd = &exec.Cmd{
 		Path:        exe,
 		Args:        []string{"localport-session", ForwardServerMode},
 		Env:         plan.env,
 		Dir:         plan.dir,
-		Stderr:      os.Stderr,
 		ExtraFiles:  []*os.File{channel},
 		SysProcAttr: &syscall.SysProcAttr{Setsid: true, Credential: plan.cred},
 	}
-	if err := cmd.Start(); err != nil {
-		return nil, err
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, nil, err
 	}
-	return cmd, nil
+	if err := startChild(cmd); err != nil {
+		return nil, nil, err
+	}
+	done := make(chan struct{})
+	prefix := fmt.Sprintf("sessionhelper: forward server %d for %q:", cmd.Process.Pid, login)
+	go func() {
+		defer close(done)
+		relayChildLog(stderr, prefix, log)
+	}()
+	return cmd, done, nil
+}
+
+const (
+	// maxChildLogLine bounds one relayed line; the rest of a longer line is
+	// dropped.
+	maxChildLogLine = 1 << 10
+	// maxChildLogBytes bounds what one child may write to the helper's log.
+	maxChildLogBytes = 64 << 10
+)
+
+// relayChildLog writes each line r carries to log, %q-quoted after prefix:
+// the child runs as the login, so its text is untrusted and must not forge
+// log lines. Past maxChildLogBytes it logs one notice and drains r unread
+// until EOF, so the child never blocks on a full pipe.
+func relayChildLog(r io.Reader, prefix string, log func(string, ...any)) {
+	br := bufio.NewReaderSize(r, maxChildLogLine)
+	total := 0
+	for {
+		line, err := br.ReadSlice('\n')
+		if len(line) > 0 {
+			long := errors.Is(err, bufio.ErrBufferFull)
+			total += len(line)
+			if total > maxChildLogBytes {
+				log("%s output over %d bytes dropped", prefix, maxChildLogBytes)
+				_, _ = io.Copy(io.Discard, br)
+				return
+			}
+			log("%s %q", prefix, strings.TrimSuffix(string(line), "\n"))
+			if long {
+				// Skip the rest of the line.
+				for errors.Is(err, bufio.ErrBufferFull) {
+					line, err = br.ReadSlice('\n')
+					total += len(line)
+				}
+			}
+		}
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
+			return
+		}
+	}
 }
 
 // shellArgs is the shell's argv: a login shell ("-sh") for a terminal and
@@ -250,21 +323,69 @@ func shellArgs(shell string, req launcher.HelperRequest) []string {
 	return []string{"-" + filepath.Base(shell)}
 }
 
+// maxPAMMessageBytes bounds the PAM message text one session keeps; the
+// reply then fits what is kept under launcher.MaxMessage.
+const maxPAMMessageBytes = 8 << 10
+
+// pamMessages collects the informational and error messages PAM modules
+// send (pam_nologin's text, an expiry warning, pam_motd), sanitized for the
+// client's terminal: invalid UTF-8 and control bytes other than tab and
+// newline become U+FFFD.
+type pamMessages struct {
+	list  []string
+	bytes int
+}
+
+func (m *pamMessages) add(s string) {
+	if m == nil || m.bytes >= maxPAMMessageBytes {
+		return
+	}
+	s = strings.Map(func(r rune) rune {
+		if (r < 0x20 && r != '\t' && r != '\n') || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+			return utf8.RuneError
+		}
+		return r
+	}, strings.ToValidUTF8(s, string(utf8.RuneError)))
+	m.list = append(m.list, s)
+	m.bytes += len(s)
+}
+
+// messages returns what was collected, fitted to the reply bound.
+func (m *pamMessages) messages() []string {
+	if m == nil {
+		return nil
+	}
+	return launcher.FitMessages(m.list)
+}
+
 // errPAMAccount is an account refusal: by the PAM account stack (expired,
 // locked, password change required, denied by policy), or by the checks a
 // no-PAM build and every build apply (checkShadow, shellUsable).
 var errPAMAccount = errors.New("account refused")
 
-// checkShadow refuses a locked password field and an account past its
-// expiry day (days since 1970-01-01; -1 or 0 is none). Locked is a leading
+// checkShadow refuses a locked password field and an account on or past its
+// expiry day (days since 1970-01-01, so 0 is expired; -1, an empty field, is
+// none), as pam_unix and sshd's auth-shadow read it. Locked is a leading
 // '!', as sshd's platform_locked_account on Linux (LOCKED_PASSWD_PREFIX);
 // '*' alone only disables password logins, which these sessions never use.
 func checkShadow(password string, expireDay int64, now time.Time) error {
 	if strings.HasPrefix(password, "!") {
 		return fmt.Errorf("%w: the account is locked", errPAMAccount)
 	}
-	if expireDay > 0 && now.Unix()/86400 >= expireDay {
+	if expireDay >= 0 && now.Unix()/86400 >= expireDay {
 		return fmt.Errorf("%w: the account expired", errPAMAccount)
+	}
+	return nil
+}
+
+// checkNologin refuses uid when the file at path exists and uid is not root,
+// as sshd's do_nologin on a host without PAM.
+func checkNologin(uid uint32, path string) error {
+	if uid == 0 {
+		return nil
+	}
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%w: %w", errPAMAccount, errcode.New(errcode.LoginsDisabled))
 	}
 	return nil
 }
@@ -327,11 +448,12 @@ func parseLoginDefsPath(defs string, uid uint32) string {
 }
 
 // sessionEnv is the shell's environment: the login's identity, TERM and
-// PATH, then every variable PAM set, which overrides those of the same name,
-// then the client's LANG and LC_* variables (launcher.ValidEnv, checked by
-// Request.Validate), which override a PAM locale. Nothing comes from the
-// launcher's or the agent's environment.
-func sessionEnv(a account, shell, term, path string, pamEnv []string, clientEnv map[string]string) []string {
+// PATH, the client's origin (originEnv), then every variable PAM set, which
+// overrides those of the same name, then the client's LANG and LC_*
+// variables (launcher.ValidEnv, checked by Request.Validate), which override
+// a PAM locale. Nothing comes from the launcher's or the agent's
+// environment.
+func sessionEnv(a account, shell, term, path, clientAddr string, pamEnv []string, clientEnv map[string]string) []string {
 	env := map[string]string{
 		"HOME": a.Home, "USER": a.Name, "LOGNAME": a.Name, "SHELL": shell,
 		"TERM": term, "PATH": path,
@@ -341,6 +463,11 @@ func sessionEnv(a account, shell, term, path string, pamEnv []string, clientEnv 
 		// A session without a terminal has no TERM, as under sshd.
 		delete(env, "TERM")
 		order = slices.Delete(order, 4, 5)
+	}
+	for _, kv := range launcher.OriginEnv(clientAddr) {
+		k, v, _ := strings.Cut(kv, "=")
+		env[k] = v
+		order = append(order, k)
 	}
 	for _, kv := range pamEnv {
 		k, v, ok := strings.Cut(kv, "=")
@@ -365,16 +492,46 @@ func sessionEnv(a account, shell, term, path string, pamEnv []string, clientEnv 
 	return out
 }
 
-// closeExtraFDs makes every descriptor from first up close-on-exec, so the
-// shell inherits only its PTY.
-func closeExtraFDs(first int) {
+// keepPAMFileLimit makes the RLIMIT_NOFILE a PAM module (pam_limits) set
+// reach the children. os/exec otherwise gives each child the soft limit the
+// helper started with, which Go saved before raising its own; calling
+// syscall.Setrlimit stops that. A limit PAM left as it was (before) keeps
+// the saved soft limit, so a session does not get Go's raised one.
+func keepPAMFileLimit(before syscall.Rlimit) error {
+	var now syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &now); err != nil {
+		return fmt.Errorf("read the open file limit: %w", err)
+	}
+	if now == before {
+		return nil
+	}
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &now); err != nil {
+		return fmt.Errorf("keep the open file limit PAM set: %w", err)
+	}
+	return nil
+}
+
+// startChild starts every process the helper runs. PAM modules and NSS open
+// descriptors without O_CLOEXEC, so each start first marks every descriptor
+// close-on-exec; the child gets only its standard descriptors and the
+// ExtraFiles exec.Cmd duplicates into place.
+func startChild(cmd *exec.Cmd) error {
+	closeExtraFDs()
+	return cmd.Start()
+}
+
+// closeExtraFDs makes every descriptor from 3 up close-on-exec.
+func closeExtraFDs() {
+	if closeRangeCloexec(3) == nil {
+		return
+	}
 	entries, err := os.ReadDir("/dev/fd")
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
 		fd, err := strconv.Atoi(e.Name())
-		if err == nil && fd >= first {
+		if err == nil && fd >= 3 {
 			unix.CloseOnExec(fd)
 		}
 	}

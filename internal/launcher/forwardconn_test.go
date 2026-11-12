@@ -3,12 +3,46 @@ package launcher
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// The forward server's stderr is logged quoted and bounded per session.
+func TestFrameForwardTransportBoundsTheServersStderr(t *testing.T) {
+	var ch bytes.Buffer
+	line := bytes.Repeat([]byte("x"), 4<<10)
+	if err := WriteFrame(&ch, Frame{Type: FrameStderr, Data: []byte("forged\nlauncher: started")}); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 * maxForwardLogBytes / len(line) {
+		if err := WriteFrame(&ch, Frame{Type: FrameStderr, Data: line}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := WriteFrame(&ch, Frame{Type: FrameExit}); err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	tr := newFrameForwardTransport(nopCloser{&ch}, func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) })
+	if _, err := tr.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("read: %v", err)
+	}
+	if logged[0] != `launcher: forward helper: "forged\nlauncher: started"` {
+		t.Fatalf("first line %q", logged[0])
+	}
+	if n := 1 + maxForwardLogBytes/len(line); len(logged) > n+1 || !strings.Contains(logged[len(logged)-1], "dropped") {
+		t.Fatalf("%d lines, last %q", len(logged), logged[len(logged)-1])
+	}
+}
+
+type nopCloser struct{ io.ReadWriter }
+
+func (nopCloser) Close() error { return nil }
 
 // frameReader unwraps the data frames a piped helper relays.
 type frameReader struct {

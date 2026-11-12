@@ -74,6 +74,7 @@ func main() {
 		logger.Print("localport-session: must run as root")
 		os.Exit(1)
 	}
+	catchHangupAndPipe()
 	switch os.Args[1] {
 	case "helper":
 		if len(os.Args) != 2 {
@@ -104,6 +105,20 @@ func main() {
 	}
 }
 
+// catchHangupAndPipe keeps SIGHUP and SIGPIPE from ending the launcher and
+// the helper. It catches them instead of ignoring them: a caught signal
+// resets to the default in an exec'd child, an ignored one stays ignored, and
+// a session must get the login's default dispositions. Notify also replaces
+// a SIG_IGN inherited from whoever started this process.
+func catchHangupAndPipe() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, syscall.SIGHUP, syscall.SIGPIPE)
+	go func() {
+		for range c {
+		}
+	}()
+}
+
 // stdio is the file server's connection: standard input and output.
 type stdio struct{}
 
@@ -130,7 +145,6 @@ func runLauncher(logger *log.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	signal.Ignore(syscall.SIGHUP, syscall.SIGPIPE)
 	s := &launcher.Server{
 		AgentUID:     uid,
 		AgentAccount: agentAccount,

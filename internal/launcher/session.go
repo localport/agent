@@ -15,6 +15,8 @@ var ErrUnavailable = errors.New("launcher unavailable")
 type Session struct {
 	conn io.ReadWriteCloser
 	ID   string
+	// Messages are the PAM messages of the session's setup, for the client.
+	Messages []string
 }
 
 // Close ends the request connection; the session goes on.

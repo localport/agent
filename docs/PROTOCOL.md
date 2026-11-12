@@ -679,6 +679,10 @@ stream:
    `localport: <code>` to the channel's stderr (`login_not_allowed`,
    `kind_disabled`, `agent_busy`, `kind_unavailable`, `launcher_unavailable`,
    `recording_unavailable` for a Strict channel whose recording did not open).
+   Shell and exec run through the login's shell, so an account whose shell is
+   `nologin` or `false` refuses them itself, as under sshd; SFTP and port
+   forwarding run the agent's own file and forward servers as the login and
+   follow the device config, not the login shell.
    The helper's exit becomes `exit-status`, or for a Unix helper killed by a
    signal `exit-signal` (the RFC 4254 name without `SIG`, `<name>@localport.io`
    outside its list, core-dumped false), then the channel closes; a Strict

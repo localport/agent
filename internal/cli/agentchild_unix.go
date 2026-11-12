@@ -11,15 +11,15 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/service"
 )
 
 // runAsAgentAccount re-executes this binary as the agent account with
-// agentChildCommand and args, stdin and stdout as given and stderr shared. A
-// SIGTERM or SIGHUP root receives is forwarded; SIGINT from the terminal
-// reaches the child directly, as both are in its foreground process group.
-// A child that fails has printed its own error; the result is a
-// service.ExitError with its status.
+// agentChildCommand and args, stdin and stdout as given and stderr shared,
+// in its own session behind a PTY relay when any of them is a terminal
+// (runRelayed). A child that fails has printed its own error; the result is
+// a service.ExitError with its status.
 func runAsAgentAccount(args []string, stdin io.Reader, stdout io.Writer) error {
 	acct, err := service.LookupAccount()
 	if err != nil {
@@ -30,33 +30,19 @@ func runAsAgentAccount(args []string, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 	cmd := agentChildCmd(exe, acct, args)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, os.Stderr
-	sig := make(chan os.Signal, 2)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(sig)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start localport as the account %s: %w", service.AgentAccount, err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	for {
-		select {
-		case s := <-sig:
-			if s != syscall.SIGINT {
-				_ = cmd.Process.Signal(s)
-			}
-		case err := <-done:
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				code := exitErr.ExitCode()
-				if code <= 0 {
-					code = 1
-				}
-				return &service.ExitError{Code: code, Err: fmt.Errorf("localport %s, run as the account %s, failed", args[0], service.AgentAccount)}
-			}
-			return err
+	err = runRelayed(cmd, stdin, stdout, os.Stderr, signal.Ignored(syscall.SIGHUP))
+	var exitErr *exec.ExitError
+	switch {
+	case errors.As(err, &exitErr):
+		code := exitErr.ExitCode()
+		if code <= 0 {
+			code = 1
 		}
+		return &service.ExitError{Code: code, Err: fmt.Errorf("%w: localport %s", errcode.New(errcode.AgentChildFailed), args[0])}
+	case err != nil && cmd.Process == nil:
+		return fmt.Errorf("%w: %w", errcode.New(errcode.AgentChildStart), err)
 	}
+	return err
 }
 
 // agentChildCmd is the child's command: fixed argv, no environment, the

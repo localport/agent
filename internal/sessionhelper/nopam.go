@@ -23,15 +23,26 @@ const pamAvailable = false
 // pamSession is empty without PAM.
 type pamSession struct{}
 
-func openPAM(string, string, uint32) (*pamSession, error) { return &pamSession{}, nil }
-func (*pamSession) env() []string                         { return nil }
-func (*pamSession) close()                                {}
+func openPAM(string, string, string, uint32, *pamMessages) (*pamSession, error) {
+	return &pamSession{}, nil
+}
+func (*pamSession) env() []string { return nil }
+func (*pamSession) close()        {}
 
-// accountChecks applies sshd's shadow checks for a host without PAM: the
-// entry is not locked and not expired (checkShadow). A host with no
-// shadow entry for the account (no /etc/shadow, or NSS without shadow)
-// passes, as sshd's do.
-func accountChecks(a account) error { return shadowChecks(a.Name, time.Now()) }
+// nologinPath is the file whose presence stops the logins of every account
+// but root; on a PAM build pam_nologin applies it.
+const nologinPath = "/etc/nologin"
+
+// accountChecks applies sshd's checks for a host without PAM: /etc/nologin
+// (checkNologin), and a shadow entry that is not locked and not expired
+// (checkShadow). A host with no shadow entry for the account (no
+// /etc/shadow, or NSS without shadow) passes that check, as sshd's does.
+func accountChecks(a account) error {
+	if err := checkNologin(a.UID, nologinPath); err != nil {
+		return err
+	}
+	return shadowChecks(a.Name, time.Now())
+}
 
 func shadowChecks(name string, now time.Time) error {
 	cname := C.CString(name)

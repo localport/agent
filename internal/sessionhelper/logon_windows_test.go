@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/localport/agent/internal/testroot"
 )
 
 // TestRootPasswordLogon logs LOCALPORT_TEST_LOGIN, a local account, on with
@@ -17,7 +19,7 @@ import (
 func TestRootPasswordLogon(t *testing.T) {
 	name, password := os.Getenv("LOCALPORT_TEST_LOGIN"), os.Getenv("LOCALPORT_TEST_PASSWORD")
 	if name == "" || password == "" {
-		t.Skip("set LOCALPORT_TEST_LOGIN and LOCALPORT_TEST_PASSWORD to a local test account")
+		testroot.Require(t, "set LOCALPORT_TEST_LOGIN and LOCALPORT_TEST_PASSWORD to a local test account")
 	}
 	l, err := parseLogin(name)
 	if err != nil {

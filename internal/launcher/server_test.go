@@ -306,8 +306,14 @@ func TestRequestValidation(t *testing.T) {
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("valid request: %v", err)
 	}
+	for _, v := range []int{0, Version - 1, Version + 1} {
+		r := ok
+		r.V = v
+		if CodeOf(r.Validate()) != CodeVersionMismatch {
+			t.Errorf("version %d: %v, want version_mismatch", v, r.Validate())
+		}
+	}
 	for name, edit := range map[string]func(*Request){
-		"old version":    func(r *Request) { r.V = 0 },
 		"unknown kind":   func(r *Request) { r.Kind = "shell" },
 		"no login":       func(r *Request) { r.Login = "" },
 		"no device":      func(r *Request) { r.Device = "" },
@@ -409,7 +415,7 @@ func TestRequestValidation(t *testing.T) {
 
 // An unknown field or trailing data in a request is refused.
 func TestDecodeRequestIsStrict(t *testing.T) {
-	for _, body := range []string{`{"v":1,"kind":"probe","env":"X"}`, `{"v":1,"kind":"probe"} {}`} {
+	for _, body := range []string{`{"v":2,"kind":"probe","env":"X"}`, `{"v":2,"kind":"probe"} {}`} {
 		if _, err := decodeRequest([]byte(body)); CodeOf(err) != CodeBadRequest {
 			t.Errorf("%s: %v, want bad_request", body, err)
 		}

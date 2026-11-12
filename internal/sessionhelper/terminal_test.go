@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
@@ -17,6 +18,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/launcher"
 )
 
@@ -31,6 +33,12 @@ type shell struct {
 
 func startShell(t *testing.T) *shell {
 	t.Helper()
+	return startShellArgs(t, "-sh")
+}
+
+// startShellArgs starts /bin/sh with args on a PTY.
+func startShellArgs(t *testing.T, args ...string) *shell {
+	t.Helper()
 	agent, helper, err := launcher.SocketPair()
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +47,7 @@ func startShell(t *testing.T) *shell {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan := spawnPlan{path: "/bin/sh", args: []string{"-sh"}, env: []string{"PATH=/usr/bin:/bin", "TERM=dumb", "HOME=/", "PS1=$ "}, dir: "/"}
+	plan := spawnPlan{path: "/bin/sh", args: args, env: []string{"PATH=/usr/bin:/bin", "TERM=dumb", "HOME=/", "PS1=$ "}, dir: "/"}
 	k, err := startTerminal(&frameWriter{w: helper}, master, slave, plan, t.Logf)
 	if err != nil {
 		t.Fatal(err)
@@ -206,38 +214,47 @@ func TestTerminalShellHoldsOnlyThePTY(t *testing.T) {
 	s.expectExit(t, 0)
 }
 
-// closeExtraFDs marks every descriptor from first up close-on-exec, the
-// first one included, and leaves those below it alone.
-func TestCloseExtraFDsMarksFromFirst(t *testing.T) {
+// leakyFD returns a descriptor without close-on-exec, as a PAM module or NSS
+// opens one after the helper started.
+func leakyFD(t *testing.T) int {
+	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
-	defer w.Close()
+	t.Cleanup(func() { r.Close(); w.Close() })
 	fd, err := unix.Dup(int(r.Fd()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unix.Close(fd)
-	cloexec := func(fd int) bool {
-		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return flags&unix.FD_CLOEXEC != 0
+	t.Cleanup(func() { unix.Close(fd) })
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+	if err != nil || flags&unix.FD_CLOEXEC != 0 {
+		t.Fatalf("dup flags %#x, %v", flags, err)
 	}
-	if cloexec(fd) {
-		t.Fatal("dup returned a close-on-exec descriptor")
+	return fd
+}
+
+// A descriptor opened without close-on-exec after the helper started does
+// not reach a pipe session's command.
+func TestPipeSessionDoesNotInheritLeakedFD(t *testing.T) {
+	fd := leakyFD(t)
+	_, fr := startPipe(t, "if [ -e /dev/fd/"+strconv.Itoa(fd)+" ]; then echo LEAKED; else echo CLEAN; fi")
+	f, err := fr.ReadFrame()
+	if err != nil || string(f.Data) != "CLEAN\n" {
+		t.Fatalf("frame %+v %q, %v", f, f.Data, err)
 	}
-	closeExtraFDs(fd + 1)
-	if cloexec(fd) {
-		t.Fatal("a descriptor below first was marked")
+}
+
+// The same holds for a command on a PTY. It runs non-interactively: an
+// interactive login shell may close inherited descriptors itself.
+func TestTerminalDoesNotInheritLeakedFD(t *testing.T) {
+	fd := leakyFD(t)
+	s := startShellArgs(t, "sh", "-c", "if [ -e /dev/fd/"+strconv.Itoa(fd)+" ]; then echo LEAKED; else echo CLEAN; fi")
+	if got := s.readUntil(t, regexp.MustCompile(`(CLEAN|LEAKED)\r\n`)); got != "CLEAN" {
+		t.Fatalf("command saw fd %d: %s", fd, got)
 	}
-	closeExtraFDs(fd)
-	if !cloexec(fd) {
-		t.Fatal("the first descriptor was not marked close-on-exec")
-	}
+	s.expectExit(t, 0)
 }
 
 // The shell leads its own session and process group.
@@ -307,12 +324,29 @@ func TestParseLoginDefsPath(t *testing.T) {
 // is added.
 func TestSessionEnv(t *testing.T) {
 	a := account{Name: "pi", Home: "/home/pi"}
-	got := sessionEnv(a, "/bin/bash", "xterm", "/usr/bin", []string{"XDG_SESSION_ID=4", "PATH=/pam/bin", "LANG=C", "bad", "=x"},
+	got := sessionEnv(a, "/bin/bash", "xterm", "/usr/bin", "", []string{"XDG_SESSION_ID=4", "PATH=/pam/bin", "LANG=C", "bad", "=x"},
 		map[string]string{"LC_TIME": "de_DE.UTF-8", "LANG": "en_GB.UTF-8"})
 	want := []string{"HOME=/home/pi", "USER=pi", "LOGNAME=pi", "SHELL=/bin/bash", "TERM=xterm", "PATH=/pam/bin", "XDG_SESSION_ID=4",
 		"LANG=en_GB.UTF-8", "LC_TIME=de_DE.UTF-8"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("env %q, want %q", got, want)
+	}
+	// A known client origin adds SSH_CLIENT and SSH_CONNECTION after the
+	// identity, as sshd does.
+	got = sessionEnv(a, "/bin/bash", "", "/usr/bin", "203.0.113.9:40022", nil, nil)
+	want = []string{"HOME=/home/pi", "USER=pi", "LOGNAME=pi", "SHELL=/bin/bash", "PATH=/usr/bin",
+		"SSH_CLIENT=203.0.113.9 40022 22", "SSH_CONNECTION=203.0.113.9 40022 127.0.0.1 22"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("env %q, want %q", got, want)
+	}
+}
+
+// The utmp host is the client's IP, or localport without an origin.
+func TestUtmpHost(t *testing.T) {
+	for addr, want := range map[string]string{"203.0.113.9:40022": "203.0.113.9", "[2001:db8::7]:22": "2001:db8::7", "": "localport", "bad": "localport"} {
+		if got := utmpHost(addr); got != want {
+			t.Errorf("utmpHost(%q) = %q, want %q", addr, got, want)
+		}
 	}
 }
 
@@ -324,16 +358,45 @@ func TestCheckShadow(t *testing.T) {
 		refused  bool
 	}{
 		{"$6$salt$hash", -1, false},
-		{"*", 0, false},
-		{"", 0, false},
-		{"!$6$salt$hash", 0, true},
-		{"!", 0, true},
+		{"*", -1, false},
+		{"", -1, false},
+		{"!$6$salt$hash", -1, true},
+		{"!", -1, true},
+		// Day 0 is expired, as pam_unix and sshd read it; -1 is no expiry.
+		{"$6$x", 0, true},
+		{"$6$x", 19999, true},
 		{"$6$x", 20000, true},
 		{"$6$x", 20001, false},
 	} {
 		err := checkShadow(tc.password, tc.expire, now)
 		if (err != nil) != tc.refused || (err != nil && !errors.Is(err, errPAMAccount)) {
 			t.Errorf("checkShadow(%q, %d) = %v, refused want %v", tc.password, tc.expire, err, tc.refused)
+		}
+	}
+}
+
+func TestCheckNologin(t *testing.T) {
+	present := filepath.Join(t.TempDir(), "nologin")
+	if err := os.WriteFile(present, []byte("maintenance\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	absent := filepath.Join(t.TempDir(), "nologin")
+	for _, tc := range []struct {
+		uid     uint32
+		path    string
+		refused bool
+	}{
+		{0, present, false},
+		{1000, present, true},
+		{0, absent, false},
+		{1000, absent, false},
+	} {
+		err := checkNologin(tc.uid, tc.path)
+		if (err != nil) != tc.refused {
+			t.Errorf("uid %d, %s: %v, refused want %v", tc.uid, tc.path, err, tc.refused)
+		}
+		if err != nil && (!errors.Is(err, errPAMAccount) || !errors.Is(err, errcode.New(errcode.LoginsDisabled))) {
+			t.Errorf("uid %d: %v, want an account refusal coded LoginsDisabled", tc.uid, err)
 		}
 	}
 }

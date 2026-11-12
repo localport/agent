@@ -16,7 +16,15 @@ type frameForwardTransport struct {
 	fr   *FrameReader
 	rest []byte
 	log  func(string, ...any)
+	// logged counts the stderr bytes seen; past maxForwardLogBytes one notice
+	// is logged (logCut) and the rest dropped.
+	logged int
+	logCut bool
 }
+
+// maxForwardLogBytes bounds what one forward server may write to the
+// agent's log, as the Unix helper bounds it (sessionhelper maxChildLogBytes).
+const maxForwardLogBytes = 64 << 10
 
 func newFrameForwardTransport(ch io.ReadWriteCloser, log func(string, ...any)) *frameForwardTransport {
 	return &frameForwardTransport{ch: ch, fr: NewFrameReader(ch), log: log}
@@ -32,7 +40,16 @@ func (t *frameForwardTransport) Read(p []byte) (int, error) {
 		case FrameData:
 			t.rest = f.Data
 		case FrameStderr:
-			t.log("launcher: forward helper: %s", f.Data)
+			// The forward server runs as the login: its text is quoted, so it
+			// cannot forge log lines, and bounded per session.
+			switch {
+			case t.logged < maxForwardLogBytes:
+				t.log("launcher: forward helper: %q", f.Data)
+			case !t.logCut:
+				t.logCut = true
+				t.log("launcher: forward helper: output over %d bytes dropped", maxForwardLogBytes)
+			}
+			t.logged += len(f.Data)
 		case FrameExit:
 			return 0, io.EOF
 		default:

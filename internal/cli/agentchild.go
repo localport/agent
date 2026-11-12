@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/service"
@@ -37,9 +38,13 @@ const agentChildCommand = "__agent"
 var asAgentChild bool
 
 // agentChildCommands are the commands a child runs whole, with root's argv;
-// enrol and purge are the parts of connect and service uninstall --purge
-// that touch the store.
-var agentChildCommands = []string{"run", "status", "identity", "login", "setup", "access", "enrol", "purge"}
+// enrol, purge and set-pins are the parts of connect, service uninstall
+// --purge and set that touch the store.
+var agentChildCommands = []string{"run", "status", "identity", "login", "setup", "access", "enrol", "purge", "set-pins"}
+
+// storePartCommands are the agentChildCommands that are a part of a root
+// command, never a command of their own.
+var storePartCommands = []string{"enrol", "purge", "set-pins"}
 
 // needsAgentChild reports whether this process is root and file is the
 // system config, so the store must be reached through the agent account.
@@ -59,7 +64,7 @@ var lookupAgentAccount = service.LookupAccount
 // rootRunsAsAgent reports whether command, run whole, re-executes itself as
 // the agent account: root, on a platform with the system layout.
 func rootRunsAsAgent(command string) bool {
-	if !slices.Contains(agentChildCommands, command) || command == "enrol" || command == "purge" {
+	if !slices.Contains(agentChildCommands, command) || slices.Contains(storePartCommands, command) {
 		return false
 	}
 	file, err := systemLocalConfig()
@@ -75,10 +80,10 @@ func runAgentChild(app *App, args []string) error {
 		return err
 	}
 	if euid := os.Geteuid(); euid != acct.UID || euid == 0 {
-		return fmt.Errorf("%s is started only by localport, as the account %s", agentChildCommand, service.AgentAccount)
+		return fmt.Errorf("%w: run as uid %d", errcode.New(errcode.AgentChildOnly), euid)
 	}
 	if len(args) == 0 || !slices.Contains(agentChildCommands, args[0]) {
-		return fmt.Errorf("%s: unknown command", agentChildCommand)
+		return fmt.Errorf("%w: unknown command", errcode.New(errcode.AgentChildOnly))
 	}
 	asAgentChild = true
 	switch args[0] {
@@ -86,8 +91,29 @@ func runAgentChild(app *App, args []string) error {
 		return runEnrolChild(os.Stdin, os.Stdout)
 	case "purge":
 		return runPurgeChild()
+	case "set-pins":
+		return runSetPinsChild(args[1:])
 	}
 	return app.Run(args)
+}
+
+// runSetPinsChild forgets the desktop server keys of a device in the system
+// store: args are the device's ref and one or more of rdp and vnc. set, as
+// root, runs it as `set-pins <ref> <kind>...`.
+func runSetPinsChild(args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("%w: set-pins needs a device and a kind", errcode.New(errcode.AgentChildOnly))
+	}
+	ref, err := identity.ParseDeviceRef(args[0])
+	if err != nil {
+		return fmt.Errorf("%w: set-pins: %w", errcode.New(errcode.AgentChildOnly), err)
+	}
+	for _, kind := range args[1:] {
+		if _, ok := desktopKeyNames[kind]; !ok {
+			return fmt.Errorf("%w: set-pins: unknown kind %q", errcode.New(errcode.AgentChildOnly), kind)
+		}
+	}
+	return resetDesktopPins(currentInvoker(false), ref, args[1:])
 }
 
 // enrolRequest is what connect, as root, sends the enrol child on its stdin.
@@ -131,7 +157,7 @@ func enrolInStore(store *identity.Store, req enrolRequest) (enrolResult, error) 
 	}
 	ref, err := saveIssued(store, ctx, *material)
 	if err != nil {
-		return enrolResult{}, fmt.Errorf("save the device credential: %w\n  %s", err, joinTokenSpent)
+		return enrolResult{}, fmt.Errorf("%w: %w\n  %s", errcode.New(errcode.CredentialNotSaved), err, joinTokenSpent)
 	}
 	storeEnrolledKeys(store, ref, material.DeviceKeys)
 	fmt.Fprintf(os.Stderr, "\n  enrolled\n")
@@ -148,7 +174,7 @@ func runEnrolChild(in io.Reader, out io.Writer) error {
 	dec := json.NewDecoder(io.LimitReader(in, 64<<10))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
-		return fmt.Errorf("%s enrol: read the request: %w", agentChildCommand, err)
+		return fmt.Errorf("%w: enrol: read the request: %w", errcode.New(errcode.AgentChildOnly), err)
 	}
 	store, err := currentInvoker(false).store()
 	if err != nil {
@@ -174,7 +200,7 @@ func enrolAsAgent(req enrolRequest) (enrolResult, error) {
 	}
 	var res enrolResult
 	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
-		return enrolResult{}, fmt.Errorf("read the enrolment result: %w\n  %s", err, joinTokenSpent)
+		return enrolResult{}, fmt.Errorf("%w: read the enrolment result: %w\n  %s", errcode.New(errcode.AgentChildFailed), err, joinTokenSpent)
 	}
 	return res, nil
 }
@@ -186,7 +212,10 @@ func runPurgeChild() error {
 	if err != nil {
 		return err
 	}
-	return purgeStore(store)
+	if err := purgeStore(store); err != nil {
+		return fmt.Errorf("%w: %w", errcode.New(errcode.StoreNotPurged), err)
+	}
+	return nil
 }
 
 // purgeStore deletes the device credentials of store and its recording

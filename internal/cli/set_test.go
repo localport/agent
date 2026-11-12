@@ -10,6 +10,7 @@ import (
 
 	"github.com/localport/agent/internal/agent"
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 )
 
@@ -85,6 +86,46 @@ func TestReloadProbesTheLauncherAgain(t *testing.T) {
 
 // desktopPinTargets are the targets the reset tests pin, by kind.
 var desktopPinTargets = map[string]string{"rdp": "127.0.0.1:3389", "vnc": "127.0.0.1:5900"}
+
+// The set-pins child forgets the named kind's key in the system store and
+// keeps the other kind's; a bad ref or kind is refused.
+func TestSetPinsChildResetsThePin(t *testing.T) {
+	file := asRoot(t, &fakeManager{installed: true})
+	writeDevices(t, file)
+	store, err := identity.SystemStore(file.Base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := deviceRef("factory.gw-01")
+	pins, err := store.DesktopPins(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"rdp", "vnc"} {
+		if _, err := pins.Pin(context.Background(), kind, desktopPinTargets[kind], [32]byte{1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runSetPinsChild([]string{ref.String(), "rdp"}); err != nil {
+		t.Fatalf("set-pins = %v", err)
+	}
+	_, rdp, err := pins.Lookup("rdp", desktopPinTargets["rdp"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, vnc, err := pins.Lookup("vnc", desktopPinTargets["vnc"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rdp || !vnc {
+		t.Fatalf("after set-pins rdp held %v, vnc held %v; want only rdp forgotten", rdp, vnc)
+	}
+	for _, args := range [][]string{{ref.String()}, {"factory.gw-01", "rdp"}, {ref.String(), "ssh"}} {
+		if err := runSetPinsChild(args); !errors.Is(err, errcode.New(errcode.AgentChildOnly)) {
+			t.Errorf("set-pins %q = %v, want AgentChildOnly", args, err)
+		}
+	}
+}
 
 // --rdp-reset-pin and --vnc-reset-pin alone forget the device's key of their
 // kind, and only that kind's, without writing the config or reloading; with

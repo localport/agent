@@ -82,7 +82,7 @@ func startPipeSession(out *frameWriter, plan spawnPlan, log func(string, ...any)
 		events, cmd.ExtraFiles = r, []*os.File{w}
 		defer w.Close() // the child holds its copy once started
 	}
-	if err := cmd.Start(); err != nil {
+	if err := startChild(cmd); err != nil {
 		if events != nil {
 			_ = events.Close()
 		}

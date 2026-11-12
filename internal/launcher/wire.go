@@ -20,13 +20,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
-// Version is the request schema version. A launcher refuses any other.
-const Version = 1
+// Version is the request schema version. A launcher refuses any other with
+// CodeVersionMismatch.
+const Version = 2
 
 // AgentAccount is the system account the network agent runs as: the only
 // peer the launcher serves, and the login of a run_as_agent session.
@@ -61,6 +66,9 @@ const (
 	CodeSpawnFailed        = "spawn_failed"
 	CodeConfigUnreadable   = "config_unreadable"
 	CodeInternal           = "internal"
+	// CodeVersionMismatch refuses a request of another Version: the agent
+	// and the launcher service come from different releases.
+	CodeVersionMismatch = "version_mismatch"
 )
 
 // Full Disk Access states a probe reports.
@@ -99,6 +107,11 @@ type Request struct {
 	// changing the file system. Only an sftp request carries them.
 	FilesDownload bool `json:"files_download,omitempty"`
 	FilesUpload   bool `json:"files_upload,omitempty"`
+	// ClientAddr is the session client's address, `ip:port` with an IP
+	// literal and no zone, as the edge reported it; empty when unknown. The
+	// helper gives it to PAM (PAM_RHOST), SSH_CLIENT, SSH_CONNECTION and
+	// utmp.
+	ClientAddr string `json:"client_addr,omitempty"`
 	// Password travels outside JSON, as a raw length-prefixed trailer
 	// (writeSecret, readSecret), so no encoder buffer ever holds it; each
 	// hop zeroes its copy once used and nothing stores it.
@@ -165,13 +178,16 @@ var (
 // Validate checks the fields of a request for its kind, without the config.
 // An sftp request carries no terminal and no command.
 func (r Request) Validate() error {
-	if r.V != Version || r.Kind != KindSFTP && (r.FilesDownload || r.FilesUpload) {
+	if r.V != Version {
+		return Refusal(CodeVersionMismatch)
+	}
+	if r.Kind != KindSFTP && (r.FilesDownload || r.FilesUpload) {
 		return Refusal(CodeBadRequest)
 	}
 	switch r.Kind {
 	case KindProbe:
 		if r.Device != "" || r.Login != "" || r.Cols != 0 || r.Rows != 0 || r.Term != "" || r.Command != "" ||
-			r.Pipe != "" || r.HasPassword || len(r.Password) != 0 || len(r.Env) != 0 {
+			r.Pipe != "" || r.HasPassword || len(r.Password) != 0 || len(r.Env) != 0 || r.ClientAddr != "" {
 			return Refusal(CodeBadRequest)
 		}
 		return nil
@@ -214,18 +230,114 @@ func (r Request) validateCommon() error {
 		r.Pipe != "" && !pipePattern.MatchString(r.Pipe),
 		r.HasPassword != (len(r.Password) > 0),
 		len(r.Password) > MaxPassword,
-		!ValidEnv(r.Env):
+		!ValidEnv(r.Env),
+		r.ClientAddr != "" && !ValidClientAddr(r.ClientAddr):
 		return Refusal(CodeBadRequest)
 	}
 	return nil
 }
 
-// Response is one launcher message. Exactly one field is set.
+// OriginEnv is the SSH_CLIENT and SSH_CONNECTION a session with client
+// address addr gets, as sshd sets them, none for an empty or invalid addr.
+// A relayed session has no local socket, so the server end is
+// 127.0.0.1 port 22; the fields are there because parsers expect four.
+func OriginEnv(addr string) []string {
+	ip, port, ok := SplitClientAddr(addr)
+	if !ok {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("SSH_CLIENT=%s %d 22", ip, port),
+		fmt.Sprintf("SSH_CONNECTION=%s %d 127.0.0.1 22", ip, port),
+	}
+}
+
+// SplitClientAddr returns the IP and port of a valid client address.
+func SplitClientAddr(addr string) (ip string, port uint16, ok bool) {
+	if !ValidClientAddr(addr) {
+		return "", 0, false
+	}
+	ap := netip.MustParseAddrPort(addr)
+	return ap.Addr().String(), ap.Port(), true
+}
+
+// ValidClientAddr reports whether addr is `ip:port`: an IP literal without
+// a zone and a port from 1 to 65535.
+func ValidClientAddr(addr string) bool {
+	ap, err := netip.ParseAddrPort(addr)
+	return err == nil && ap.Addr().Zone() == "" && ap.Port() != 0
+}
+
+// Response is one launcher message. Exactly one of Started, Refused, Probe
+// and Exit is set; Messages may stand beside Started or Refused.
 type Response struct {
 	Started *Started `json:"started,omitempty"`
 	Refused *Refused `json:"refused,omitempty"`
 	Probe   *Probe   `json:"probe,omitempty"`
 	Exit    *Exit    `json:"exit,omitempty"`
+	// Messages are the session setup's PAM messages for the client, in
+	// order (HelperReply.Messages).
+	Messages []string `json:"messages,omitempty"`
+}
+
+// maxCodeLen bounds every refusal code, so FitMessages can size a reply
+// before its code is known.
+const maxCodeLen = 32
+
+// FitMessages returns msgs cut so that a HelperReply and a Response carrying
+// them with their largest other fields encode within MaxMessage: whole
+// messages are dropped from the end, then the last one kept is cut on a
+// rune boundary.
+func FitMessages(msgs []string) []string {
+	if len(msgs) == 0 || messagesFit(msgs) {
+		return msgs
+	}
+	out := slices.Clone(msgs)
+	for len(out) > 0 && !messagesFit(out) {
+		out = out[:len(out)-1]
+	}
+	if len(out) == len(msgs) {
+		return out
+	}
+	// Add the first dropped message back, cut to the longest prefix that fits.
+	next := msgs[len(out)]
+	lo, hi := 0, len(next)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if messagesFit(append(slices.Clone(out), validPrefix(next, mid))) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	if cut := validPrefix(next, lo); cut != "" {
+		out = append(out, cut)
+	}
+	return out
+}
+
+// validPrefix is s cut to at most n bytes, on a rune boundary.
+func validPrefix(s string, n int) string {
+	for n > 0 && n < len(s) && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// messagesFit reports whether msgs fit the largest reply on both hops.
+func messagesFit(msgs []string) bool {
+	code := strings.Repeat("x", maxCodeLen)
+	for _, v := range []any{
+		HelperReply{Refused: code, Messages: msgs},
+		Response{Started: &Started{SessionID: strings.Repeat("0", 32)}, Messages: msgs},
+		Response{Refused: &Refused{Code: code}, Messages: msgs},
+	} {
+		b, err := json.Marshal(v)
+		if err != nil || len(b) > MaxMessage {
+			return false
+		}
+	}
+	return true
 }
 
 // Started reports a helper that passed account and session setup and
@@ -263,12 +375,29 @@ type Exit struct {
 }
 
 // RefusalError is a refusal carried as an error; errors.As finds it.
-type RefusalError struct{ Code string }
+// Messages are the PAM messages that came with it, for the client.
+type RefusalError struct {
+	Code     string
+	Messages []string
+}
 
 func (e *RefusalError) Error() string { return "launcher refused: " + e.Code }
 
 // Refusal returns a RefusalError for code.
 func Refusal(code string) error { return &RefusalError{Code: code} }
+
+// ErrLauncherVersion is the agent's error for a launcher of another
+// release; errors.As still finds the RefusalError beside it.
+var ErrLauncherVersion = errcode.New(errcode.LauncherVersion)
+
+// clientRefusal is the error a client returns for a refusal it read.
+func clientRefusal(code string, messages []string) error {
+	r := &RefusalError{Code: code, Messages: messages}
+	if code == CodeVersionMismatch {
+		return fmt.Errorf("%w: %w", ErrLauncherVersion, r)
+	}
+	return r
+}
 
 // CodeOf returns the refusal code err carries, or CodeInternal.
 func CodeOf(err error) string {
@@ -355,8 +484,15 @@ func readSecret(r io.Reader) ([]byte, error) {
 }
 
 // decodeRequest decodes a request body strictly: unknown fields and trailing
-// data are refused.
+// data are refused. The version is read first, so a request of another
+// Version, whose fields may differ, is refused as a version mismatch.
 func decodeRequest(body []byte) (Request, error) {
+	var head struct {
+		V int `json:"v"`
+	}
+	if err := json.Unmarshal(body, &head); err == nil && head.V != Version {
+		return Request{}, Refusal(CodeVersionMismatch)
+	}
 	var req Request
 	if err := decodeStrict(body, &req); err != nil {
 		return Request{}, Refusal(CodeBadRequest)
@@ -382,6 +518,9 @@ func readResponse(r io.Reader) (Response, error) {
 	}
 	if set != 1 {
 		return Response{}, errors.New("launcher: bad response: exactly one field must be set")
+	}
+	if len(resp.Messages) > 0 && resp.Started == nil && resp.Refused == nil {
+		return Response{}, errors.New("launcher: bad response: messages without started or refused")
 	}
 	return resp, nil
 }

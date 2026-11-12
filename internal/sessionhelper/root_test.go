@@ -20,11 +20,15 @@ import (
 	"time"
 
 	"github.com/localport/agent/internal/launcher"
+	"github.com/localport/agent/internal/testroot"
 )
 
 // TestMain runs this test binary as the helper when started with the
 // launcher's helper argv.
 func TestMain(m *testing.M) {
+	if os.Getenv(fileLimitTestStage) != "" {
+		os.Exit(runFileLimitStage())
+	}
 	if len(os.Args) == 2 && os.Args[1] == "helper" {
 		os.Exit(Run(log.New(os.Stderr, "", 0).Printf))
 	}
@@ -43,13 +47,7 @@ func TestMain(m *testing.M) {
 // it: the listener's socket file belongs to the login, so the forward
 // server runs with the login's credentials, not root's.
 func TestRootHelperForwardsAsTheLogin(t *testing.T) {
-	login := os.Getenv("LOCALPORT_TEST_LOGIN")
-	switch {
-	case os.Geteuid() != 0:
-		t.Skip("needs root")
-	case login == "":
-		t.Skip("set LOCALPORT_TEST_LOGIN to a test account")
-	}
+	login := rootLogin(t)
 	u, err := user.Lookup(login)
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +93,7 @@ func TestRootHelperForwardsAsTheLogin(t *testing.T) {
 	if err := launcher.WriteHelperRequest(ours, launcher.HelperRequest{Kind: launcher.KindForward, Login: login}); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := launcher.ReadHelperReply(ours)
+	reply, err := launcher.ReadHelperReply(ours, nil)
 	if err != nil || !reply.Started {
 		t.Fatalf("helper reply %+v, %v", reply, err)
 	}
@@ -142,18 +140,99 @@ func TestRootHelperForwardsAsTheLogin(t *testing.T) {
 	}
 }
 
+// rootLogin returns LOCALPORT_TEST_LOGIN for a test that runs a session as
+// root; without root or the login it skips, or fails under testroot's
+// RequireEnv.
+func rootLogin(t *testing.T) string {
+	t.Helper()
+	login := os.Getenv("LOCALPORT_TEST_LOGIN")
+	switch {
+	case os.Geteuid() != 0:
+		testroot.Require(t, "needs root")
+	case login == "":
+		testroot.Require(t, "set LOCALPORT_TEST_LOGIN to a test account")
+	}
+	return login
+}
+
+// runRootTerminal starts the helper as the launcher does for req (a
+// terminal), types script into the shell and returns its output up to the
+// exit frame and the exit code.
+func runRootTerminal(t *testing.T, req launcher.HelperRequest, script string) (string, int32) {
+	t.Helper()
+	agentEnd, helperEnd, err := launcher.SocketPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agentEnd.Close()
+	ours, theirs, err := launcher.SocketPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ours.Close()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := &exec.Cmd{Path: exe, Args: []string{"localport-session", "helper"}, Env: []string{}, Dir: "/", Stderr: os.Stderr, ExtraFiles: []*os.File{helperEnd, theirs}}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	helperEnd.Close()
+	theirs.Close()
+	defer cmd.Wait()
+	if err := launcher.WriteHelperRequest(ours, req); err != nil {
+		t.Fatal(err)
+	}
+	if reply, err := launcher.ReadHelperReply(ours, nil); err != nil || !reply.Started {
+		t.Fatalf("helper reply %+v, %v", reply, err)
+	}
+	_ = agentEnd.SetDeadline(time.Now().Add(20 * time.Second))
+	if err := launcher.WriteFrame(agentEnd, launcher.Frame{Type: launcher.FrameData, Data: []byte(script)}); err != nil {
+		t.Fatal(err)
+	}
+	fr := launcher.NewFrameReader(agentEnd)
+	var out strings.Builder
+	for {
+		f, err := fr.ReadFrame()
+		if err != nil {
+			t.Fatalf("channel ended: %v; output %q", err, out.String())
+		}
+		if f.Type == launcher.FrameExit {
+			return out.String(), f.Code
+		}
+		out.Write(f.Data)
+	}
+}
+
+// The session's PTY belongs to the login, group tty, mode 0620, and a
+// known client origin reaches SSH_CLIENT and SSH_CONNECTION.
+func TestRootHelperPTYOwnerAndOrigin(t *testing.T) {
+	login := rootLogin(t)
+	u, err := user.Lookup(login)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := launcher.HelperRequest{Kind: launcher.KindTerminal, Login: login, Cols: 80, Rows: 24, Term: "xterm", ClientAddr: "203.0.113.9:40022"}
+	out, code := runRootTerminal(t, req, "echo TTY=$(ls -lnL $(tty) | awk '{print $1, $3}') END; echo C=$SSH_CLIENT/$SSH_CONNECTION END; exit 0\n")
+	if code != 0 {
+		t.Fatalf("exit %d; output %q", code, out)
+	}
+	m := regexp.MustCompile(`TTY=(\S+) (\d+) END`).FindStringSubmatch(out)
+	if m == nil || !strings.HasPrefix(m[1], "crw--w----") || m[2] != u.Uid {
+		t.Fatalf("output %q: want the PTY crw--w---- owned by uid %s", out, u.Uid)
+	}
+	if !strings.Contains(out, "C=203.0.113.9 40022 22/203.0.113.9 40022 127.0.0.1 22 END") {
+		t.Fatalf("output %q: no client origin", out)
+	}
+}
+
 // TestRootHelperRunsAPAMSession starts the helper as the launcher does, as
 // root, for LOCALPORT_TEST_LOGIN (an account with /bin/sh), through the
 // host's /etc/pam.d/localport, and runs a command in the login's shell. CI
 // runs it under `make test-root` with the packaged PAM file installed.
 func TestRootHelperRunsAPAMSession(t *testing.T) {
-	login := os.Getenv("LOCALPORT_TEST_LOGIN")
-	switch {
-	case os.Geteuid() != 0:
-		t.Skip("needs root")
-	case login == "":
-		t.Skip("set LOCALPORT_TEST_LOGIN to a test account")
-	}
+	login := rootLogin(t)
 	if pamAvailable {
 		if _, err := os.Stat("/etc/pam.d/localport"); err != nil {
 			t.Fatalf("the PAM service file: %v", err)
@@ -184,7 +263,7 @@ func TestRootHelperRunsAPAMSession(t *testing.T) {
 	if err := launcher.WriteHelperRequest(ours, launcher.HelperRequest{Kind: launcher.KindTerminal, Login: login, Cols: 80, Rows: 24, Term: "xterm"}); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := launcher.ReadHelperReply(ours)
+	reply, err := launcher.ReadHelperReply(ours, nil)
 	if err != nil || !reply.Started {
 		t.Fatalf("helper reply %+v, %v", reply, err)
 	}

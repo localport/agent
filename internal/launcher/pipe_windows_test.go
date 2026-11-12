@@ -96,6 +96,45 @@ func TestPipeListenerCloseReleasesItsHandles(t *testing.T) {
 }
 
 // The server reads the client's token; the client checks the pipe's owner.
+// A client that connects and closes before Accept's connect leaves the
+// instance with ERROR_NO_DATA: Accept resets it and serves the next client.
+func TestPipeAcceptSurvivesAClientGoneBeforeTheConnect(t *testing.T) {
+	me := currentSID(t)
+	name := testPipeName(t)
+	l := listen(t, name, me)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// listen created the waiting instance: this client takes it and leaves
+	// before any Accept.
+	gone, err := dialPipe(ctx, name, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = gone.Close()
+	accepted := make(chan error, 1)
+	go func() {
+		conn, err := l.Accept()
+		if err == nil {
+			_ = conn.Close()
+		}
+		accepted <- err
+	}()
+	for {
+		c, err := dialPipe(ctx, name, me)
+		if err == nil {
+			_ = c.Close()
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := <-accepted; err != nil {
+		t.Fatalf("Accept after a client gone before the connect: %v", err)
+	}
+}
+
 func TestPipeClientAndOwnerChecks(t *testing.T) {
 	me := currentSID(t)
 	name := testPipeName(t)
