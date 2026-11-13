@@ -339,8 +339,8 @@ func TestIgnoreClosedSwallowsOrdinaryDisconnects(t *testing.T) {
 	if got := ignoreClosed(real); got == nil {
 		t.Fatal("a genuine failure must survive ignoreClosed")
 	}
-	if got := firstCopyError(nil, io.EOF, real); got != real {
-		t.Fatalf("firstCopyError = %v, want the genuine failure", got)
+	if got := firstCopyError(nil, io.EOF, real); !errors.Is(got, real) || !errors.Is(got, ErrRelayFailed) {
+		t.Fatalf("firstCopyError = %v, want the genuine failure under %v", got, ErrRelayFailed)
 	}
 	if got := firstCopyError(io.EOF, syscall.ECONNRESET); got != nil {
 		t.Fatalf("firstCopyError = %v, want nil when every copy ended normally", got)

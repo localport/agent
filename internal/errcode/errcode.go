@@ -98,7 +98,15 @@ const (
 	DiskLow              Code = "AG062"
 	RecordingUnavailable Code = "AG063"
 
-	NoTransport Code = "AG071"
+	NoTransport       Code = "AG071"
+	RegisterFailed    Code = "AG072"
+	UntrustedRedirect Code = "AG073"
+	TooManyRedirects  Code = "AG074"
+	InboundLimit      Code = "AG075"
+	DataDialFailed    Code = "AG076"
+	LocalDialFailed   Code = "AG077"
+	PortRefused       Code = "AG078"
+	RelayFailed       Code = "AG079"
 
 	InstallerNotElevated Code = "AG081"
 	InstallDirUnsafe     Code = "AG082"
@@ -170,6 +178,14 @@ var registry = []Entry{
 	{RecordingUnavailable, "Recording unavailable", "recording unavailable"},
 
 	{NoTransport, "No transport", "no transport available: every candidate failed (check edge reachability and firewall)"},
+	{RegisterFailed, "Registration failed", "registration with the edge failed"},
+	{UntrustedRedirect, "Redirect to an untrusted host", "the edge redirected to a host outside the Localport service"},
+	{TooManyRedirects, "Too many redirects", "the edge redirected too many times"},
+	{InboundLimit, "Too many inbound connections", "an inbound connection was refused: too many are opening at once"},
+	{DataDialFailed, "Data connection failed", "a data connection to the edge failed"},
+	{LocalDialFailed, "Local service unreachable", "the local service did not accept the connection"},
+	{PortRefused, "Port not allowed", "the requested port is not allowed on this device"},
+	{RelayFailed, "Connection broke while relaying", "the connection broke while relaying"},
 
 	{InstallerNotElevated, "Installer step not elevated", "this installer step needs an elevated Administrator"},
 	{InstallDirUnsafe, "Install directory unsafe", "the install directory can be changed by someone other than SYSTEM and Administrators"},

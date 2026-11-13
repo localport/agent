@@ -201,7 +201,12 @@ func checkCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, devi
 	if !signedByCA(cert, cas) {
 		return nil, refuseCert("not signed by a session CA key")
 	}
-	after, before := time.Unix(int64(min(cert.ValidAfter, 1<<62)), 0), time.Unix(int64(min(cert.ValidBefore, 1<<62)), 0)
+	// The control plane mints short-lived certificates; an open-ended or empty window
+	// is malformed, and the bound keeps both ends inside int64 seconds.
+	if cert.ValidBefore > 1<<62 || cert.ValidAfter >= cert.ValidBefore {
+		return nil, refuseCert("validity window malformed")
+	}
+	after, before := time.Unix(int64(cert.ValidAfter), 0), time.Unix(int64(cert.ValidBefore), 0)
 	if now.Add(certSkew).Before(after) || !now.Add(-certSkew).Before(before) {
 		return nil, refuseCert("outside its validity window (%v to %v, now %v)", after.UTC(), before.UTC(), now.UTC())
 	}

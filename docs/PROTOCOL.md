@@ -91,8 +91,8 @@ TLS client certificate of the connection (see
 connection without one is refused.
 
 A device also reports what its local config enables. The agent enforces it;
-the API's session mint also refuses a kind whose capability or desktop
-protocol is not reported:
+the control plane also issues no session certificate for a kind whose
+capability or desktop protocol is not reported:
 
 ```json
 { "capabilities": ["terminal", "files", "desktop"], "logins": ["pi"], "desktop": ["rdp", "vnc"] }
@@ -575,7 +575,10 @@ stream, 16 session streams, 2 recording segment requests, 1 recording open, 1
 recording complete or failed open (see
 [Session recording](#session-recording)), and 1 clipboard notice batch (see
 [Clipboard notices](#clipboard-notices)). The edge refuses a
-17th session on one mux with the end reason `agent_closed`.
+17th session on one mux with the end reason `agent_closed`. The agent closes
+(resets), unread, a session stream that arrives while 16 others wait for
+their handshake decision (a session slot taken, a resume's handle claimed, or a
+refusal).
 
 Accept stream: the agent's first request is `POST /v1/session-accept` with no
 body (`END_STREAM` on its headers). The edge answers `200` and holds the
@@ -583,11 +586,18 @@ response open for the life of the mux. Each session is one notice on it:
 
 | Bytes | Meaning                                                        |
 | ----- | -------------------------------------------------------------- |
-| 4     | `uint32` big-endian length, always 24                          |
+| 4     | `uint32` big-endian length of the rest, 25 to 89               |
 | 16    | session id: the bytes of the UUID the stream's access row carries, which each recording of a channel opened while the stream carries the connection names |
 | 8     | `uint64` big-endian serial of the SSH user certificate the edge admitted |
+| 1     | address length, 0 to 64                                        |
+| n     | the client's address as the edge saw it, ASCII `ip:port` (`[ipv6]:port` for IPv6): an IP literal without a zone and a port from 1 to 65535; absent when the length is 0 |
 
-A notice of any other length, or the accept stream ending, ends the mux.
+A notice outside this layout (a length outside 25 to 89, an address length
+that disagrees with it, an address that is not `ip:port`), or the accept
+stream ending, ends the mux. The agent gives the address to every helper the
+stream's connection starts (PAM `PAM_RHOST`, `SSH_CLIENT`, `SSH_CONNECTION`,
+utmp host); a resume's notice replaces it for the helpers started after the
+resume.
 
 Session stream: for every notice the agent opens `POST /v1/session` with header
 `Localport-Session-Id: <32 lowercase hex chars>` (the id from the notice), so
@@ -679,6 +689,10 @@ stream:
    `localport: <code>` to the channel's stderr (`login_not_allowed`,
    `kind_disabled`, `agent_busy`, `kind_unavailable`, `launcher_unavailable`,
    `recording_unavailable` for a Strict channel whose recording did not open).
+   The messages PAM gives the login's session setup (an expiry warning, the
+   `/etc/nologin` text) are written to the channel's stderr, one line each
+   ending in CRLF, before the session's output or the refusal line; a port
+   forward has no stderr, so the agent logs them.
    Shell and exec run through the login's shell, so an account whose shell is
    `nologin` or `false` refuses them itself, as under sshd; SFTP and port
    forwarding run the agent's own file and forward servers as the login and
@@ -990,7 +1004,7 @@ session handler to shut down (connections end with `shutdown`, handshakes in
 progress are aborted, session processes are ended: SIGHUP, then SIGKILL at
 5 s, and each channel waits at most 3 s for its recording's final segment
 to reach the uploader),
-waits for that at most 10 s, then closes the mux connection. The connection is
+waits for that at most 15 s, then closes the mux connection. The connection is
 never closed before that step.
 
 ## Resumable connections
@@ -1020,6 +1034,9 @@ refuses any other version). The edge relays them like any bytes.
   and a zero byte. The token is HKDF-SHA256 over the first connect's X25519
   shared secret, salted with its transcript, info `localport-resume-v1`; it
   never crosses the wire, so a relay cannot resume.
+- The agent verifies a hello's or resume's signature with its certificate's
+  key before anything else about it: no CA key refresh, admission or claim of
+  the handle happens for one that does not verify.
 - The agent admits a hello as userauth admits a certificate (table above,
   serial the notice's), and binds the connection to the certificate's key. It
   admits a resume only for a live handle, with a resume certificate (critical
@@ -1124,14 +1141,25 @@ segment object is:
 
 | Bytes | Meaning |
 | ----- | ------- |
-| 1 | version, `1` |
-| 1 | codec: `0` the plaintext as is, `1` raw deflate (level 6, used only when smaller) |
-| rest | ChaCha20-Poly1305 ciphertext and tag under the DEK |
+| 1 | version, `2` |
+| 1 | codec: `0` the payload is the plaintext as is, `1` raw deflate of it (level 6, used only when smaller) |
+| rest | ChaCha20-Poly1305 ciphertext and tag under the DEK of the padded payload |
+
+The padded payload is the payload's length (`uint32` big-endian), the
+payload, then zero bytes up to Padme(4 + payload length) bytes (Nikitin et
+al., "Reducing Metadata Leakage from Encrypted Files and Communication with
+PURBs", 2019): with `E = floor(log2 L)` and `S = floor(log2 E) + 1`, `L` is
+rounded up to a multiple of `2^(E - S)`, so storage sees the size class of a
+segment, not its exact compressed size, at most 12% larger. A reader refuses
+another version, a length past the padded payload, a padded size other than
+Padme(4 + length), and non-zero padding. The largest object, a 256 KiB
+payload, is 270354 bytes.
 
 The nonce is the segment index as a 96-bit big-endian integer, and the AAD is
 `id || index (uint32 BE) || final (1 byte) || version || codec`. Only the
 last segment has `final` 1; a recording that ends with nothing buffered seals
-an empty final segment (18 bytes). `h_i` is SHA-256 of object `i`; the chain
+an empty final segment (22 bytes). A recording holds at most 2^32 - 1
+segments; the agent seals none past that. `h_i` is SHA-256 of object `i`; the chain
 is `chain_0 = SHA-256(h_0)` and `chain_i = SHA-256(chain_{i-1} || h_i)`. The
 agent clears its DEK buffer after the final segment is sealed or the
 recording is discarded. Copies inside the cipher state and those the Go
@@ -1171,7 +1199,7 @@ are unpadded base64url.
 | ------- | ---- | ------------ |
 | `POST /v1/recording/open` | `{"wrapped_dek","signature","certificate","session_id"}` (`session_id` the canonical UUID of the stream the connection runs on, a resume stream's after a resume; only an open while the mux carries that stream can create the recording, a later one reopens it and a missing recording is `recording_not_found`) | `{"status","segments","chain"}`: the segments the server holds and its chain over them (empty with 0 segments) |
 | `POST /v1/recording/open`, header `Localport-Recording-Failed: <reason>` (a failed open: `spool_full`, `disk_low` or `recording_failed`) | `{"wrapped_dek":"","signature","certificate","session_id"}`, signed over the failed open digest | `{"status","segments"}`; moves a recording that never started to `incomplete` with the reason, creating it when it does not exist and the session is attested; a repeat answers `200`, any other recording state `recording_closed` |
-| `PUT /v1/recording/segment`, headers `Localport-Segment-Index` (decimal, no sign or leading zeros) and `Localport-Segment-Sha256` (unpadded base64url of `h_i`) | the segment object, at least 18 bytes | `{"status","segments"}`; a segment already stored answers `200` like a fresh one |
+| `PUT /v1/recording/segment`, headers `Localport-Segment-Index` (decimal, no sign or leading zeros) and `Localport-Segment-Sha256` (unpadded base64url of `h_i`) | the segment object, 22 to 270354 bytes | `{"status","segments"}`; a segment already stored answers `200` like a fresh one |
 | `POST /v1/recording/complete` | `{"segments","final_hash","ended_at","incomplete","final","reason","signature"}` | `{"status","segments"}` |
 
 Every open a live channel or forwards start sends, normal or failed, carries
@@ -1225,8 +1253,10 @@ spool; an acknowledged segment never is. A session holds at most 1 MiB of
 unacknowledged segments in memory. The spool is `<state root>/recordings/` (the
 directory that holds `identity/`), directories 0700 and files 0600, each written
 to a unique temporary file, fsynced and renamed: `<id>/meta.json` (device
-identifier, `wrapped_dek`, key hash, policy, counters, chain, and the complete
-fields once known) and `<id>/<index>.seg`. `meta.json` is written before the
+identifier, `wrapped_dek`, key hash, policy, counters, chain, the segment
+object version as `object_version`, and the complete fields once known) and
+`<id>/<index>.seg`. At restart an entry whose `object_version` is absent or
+not `2` is dropped and logged. `meta.json` is written before the
 open and before the first output, so a crash leaves an entry to complete. The
 final segment is always spooled and named in `meta.json` before it can be sent,
 so a crash after its delivery still completes the recording as final. At
@@ -1299,8 +1329,8 @@ recording did not open, is worth one fresh certificate.
 ## Clipboard notices
 
 Each clipboard transfer decision on a desktop connection is reported to the
-edge, which stores it as an access-log row of the team; the text itself is
-never sent. A decision is:
+edge, which records it in the team's access log; the text itself is never
+sent. A decision is:
 
 - `vnc`: every ClientCutText (`paste`) and ServerCutText (`copy`), with its
   length: `allowed`, `denied_policy` when the certificate does not allow the

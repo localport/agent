@@ -219,7 +219,7 @@ func (f *forwarder) ensure() (*launcher.ForwardClient, error) {
 		s.log("session: forward channel: %v", err)
 		return fail(errors.New(CodeKindUnavailable))
 	}
-	req := launcher.Request{Kind: launcher.KindForward, Device: s.cfg.Device, Login: c.login, Pipe: pipe}
+	req := launcher.Request{Kind: launcher.KindForward, Device: s.cfg.Device, Login: c.login, Pipe: pipe, ClientAddr: c.adm.Load().clientAddr}
 	if len(c.password) > 0 {
 		// The launcher client zeroes its copy once sent.
 		req.HasPassword, req.Password = true, bytes.Clone(c.password)
@@ -234,8 +234,13 @@ func (f *forwarder) ensure() (*launcher.ForwardClient, error) {
 		_ = ours.Close()
 		rec.abort()
 		s.log("session: the forward helper for %q did not start: %v", c.login, err)
+		if r, ok := errors.AsType[*launcher.RefusalError](err); ok {
+			s.logMessages(c.login, r.Messages)
+		}
 		return fail(errors.New(refusalReason(err)))
 	}
+	// A forward has no stderr to show the client PAM's messages on.
+	s.logMessages(c.login, sess.Messages)
 	client, err = launcher.NewForwardClient(ours, s.log)
 	if err != nil {
 		_ = sess.Close()

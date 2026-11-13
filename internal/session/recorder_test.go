@@ -108,10 +108,13 @@ func decryptRecordingID(t *testing.T, priv hpke.PrivateKey, id string, wrapped [
 			f = 1
 		}
 		aad = append(aad, f, s.Object[0], s.Object[1])
-		plain, err := aead.Open(nil, nonce, s.Object[2:], aad)
+		padded, err := aead.Open(nil, nonce, s.Object[2:], aad)
 		if err != nil {
 			t.Fatalf("segment %d: %v", s.Index, err)
 		}
+		// The payload's length, the payload, zeros (recording package tests
+		// check the padding).
+		plain := padded[4 : 4+binary.BigEndian.Uint32(padded)]
 		if s.Object[1] == recording.CodecDeflate {
 			if plain, err = io.ReadAll(flate.NewReader(bytes.NewReader(plain))); err != nil {
 				t.Fatalf("segment %d: inflate: %v", s.Index, err)
@@ -176,12 +179,13 @@ func TestRecorderRecordsFileEvents(t *testing.T) {
 }
 
 // A session that ends with nothing buffered still seals a final segment:
-// an empty plaintext, the 18-byte object.
+// an empty plaintext, the 22-byte object (version, codec, the 4-byte
+// length, tag).
 func TestRecorderSealsAnEmptyFinalSegment(t *testing.T) {
 	h := &fakeHandoff{}
 	r, _ := newTestRecorder(t, RecPolicyBestEffort, h)
 	r.end()
-	if len(h.segs) != 1 || !h.segs[0].Final || len(h.segs[0].Object) != 18 || h.done == nil || !h.done.Final || h.done.Segments != 1 {
+	if len(h.segs) != 1 || !h.segs[0].Final || len(h.segs[0].Object) != 22 || h.done == nil || !h.done.Final || h.done.Segments != 1 {
 		t.Fatalf("segments %+v, completion %+v; want one empty final segment", h.segs, h.done)
 	}
 }

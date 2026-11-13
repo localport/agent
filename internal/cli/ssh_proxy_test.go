@@ -115,7 +115,7 @@ func (e *proxyEdge) serveStream(w http.ResponseWriter, r *http.Request) {
 	e.mu.Unlock()
 	stream := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
 	defer stream.Close()
-	e.srv.Serve(stream, [16]byte{0x01}, cert.Serial)
+	e.srv.Serve(stream, [16]byte{0x01}, cert.Serial, "")
 }
 
 // mint signs a session certificate as the API would: a resume request gets

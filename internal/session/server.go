@@ -48,12 +48,17 @@ const (
 	// CloseConfigChanged ends the sessions of a device whose local config
 	// entry a reload changed or removed.
 	CloseConfigChanged = "config_changed"
-	// CloseExited: the last channel of a terminal connection closed.
+	// CloseExited: the last channel of a terminal or files connection, or a
+	// desktop connection's channel, closed.
 	CloseExited = "exited"
 )
 
 const (
 	maxSessions = 8
+	// maxHandshakes bounds the streams between Serve's start and their
+	// handshake decision: the edge carries at most 16 session streams per
+	// mux, and one mux at a time serves a device.
+	maxHandshakes = 16
 	// maxChannels bounds the session channels of one connection; a terminal
 	// connection has one.
 	maxChannels       = 4
@@ -63,7 +68,7 @@ const (
 	serverVersion = "SSH-2.0-localport"
 )
 
-// Handshake bounds, variables so tests shorten them.
+// Handshake and end bounds, variables so tests shorten them.
 var (
 	// handshakeTimeout bounds the SSH key exchange and userauth from the
 	// stream's start.
@@ -72,6 +77,9 @@ var (
 	// person answers, as the trust dialog does; the rest of the handshake
 	// stays under handshakeTimeout.
 	interactiveAuthTimeout = 5 * time.Minute
+	// endWriteTimeout bounds the end reason writes of a connection that is
+	// ending; the connection closes after it whether or not they completed.
+	endWriteTimeout = 2 * time.Second
 )
 
 // Permissions extension keys carrying the admitted identity from userauth to
@@ -200,6 +208,10 @@ type Server struct {
 	// refreshes cancels the key refreshes in flight (keyRefreshContext).
 	refreshes map[*context.CancelFunc]struct{}
 	sessions  int // slots taken, at most maxSessions
+	// handshakes counts the Serve calls before their handshake decision, at
+	// most maxHandshakes; capLogged is when a stream over it was last logged.
+	handshakes int
+	capLogged  time.Time
 	// forwards counts the forward channels of every connection, at most
 	// maxDeviceForwards.
 	forwards int
@@ -223,6 +235,9 @@ type handler struct {
 	stopped     bool
 	stopReason  string
 	handshaking bool
+	// counted is true while a Serve call holds one of Server.handshakes;
+	// guarded by mu.
+	counted bool
 }
 
 // resumable is one connection's resume state. The fields after ended are
@@ -292,6 +307,10 @@ var afterAttemptClaimCleared atomic.Pointer[func()]
 // stream is installed and before the resume's claim is released.
 var afterResumeInstall atomic.Pointer[func(*resumable)]
 
+// afterConnPublished, when set by a test, runs in serveNew once addConn has
+// published the connection and before its stream runs.
+var afterConnPublished atomic.Pointer[func(*resumable)]
+
 // onConnEnd, when set by a test, gets the reason serveConn ends a connection
 // with ("" for a client's close), before its channels end.
 var onConnEnd atomic.Pointer[func(reason string)]
@@ -300,8 +319,9 @@ var onConnEnd atomic.Pointer[func(reason string)]
 const detachTimeout = 5 * time.Minute
 
 // closeFlushTimeout bounds how long an ended connection's last bytes and
-// closeTag may take to leave on its attached stream.
-const closeFlushTimeout = 5 * time.Second
+// closeTag may take to leave on its attached stream; a variable so tests
+// shorten it.
+var closeFlushTimeout = 5 * time.Second
 
 // NewServer returns the session server of one device.
 func NewServer(cfg ServerConfig) *Server {
@@ -336,11 +356,19 @@ func (s *Server) log(format string, args ...any) {
 // connection on a ResumableConn, a resume attaches the stream to a detached
 // one. id is the stream's session id (the access row id; a first connect's
 // recordings name it) and serial the certificate serial the edge admitted.
-// Serve returns when the stream ends; the connection outlives it while it
-// waits detached for a resume. The caller closes stream after Serve returns.
-func (s *Server) Serve(stream net.Conn, id [16]byte, serial uint64) {
+// clientAddr is the client's `ip:port` from the edge's notice, empty when
+// unknown. Serve returns when the stream ends; the connection outlives it
+// while it waits detached for a resume. The caller closes stream after Serve
+// returns. With maxHandshakes streams before their handshake decision, Serve
+// returns at once without reading the stream and reports refusedUnread.
+func (s *Server) Serve(stream net.Conn, id [16]byte, serial uint64, clientAddr string) (refusedUnread bool) {
 	h := &handler{stop: make(chan struct{}), handshaking: true, abort: func() { _ = stream.SetDeadline(time.Now()) }}
-	s.register(h)
+	if ok, logIt := s.register(h); !ok {
+		if logIt {
+			s.log("session: %d handshakes in progress, closing new streams", maxHandshakes)
+		}
+		return true
+	}
 	defer s.unregister(h)
 	defer func() {
 		if r := recover(); r != nil {
@@ -352,13 +380,14 @@ func (s *Server) Serve(stream net.Conn, id [16]byte, serial uint64) {
 	hello, resume, err := readClientPrelude(stream)
 	if err != nil {
 		s.log("session: prelude: %v", err)
-		return
+		return false
 	}
 	if hello != nil {
-		s.serveNew(h, stream, hello, id, serial)
-		return
+		s.serveNew(h, stream, hello, id, serial, clientAddr)
+		return false
 	}
-	s.serveResume(h, stream, resume, id, serial)
+	s.serveResume(h, stream, resume, id, serial, clientAddr)
+	return false
 }
 
 // hostIdentity is the device's SSH host key and the Device certificates must
@@ -402,7 +431,7 @@ func parsePreludeCert(raw []byte) (*ssh.Certificate, error) {
 // serveNew runs a first connect: it admits the certificate the client signed
 // the hello with, takes a session slot, answers under the host key and
 // starts the connection, then runs the stream until it ends.
-func (s *Server) serveNew(h *handler, stream net.Conn, hello *helloMsg, id [16]byte, serial uint64) {
+func (s *Server) serveNew(h *handler, stream net.Conn, hello *helloMsg, id [16]byte, serial uint64, clientAddr string) {
 	refuse := func(format string, args ...any) {
 		s.log("session: first connect refused: "+format, args...)
 		_ = writePrelude(stream, helloReplyMsg{Status: statusRefused})
@@ -417,13 +446,14 @@ func (s *Server) serveNew(h *handler, stream net.Conn, hello *helloMsg, id [16]b
 		refuse("%v", err)
 		return
 	}
+	// Before admit, whose CA refresh a forged hello must not trigger.
+	if !verifyPrelude(cert.Key, clientSigContext, transcript(hello.noSig()), hello.Sig) {
+		refuse("the hello signature does not verify with the certificate's key")
+		return
+	}
 	adm, err := s.admit(cert, cert.ValidPrincipals[0], device, serial)
 	if err != nil {
 		refuse("%v", err)
-		return
-	}
-	if !verifyPrelude(cert.Key, clientSigContext, transcript(hello.noSig()), hello.Sig) {
-		refuse("the hello signature does not verify with the certificate's key")
 		return
 	}
 	if !s.takeSlot(h) {
@@ -462,19 +492,26 @@ func (s *Server) serveNew(h *handler, stream net.Conn, hello *helloMsg, id [16]b
 	e := &resumable{rc: NewResumableConn(), handle: string(handle), token: token, subject: adm.Subject, kind: adm.Kind,
 		login: adm.Login, certKey: cert.Key.Marshal(), serial: serial, ended: make(chan string, 1)}
 	ch := &handler{stop: make(chan struct{}), handshaking: true, abort: func() { e.rc.End(errConnEnded) }}
+	// Installed before addConn publishes e, so a resume of the new handle
+	// always finds this stream attached and takes over from it. A fresh conn
+	// accepts position 0.
+	run, _ := e.rc.Install(stream, 0)
 	if !s.addConn(e, ch) {
 		return
 	}
+	if hook := afterConnPublished.Load(); hook != nil {
+		(*hook)(e)
+	}
 	started = true
-	go s.serveConn(ch, e, id, serial, cert)
+	go s.serveConn(ch, e, id, serial, cert, clientAddr)
 	defer s.release(e)
-	s.serveStream(e, stream, 0)
+	s.runStream(e, run)
 }
 
 // serveResume runs a resume: the handle's connection, a resume certificate
 // for its original serial, subject and key signed by that key, a fresh
 // host-key-signed reply, then the token proof, before any byte is resent.
-func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]byte, serial uint64) {
+func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]byte, serial uint64, clientAddr string) {
 	refuse := func(status uint32, format string, args ...any) {
 		s.log("session: resume refused: "+format, args...)
 		_ = writePrelude(stream, resumeReplyMsg{Status: status})
@@ -484,7 +521,18 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 		refuse(statusRefused, "%v", err)
 		return
 	}
-	e, status := s.beginResume(string(m.Handle))
+	// The signature is checked before the claim and the CA refresh, so a
+	// forged resume neither blocks a real one nor triggers a refresh.
+	cert, err := parsePreludeCert(m.Cert)
+	if err != nil {
+		refuse(statusRefused, "%v", err)
+		return
+	}
+	if !verifyPrelude(cert.Key, clientSigContext, transcript(m.noSig()), m.Sig) {
+		refuse(statusRefused, "the resume signature does not verify with the certificate's key")
+		return
+	}
+	e, status := s.beginResume(h, string(m.Handle))
 	if status != statusOK {
 		refuse(status, "the connection is gone, resuming or shutting down")
 		return
@@ -495,11 +543,6 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 	// deadline is checked after every attempt.
 	claimed := true
 	defer func() { s.endAttempt(e, claimed) }()
-	cert, err := parsePreludeCert(m.Cert)
-	if err != nil {
-		refuse(statusRefused, "%v", err)
-		return
-	}
 	adm, err := s.withCARefresh(cert, func() (*admission, error) {
 		return verifyResumeCert(cert, s.caKeys(), device, serial, e.serial, s.cfg.clock.Now())
 	})
@@ -509,9 +552,6 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 		return
 	case adm.Subject != e.subject || adm.Kind != e.kind || adm.Login != e.login || !bytes.Equal(cert.Key.Marshal(), e.certKey):
 		refuse(statusRefused, "the resume certificate is for another subject, kind, login or key")
-		return
-	case !verifyPrelude(cert.Key, clientSigContext, transcript(m.noSig()), m.Sig):
-		refuse(statusRefused, "the resume signature does not verify with the certificate's key")
 		return
 	}
 	// The connection runs under this admission once installed, so it meets
@@ -573,7 +613,7 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 	// The connection continues under the resume certificate and this stream's
 	// session id, which the edge attests for recordings, before any byte of
 	// the stream is read.
-	if s.readmit(e, &connAdmission{admission: adm, sessionID: uuidText(id)}) {
+	if s.readmit(e, &connAdmission{admission: adm, sessionID: uuidText(id), clientAddr: clientAddr}) {
 		s.log("session: resume refused: %s: the resume names a recording that a running channel or forwards helper does not have", CloseRecordingRequired)
 		_ = writePrelude(stream, proofReplyMsg{Status: statusLost})
 		e.endWith(CloseRecordingRequired)
@@ -624,13 +664,6 @@ func (s *Server) mark(e *resumable, label string) {
 	s.mu.Unlock()
 	if c != nil {
 		c.markRecordings(label)
-	}
-}
-
-// serveStream installs a first connect's stream as e's stream and runs it.
-func (s *Server) serveStream(e *resumable, stream net.Conn, peerReceived uint64) {
-	if run, _ := e.rc.Install(stream, peerReceived); run != nil {
-		s.runStream(e, run)
 	}
 }
 
@@ -747,8 +780,9 @@ func (s *Server) addConn(e *resumable, h *handler) bool {
 
 // beginResume claims handle's connection for one resume and holds it
 // (release): statusLost when it is gone, statusBusy while another resume
-// holds the claim, statusRefused during Shutdown.
-func (s *Server) beginResume(handle string) (*resumable, uint32) {
+// holds the claim, statusRefused during Shutdown. A claim ends h's
+// handshake count.
+func (s *Server) beginResume(h *handler, handle string) (*resumable, uint32) {
 	s.mu.Lock()
 	e := s.conns[handle]
 	switch {
@@ -772,6 +806,7 @@ func (s *Server) beginResume(handle string) (*resumable, uint32) {
 	}
 	e.resuming = true
 	e.holdLocked()
+	s.endCountLocked(h)
 	s.mu.Unlock()
 	return e, statusOK
 }
@@ -801,7 +836,7 @@ func (s *Server) proofFailed(e *resumable) int {
 // serveConn runs one connection: the SSH handshake on its ResumableConn,
 // bounded by handshakeTimeout, then run. It owns the session slot serveNew
 // took and removes the connection when it ends.
-func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64, admitted *ssh.Certificate) {
+func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64, admitted *ssh.Certificate, clientAddr string) {
 	defer s.releaseSlot()
 	defer s.removeConn(e, h)
 	defer func() {
@@ -830,7 +865,7 @@ func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64,
 		return
 	}
 	defer conn.Close()
-	s.run(h, conn, chans, reqs, admissionOf(conn.Permissions), uuidText(id), secret.password, e)
+	s.run(h, conn, chans, reqs, &connAdmission{admission: admissionOf(conn.Permissions), sessionID: uuidText(id), clientAddr: clientAddr}, secret.password, e)
 }
 
 // removeConn forgets an ended connection: no resume finds it, its detach
@@ -1104,15 +1139,46 @@ func (s *Server) kindEnabled(kind string) bool {
 	return false
 }
 
-func (s *Server) register(h *handler) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.handlers[h] = struct{}{}
+// logMessages logs the PAM messages of a session setup for login, quoted.
+func (s *Server) logMessages(login string, msgs []string) {
+	for _, m := range msgs {
+		s.log("session: PAM message for %q: %q", login, m)
+	}
 }
 
+// register adds a Serve call's handler and counts its handshake. With
+// maxHandshakes counted it refuses h; logIt is true at most once a second.
+func (s *Server) register(h *handler) (ok, logIt bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handshakes >= maxHandshakes {
+		now := s.cfg.clock.Now()
+		if now.Sub(s.capLogged) < time.Second {
+			return false, false
+		}
+		s.capLogged = now
+		return false, true
+	}
+	s.handshakes++
+	h.counted = true
+	s.handlers[h] = struct{}{}
+	return true, false
+}
+
+// endCountLocked ends h's handshake count, if it holds one, under s.mu.
+func (s *Server) endCountLocked(h *handler) {
+	if h.counted {
+		h.counted = false
+		s.handshakes--
+	}
+}
+
+// unregister removes a handler; a Serve call that ends before its handshake
+// decision ends its count here.
 func (s *Server) unregister(h *handler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.endCountLocked(h)
 	delete(s.handlers, h)
 	if len(s.handlers) == 0 && s.drained != nil {
 		close(s.drained)
@@ -1134,7 +1200,7 @@ func (s *Server) endHandshake(h *handler) bool {
 }
 
 // takeSlot takes one of the maxSessions slots unless Shutdown is running or
-// has stopped h.
+// has stopped h. A slot taken ends h's handshake count.
 func (s *Server) takeSlot(h *handler) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1142,6 +1208,7 @@ func (s *Server) takeSlot(h *handler) bool {
 		return false
 	}
 	s.sessions++
+	s.endCountLocked(h)
 	return true
 }
 
@@ -1237,7 +1304,7 @@ type conn struct {
 	channels map[*channel]struct{}
 	// desktop is a desktop connection's one channel once its open began.
 	desktop *desktopChannel
-	// allClosed receives once when a terminal connection's channel closed,
+	// allClosed receives once when a terminal or files connection's last channel closed,
 	// or a desktop connection's channel ended or was refused.
 	allClosed chan struct{}
 }
@@ -1248,6 +1315,9 @@ type conn struct {
 type connAdmission struct {
 	*admission
 	sessionID string
+	// clientAddr is the client's `ip:port` from the stream's notice, empty
+	// when unknown; every launcher request of the connection carries it.
+	clientAddr string
 	// recordedStarts counts the recorded starts under this stream, each counted
 	// before it is attempted; a resume's admission counts from zero.
 	recordedStarts atomic.Int32
@@ -1303,14 +1373,15 @@ func (c *conn) fail(reason string) {
 }
 
 // run serves an admitted connection until its first recorded end: the client
-// closing it, the idle timeout, a Shutdown, the channel of a terminal or
-// desktop connection closing (a failed Strict recording ends its own channel), or a
+// closing it, the idle timeout, a Shutdown, the last channel of a terminal or
+// files connection or a desktop connection's channel closing (a failed Strict
+// recording ends its own channel), or a
 // failed Strict forwards recording, or an end e queues (detach timeout, a
-// resume refused or lost). It then writes the reason to every open channel's
-// stderr (a detached conn is dropped first, so nothing waits for a stream),
-// ends the forwards, closes the connection and joins the channels and
-// forwards.
-func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request, adm *admission, sessionID string, password []byte, e *resumable) {
+// resume refused or lost). It then ends the forwards, writes the reason to
+// every open channel's stderr (a detached conn is dropped first, so nothing
+// waits for a stream; the writes are bounded by endWriteTimeout), closes the
+// connection and joins the channels and forwards.
+func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request, adm *connAdmission, password []byte, e *resumable) {
 	c := &conn{s: s, login: sc.User(), password: password,
 		channels: map[*channel]struct{}{}, allClosed: make(chan struct{}, 1), failed: make(chan string, 1)}
 	var wg sync.WaitGroup
@@ -1320,7 +1391,7 @@ func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel
 		// A resume installed before the SSH handshake ended.
 		c.adm.Store(e.admitted)
 	} else {
-		c.adm.Store(&connAdmission{admission: adm, sessionID: sessionID})
+		c.adm.Store(adm)
 	}
 	e.conn = c
 	s.mu.Unlock()
@@ -1380,17 +1451,21 @@ wait:
 	if hook := onConnEnd.Load(); hook != nil {
 		(*hook)(reason)
 	}
-	c.end(reason)
+	ended := c.end(reason)
 	_ = sc.Close()
+	<-ended
 	wg.Wait()
 	// After every forward recorded its close.
 	c.fwd.finish()
 }
 
-// end decides the connection's end and ends every open channel, telling the
-// client why when there is a reason: on a session channel's stderr, on a
-// desktop channel by end@localport.io.
-func (c *conn) end(reason string) {
+// end decides the connection's end, ends the forwards and ends every open
+// channel, telling the client why when there is a reason: on a session
+// channel's stderr, on a desktop channel by end@localport.io. It waits at
+// most endWriteTimeout for those writes, which a client that stopped reading
+// blocks; the caller then closes the connection, which fails a write still
+// waiting, and receives from the returned channel once every write is done.
+func (c *conn) end(reason string) <-chan struct{} {
 	c.mu.Lock()
 	c.ended = true
 	open := make([]*channel, 0, len(c.channels))
@@ -1398,11 +1473,24 @@ func (c *conn) end(reason string) {
 		open = append(open, ch)
 	}
 	c.mu.Unlock()
-	for _, ch := range open {
-		ch.end(reason)
-	}
-	c.endDesktop(reason)
 	c.fwd.end()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+		for _, ch := range open {
+			wg.Go(func() { ch.end(reason) })
+		}
+		wg.Go(func() { c.endDesktop(reason) })
+		wg.Wait()
+	}()
+	bound := time.NewTimer(endWriteTimeout)
+	defer bound.Stop()
+	select {
+	case <-done:
+	case <-bound.C:
+	}
+	return done
 }
 
 // markRecordings queues a marker on every open recording of the connection:

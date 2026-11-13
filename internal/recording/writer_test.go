@@ -150,6 +150,15 @@ func TestWriterResizeAndExit(t *testing.T) {
 	}
 }
 
+// A Windows status above MaxInt32 (0xC0000005) is recorded unsigned.
+func TestWriterExitFullUint32(t *testing.T) {
+	w := NewWriter(testStart, 80, 24)
+	lines := w.Exit(testStart, 3221225477)
+	if _, code, data := parseEvent(t, lines[0]); code != "x" || data != "3221225477" {
+		t.Fatalf("exit = %q %q, want x 3221225477", code, data)
+	}
+}
+
 func TestWriterSplitsLongOutput(t *testing.T) {
 	w := NewWriter(testStart, 80, 24)
 	// Control bytes expand sixfold in JSON, so 150 Ki of them needs many events.

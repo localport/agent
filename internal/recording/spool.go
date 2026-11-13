@@ -29,7 +29,7 @@ const (
 	// segment write is refused while less is available.
 	MinFreeSpace = 64 << 20
 
-	// PolicyBestEffort and PolicyStrict are the recording policies a ticket's
+	// PolicyBestEffort and PolicyStrict are the recording policies a session certificate's
 	// rec carries.
 	PolicyBestEffort = "best_effort"
 	PolicyStrict     = "strict"
@@ -74,7 +74,7 @@ type Meta struct {
 	// SessionID is the session id of the connection the recording belongs to
 	// (the edge's notice); a connection has one recording per session channel, plus one for its port forwards.
 	SessionID string `json:"session_id"`
-	// Identifier is the local device identity the ticket was for. The
+	// Identifier is the local device identity the session certificate was for. The
 	// uploader keys the device's session mux on it.
 	Identifier string `json:"identifier"`
 	// LastAcceptedAt is the session start, then the time of each segment the
@@ -104,6 +104,10 @@ type Meta struct {
 	// Channels is the cumulative channel count the open of a live start
 	// carries (Client.Open). It is never stored: a resumed open carries none.
 	Channels int32 `json:"-"`
+	// ObjectVersion is the segment object version of the entry's segments,
+	// written as ObjectVersion by every meta write. An entry read with
+	// another (absent before version 2) is dropped by the start-up scan.
+	ObjectVersion int `json:"object_version"`
 }
 
 // Chain returns the chain value over all Sealed segments.
@@ -120,6 +124,8 @@ func (m *Meta) Chain() []byte {
 
 func (m *Meta) validate() error {
 	switch {
+	case m.ObjectVersion != ObjectVersion:
+		return fmt.Errorf("%w: segment object version %d, want %d", ErrMeta, m.ObjectVersion, ObjectVersion)
 	case !validID(m.ID):
 		return fmt.Errorf("%w: id %q is not a canonical UUID", ErrMeta, m.ID)
 	case !validID(m.SessionID):
@@ -434,6 +440,7 @@ func (s *Spool) WriteMeta(m Meta) error {
 }
 
 func marshalMeta(m Meta) ([]byte, error) {
+	m.ObjectVersion = ObjectVersion
 	if err := m.validate(); err != nil {
 		return nil, err
 	}

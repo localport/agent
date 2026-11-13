@@ -88,12 +88,12 @@ func (w *Writer) Resize(at time.Time, cols, rows uint16) []byte {
 
 // Exit returns the held partial sequence line, if any, and the "x" line for
 // a shell that exited with status.
-func (w *Writer) Exit(at time.Time, status int) [][]byte {
+func (w *Writer) Exit(at time.Time, status uint32) [][]byte {
 	var lines [][]byte
 	if l := w.Flush(at); l != nil {
 		lines = append(lines, l)
 	}
-	return append(lines, eventLine(w.interval(at), 'x', jsonString(strconv.AppendInt(nil, int64(status), 10))))
+	return append(lines, eventLine(w.interval(at), 'x', jsonString(strconv.AppendUint(nil, uint64(status), 10))))
 }
 
 // File returns the "f" line of one files-log event at at: an asciicast v3

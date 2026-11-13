@@ -277,7 +277,7 @@ func (f *sshFixture) serveStream(t *testing.T, serial uint64) net.Conn {
 	go func() {
 		defer close(done)
 		defer srvSide.Close()
-		f.srv.Serve(srvSide, streamID(serial), serial)
+		f.srv.Serve(srvSide, streamID(serial), serial, f.clientAddr)
 	}()
 	t.Cleanup(func() {
 		_ = cliSide.Close()
@@ -376,6 +376,34 @@ func TestResumeContinuesTheConnection(t *testing.T) {
 	if err := rc.resume(t, nil); err != nil || !rc.alive() {
 		t.Fatalf("second resume: %v", err)
 	}
+}
+
+// A resume's client address replaces the first connect's for the requests
+// made after it.
+func TestResumeReplacesTheClientAddr(t *testing.T) {
+	f := newSSHFixture(t, nil)
+	f.clientAddr = "203.0.113.9:40022"
+	o := f.defaults()
+	o.kind = "ssh"
+	rc := f.connectResumableAs(t, o)
+	run := func(want string) {
+		t.Helper()
+		sess, err := rc.client.NewSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = sess.Run("ls")
+		if got := f.launcher.lastRequest(t).ClientAddr; got != want {
+			t.Fatalf("launcher request ClientAddr %q, want %q", got, want)
+		}
+	}
+	run("203.0.113.9:40022")
+	rc.cut(t)
+	f.clientAddr = "198.51.100.4:51000"
+	if err := rc.resume(t, func(o *certOpts) { o.kind = "ssh" }); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	run("198.51.100.4:51000")
 }
 
 func TestResumeRefusals(t *testing.T) {
@@ -574,7 +602,7 @@ func TestARunningResumeHoldsTheDetachTimer(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got, status := f.srv.beginResume(e.handle); got != e || status != statusOK {
+	if got, status := f.srv.beginResume(&handler{}, e.handle); got != e || status != statusOK {
 		t.Fatalf("beginResume = %v, %d", got, status)
 	}
 	clock.fireDetach()
@@ -624,7 +652,7 @@ func TestATakenOverResumeLeavesTheNextResumesClaim(t *testing.T) {
 	go func() {
 		defer close(served)
 		defer srvSide.Close()
-		f.srv.Serve(srvSide, [16]byte{0x01, 0x9c}, 77)
+		f.srv.Serve(srvSide, [16]byte{0x01, 0x9c}, 77, "")
 	}()
 	t.Cleanup(func() { _ = cliSide.Close() })
 	pos, err := rc.cr.Resume(cliSide, signer)
@@ -666,7 +694,7 @@ func TestAResumeKeepsItsClaimUntilItsStreamIsInstalled(t *testing.T) {
 	var second atomic.Uint32
 	second.Store(99)
 	hook := func(e *resumable) {
-		_, status := f.srv.beginResume(e.handle)
+		_, status := f.srv.beginResume(&handler{}, e.handle)
 		second.Store(status)
 	}
 	afterResumeInstall.Store(&hook)
@@ -864,7 +892,7 @@ func TestADeadlinePassedDuringAnAttemptEndsTheConnectionAfterIt(t *testing.T) {
 	rc.cut(t)
 	e := onlyConn(t, f.srv)
 	onlyDeadline(t, f.srv, e)
-	if _, status := f.srv.beginResume(e.handle); status != statusOK {
+	if _, status := f.srv.beginResume(&handler{}, e.handle); status != statusOK {
 		t.Fatalf("beginResume = %d", status)
 	}
 	clock.advance(detachTimeout + time.Second)
@@ -874,7 +902,7 @@ func TestADeadlinePassedDuringAnAttemptEndsTheConnectionAfterIt(t *testing.T) {
 		t.Fatal("the deadline expired the connection while an attempt ran")
 	}
 	// A second resume during the attempt is busy.
-	if _, status := f.srv.beginResume(e.handle); status != statusBusy {
+	if _, status := f.srv.beginResume(&handler{}, e.handle); status != statusBusy {
 		t.Fatalf("a second resume during the attempt = %d, want busy", status)
 	}
 	f.srv.endAttempt(e, true)

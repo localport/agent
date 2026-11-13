@@ -2,6 +2,7 @@ package recording
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -42,6 +43,7 @@ func testMeta(id string) Meta {
 		WrappedDEK:     bytes.Repeat([]byte{1}, 100),
 		KeySHA256:      bytes.Repeat([]byte{0xaa}, 32),
 		Policy:         PolicyBestEffort,
+		ObjectVersion:  ObjectVersion,
 	}
 }
 
@@ -360,6 +362,50 @@ func TestSpoolScanDropsCorruptEntries(t *testing.T) {
 	}
 	if _, scan := openTestSpool(t, dir); len(scan.Dropped)+len(scan.Entries) != 0 {
 		t.Errorf("third scan = %+v, want nothing left", scan)
+	}
+}
+
+// An entry spooled before segment object version 2 (no object_version, or
+// another version) is dropped by the scan; its segments no reader accepts.
+func TestSpoolScanDropsOtherObjectVersions(t *testing.T) {
+	for name, edit := range map[string]func(map[string]any){
+		"absent":    func(m map[string]any) { delete(m, "object_version") },
+		"version 1": func(m map[string]any) { m["object_version"] = 1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := spoolDir(t)
+			s, _ := openTestSpool(t, dir)
+			if err := s.CreateEntry(testMeta(spoolID1)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CreateEntry(testMeta(spoolID2)); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, spoolID1, "meta.json")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil || m["object_version"] != float64(ObjectVersion) {
+				t.Fatalf("meta.json object_version %v, %v; want %d", m["object_version"], err, ObjectVersion)
+			}
+			edit(m)
+			if raw, err = json.Marshal(m); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, scan := openTestSpool(t, dir)
+			if len(scan.Entries) != 1 || scan.Entries[0].Meta.ID != spoolID2 {
+				t.Fatalf("entries = %+v, want only the current entry", scan.Entries)
+			}
+			if len(scan.Dropped) != 1 || scan.Dropped[0].ID != spoolID1 || !errors.Is(scan.Dropped[0].Err, ErrMeta) {
+				t.Fatalf("dropped = %+v, want the old entry", scan.Dropped)
+			}
+		})
 	}
 }
 

@@ -264,8 +264,8 @@ func (t *Tunnel) serveMux(conn net.Conn) {
 		Protocols: &protocols,
 		HTTP2: &http.HTTP2Config{
 			MaxConcurrentStreams: maxConcurrentDataConns,
-			// The edge's HTTP/2 client holds a request-body buffer of this size
-			// for every open stream (golang/go#79831), so keep it at the minimum.
+			// The minimum: a Go HTTP/2 client peer holds a request-body buffer
+			// of this size for every open stream (golang/go#79831).
 			MaxReadFrameSize:              muxMaxReadFrameSize,
 			MaxReceiveBufferPerConnection: muxUploadBufferPerConnection,
 			MaxReceiveBufferPerStream:     muxUploadBufferPerStream,

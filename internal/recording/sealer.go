@@ -11,6 +11,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
+	"math/bits"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -18,13 +20,14 @@ import (
 
 const (
 	// ObjectVersion is the first byte of every segment object.
-	ObjectVersion = 1
-	// CodecNone and CodecDeflate are the second byte: the plaintext as is,
-	// or raw deflate of it.
+	ObjectVersion = 2
+	// CodecNone and CodecDeflate are the second byte: the payload is the
+	// plaintext as is, or raw deflate of it.
 	CodecNone    = 0
 	CodecDeflate = 1
-	// MaxObject bounds one segment object: version, codec, plaintext, tag.
-	MaxObject = 2 + MaxPlaintext + chacha20poly1305.Overhead
+	// MaxObject bounds one segment object: version, codec, the padded
+	// payload of a MaxPlaintext payload (padme(4 + MaxPlaintext)), tag.
+	MaxObject = 270354
 	// IDLen is the length of a recording id, a canonical UUID in text form.
 	IDLen = 36
 
@@ -44,12 +47,17 @@ var (
 	ErrPlaintextSize = errors.New("recording: segment plaintext too large")
 	// ErrID is returned by NewSealer for an id that is not IDLen bytes.
 	ErrID = errors.New("recording: id is not a 36-character UUID")
+	// ErrSegmentCount is returned by Seal once math.MaxUint32 segments were
+	// sealed, where the next index would wrap.
+	ErrSegmentCount = errors.New("recording: segment index exhausted")
 )
 
 // Segment is one sealed segment.
 type Segment struct {
 	Index uint32
-	// Object is version || codec || ciphertext, the body of the segment PUT.
+	// Object is version || codec || AEAD(padded payload), the body of the
+	// segment PUT; the padded payload is the payload's length (4 bytes BE),
+	// the payload, then zeros to padme(4 + payload length) bytes.
 	Object []byte
 	// Hash is SHA-256(Object), h_i of the chain.
 	Hash  [sha256.Size]byte
@@ -66,6 +74,9 @@ type Sealer struct {
 	keySHA256  [sha256.Size]byte
 	next       uint32
 	chain      []byte
+	// zw and deflated are the reused compressor and its output.
+	zw       *flate.Writer
+	deflated bytes.Buffer
 }
 
 // NewSealer generates a DEK for recording id and wraps it with HPKE
@@ -108,9 +119,9 @@ func (s *Sealer) Sealed() uint32 { return s.next }
 // none was sealed.
 func (s *Sealer) FinalHash() []byte { return bytes.Clone(s.chain) }
 
-// Seal compresses and encrypts plaintext as the next segment. final marks
-// the recording's last segment: it is bound into the AAD, the DEK is zeroed
-// after it, and every later call returns ErrSealed.
+// Seal compresses, pads and encrypts plaintext as the next segment. final
+// marks the recording's last segment: it is bound into the AAD, the DEK is
+// zeroed after it, and every later call returns ErrSealed.
 func (s *Sealer) Seal(plaintext []byte, final bool) (Segment, error) {
 	if s.dek == nil {
 		return Segment{}, ErrSealed
@@ -118,7 +129,10 @@ func (s *Sealer) Seal(plaintext []byte, final bool) (Segment, error) {
 	if len(plaintext) > MaxPlaintext {
 		return Segment{}, ErrPlaintextSize
 	}
-	codec, payload, err := compress(plaintext)
+	if s.next == math.MaxUint32 {
+		return Segment{}, ErrSegmentCount
+	}
+	codec, payload, err := s.compress(plaintext)
 	if err != nil {
 		return Segment{}, err
 	}
@@ -126,10 +140,15 @@ func (s *Sealer) Seal(plaintext []byte, final bool) (Segment, error) {
 	if err != nil {
 		return Segment{}, fmt.Errorf("recording: cipher: %w", err)
 	}
-	index := s.next
-	obj := make([]byte, 2, 2+len(payload)+aead.Overhead())
+	// The padded payload is built in the object's buffer and sealed in place
+	// (the AEAD allows exact overlap): length, payload, zeros.
+	n := padme(4 + len(payload))
+	obj := make([]byte, 2+n, 2+n+aead.Overhead())
 	obj[0], obj[1] = ObjectVersion, codec
-	obj = aead.Seal(obj, segmentNonce(index), payload, segmentAAD(s.id, index, final, codec))
+	binary.BigEndian.PutUint32(obj[2:], uint32(len(payload)))
+	copy(obj[6:], payload)
+	index := s.next
+	obj = aead.Seal(obj[:2], segmentNonce(index), obj[2:2+n], segmentAAD(s.id, index, final, codec))
 	seg := Segment{Index: index, Object: obj, Hash: sha256.Sum256(obj), Final: final}
 	s.chain = ChainStep(s.chain, seg.Hash)
 	s.next++
@@ -144,26 +163,45 @@ func (s *Sealer) Seal(plaintext []byte, final bool) (Segment, error) {
 func (s *Sealer) Discard() {
 	clear(s.dek)
 	s.dek = nil
+	// The compressor's window holds recent plaintext.
+	s.zw, s.deflated = nil, bytes.Buffer{}
 }
 
-// compress returns raw deflate of plaintext at level 6 from a fresh
-// compressor, or plaintext with CodecNone when deflate is not smaller.
-func compress(plaintext []byte) (byte, []byte, error) {
-	var buf bytes.Buffer
-	zw, err := flate.NewWriter(&buf, deflateLevel)
-	if err != nil {
+// compress returns raw deflate of plaintext at level 6, or plaintext with
+// CodecNone when deflate is not smaller. The deflate output is valid until
+// the next call.
+func (s *Sealer) compress(plaintext []byte) (byte, []byte, error) {
+	s.deflated.Reset()
+	if s.zw == nil {
+		zw, err := flate.NewWriter(&s.deflated, deflateLevel)
+		if err != nil {
+			return 0, nil, fmt.Errorf("recording: deflate: %w", err)
+		}
+		s.zw = zw
+	} else {
+		s.zw.Reset(&s.deflated)
+	}
+	if _, err := s.zw.Write(plaintext); err != nil {
 		return 0, nil, fmt.Errorf("recording: deflate: %w", err)
 	}
-	if _, err := zw.Write(plaintext); err != nil {
+	if err := s.zw.Close(); err != nil {
 		return 0, nil, fmt.Errorf("recording: deflate: %w", err)
 	}
-	if err := zw.Close(); err != nil {
-		return 0, nil, fmt.Errorf("recording: deflate: %w", err)
-	}
-	if buf.Len() >= len(plaintext) {
+	if s.deflated.Len() >= len(plaintext) {
 		return CodecNone, plaintext, nil
 	}
-	return CodecDeflate, buf.Bytes(), nil
+	return CodecDeflate, s.deflated.Bytes(), nil
+}
+
+// padme returns the padded length of an n-byte message (n >= 2): n rounded
+// up so that at most floor(log2(log2 n)) + 1 bits of it are significant,
+// at most 12% overhead (Nikitin et al., "Reducing Metadata Leakage from
+// Encrypted Files and Communication with PURBs", 2019).
+func padme(n int) int {
+	e := bits.Len(uint(n)) - 1 // floor(log2 n)
+	s := bits.Len(uint(e))     // floor(log2 e) + 1
+	mask := 1<<(e-s) - 1
+	return (n + mask) &^ mask
 }
 
 // segmentNonce is the segment index as a 96-bit big-endian integer.

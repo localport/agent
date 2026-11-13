@@ -3,6 +3,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -11,12 +12,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/localport/agent/internal/launcher"
+	"github.com/localport/agent/internal/recording"
 	"github.com/localport/agent/internal/sessionhelper"
 )
 
@@ -104,6 +107,8 @@ func socketDir(t *testing.T) string {
 // connection, started at the first forward.
 func TestLocalForward(t *testing.T) {
 	f := forwardFixture(t, nil)
+	f.clientAddr = "[2001:db8::7]:5022"
+	f.launcher.messages = []string{"pam\x1b[2J"}
 	tcp := echoServer(t, "tcp", "127.0.0.1:0")
 	sock := filepath.Join(socketDir(t), "e.sock")
 	echoServer(t, "unix", sock)
@@ -126,9 +131,11 @@ func TestLocalForward(t *testing.T) {
 		t.Fatalf("forward helpers started: %d, want 1", n)
 	}
 	r := f.launcher.lastRequest(t)
-	if r.Login != testLogin || r.Device != "client.device" || r.Cols != 0 || len(r.Env) != 0 {
+	if r.Login != testLogin || r.Device != "client.device" || r.Cols != 0 || len(r.Env) != 0 || r.ClientAddr != f.clientAddr {
 		t.Fatalf("forward request %+v", r)
 	}
+	// A forward has no stderr: PAM's messages go to the log, escaped.
+	waitEvent(t, f.events, `session: PAM message for "`+testLogin+`": "pam\x1b[2J"`)
 	// A refused target answers the channel open with connection failed.
 	closed, _ := net.Listen("tcp", "127.0.0.1:0")
 	addr := closed.Addr().String()
@@ -354,6 +361,99 @@ func TestForwardTrafficIsActivity(t *testing.T) {
 
 // A recorded connection's forwards go to one forwards recording: an open and
 // a close with the bytes each way, never the bytes themselves.
+// stalledHandoff blocks every segment handoff until release is closed.
+type stalledHandoff struct {
+	recordingHandoff
+	release <-chan struct{}
+}
+
+func (h stalledHandoff) Segment(seg recording.Segment) error {
+	<-h.release
+	return h.recordingHandoff.Segment(seg)
+}
+
+// pausedReads is a client conn whose reads block once pause is set, as a
+// client whose network stopped; release unblocks them.
+type pausedReads struct {
+	net.Conn
+	pause   *atomic.Bool
+	release <-chan struct{}
+}
+
+func (c pausedReads) Read(p []byte) (int, error) {
+	if c.pause.Load() {
+		<-c.release
+	}
+	return c.Conn.Read(p)
+}
+
+// The worst case of a connection's end on Shutdown: a client whose network
+// stopped (the end writes and then the close flush run out) with a channel
+// recording and a forwards recording whose handoffs never return. The bounds
+// run in turn, so Shutdown takes their sum and no more; the session mux's
+// sessionShutdownTimeout is set from the same sum at production values.
+func TestShutdownWorstCaseIsTheSumOfTheEndBounds(t *testing.T) {
+	oldWrite, oldRec, oldFlush := endWriteTimeout, recorderEndTimeout, closeFlushTimeout
+	endWriteTimeout, recorderEndTimeout, closeFlushTimeout = 100*time.Millisecond, 200*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { endWriteTimeout, recorderEndTimeout, closeFlushTimeout = oldWrite, oldRec, oldFlush })
+	sum := endWriteTimeout + 2*recorderEndTimeout + closeFlushTimeout
+
+	client := &captureClient{opens: make(chan capturedOpen, 3)}
+	f, keySum, _ := recordingFixture(t, client)
+	f.cfg.Capabilities = []string{"terminal", "forwarding"}
+	f.srv = NewServer(*f.cfg)
+	serveForwards(t, f.launcher)
+	release := make(chan struct{})
+	wrap := func(h recordingHandoff) recordingHandoff { return stalledHandoff{h, release} }
+	wrapRecordingHandoff.Store(&wrap)
+	var paused atomic.Bool
+	f.clientConn = func(c net.Conn) net.Conn { return pausedReads{c, &paused, release} }
+	t.Cleanup(func() { wrapRecordingHandoff.Store(nil) })
+	// Deferred, so it runs before every cleanup (the client closes, the
+	// fixture's Shutdown and uploader stop): the stalled recorders and
+	// client reads continue.
+	defer close(release)
+
+	tcp := echoServer(t, "tcp", "127.0.0.1:0")
+	o := f.forwardOpts(true, false)
+	o.rec = &certRec{Policy: RecPolicyBestEffort, PubSHA256: keySum}
+	c := f.connect(t, o)
+	fc, err := c.Dial("tcp", tcp.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pingPong(t, fc)
+	// A quiet channel: its recording hands off only its final segment, which
+	// stalls. A flooding one fills every buffer once the client stops reading.
+	for _, cmd := range []string{"hold", "flood"} {
+		sess, _ := c.NewSession()
+		_, _ = sess.StdoutPipe()
+		if err := sess.Start(cmd); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 3 {
+		select {
+		case <-client.opens:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the channel and forwards recordings did not all open")
+		}
+	}
+	paused.Store(true)
+	time.Sleep(500 * time.Millisecond) // the flood fills the socket and send buffers
+
+	ctx, cancel := context.WithTimeout(context.Background(), sum+2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := f.srv.ShutdownConfigChanged(ctx); err != nil {
+		t.Fatalf("Shutdown = %v after %v, want it within the sum of the end bounds (%v)", err, time.Since(start), sum)
+	}
+	// Each bound ran out in turn: the stalls are real and sequential.
+	if took := time.Since(start); took < sum {
+		t.Fatalf("Shutdown took %v, under the %v sum: a bound did not run out", took, sum)
+	}
+}
+
 func TestForwardRecordingEvents(t *testing.T) {
 	client := &captureClient{opens: make(chan capturedOpen, 2)}
 	f, keySum, _ := recordingFixture(t, client)

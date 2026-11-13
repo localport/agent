@@ -762,8 +762,8 @@ type scmHandler struct {
 const startWaitHint = 15 * time.Second
 
 // stopWaitHint is the STOP_PENDING wait hint. It covers the session shutdown
-// bound (10 s) and the tunnel stop that follows.
-const stopWaitHint = 20 * time.Second
+// bound (15 s) and the tunnel stop that follows.
+const stopWaitHint = 25 * time.Second
 
 func (h *scmHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
 	pending := svc.Status{State: svc.StartPending, WaitHint: uint32(startWaitHint / time.Millisecond)}

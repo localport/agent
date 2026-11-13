@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"slices"
 	"sync"
@@ -28,9 +29,12 @@ import (
 // Serve runs on its own goroutine per stream and must return once the stream
 // fails. id is the stream's session id from the edge's notice (the bytes of
 // the UUID its access row carries and the recordings of channels opened on
-// it name) and serial the serial of
-// the SSH user certificate the edge admitted for it. The session mux closes
-// stream after Serve returns. Shutdown ends the
+// it name), serial the serial of the SSH user certificate the edge admitted
+// for it, and clientAddr the client's `ip:port` as the edge saw it, empty
+// when the edge did not report one. Serve reports refusedUnread when it
+// closed the stream without reading or writing it. The session mux closes
+// stream after Serve returns, first delivering what Serve wrote unless it
+// refused the stream unread. Shutdown ends the
 // sessions the handler holds when it is called and must return once ctx ends.
 // It is not terminal: Serve may be called again after Shutdown returns, for
 // the next control session. No stream of the stopping
@@ -43,7 +47,7 @@ import (
 // RecordingClientUp is called each time the mux publishes the recording
 // client of a new conn; it must not block.
 type SessionHandler interface {
-	Serve(stream net.Conn, id [16]byte, serial uint64)
+	Serve(stream net.Conn, id [16]byte, serial uint64, clientAddr string) (refusedUnread bool)
 	Shutdown(ctx context.Context) error
 	LiveSessions() int
 	RecordingClientUp()
@@ -58,9 +62,12 @@ const (
 	// sessionIDHeader carries the hex session id a session stream answers.
 	sessionIDHeader = "Localport-Session-Id"
 	sessionIDLen    = 16
-	// sessionNoticeLen is a notice body: the session id, then the admitted
-	// certificate serial as uint64 big-endian.
-	sessionNoticeLen = sessionIDLen + 8
+	// A notice body is the session id, the admitted certificate serial as
+	// uint64 big-endian, a one-byte address length and that many bytes of
+	// the client's `ip:port` (0 when unknown).
+	sessionNoticeMinLen = sessionIDLen + 8 + 1
+	maxNoticeAddrLen    = 64
+	sessionNoticeMaxLen = sessionNoticeMinLen + maxNoticeAddrLen
 	// sessionMuxAuthority is the :authority of every request. The mux conn
 	// reaches exactly one edge, which does not route on it.
 	sessionMuxAuthority = "session-mux.invalid"
@@ -85,10 +92,12 @@ const (
 	sessionMuxPingInterval = 30 * time.Second
 	sessionMuxPingTimeout  = 15 * time.Second
 
-	// sessionShutdownTimeout bounds the handler's Shutdown when the mux stops:
-	// a session's 5 s kill window, which overlaps its 4 s close, then the 3 s
-	// bound on its recording's final handoff, plus margin for the reap.
-	sessionShutdownTimeout = 10 * time.Second
+	// sessionShutdownTimeout bounds the handler's Shutdown when the mux stops.
+	// A connection's end runs these bounds in turn: 2 s end writes, 3 s for
+	// its channel recordings' final handoff, 3 s for its forwards recording's,
+	// then the 5 s close flush (13 s; its helpers' 5 s kill delay overlaps),
+	// plus margin for the reap.
+	sessionShutdownTimeout = 15 * time.Second
 
 	sessionMuxBackoffBase = time.Second
 	sessionMuxBackoffCeil = 60 * time.Second
@@ -375,20 +384,22 @@ func (m *sessionMux) serve(conn net.Conn) (bool, error) {
 
 	slots := make(chan struct{}, maxSessionOpens)
 	var length [4]byte
-	var notice [sessionNoticeLen]byte
+	var buf [sessionNoticeMaxLen]byte
 	for {
 		if _, err := io.ReadFull(resp.Body, length[:]); err != nil {
 			return true, fmt.Errorf("session accept stream: %w", err)
 		}
-		if n := binary.BigEndian.Uint32(length[:]); n != sessionNoticeLen {
-			return true, fmt.Errorf("session accept stream: notice length %d, want %d", n, sessionNoticeLen)
+		n := binary.BigEndian.Uint32(length[:])
+		if n < sessionNoticeMinLen || n > sessionNoticeMaxLen {
+			return true, fmt.Errorf("session accept stream: notice length %d, want %d to %d", n, sessionNoticeMinLen, sessionNoticeMaxLen)
 		}
-		if _, err := io.ReadFull(resp.Body, notice[:]); err != nil {
+		if _, err := io.ReadFull(resp.Body, buf[:n]); err != nil {
 			return true, fmt.Errorf("session accept stream: %w", err)
 		}
-		var id [sessionIDLen]byte
-		copy(id[:], notice[:sessionIDLen])
-		serial := binary.BigEndian.Uint64(notice[sessionIDLen:])
+		id, serial, clientAddr, err := parseNotice(buf[:n])
+		if err != nil {
+			return true, fmt.Errorf("session accept stream: %w", err)
+		}
 		select {
 		case slots <- struct{}{}:
 		case <-connCtx.Done():
@@ -398,14 +409,35 @@ func (m *sessionMux) serve(conn net.Conn) (bool, error) {
 		go func() {
 			defer opens.Done()
 			defer func() { <-slots }()
-			m.openSession(connCtx, cc, conn, id, serial)
+			m.openSession(connCtx, cc, conn, id, serial, clientAddr)
 		}()
 	}
 }
 
+// parseNotice reads a notice body of sessionNoticeMinLen to
+// sessionNoticeMaxLen bytes. The address, when present, is `ip:port` with an
+// IP literal, no zone and a nonzero port, the rule of
+// launcher.ValidClientAddr (launcher imports this package).
+func parseNotice(b []byte) (id [sessionIDLen]byte, serial uint64, clientAddr string, err error) {
+	copy(id[:], b[:sessionIDLen])
+	serial = binary.BigEndian.Uint64(b[sessionIDLen:])
+	addr := b[sessionNoticeMinLen:]
+	if int(b[sessionNoticeMinLen-1]) != len(addr) {
+		return id, 0, "", fmt.Errorf("notice address length %d, %d bytes follow", b[sessionNoticeMinLen-1], len(addr))
+	}
+	if len(addr) == 0 {
+		return id, serial, "", nil
+	}
+	ap, perr := netip.ParseAddrPort(string(addr))
+	if perr != nil || ap.Addr().Zone() != "" || ap.Port() == 0 {
+		return id, 0, "", fmt.Errorf("notice address %q is not ip:port", addr)
+	}
+	return id, serial, string(addr), nil
+}
+
 // openSession opens the session stream for one notice and hands it to the
 // handler. The stream is always opened, so the edge sees every refusal on it.
-func (m *sessionMux) openSession(ctx context.Context, cc *http.ClientConn, conn net.Conn, id [sessionIDLen]byte, serial uint64) {
+func (m *sessionMux) openSession(ctx context.Context, cc *http.ClientConn, conn net.Conn, id [sessionIDLen]byte, serial uint64, clientAddr string) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	reqBody, bodyWriter := io.Pipe()
 	req, err := newSessionMuxRequest(streamCtx, http.MethodPost, sessionStreamPath, reqBody)
@@ -446,14 +478,14 @@ func (m *sessionMux) openSession(ctx context.Context, cc *http.ClientConn, conn 
 			slog.String("tunnel", m.label), slog.Int("status", resp.StatusCode))
 		return
 	}
-	if !m.handOver(stream, id, serial) {
+	if !m.handOver(stream, id, serial, clientAddr) {
 		_ = stream.Close()
 	}
 }
 
 // handOver starts Serve for stream unless stop has begun. The check and the
 // Add are one critical section with stop's, so run's Wait covers every Serve.
-func (m *sessionMux) handOver(stream net.Conn, id [sessionIDLen]byte, serial uint64) bool {
+func (m *sessionMux) handOver(stream net.Conn, id [sessionIDLen]byte, serial uint64, clientAddr string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopping {
@@ -463,8 +495,10 @@ func (m *sessionMux) handOver(stream net.Conn, id [sessionIDLen]byte, serial uin
 	go func() {
 		defer m.served.Done()
 		defer stream.Close()
-		m.handler.Serve(stream, id, serial)
-		flushSessionStream(stream)
+		// A stream refused unread has nothing to deliver; it closes at once.
+		if !m.handler.Serve(stream, id, serial, clientAddr) {
+			flushSessionStream(stream)
+		}
 	}()
 	return true
 }

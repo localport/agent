@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/proto"
@@ -52,6 +53,19 @@ const (
 	// the agent returns to the configured connect host. It covers an edge
 	// restart.
 	edgeFallbackAfter = 90 * time.Second
+)
+
+// Coded failures a tunnel reports to the user (OnError, OnDataClose, Run).
+// Each site wraps one with its detail; the cause stays in the chain.
+var (
+	ErrRegisterFailed    = errcode.New(errcode.RegisterFailed)
+	ErrUntrustedRedirect = errcode.New(errcode.UntrustedRedirect)
+	ErrTooManyRedirects  = errcode.New(errcode.TooManyRedirects)
+	ErrInboundLimit      = errcode.New(errcode.InboundLimit)
+	ErrDataDialFailed    = errcode.New(errcode.DataDialFailed)
+	ErrLocalDialFailed   = errcode.New(errcode.LocalDialFailed)
+	ErrPortRefused       = errcode.New(errcode.PortRefused)
+	ErrRelayFailed       = errcode.New(errcode.RelayFailed)
 )
 
 // edgeIdleTimeout is the longest the control connection may stay silent
@@ -199,8 +213,9 @@ type Options struct {
 	// and carries a renewed one from pending to current. Nil on a tunnel.
 	Credential DeviceCredential
 	// Capabilities, Logins and Desktop are what the device enabled locally,
-	// reported on Register. The agent enforces them; the API's session mint
-	// also refuses a kind whose capability or desktop protocol is not listed.
+	// reported on Register. The agent enforces them; the control plane also
+	// issues no session certificate for a kind whose capability or desktop
+	// protocol is not listed.
 	Capabilities []string
 	Logins       []string
 	Desktop      []string
@@ -401,23 +416,23 @@ func (t *Tunnel) dialTarget(port uint16) (net.Conn, int, error) {
 	if !t.IsDevice() {
 		conn, err := net.DialTimeout("tcp", t.opts.Local, dialTimeout)
 		if err != nil {
-			return nil, http.StatusBadGateway, fmt.Errorf("local dial %s: %w", t.opts.Local, err)
+			return nil, http.StatusBadGateway, fmt.Errorf("%w: %s: %w", ErrLocalDialFailed, t.opts.Local, err)
 		}
 		return conn, http.StatusOK, nil
 	}
 	if port == 0 {
-		return nil, http.StatusForbidden, errors.New("no port requested")
+		return nil, http.StatusForbidden, fmt.Errorf("%w: the edge named no port", ErrPortRefused)
 	}
 	if _, open := t.ports.Protocol(port); !open {
-		return nil, http.StatusForbidden, fmt.Errorf("port %d is not allowed on this device", port)
+		return nil, http.StatusForbidden, fmt.Errorf("%w: port %d is not in the device's port list", ErrPortRefused, port)
 	}
 	if !t.opts.AllowPorts.Allows(port) {
-		return nil, http.StatusForbidden, fmt.Errorf("port %d is outside this device's --allow-ports", port)
+		return nil, http.StatusForbidden, fmt.Errorf("%w: port %d is outside this device's --allow-ports", ErrPortRefused, port)
 	}
 	addr := net.JoinHostPort(t.opts.Host, strconv.Itoa(int(port)))
 	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err != nil {
-		return nil, http.StatusBadGateway, fmt.Errorf("local dial %s: %w", addr, err)
+		return nil, http.StatusBadGateway, fmt.Errorf("%w: %s: %w", ErrLocalDialFailed, addr, err)
 	}
 	return conn, http.StatusOK, nil
 }
@@ -712,7 +727,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 		}
 		if err := pc.SendRegister(reg); err != nil {
 			raw.Close()
-			return fmt.Errorf("send register: %w", err)
+			return fmt.Errorf("%w: send register: %w", ErrRegisterFailed, err)
 		}
 
 		_ = raw.SetReadDeadline(time.Now().Add(registrationTimeout))
@@ -720,7 +735,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 		_ = raw.SetReadDeadline(time.Time{})
 		if err != nil {
 			raw.Close()
-			return fmt.Errorf("register response: %w", err)
+			return fmt.Errorf("%w: register response: %w", ErrRegisterFailed, err)
 		}
 
 		switch msgType {
@@ -728,7 +743,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			ack, err := proto.ParseRegisterAck(body)
 			if err != nil {
 				raw.Close()
-				return fmt.Errorf("parse ack: %w", err)
+				return fmt.Errorf("%w: parse ack: %w", ErrRegisterFailed, err)
 			}
 			if !ack.Success {
 				raw.Close()
@@ -771,10 +786,10 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			rd, err := proto.ParseRedirect(body)
 			raw.Close()
 			if err != nil {
-				return fmt.Errorf("parse redirect: %w", err)
+				return fmt.Errorf("%w: parse redirect: %w", ErrRegisterFailed, err)
 			}
 			if !allowedRedirectHost(rd.EdgeAddr) {
-				return fmt.Errorf("refusing redirect to untrusted host %q", sanitizeDisplay(rd.EdgeAddr))
+				return fmt.Errorf("%w: %q", ErrUntrustedRedirect, sanitizeDisplay(rd.EdgeAddr))
 			}
 			if h := t.opts.Handler; h != nil {
 				h.OnRedirect(t.EventKey(), addr, rd.EdgeAddr)
@@ -787,14 +802,14 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			if ep != nil {
 				return fmt.Errorf("edge error [%s]: %s", ep.Code, ep.Message)
 			}
-			return errors.New("edge returned error")
+			return fmt.Errorf("%w: an unreadable edge error", ErrRegisterFailed)
 
 		default:
 			raw.Close()
-			return fmt.Errorf("unexpected message during register: %s", msgType)
+			return fmt.Errorf("%w: unexpected message %s", ErrRegisterFailed, msgType)
 		}
 	}
-	return fmt.Errorf("too many redirects (>%d)", maxRedirectHops)
+	return fmt.Errorf("%w: more than %d", ErrTooManyRedirects, maxRedirectHops)
 }
 
 // refused lets the device credential act on a non-retryable refusal of the
@@ -1007,7 +1022,7 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 		select {
 		case t.dataSlots <- struct{}{}:
 		default:
-			t.emitError(fmt.Errorf("refused an inbound connection: %d already in flight", maxConcurrentDataConns))
+			t.emitError(fmt.Errorf("%w: %d already in flight", ErrInboundLimit, maxConcurrentDataConns))
 			return
 		}
 
@@ -1216,7 +1231,7 @@ func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
 		}
 	}
 	if dialer == nil {
-		closeEvt(0, 0, errors.New("data dial: no transport selected (control connection not established)"))
+		closeEvt(0, 0, fmt.Errorf("%w: no control connection", ErrDataDialFailed))
 		return
 	}
 
@@ -1225,7 +1240,7 @@ func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
 	edge, err := dialer.Dial(dialCtx, host, port)
 	cancelDial()
 	if err != nil {
-		closeEvt(0, 0, fmt.Errorf("data dial (%s): %w", dialer.Kind(), err))
+		closeEvt(0, 0, fmt.Errorf("%w: %s: %w", ErrDataDialFailed, dialer.Kind(), err))
 		return
 	}
 	pc := proto.NewConn(edge)
@@ -1243,7 +1258,7 @@ func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
 	if err := pc.SendConnectionReady(&proto.ConnectionReadyPayload{ConnectionID: connID, Status: http.StatusOK}); err != nil {
 		local.Close()
 		edge.Close()
-		closeEvt(0, 0, err)
+		closeEvt(0, 0, fmt.Errorf("%w: connection ready: %w", ErrDataDialFailed, err))
 		return
 	}
 
@@ -1382,11 +1397,11 @@ func ignoreClosed(err error) error {
 }
 
 // firstCopyError returns the first error from either copy direction that is
-// not a normal close.
+// not a normal close, wrapped in ErrRelayFailed.
 func firstCopyError(errs ...error) error {
 	for _, err := range errs {
 		if e := ignoreClosed(err); e != nil {
-			return e
+			return fmt.Errorf("%w: %w", ErrRelayFailed, e)
 		}
 	}
 	return nil

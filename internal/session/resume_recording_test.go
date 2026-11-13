@@ -545,7 +545,7 @@ func TestAStreamReleaseUnderAResumeArmsNoTimer(t *testing.T) {
 	f := newSSHFixture(t, func(c *ServerConfig) { c.clock = &manualClock{} })
 	rc := f.connectResumable(t)
 	e := onlyConn(t, f.srv)
-	if got, status := f.srv.beginResume(e.handle); got != e || status != statusOK {
+	if got, status := f.srv.beginResume(&handler{}, e.handle); got != e || status != statusOK {
 		t.Fatalf("beginResume = %v, %d", got, status)
 	}
 	e.rc.Detach()
@@ -590,7 +590,7 @@ func TestEndAttemptIsOneCriticalSection(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if _, status := f.srv.beginResume(e.handle); status != statusOK {
+	if _, status := f.srv.beginResume(&handler{}, e.handle); status != statusOK {
 		t.Fatalf("beginResume = %d", status)
 	}
 	clock.advance(detachTimeout + time.Second)
@@ -598,7 +598,7 @@ func TestEndAttemptIsOneCriticalSection(t *testing.T) {
 	hook := func() {
 		afterAttemptClaimCleared.Store(nil)
 		go func() {
-			_, status := f.srv.beginResume(e.handle)
+			_, status := f.srv.beginResume(&handler{}, e.handle)
 			statuses <- status
 		}()
 		time.Sleep(50 * time.Millisecond)

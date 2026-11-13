@@ -16,8 +16,8 @@ import (
 )
 
 // Clipboard notices: the agent reports each clipboard transfer decision of a
-// desktop session to the edge, which stores it as an access-log row
-// (docs/PROTOCOL.md "Clipboard notices"). Notices queue per device and a
+// desktop session to the edge, which records it (docs/PROTOCOL.md "Clipboard
+// notices"). Notices queue per device and a
 // sender per device posts them in batches on the device's session mux, one
 // request at a time. Sending never blocks the desktop relay: a full queue
 // counts the decisions it could not take per session and reports the count

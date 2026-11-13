@@ -1,35 +1,35 @@
 {
   "description": "Recording 0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b sealed by agent/internal/recording; regenerate with go test ./internal/recording -run TestRecordingVectors -update",
   "id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
-  "dek": "98S8ooX3EoidxBkUEWV9cHmywCeW2fgJfBd85g3gLXA",
+  "dek": "1vx9xpunuI7RpPNDSSvOw8kcKg7MbliTsyVpBkXPmBM",
   "final_sealed": true,
-  "final_hash": "szHdZfa_K8nanqloEmcTMpsAoQGdpj1GwWWNzll5hvA",
+  "final_hash": "Qq1ZYl1jF_cIveNH5FF3t2iOywR8ZdXEplm9K8PDURQ",
   "segments": [
     {
       "index": 0,
       "final": false,
       "codec": 1,
-      "object": "AQEKMMSgvGZ-gzedfwr-CK584nwRlLOfg60oU7tlZI-NIJm167--2_QA3VEZGM5CJNSoloqefwaz6tMs_zZph-_BoLYKyn1As35lVqx6WDgN9lzQIZEFYsgA4Ogr3cob8vsbdeMab7dkwFsTy1nlCgIsKNbgtTPBuPfmEbrDnVfiWOXT86kXnka97-Qg-umq9Wh15isemhIVeaeImDQOx1nwiqo7fO44PkNqCatTZdZMA6sbdclD00VwIww2pDL_6WpMlv5VqKt5i0_EQyedRoAcKhDmcFldArVloEF6GAx1-ZOW",
-      "sha256": "s_lA2HNus2RwcrmFilE9_TfHEinOSKCTgk1vWnWa_M8",
-      "chain": "fd6QaAe0a5Pkv9wLD5LuxcAu0wmj7K_yaPBc-Nv4Kx8",
+      "object": "AgFlaFWLzqZHQ9EIXppXt3Cc-nxn27mcVGQE0tPfrf2r_YGvAUjPnOELxC2LSjLdihTr9EU7wrtDl_zjkdTVUn0gv4wr1MCT8LYi5S4DXw4VdJ--_DHlXB55IkyqNUVpC0E5USXmHii53gVECmR3plCbKziOGNme7AIem2BsWUCfKIVIxSOzeViiOUTWPl_yvfdtTp-2kHAm15XPUzM2rjbWfmPIYDlFpoFJFQA4-CXlanz2Eesjjzqo3ycwnJhtrUIIVLStKS4xQDfkQZirF_jxO9zaa2TVzCUvN_IrEVB2iqMFfLrwUR2UHi-U8YTY3tM",
+      "sha256": "oBjnGSS97FpRq6x5n2bP4OJvGnOEEw0Uit8ftQo_ltw",
+      "chain": "HaRpLBkW0oJTKfoW2Pn3b3X4QU_mbtzVbQfTpRzxOMY",
       "plaintext_sha256": "3n31NBH6WXlVydkgv6SSHo5EaGReVgDxNREXpZTdh5c"
     },
     {
       "index": 1,
       "final": false,
       "codec": 0,
-      "object": "AQD0trwYGeAL4EwVYcKvpq9EEp4BIwfqev92gMzXQzvH5s1BvcQeI0XMUex_OeZVHQ",
-      "sha256": "4Um9mcivJHPwRuw83V2MblfUqu2onNsA8uawaO0taF0",
-      "chain": "spIAljUUE7ITXsH3ktBUFYMbotNPXemwPIFWiGcxfLk",
+      "object": "AgCv4tyjcjaYLiAFhV9dWAPM6kGnODEkNteM-hLb_4at_4mjqAkzlqOVFKgUN0mPBbgBzW-p",
+      "sha256": "35vAaJcV8Qy58bsYta4S9qqFSpCgQar7xB4S64hyTGw",
+      "chain": "lrRKIVAFx2gmWFBBmcrvKxrLLejUpV6Co6qFlvemq_g",
       "plaintext_sha256": "6f_oc34bn1KlbodcE57aIW6Al2d_gaZYx4fuEOb6dPk"
     },
     {
       "index": 2,
       "final": true,
       "codec": 0,
-      "object": "AQDC5lmI8UBQvZM-JFPk_cnO2Bey3-8spK0v2KLUXuLQDzI",
-      "sha256": "esD3VEtO8AJ7BpsDCjOEclzIC8YXGvMawWZoZ2nb0F4",
-      "chain": "szHdZfa_K8nanqloEmcTMpsAoQGdpj1GwWWNzll5hvA",
+      "object": "AgCZGOVIyGD87oPzcqkfh9JbaP5IMSwf9bzU4aoypHFHU-DBidkpww",
+      "sha256": "FR1miKzYSIm-Cc8hc8cd7TVi5qZMht1dK0TNy26bDD0",
+      "chain": "Qq1ZYl1jF_cIveNH5FF3t2iOywR8ZdXEplm9K8PDURQ",
       "plaintext_sha256": "prsQZVCppwWG9EaDDsdrrPYhyO7VE_6CvwZcYzLVmI4"
     }
   ],

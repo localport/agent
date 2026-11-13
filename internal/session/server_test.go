@@ -48,6 +48,8 @@ type fakeLauncher struct {
 	requests []launcher.Request
 	resizes  chan [2]uint16
 	refuse   error
+	// messages are the PAM messages every started session carries.
+	messages []string
 	// hold, when set, makes Start wait for it to close after announcing the
 	// request on starting; helperDone receives when a helper's channel ends.
 	hold       chan struct{}
@@ -83,7 +85,7 @@ func (l *fakeLauncher) Start(_ context.Context, req launcher.Request, channel *o
 	}
 	if req.Kind == launcher.KindForward && l.forward != nil {
 		go l.forward(conn)
-		return &launcher.Session{}, nil
+		return &launcher.Session{Messages: l.messages}, nil
 	}
 	go func() {
 		l.helper(conn, req)
@@ -91,7 +93,7 @@ func (l *fakeLauncher) Start(_ context.Context, req launcher.Request, channel *o
 			l.helperDone <- struct{}{}
 		}
 	}()
-	return &launcher.Session{}, nil
+	return &launcher.Session{Messages: l.messages}, nil
 }
 
 func (l *fakeLauncher) lastRequest(t *testing.T) launcher.Request {
@@ -122,6 +124,13 @@ func (l *fakeLauncher) helper(conn net.Conn, req launcher.Request) {
 			ev = l.badEvent
 		}
 		_ = launcher.WriteFrame(conn, launcher.Frame{Type: launcher.FrameEvent, Data: ev})
+	}
+	if req.Command == "flood" {
+		// Output until the channel ends, more than any client window.
+		chunk := make([]byte, 32<<10)
+		for launcher.WriteFrame(conn, launcher.Frame{Type: launcher.FrameData, Data: chunk}) == nil {
+		}
+		return
 	}
 	if req.Kind == launcher.KindSFTP || req.Command == "event" {
 		// A file event, then the sftp bytes echo until eof; an exec helper
@@ -165,6 +174,10 @@ type sshFixture struct {
 	device   Device
 	hostKey  ssh.PublicKey
 	events   chan string
+	// clientAddr is the notice's client address dial serves streams with.
+	clientAddr string
+	// clientConn, when set, wraps the client side of each stream dial makes.
+	clientConn func(net.Conn) net.Conn
 }
 
 func newSSHFixture(t *testing.T, edit func(*ServerConfig)) *sshFixture {
@@ -325,11 +338,14 @@ func (f *sshFixture) mint(t *testing.T, o certOpts) (ssh.Signer, *ssh.Certificat
 func (f *sshFixture) dial(t *testing.T, serial uint64, signer ssh.Signer, edit func(*ssh.ClientConfig)) (*ssh.Client, error) {
 	t.Helper()
 	srvSide, cliSide := tcpPair(t)
+	if f.clientConn != nil {
+		cliSide = f.clientConn(cliSide)
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer srvSide.Close()
-		f.srv.Serve(srvSide, [16]byte{0x01, 0x9a}, serial)
+		f.srv.Serve(srvSide, [16]byte{0x01, 0x9a}, serial, f.clientAddr)
 	}()
 	t.Cleanup(func() {
 		_ = cliSide.Close()
@@ -1020,6 +1036,261 @@ func TestLauncherRefusalFailsTheRequest(t *testing.T) {
 	readFor(t, stderr, "localport: "+CodeLoginNotAllowed+"\r\n")
 }
 
+// PAM's messages reach the client's stderr ahead of the session's output, and
+// ahead of the refusal when the setup refused.
+func TestPAMMessagesReachTheClient(t *testing.T) {
+	t.Run("started", func(t *testing.T) {
+		f := newSSHFixture(t, nil)
+		f.launcher.messages = []string{"Your password expires in 3 days.", "two\nlines"}
+		o := f.defaults()
+		o.kind = "ssh"
+		client := f.connect(t, o)
+		sess, _ := client.NewSession()
+		var stderr bytes.Buffer
+		sess.Stderr = &stderr
+		_ = sess.Run("ls")
+		if want := "Your password expires in 3 days.\r\ntwo\r\nlines\r\nwarn"; stderr.String() != want {
+			t.Fatalf("stderr %q, want %q", stderr.String(), want)
+		}
+	})
+	t.Run("refused", func(t *testing.T) {
+		f := newSSHFixture(t, nil)
+		f.launcher.refuse = &launcher.RefusalError{Code: launcher.CodeAccountRefused, Messages: []string{"Your account has expired."}}
+		client := f.connect(t, f.defaults())
+		sess, _ := client.NewSession()
+		_ = sess.RequestPty("xterm", 24, 80, nil)
+		stderr, _ := sess.StderrPipe()
+		if err := sess.Shell(); err == nil {
+			t.Fatal("the shell started")
+		}
+		readFor(t, stderr, "Your account has expired.\r\nlocalport: "+CodeLoginNotAllowed+"\r\n")
+	})
+}
+
+// The notice's client address reaches every launcher request of the
+// connection.
+func TestClientAddrReachesTheLauncherRequest(t *testing.T) {
+	f := newSSHFixture(t, nil)
+	f.clientAddr = "203.0.113.9:40022"
+	o := f.defaults()
+	o.kind = "ssh"
+	client := f.connect(t, o)
+	sess, _ := client.NewSession()
+	_ = sess.Run("ls")
+	if req := f.launcher.lastRequest(t); req.ClientAddr != f.clientAddr {
+		t.Fatalf("launcher request ClientAddr %q, want %q", req.ClientAddr, f.clientAddr)
+	}
+}
+
+// A client that stops reading fills its channel window, so the end reason
+// write blocks; Shutdown still ends the connection within the write bound.
+func TestShutdownIsBoundedByAClientThatStopsReading(t *testing.T) {
+	old := endWriteTimeout
+	endWriteTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { endWriteTimeout = old })
+	f := newSSHFixture(t, nil)
+	o := f.defaults()
+	o.kind = "ssh"
+	client := f.connect(t, o)
+	sess, _ := client.NewSession()
+	// Never read: the window closes once the helper's output fills it.
+	_, _ = sess.StdoutPipe()
+	if err := sess.Start("flood"); err != nil {
+		t.Fatal(err)
+	}
+	// The 2 MiB window fills in milliseconds; the guard proof of the bound
+	// shows Shutdown blocks after this wait without it.
+	time.Sleep(500 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := f.srv.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown = %v after %v, want it bounded by the end write", err, time.Since(start))
+	}
+}
+
+// waitEvent reads events until want arrives.
+func waitEvent(t *testing.T, events <-chan string, want string) {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case got := <-events:
+			if got == want {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("no event %q", want)
+		}
+	}
+}
+
+// forgedSigner presents cert but signs with another key, as a client that
+// holds a certificate and not its key would.
+type forgedSigner struct {
+	cert  *ssh.Certificate
+	other ssh.Signer
+}
+
+func (s forgedSigner) PublicKey() ssh.PublicKey { return s.cert }
+func (s forgedSigner) Sign(r io.Reader, data []byte) (*ssh.Signature, error) {
+	return s.other.Sign(r, data)
+}
+
+// A hello whose signature does not verify is refused before its certificate
+// is checked: a certificate from an unknown CA key triggers no CA refresh.
+func TestBadHelloSignatureCausesNoCARefresh(t *testing.T) {
+	var refreshes atomic.Int32
+	f := newSSHFixture(t, func(c *ServerConfig) {
+		c.RefreshKeys = func(context.Context) error { refreshes.Add(1); return nil }
+	})
+	_, unknownCA, _ := ed25519.GenerateKey(rand.Reader)
+	o := f.defaults()
+	o.signer = unknownCA
+	_, cert := f.mint(t, o)
+	_, otherKey, _ := ed25519.GenerateKey(rand.Reader)
+	other, _ := ssh.NewSignerFromKey(otherKey)
+	if _, err := f.dial(t, 42, forgedSigner{cert: cert, other: other}, nil); err == nil {
+		t.Fatal("a forged hello connected")
+	}
+	if n := refreshes.Load(); n != 0 {
+		t.Fatalf("a forged hello caused %d CA refreshes", n)
+	}
+}
+
+// A resume whose signature does not verify is refused before it claims the
+// connection or checks its certificate.
+func TestBadResumeSignatureCausesNoClaimOrCARefresh(t *testing.T) {
+	var refreshes, claims atomic.Int32
+	f := newSSHFixture(t, func(c *ServerConfig) {
+		c.RefreshKeys = func(context.Context) error { refreshes.Add(1); return nil }
+	})
+	rc := f.connectResumable(t)
+	rc.cut(t)
+	hook := func() { claims.Add(1) }
+	afterAttemptClaimCleared.Store(&hook)
+	t.Cleanup(func() { afterAttemptClaimCleared.Store(nil) })
+
+	_, unknownCA, _ := ed25519.GenerateKey(rand.Reader)
+	o := f.defaults()
+	o.key, o.serial, o.resumes, o.signer = rc.key, 77, "2a", unknownCA
+	_, cert := f.mint(t, o)
+	_, otherKey, _ := ed25519.GenerateKey(rand.Reader)
+	other, _ := ssh.NewSignerFromKey(otherKey)
+	if _, err := rc.cr.Resume(f.serveStream(t, 77), forgedSigner{cert: cert, other: other}); resumeCode(err) != CloseResumeRefused {
+		t.Fatalf("forged resume = %v, want %s", err, CloseResumeRefused)
+	}
+	afterAttemptClaimCleared.Store(nil)
+	if n, c := refreshes.Load(), claims.Load(); n != 0 || c != 0 {
+		t.Fatalf("a forged resume caused %d CA refreshes and %d claims", n, c)
+	}
+	if err := rc.resume(t, nil); err != nil || !rc.alive() {
+		t.Fatalf("a good resume after the forged one: %v", err)
+	}
+	if n := handshakeCount(f.srv); n != 0 {
+		t.Fatalf("handshake count %d after a resume, want 0", n)
+	}
+}
+
+// A first connect's stream is attached before addConn publishes the
+// connection, so a resume of its handle never finds it without a stream and
+// is never taken over by the first stream's late install.
+func TestFirstStreamIsAttachedWhenTheConnIsPublished(t *testing.T) {
+	f := newSSHFixture(t, nil)
+	attached := make(chan bool, 1)
+	hook := func(e *resumable) {
+		e.rc.mu.Lock()
+		attached <- e.rc.att != nil
+		e.rc.mu.Unlock()
+	}
+	afterConnPublished.Store(&hook)
+	t.Cleanup(func() { afterConnPublished.Store(nil) })
+	_ = f.connect(t, f.defaults())
+	if !<-attached {
+		t.Fatal("the connection was published without its first stream")
+	}
+}
+
+// handshakeCount is the server's count of streams before their handshake
+// decision.
+func handshakeCount(s *Server) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.handshakes
+}
+
+// waitHandshakes waits until the count is n.
+func waitHandshakes(t *testing.T, s *Server, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for handshakeCount(s) != n {
+		if time.Now().After(deadline) {
+			t.Fatalf("handshake count %d, want %d", handshakeCount(s), n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// At most maxHandshakes streams wait for their handshake decision; the next
+// one is closed unread. Every end path releases the count, and a live
+// session holds none.
+func TestHandshakeCap(t *testing.T) {
+	f := newSSHFixture(t, nil)
+	var silent []net.Conn
+	for range maxHandshakes {
+		silent = append(silent, f.serveStream(t, 42))
+	}
+	waitHandshakes(t, f.srv, maxHandshakes)
+
+	extra := f.serveStream(t, 42)
+	_ = extra.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if n, err := extra.Read(make([]byte, 1)); n != 0 || err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the stream over the cap read %d bytes, %v; want closed", n, err)
+	}
+	if n := handshakeCount(f.srv); n != maxHandshakes {
+		t.Fatalf("handshake count %d after a refused stream, want %d", n, maxHandshakes)
+	}
+	// Serve reports the refusal, so the mux skips the flush.
+	srvSide, _ := tcpPair(t)
+	if !f.srv.Serve(srvSide, [16]byte{0x01}, 42, "") {
+		t.Fatal("Serve over the cap did not report the stream refused unread")
+	}
+	_ = srvSide.Close()
+
+	// Prelude errors release the count.
+	for _, c := range silent {
+		_ = c.Close()
+	}
+	waitHandshakes(t, f.srv, 0)
+
+	// A refusal releases it.
+	o := f.defaults()
+	o.login = "nobody"
+	signer, _ := f.mint(t, o)
+	if _, err := f.dial(t, 42, signer, nil); err == nil {
+		t.Fatal("a refused login connected")
+	}
+	waitHandshakes(t, f.srv, 0)
+
+	// A live session holds none.
+	client := f.connect(t, f.defaults())
+	if n := handshakeCount(f.srv); n != 0 || f.srv.LiveSessions() != 1 {
+		t.Fatalf("a live session: handshake count %d, live %d", n, f.srv.LiveSessions())
+	}
+	_ = client
+}
+
+// A stream that sends no prelude within handshakeTimeout releases its count.
+func TestHandshakeTimeoutReleasesTheCount(t *testing.T) {
+	old := handshakeTimeout
+	handshakeTimeout = time.Second
+	t.Cleanup(func() { handshakeTimeout = old })
+	f := newSSHFixture(t, nil)
+	_ = f.serveStream(t, 42)
+	waitHandshakes(t, f.srv, 1)
+	waitHandshakes(t, f.srv, 0)
+}
+
 // capturedOpen is one open a captureClient saw.
 type capturedOpen struct {
 	id, sessionID string
@@ -1326,5 +1597,46 @@ func TestUUIDText(t *testing.T) {
 	binary.BigEndian.PutUint64(id[8:], 0x8123_4567_89ab_cdef)
 	if got := uuidText(id); got != "01923456-789a-7bcd-8123-456789abcdef" {
 		t.Fatalf("uuidText = %s", got)
+	}
+}
+
+// A certificate whose window is open-ended, past int64 seconds or empty is
+// refused before the window is compared with the clock.
+func TestCertValidityWindowMalformed(t *testing.T) {
+	f := newSSHFixture(t, nil)
+	cas := f.cfg.CAKeys()
+	caSigner, err := ssh.NewSignerFromKey(f.ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	nowU := uint64(now.Unix())
+	for name, tc := range map[string]struct {
+		after, before uint64
+		ok            bool
+	}{
+		"valid":           {nowU - 30, nowU + 60, true},
+		"infinity":        {nowU - 30, ssh.CertTimeInfinity, false},
+		"past 1<<62":      {nowU - 30, 1<<62 + 1, false},
+		"after == before": {nowU, nowU, false},
+		"after > before":  {nowU + 1, nowU, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, cert := f.mint(t, f.defaults())
+			cert.ValidAfter, cert.ValidBefore = tc.after, tc.before
+			if err := cert.SignCert(rand.Reader, caSigner); err != nil {
+				t.Fatal(err)
+			}
+			_, err := verifyCert(cert, testLogin, cas, f.device, 42, now)
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("verifyCert = %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, errCertRefused) || !strings.Contains(err.Error(), "validity window malformed") {
+				t.Fatalf("verifyCert = %v, want the malformed window refusal", err)
+			}
+		})
 	}
 }

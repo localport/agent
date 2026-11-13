@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -219,10 +220,11 @@ func validSize(cols, rows uint32) bool {
 // written to the channel's stderr and fails the request.
 func (ch *channel) start(kind, command string) bool {
 	s := ch.c.s
-	req := launcher.Request{Kind: kind, Device: s.cfg.Device, Login: ch.c.login, Command: command, Env: ch.env}
+	adm := ch.c.adm.Load()
+	req := launcher.Request{Kind: kind, Device: s.cfg.Device, Login: ch.c.login, Command: command, Env: ch.env, ClientAddr: adm.clientAddr}
 	var files filesAccess
 	if kind == launcher.KindSFTP {
-		files = ch.c.adm.Load().Files
+		files = adm.Files
 		req.FilesDownload, req.FilesUpload = files.Download, files.Upload
 	}
 	if len(ch.c.password) > 0 {
@@ -256,9 +258,13 @@ func (ch *channel) start(kind, command string) bool {
 		_ = ours.Close()
 		rec.abort()
 		s.log("session: %s for %q did not start: %v", kind, ch.c.login, err)
+		if r, ok := errors.AsType[*launcher.RefusalError](err); ok {
+			ch.writeMessages(r.Messages)
+		}
 		ch.refuse(refusalReason(err))
 		return false
 	}
+	ch.writeMessages(sess.Messages)
 	// end may have run while the launcher started the session (a client
 	// disconnect, idle, Shutdown): it found no helper to close, so the new
 	// session is ended here and never relayed.
@@ -359,6 +365,15 @@ func (ch *channel) refuse(code string) {
 	_, _ = ch.ch.Stderr().Write([]byte("localport: " + code + "\r\n"))
 }
 
+// writeMessages writes the session setup's PAM messages to the channel's
+// stderr, one per line, as sshd shows them before the session. Lines end in
+// CRLF since a terminal client's tty is raw.
+func (ch *channel) writeMessages(msgs []string) {
+	for _, m := range msgs {
+		_, _ = ch.ch.Stderr().Write([]byte(strings.ReplaceAll(m, "\n", "\r\n") + "\r\n"))
+	}
+}
+
 // refusalReason maps a launcher refusal to the code the client sees.
 func refusalReason(err error) string {
 	if errors.Is(err, launcher.ErrUnavailable) {
@@ -416,20 +431,21 @@ var rfcSignals = []string{"ABRT", "ALRM", "FPE", "HUP", "ILL", "INT", "KILL", "P
 
 // decodeExit reads an exit frame's code. Off Windows a negative code -n means
 // killed by signal n, recorded as 128+n; on Windows the code is the process's
-// 32-bit exit status, which may read negative.
-func decodeExit(code int32, goos string) (status int, signal string) {
+// 32-bit exit status, which may read negative. The status is the uint32 RFC
+// 4254 section 6.10 carries.
+func decodeExit(code int32, goos string) (status uint32, signal string) {
 	if goos == "windows" || code >= 0 {
-		return int(uint32(code)), ""
+		return uint32(code), ""
 	}
-	n := int(-code)
-	name := signalName(n)
+	n := -int64(code)
+	name := signalName(int(n))
 	if name == "" {
-		name = strconv.Itoa(n)
+		name = strconv.FormatInt(n, 10)
 	}
 	if !slices.Contains(rfcSignals, name) {
 		name += "@localport.io"
 	}
-	return 128 + n, name
+	return uint32(128 + n), name
 }
 
 // readHelper relays the helper's frames until its exit frame or the
@@ -481,7 +497,7 @@ func (ch *channel) readHelper() {
 				if signal != "" {
 					_, _ = ch.ch.SendRequest("exit-signal", false, ssh.Marshal(exitSignalMsg{Signal: signal}))
 				} else {
-					_, _ = ch.ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(status)}))
+					_, _ = ch.ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{status}))
 				}
 				_ = ch.ch.CloseWrite()
 				_ = ch.ch.Close()

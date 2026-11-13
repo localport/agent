@@ -98,7 +98,7 @@ func TestDecodeExit(t *testing.T) {
 	for _, tc := range []struct {
 		code   int32
 		goos   string
-		status int
+		status uint32
 		signal string
 	}{
 		{0, "linux", 0, ""},

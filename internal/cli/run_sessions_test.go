@@ -117,7 +117,7 @@ func TestDeviceSessionsUseTheRegisteredCertificate(t *testing.T) {
 // sshHandshake serves one stream and runs an SSH client's handshake and
 // userauth on it.
 func sshHandshake(t *testing.T, h interface {
-	Serve(net.Conn, [16]byte, uint64)
+	Serve(net.Conn, [16]byte, uint64, string) bool
 }, serial uint64, signer ssh.Signer, user string, hostKey ssh.PublicKey) error {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -133,7 +133,7 @@ func sshHandshake(t *testing.T, h interface {
 			return
 		}
 		defer agentSide.Close()
-		h.Serve(agentSide, [16]byte{1}, serial)
+		h.Serve(agentSide, [16]byte{1}, serial, "")
 	}()
 	clientSide, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {

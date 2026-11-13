@@ -93,8 +93,8 @@ type RegisterPayload struct {
 
 	// Capabilities (terminal, files, desktop, forwarding), Logins and Desktop (rdp, vnc)
 	// are what a device enabled in its local config. The agent enforces them;
-	// the API's session mint also refuses a kind whose capability or desktop
-	// protocol is not listed.
+	// the control plane also issues no session certificate for a kind whose
+	// capability or desktop protocol is not listed.
 	Capabilities []string `json:"capabilities,omitempty"`
 	Logins       []string `json:"logins,omitempty"`
 	Desktop      []string `json:"desktop,omitempty"`

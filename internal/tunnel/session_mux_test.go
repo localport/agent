@@ -147,10 +147,61 @@ func (e *fakeSessionEdge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // noticeSerial is the certificate serial every test notice carries.
 const noticeSerial uint64 = 0x0123456789abcdef
 
+// noticeAddr is the client address every test notice carries.
+const noticeAddr = "203.0.113.9:40022"
+
 func notice(id [sessionIDLen]byte) []byte {
-	b := binary.BigEndian.AppendUint32(nil, sessionNoticeLen)
-	b = append(b, id[:]...)
-	return binary.BigEndian.AppendUint64(b, noticeSerial)
+	body := noticeBody(id, noticeAddr)
+	return append(binary.BigEndian.AppendUint32(nil, uint32(len(body))), body...)
+}
+
+// noticeBody is a notice without its length prefix.
+func noticeBody(id [sessionIDLen]byte, addr string) []byte {
+	b := append([]byte(nil), id[:]...)
+	b = binary.BigEndian.AppendUint64(b, noticeSerial)
+	b = append(b, byte(len(addr)))
+	return append(b, addr...)
+}
+
+// withAddrLen sets a notice body's address length byte to n.
+func withAddrLen(body []byte, n byte) []byte {
+	body[sessionNoticeMinLen-1] = n
+	return body
+}
+
+func TestParseNotice(t *testing.T) {
+	id := [sessionIDLen]byte{0xaa, 0xbb}
+	for name, tc := range map[string]struct {
+		body []byte
+		addr string
+		ok   bool
+	}{
+		"v4":        {noticeBody(id, "203.0.113.9:40022"), "203.0.113.9:40022", true},
+		"v6":        {noticeBody(id, "[2001:db8::7]:5022"), "[2001:db8::7]:5022", true},
+		"empty":     {noticeBody(id, ""), "", true},
+		"v4 in v6":  {noticeBody(id, "[::ffff:203.0.113.9]:22"), "[::ffff:203.0.113.9]:22", true},
+		"zone":      {noticeBody(id, "[fe80::1%eth0]:22"), "", false},
+		"port 0":    {noticeBody(id, "203.0.113.9:0"), "", false},
+		"no port":   {noticeBody(id, "203.0.113.9"), "", false},
+		"host name": {noticeBody(id, "example.com:22"), "", false},
+		"bad ip":    {noticeBody(id, "203.0.113.999:22"), "", false},
+		// A valid address after a length byte that disagrees with it.
+		"length byte short": {withAddrLen(noticeBody(id, "203.0.113.9:22"), 13), "", false},
+		"length byte long":  {withAddrLen(noticeBody(id, "203.0.113.9:22"), 15), "", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			gotID, serial, addr, err := parseNotice(tc.body)
+			if !tc.ok {
+				if err == nil {
+					t.Fatalf("parseNotice accepted %q", tc.body)
+				}
+				return
+			}
+			if err != nil || gotID != id || serial != noticeSerial || addr != tc.addr {
+				t.Fatalf("parseNotice = %x, %x, %q, %v", gotID, serial, addr, err)
+			}
+		})
+	}
 }
 
 func (e *fakeSessionEdge) sendNotice(t *testing.T, b []byte) {
@@ -228,9 +279,11 @@ type streamEchoHandler struct {
 	shutdownCalls atomic.Int32
 	recordingUps  atomic.Int32
 	farewellErr   chan error
-	// lastID and lastSerial are the notice values of the latest Serve.
+	// lastID, lastSerial and lastAddr are the notice values of the latest
+	// Serve.
 	lastID     atomic.Pointer[[16]byte]
 	lastSerial atomic.Uint64
+	lastAddr   atomic.Pointer[string]
 }
 
 func newStreamEchoHandler() *streamEchoHandler {
@@ -243,9 +296,10 @@ func newStreamEchoHandler() *streamEchoHandler {
 	return h
 }
 
-func (h *streamEchoHandler) Serve(stream net.Conn, id [16]byte, serial uint64) {
+func (h *streamEchoHandler) Serve(stream net.Conn, id [16]byte, serial uint64, clientAddr string) bool {
 	h.lastID.Store(&id)
 	h.lastSerial.Store(serial)
+	h.lastAddr.Store(&clientAddr)
 	done := make(chan struct{})
 	h.mu.Lock()
 	h.live[stream] = done
@@ -259,6 +313,7 @@ func (h *streamEchoHandler) Serve(stream net.Conn, id [16]byte, serial uint64) {
 		close(done)
 	}()
 	_, _ = io.Copy(stream, stream)
+	return false
 }
 
 func (h *streamEchoHandler) Shutdown(ctx context.Context) error {
@@ -435,6 +490,9 @@ func TestSessionMuxBindsWithSessionPurposeAndOutlivesTheRunContext(t *testing.T)
 	if id := h.lastID.Load(); id == nil || *id != [sessionIDLen]byte{1} || h.lastSerial.Load() != noticeSerial {
 		t.Fatalf("Serve got id %v serial %x, want the notice's", id, h.lastSerial.Load())
 	}
+	if addr := h.lastAddr.Load(); addr == nil || *addr != noticeAddr {
+		t.Fatalf("Serve got client address %v, want %q", addr, noticeAddr)
+	}
 
 	cancel()
 	s.write(t, []byte("ping"))
@@ -494,15 +552,34 @@ func TestSessionMuxOpensOneStreamPerNotice(t *testing.T) {
 }
 
 func TestSessionMuxRedialsAfterABadNotice(t *testing.T) {
-	edge := newFakeSessionEdge(t)
-	d := &pipeSessionDial{edge: edge}
-	startTestSessionMux(t, newStreamEchoHandler(), d.dial)
+	legacy := binary.BigEndian.AppendUint32(nil, 24)
+	legacy = append(legacy, noticeBody([sessionIDLen]byte{1}, "")[:24]...)
+	long := noticeBody([sessionIDLen]byte{1}, "203.0.113.9:22")
+	long = append(binary.BigEndian.AppendUint32(nil, sessionNoticeMaxLen+1), append(long, make([]byte, sessionNoticeMaxLen+1-len(long))...)...)
+	badAddr := noticeBody([sessionIDLen]byte{1}, "example.com:22")
+	badAddr = append(binary.BigEndian.AppendUint32(nil, uint32(len(badAddr))), badAddr...)
+	for name, b := range map[string][]byte{
+		"short":                binary.BigEndian.AppendUint32(nil, 15),
+		"24-byte form":         legacy,
+		"over 64-byte address": long,
+		"bad address":          badAddr,
+	} {
+		t.Run(name, func(t *testing.T) {
+			edge := newFakeSessionEdge(t)
+			d := &pipeSessionDial{edge: edge}
+			h := newStreamEchoHandler()
+			startTestSessionMux(t, h, d.dial)
 
-	edge.expectAccept(t)
-	edge.sendNotice(t, binary.BigEndian.AppendUint32(nil, 15))
-	edge.expectAccept(t)
-	if n := d.dials.Load(); n != 2 {
-		t.Fatalf("dials = %d, want a redial after the bad notice", n)
+			edge.expectAccept(t)
+			edge.sendNotice(t, b)
+			edge.expectAccept(t)
+			if n := d.dials.Load(); n != 2 {
+				t.Fatalf("dials = %d, want a redial after the bad notice", n)
+			}
+			if n := h.served.Load(); n != 0 {
+				t.Fatalf("Serve ran %d times for a bad notice", n)
+			}
+		})
 	}
 }
 

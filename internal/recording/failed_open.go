@@ -133,7 +133,10 @@ func (u *Uploader) applyFailedOpenLocked(r result) {
 		u.failed = slices.Delete(u.failed, i, i+1)
 		return
 	}
-	wait := min(minBackoff<<min(f.attempt, 5), failedOpenMaxBackoff)
+	// Full jitter, as backoffLocked: reports queued together do not retry in
+	// step.
+	limit := min(minBackoff<<min(f.attempt, 5), failedOpenMaxBackoff)
+	wait := minBackoff + u.jitter(limit-minBackoff+1)
 	f.attempt++
 	if refused {
 		wait = max(wait, ref.RetryAfter)

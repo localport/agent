@@ -78,6 +78,10 @@ var (
 	recorderEndTimeout = 3 * time.Second
 )
 
+// wrapRecordingHandoff, when set by a test, wraps the uploader handoff of
+// every recording the server starts.
+var wrapRecordingHandoff atomic.Pointer[func(recordingHandoff) recordingHandoff]
+
 // errRecordingUnavailable reports a recording that could not start.
 var errRecordingUnavailable = errcode.New(errcode.RecordingUnavailable)
 
@@ -102,9 +106,8 @@ func (s *Server) startRecording(id, sessionID string, adm *admission, start time
 		return nil, fmt.Errorf("%w: the held recording key changed", errRecordingUnavailable)
 	}
 	// Both policies open before the channel's helper starts; the edge attests
-	// the live connection, so the control plane checks the certificate at its
-	// admission however late the channel starts. strictOpenTimeout bounds the
-	// wait.
+	// the live connection, so the control plane checks the certificate at its admission
+	// however late the channel starts. strictOpenTimeout bounds the wait.
 	strict := adm.Rec.Policy == RecPolicyStrict
 	ctx, cancel := context.WithTimeout(context.Background(), strictOpenTimeout)
 	defer cancel()
@@ -129,7 +132,11 @@ func (s *Server) startRecording(id, sessionID string, adm *admission, start time
 		reportFailed(startFailureReason(err))
 		return nil, fmt.Errorf("%w: %w", errRecordingUnavailable, err)
 	}
-	r := newSessionRecorder(h, sealer, strict, s.log)
+	var handoff recordingHandoff = h
+	if wrap := wrapRecordingHandoff.Load(); wrap != nil {
+		handoff = (*wrap)(handoff)
+	}
+	r := newSessionRecorder(handoff, sealer, strict, s.log)
 	r.onAbort = func() { reportFailed(recording.ReasonRecordingFailed) }
 	return r, nil
 }
@@ -146,9 +153,9 @@ func startFailureReason(err error) string {
 	return recording.ReasonRecordingFailed
 }
 
-// reportFailedOpen queues the failed open of recording id. The key hash is the
-// one the certificate names, which the control plane checks the signature
-// against.
+// reportFailedOpen queues the failed open of recording id. The key hash is
+// the one the certificate names, which the control plane checks the
+// signature against.
 func (s *Server) reportFailedOpen(id, sessionID string, adm *admission, reason string, channels int32) {
 	sum, err := base64.RawURLEncoding.DecodeString(adm.Rec.PubSHA256)
 	if err != nil {
@@ -234,7 +241,7 @@ type recEvent struct {
 	at         time.Time
 	data       []byte
 	cols, rows uint16
-	status     int
+	status     uint32
 }
 
 // recClose is how a recording ends; recOpen while it runs.
@@ -361,7 +368,7 @@ func (r *sessionRecorder) resize(cols, rows uint16) {
 	r.enqueue(recEvent{kind: evResize, at: time.Now(), cols: cols, rows: rows})
 }
 
-func (r *sessionRecorder) exit(status int) {
+func (r *sessionRecorder) exit(status uint32) {
 	r.enqueue(recEvent{kind: evExit, at: time.Now(), status: status})
 }
 

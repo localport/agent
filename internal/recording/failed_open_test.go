@@ -3,6 +3,7 @@ package recording
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -128,9 +129,10 @@ func TestFailedOpenWaitsForTheDeviceControlRequest(t *testing.T) {
 	}
 }
 
-// The backoff is capped.
+// The backoff is jittered over [1 s, the capped exponential limit]: the
+// largest jitter reaches the cap and no further.
 func TestFailedOpenBackoffCap(t *testing.T) {
-	f := startUploader(t, false)
+	f := startUploader(t, true)
 	f.u.ReportFailedOpen(testFailedOpen(spoolID1))
 	refuse(f.edge.expect(t, "failed", spoolID1, 0), http.StatusServiceUnavailable, CodeBusy, 0)
 	waitFailedBackoff(t, f)
@@ -143,5 +145,32 @@ func TestFailedOpenBackoffCap(t *testing.T) {
 	f.u.mu.Unlock()
 	if wait != failedOpenMaxBackoff {
 		t.Fatalf("backoff %v, want %v", wait, failedOpenMaxBackoff)
+	}
+}
+
+// Each retry wait draws its jitter over the range above the 1 s floor.
+func TestFailedOpenBackoffIsJittered(t *testing.T) {
+	f := startUploader(t, false)
+	f.u.ReportFailedOpen(testFailedOpen(spoolID1))
+	refuse(f.edge.expect(t, "failed", spoolID1, 0), http.StatusServiceUnavailable, CodeBusy, 0)
+	waitFailedBackoff(t, f)
+	f.jitterMu.Lock()
+	args := slices.Clone(f.jitterArgs)
+	f.jitterMu.Unlock()
+	// The first retry's limit is minBackoff, so its range is one value.
+	if !slices.Contains(args, time.Duration(1)) {
+		t.Fatalf("jitter calls %v, want the first retry's range", args)
+	}
+	f.u.mu.Lock()
+	r := result{failed: f.u.failed[0], err: &Refusal{Status: http.StatusServiceUnavailable, Code: CodeBusy}}
+	r.failed.attempt = 3
+	f.u.control[r.failed.Identifier]++
+	f.u.applyFailedOpenLocked(r)
+	f.u.mu.Unlock()
+	f.jitterMu.Lock()
+	last := f.jitterArgs[len(f.jitterArgs)-1]
+	f.jitterMu.Unlock()
+	if want := minBackoff<<3 - minBackoff + 1; last != want {
+		t.Fatalf("jitter range %v, want %v", last, want)
 	}
 }

@@ -101,11 +101,11 @@ type recordingCompleteBody struct {
 	Signature  string `json:"signature"`
 }
 
-// Open sends the signed open of recording id of connection sessionID. keySHA256
-// is the SHA-256 of the team key the DEK is wrapped to; certificate is the
-// connection's SSH user certificate, from which the control plane creates the
-// recording at the first open. channels, when positive, travels in headers the
-// edge reads before it takes a slot.
+// Open sends the signed open of recording id of connection sessionID.
+// keySHA256 is the SHA-256 of the team key the DEK is wrapped to; certificate
+// is the connection's SSH user certificate, from which the control plane
+// creates the recording at the first open. channels, when positive, travels in headers the edge
+// reads before it takes a slot.
 func (c *RecordingClient) Open(ctx context.Context, id, sessionID string, wrappedDEK, keySHA256, certificate []byte, channels int32) (recording.Result, error) {
 	sig, err := recording.Sign(c.signer, recording.OpenDigest(id, sessionID, wrappedDEK, keySHA256))
 	if err != nil {

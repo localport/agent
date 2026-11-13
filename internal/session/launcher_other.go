@@ -8,7 +8,8 @@ import (
 )
 
 // launcherFor returns nil: builds other than Linux, macOS and Windows have no
-// session launcher, so every certificate is refused.
+// session launcher, so terminal, ssh and files certificates are refused;
+// desktop sessions need none.
 func launcherFor(Launcher) Launcher { return nil }
 
 // newSessionChannel is never reached without a launcher.
