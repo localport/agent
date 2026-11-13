@@ -401,6 +401,40 @@ func TestCheckNologin(t *testing.T) {
 	}
 }
 
+// The nologin text the client sees is the file's start, at most
+// maxNologinText bytes; a missing file gives none.
+func TestNologinText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nologin")
+	if err := os.WriteFile(path, []byte(strings.Repeat("m", 2*maxNologinText)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := nologinText(path); len(got) != maxNologinText {
+		t.Fatalf("%d bytes", len(got))
+	}
+	if got := nologinText(filepath.Join(t.TempDir(), "absent")); got != "" {
+		t.Fatalf("missing file gave %q", got)
+	}
+}
+
+// A nologin refusal carries the file's text to the client; another
+// refusal carries none.
+func TestNoteNologin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nologin")
+	if err := os.WriteFile(path, []byte("down for maintenance\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	msgs := &pamMessages{}
+	noteNologin(msgs, checkNologin(1000, path), path)
+	if got := msgs.messages(); len(got) != 1 || got[0] != "down for maintenance\n" {
+		t.Fatalf("messages %q", got)
+	}
+	other := &pamMessages{}
+	noteNologin(other, checkShadow("!", -1, time.Now()), path)
+	if len(other.messages()) != 0 {
+		t.Fatalf("a locked account carried the nologin text: %q", other.messages())
+	}
+}
+
 func TestShellUsable(t *testing.T) {
 	if err := shellUsable("/bin/sh"); err != nil {
 		t.Fatalf("/bin/sh: %v", err)

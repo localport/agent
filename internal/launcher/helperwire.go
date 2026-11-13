@@ -229,10 +229,10 @@ func (w *startWatch) progress() {
 	}
 }
 
-// stop ends the bound and reports whether it fired.
+// stop ends the bound and reports whether it fired. A timer that fired
+// counts even while its callback has not run yet: the kill follows.
 func (w *startWatch) stop() bool {
-	w.timer.Stop()
-	return w.timedOut.Load()
+	return !w.timer.Stop() || w.timedOut.Load()
 }
 
 // ReadHelperRequest reads the launcher's request on the helper's control

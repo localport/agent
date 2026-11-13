@@ -29,9 +29,6 @@ type Server struct {
 	// Probe reports what this host offers sessions.
 	Probe func() Probe
 	Log   func(format string, args ...any)
-	// afterFunc arms the helper start bound; nil is time.AfterFunc. Tests
-	// replace it with a fake clock.
-	afterFunc func(time.Duration, func()) startTimer
 
 	slots chan struct{}
 }
@@ -154,11 +151,9 @@ func (s *Server) run(conn *os.File, req HelperRequest) {
 		s.refuse(conn, CodeSpawnFailed)
 		return
 	}
-	after := s.afterFunc
-	if after == nil {
-		after = func(d time.Duration, f func()) startTimer { return time.AfterFunc(d, f) }
-	}
-	watch := newStartWatch(after, func() { _ = cmd.Process.Kill() })
+	// startWatch carries the bound's logic and its fake-clock tests
+	// (messages_test.go); here it runs on the real clock.
+	watch := newStartWatch(func(d time.Duration, f func()) startTimer { return time.AfterFunc(d, f) }, func() { _ = cmd.Process.Kill() })
 	err = WriteHelperRequest(in, req)
 	clear(req.Password)
 	_ = in.Close()

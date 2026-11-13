@@ -19,7 +19,10 @@ import (
 // The agent allocates even ids (dial, listen) and the helper odd ids
 // (accepted); each side's ids strictly increase, so none is reused within a
 // connection. On Linux and macOS an ok for a dial and every accepted carry
-// the connected socket as SCM_RIGHTS on the same channel; on Windows no
+// the connected socket as SCM_RIGHTS on the same channel, which the agent
+// answers with an ack of that id once it holds the socket; the helper keeps
+// its own copy until then, as a macOS socket whose only reference is in
+// flight can arrive dead. On Windows no
 // descriptor crosses and each forward's bytes ride the channel as data, eof,
 // window and close messages under a credit window (ForwardMux).
 const (
@@ -32,6 +35,7 @@ const (
 	FwdData     byte = 7
 	FwdEOF      byte = 8
 	FwdWindow   byte = 9
+	FwdAck      byte = 10
 )
 
 // Forward networks.
@@ -93,6 +97,7 @@ func FwdCodeName(code byte) string { return fwdCodeNames[code] }
 //	data      ID, Data (1 to MaxForwardData bytes)
 //	eof       ID
 //	window    ID, N (1 to ForwardWindow)
+//	ack       ID (of the ok or accepted whose socket the agent received)
 //
 // A decoded message's Data is valid until the next read on the same reader.
 type FwdMsg struct {
@@ -144,7 +149,7 @@ func (m FwdMsg) validate() error {
 		case FwdUnix:
 			ok = even && ValidForwardPath(m.Path)
 		}
-	case FwdClose, FwdEOF:
+	case FwdClose, FwdEOF, FwdAck:
 		ok = true
 	case FwdOK:
 		ok = even
@@ -293,7 +298,7 @@ func parseForwardMsg(typ byte, p []byte) (FwdMsg, error) {
 				ok = false
 			}
 		}
-	case FwdClose, FwdEOF:
+	case FwdClose, FwdEOF, FwdAck:
 	case FwdOK:
 		m.Port, ok = u16()
 	case FwdRefused:

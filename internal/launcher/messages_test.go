@@ -164,4 +164,34 @@ func TestStartWatch(t *testing.T) {
 	if ft.armed || !w.stop() || *kills != 1 {
 		t.Fatalf("fired before the progress: re-armed %v, kills %d", ft.armed, *kills)
 	}
+
+	// The bound expired but its callback has not run yet when the reply
+	// arrives: the start still timed out, since the kill is on its way.
+	w, ft, _ = fakeWatch()
+	ft.armed = false
+	if !w.stop() {
+		t.Fatal("an expired bound whose callback is pending reported a start in time")
+	}
+}
+
+// A stream mux refuses an ack, for a live stream and for an unknown id
+// alike: acks belong to passed sockets, which a mux never carries (the
+// Windows helper's only refusal of one).
+func TestForwardMuxRefusesAnAck(t *testing.T) {
+	m := NewForwardMux(func(FwdMsg) error { return nil })
+	if _, err := m.Open(1); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []uint32{1, 9} {
+		if err := m.Deliver(FwdMsg{Type: FwdAck, ID: id}); err == nil {
+			t.Errorf("ack of id %d delivered", id)
+		}
+	}
+}
+
+// A start past its bound is refused start_timeout.
+func TestStartTimeoutRefusalCode(t *testing.T) {
+	if got := startFailureCode(errHelperTimeout); got != CodeStartTimeout {
+		t.Fatalf("code %q", got)
+	}
 }

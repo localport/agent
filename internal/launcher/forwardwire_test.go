@@ -40,6 +40,8 @@ func TestForwardMsgRoundTrip(t *testing.T) {
 		{Type: FwdData, ID: 1, Data: []byte("x")},
 		{Type: FwdEOF, ID: 1},
 		{Type: FwdWindow, ID: 1, N: ForwardWindow},
+		{Type: FwdAck, ID: 2},
+		{Type: FwdAck, ID: 3},
 	} {
 		got := roundTrip(t, m)
 		if got.Type != m.Type || got.ID != m.ID || got.ListenerID != m.ListenerID || got.Network != m.Network ||
@@ -116,6 +118,7 @@ func FuzzForwardReader(f *testing.F) {
 		{Type: FwdListen, ID: 2, Network: FwdUnix, Path: "/s"},
 		{Type: FwdAccepted, ListenerID: 2, ID: 1, Host: "::1", Port: 1},
 		{Type: FwdWindow, ID: 1, N: 1},
+		{Type: FwdAck, ID: 2},
 	} {
 		b, _ := AppendForwardMsg(nil, m)
 		f.Add(b)

@@ -346,6 +346,11 @@ func (c *ForwardClient) conn(id uint32) (ForwardConn, error) {
 		return nil, fmt.Errorf("%w: no socket with the message", errBadForward)
 	}
 	defer f.Close()
+	// The helper holds its copy of the socket until this ack: on macOS a
+	// socket whose only reference is in flight can arrive dead.
+	if err := c.send(FwdMsg{Type: FwdAck, ID: id}); err != nil {
+		return nil, err
+	}
 	nc, err := net.FileConn(f)
 	if err != nil {
 		return nil, err

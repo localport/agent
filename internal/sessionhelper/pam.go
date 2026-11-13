@@ -11,8 +11,26 @@ package sessionhelper
 #include <grp.h>
 #include <unistd.h>
 
+#include <sys/resource.h>
+
 // lpPamMessage is pam_messages.go's collector of one module message.
 extern void lpPamMessage(uintptr_t collector, char *msg);
+
+// lp_start_nofile is RLIMIT_NOFILE as the process started: a constructor
+// runs before the Go runtime, whose syscall package raises the soft limit.
+static struct rlimit lp_start_nofile;
+static int lp_start_nofile_ok;
+
+__attribute__((constructor)) static void lp_record_nofile(void) {
+	lp_start_nofile_ok = getrlimit(RLIMIT_NOFILE, &lp_start_nofile) == 0;
+}
+
+static int lp_get_start_nofile(unsigned long long *cur, unsigned long long *max) {
+	if (!lp_start_nofile_ok) return -1;
+	*cur = (unsigned long long)lp_start_nofile.rlim_cur;
+	*max = (unsigned long long)lp_start_nofile.rlim_max;
+	return 0;
+}
 
 // initgroups takes an int on macOS and a gid_t on Linux.
 static int lp_initgroups(const char *user, unsigned int gid) { return initgroups(user, gid); }
@@ -52,8 +70,10 @@ static char *lp_env_at(char **env, int i) { return env[i]; }
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"runtime/cgo"
+	"syscall"
 	"unsafe"
 )
 
@@ -191,6 +211,23 @@ func (p *pamSession) end() {
 
 func (p *pamSession) strerror(rc C.int) string {
 	return C.GoString(C.pam_strerror(p.h, rc))
+}
+
+// restoreStartFileLimit sets RLIMIT_NOFILE back to what it was when the
+// helper started, before the Go runtime raised its soft limit, and stops
+// os/exec from restoring the runtime's saved copy in children
+// (syscall.Setrlimit clears it). Called before openPAM, it makes every child
+// get exactly the limit pam_limits sets, or the start limit when it sets
+// none.
+func restoreStartFileLimit() error {
+	var cur, max C.ulonglong
+	if C.lp_get_start_nofile(&cur, &max) != 0 {
+		return errors.New("the open file limit at start was not recorded")
+	}
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: uint64(cur), Max: uint64(max)}); err != nil {
+		return fmt.Errorf("restore the open file limit: %w", err)
+	}
+	return nil
 }
 
 // accountChecks is not used with PAM: the account stack decides.

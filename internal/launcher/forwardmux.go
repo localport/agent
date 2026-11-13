@@ -54,8 +54,14 @@ func (m *ForwardMux) Len() int {
 // Deliver applies one data, eof, window or close message from the peer. A
 // message for an unknown id is ignored (the stream closed here while it was
 // in flight); a data message past the stream's window, or a window past the
-// sender's grant, is a protocol error.
+// sender's grant, is a protocol error, as is any other type (an ack belongs
+// to passed sockets, never to streams).
 func (m *ForwardMux) Deliver(msg FwdMsg) error {
+	switch msg.Type {
+	case FwdData, FwdEOF, FwdWindow, FwdClose:
+	default:
+		return errBadForward
+	}
 	m.mu.Lock()
 	s := m.streams[msg.ID]
 	if msg.Type == FwdClose && s != nil {

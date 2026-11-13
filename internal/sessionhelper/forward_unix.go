@@ -48,10 +48,19 @@ func ServeForwardSocket(uc *net.UnixConn, log func(string, ...any)) error {
 }
 
 // unixForwardPeer passes each connected socket to the agent as a descriptor;
-// the agent then relays it with no copy through this process.
+// the agent then relays it with no copy through this process. It keeps its
+// copy of each passed socket (held, by message id) until the agent's ack: on
+// macOS a socket whose only reference is an in-flight SCM_RIGHTS message can
+// be torn down before the agent receives it. Held sockets count as carried
+// forwards (conns), so the server's dial and accept limits bound them.
 type unixForwardPeer struct {
 	conn *net.UnixConn
 	wmu  sync.Mutex
+
+	hmu  sync.Mutex
+	held map[uint32]*os.File
+	// closed is set by closeAll; a later send closes its socket at once.
+	closed bool
 }
 
 func (p *unixForwardPeer) Read(b []byte) (int, error) { return p.conn.Read(b) }
@@ -70,24 +79,73 @@ func (p *unixForwardPeer) send(m launcher.FwdMsg, conn net.Conn) error {
 		if err != nil {
 			return err
 		}
-		defer sock.Close()
+		// Held before the write: the agent's ack may arrive before the write
+		// returns.
+		p.hmu.Lock()
+		closed := p.closed
+		if !closed {
+			if p.held == nil {
+				p.held = map[uint32]*os.File{}
+			}
+			p.held[m.ID] = sock
+		}
+		p.hmu.Unlock()
+		if closed {
+			_ = sock.Close()
+			return net.ErrClosed
+		}
 	}
 	p.wmu.Lock()
-	defer p.wmu.Unlock()
-	return launcher.WriteForwardMsg(p.conn, m, sock)
+	err := launcher.WriteForwardMsg(p.conn, m, sock)
+	p.wmu.Unlock()
+	if err != nil && sock != nil {
+		p.hmu.Lock()
+		if p.held[m.ID] == sock {
+			delete(p.held, m.ID)
+			_ = sock.Close()
+		}
+		p.hmu.Unlock()
+	}
+	return err
 }
 
-// deliver accepts only a close: the agent owns every passed socket, so a
-// close names one this process no longer holds.
+// deliver accepts a close and an ack. The agent owns every passed socket,
+// so a close names one this process holds at most until its ack; the ack
+// releases that copy, and an ack of no held socket ends the server.
 func (p *unixForwardPeer) deliver(m launcher.FwdMsg) error {
-	if m.Type == launcher.FwdClose {
+	switch m.Type {
+	case launcher.FwdClose:
 		return nil
+	case launcher.FwdAck:
+		p.hmu.Lock()
+		sock := p.held[m.ID]
+		delete(p.held, m.ID)
+		p.hmu.Unlock()
+		if sock == nil {
+			return errors.New("forward: an ack of no passed socket")
+		}
+		return sock.Close()
 	}
 	return errors.New("forward: stream data where sockets pass")
 }
 
-func (p *unixForwardPeer) conns() int { return 0 }
-func (p *unixForwardPeer) closeAll()  {}
+func (p *unixForwardPeer) conns() int {
+	p.hmu.Lock()
+	defer p.hmu.Unlock()
+	return len(p.held)
+}
+
+// closeAll releases every passed socket not yet acked, and makes every later
+// send close its socket instead of holding it.
+func (p *unixForwardPeer) closeAll() {
+	p.hmu.Lock()
+	held := p.held
+	p.held, p.closed = nil, true
+	p.hmu.Unlock()
+	for _, sock := range held {
+		_ = sock.Close()
+	}
+}
 
 func errConnRefused(err error) bool { return errors.Is(err, syscall.ECONNREFUSED) }
 func errAddrInUse(err error) bool   { return errors.Is(err, syscall.EADDRINUSE) }

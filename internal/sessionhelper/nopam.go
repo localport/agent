@@ -29,9 +29,9 @@ func openPAM(string, string, string, uint32, *pamMessages) (*pamSession, error) 
 func (*pamSession) env() []string { return nil }
 func (*pamSession) close()        {}
 
-// nologinPath is the file whose presence stops the logins of every account
-// but root; on a PAM build pam_nologin applies it.
-const nologinPath = "/etc/nologin"
+// restoreStartFileLimit has nothing to do without PAM: os/exec gives each
+// child the limit the helper started with.
+func restoreStartFileLimit() error { return nil }
 
 // accountChecks applies sshd's checks for a host without PAM: /etc/nologin
 // (checkNologin), and a shadow entry that is not locked and not expired

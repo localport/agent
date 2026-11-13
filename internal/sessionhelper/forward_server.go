@@ -20,8 +20,9 @@ const ForwardServerMode = "forward-server"
 const (
 	// maxForwardListeners bounds the remote listeners of one connection.
 	maxForwardListeners = 8
-	// maxForwardConns bounds the dials in progress, and on Windows the
-	// streams, of one connection.
+	// maxForwardConns bounds the dials in progress plus the carried forwards
+	// of one connection (peer.conns: Windows streams, or passed sockets not
+	// yet acked on Linux and macOS); an accept past it is dropped.
 	maxForwardConns = 32
 	// forwardDialTimeout bounds one dial.
 	forwardDialTimeout = 30 * time.Second
@@ -31,15 +32,20 @@ const (
 type forwardPeer interface {
 	io.Reader
 	// send writes m. With conn (an ok for a dial, an accepted) the
-	// connection goes with it: as a descriptor that send closes here (Linux
-	// and macOS), or as a new stream of m.ID that send pumps (Windows).
+	// connection goes with it: as a descriptor whose copy here is held until
+	// the agent's ack of m.ID (Linux and macOS), or as a new stream of m.ID
+	// that send pumps (Windows).
 	send(m launcher.FwdMsg, conn net.Conn) error
-	// deliver applies a stream message (data, eof, window, or a close of no
-	// listener); an error ends the server.
+	// deliver applies a message for a carried forward: data, eof, window or
+	// a close of no listener (Windows streams), an ack or a close of no
+	// listener (Linux and macOS); an error ends the server.
 	deliver(m launcher.FwdMsg) error
-	// conns is the number of forwards the peer carries (Windows streams).
+	// conns is the number of forwards the peer carries: Windows streams, or
+	// passed sockets not yet acked. The server's dial and accept limits
+	// count it.
 	conns() int
-	// closeAll ends every carried forward.
+	// closeAll ends every carried forward; a forward sent after it is ended
+	// at once.
 	closeAll()
 }
 
@@ -129,7 +135,7 @@ func (s *forwardServer) handle(m launcher.FwdMsg, wg *sync.WaitGroup) error {
 			return ln.Close()
 		}
 		return s.peer.deliver(m)
-	case launcher.FwdData, launcher.FwdEOF, launcher.FwdWindow:
+	case launcher.FwdData, launcher.FwdEOF, launcher.FwdWindow, launcher.FwdAck:
 		return s.peer.deliver(m)
 	}
 	return fmt.Errorf("forward: message type %d from the agent", m.Type)

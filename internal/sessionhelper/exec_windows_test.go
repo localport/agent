@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/localport/agent/internal/launcher"
+	"github.com/localport/agent/internal/testroot"
 )
 
 // The shell runs a command in the Win32-OpenSSH form, and alone for a login
@@ -61,7 +62,7 @@ func TestStartPipedRunsInTheJob(t *testing.T) {
 	env := mergeEnvironment(os.Environ(), nil, nil)
 	p, err := startPiped(token, shell, commandLine(shell, "ping -n 3 127.0.0.1 >nul"), env, false)
 	if err != nil {
-		t.Skipf("CreateProcessAsUser with this process's token: %v", err)
+		testroot.Require(t, "CreateProcessAsUser with this process's token: "+err.Error())
 	}
 	defer p.close()
 	// x/sys/windows has no IsProcessInJob wrapper.

@@ -73,14 +73,15 @@ func runRelayed(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer, hangup
 	cmd.SysProcAttr.Setctty, cmd.SysProcAttr.Ctty = true, ctty
 	r := &ptyRelay{master: master, slavePath: slave.Name(), term: term, hangupIgnored: hangupIgnored}
 	if child[0] == slave {
-		restore, err := makeRaw(term)
+		// The input copier's cancel pipe exists before the start, so a
+		// started child always has its input relayed.
+		cr, cw, err := os.Pipe()
 		if err != nil {
 			_ = master.Close()
 			_ = slave.Close()
 			return err
 		}
-		defer restore()
-		r.input = term
+		r.input, r.cancelR, r.cancelW = term, cr, cw
 	}
 	return runWithSignals(cmd, r, hangupIgnored, slave)
 }
@@ -105,9 +106,23 @@ func runWithSignals(cmd *exec.Cmd, r *ptyRelay, hangupIgnored bool, closeAfterSt
 	}
 	if err != nil {
 		if r != nil {
-			_ = r.master.Close()
+			r.closeUnstarted()
 		}
 		return err
+	}
+	if r != nil && r.input != nil {
+		// Raw only once the child runs, so a failed start leaves the terminal
+		// as it was; restored on every return after this.
+		restore, err := makeRaw(r.input)
+		if err != nil {
+			// The child leads its own group and is unreaped, so the group's
+			// number is still its own.
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+			r.closeUnstarted()
+			return err
+		}
+		defer restore()
 	}
 	pid := cmd.Process.Pid
 	var exitMu sync.Mutex
@@ -185,15 +200,17 @@ func (r *ptyRelay) start() {
 	if r.input == nil {
 		return
 	}
-	cr, cw, err := os.Pipe()
-	if err != nil {
-		// Without the cancel pipe the input copier could not be stopped;
-		// the child runs without input.
-		return
-	}
-	r.cancelR, r.cancelW = cr, cw
 	r.inputDone = make(chan struct{})
 	go r.copyInput()
+}
+
+// closeUnstarted releases a relay whose child never ran.
+func (r *ptyRelay) closeUnstarted() {
+	_ = r.master.Close()
+	if r.cancelR != nil {
+		_ = r.cancelR.Close()
+		_ = r.cancelW.Close()
+	}
 }
 
 // lost records the terminal's loss once: output stops reaching it and,

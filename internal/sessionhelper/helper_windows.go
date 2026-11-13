@@ -106,8 +106,9 @@ func Run(log func(string, ...any)) int {
 	if err != nil {
 		return refuse(launcher.CodeSpawnFailed, err)
 	}
-	// A terminal, and an exec with a terminal, run in a pseudoconsole; an
-	// exec without one, the file server and the forward server run on pipes.
+	// A terminal, and an exec with a terminal, run under the console host;
+	// an exec without one, the file server and the forward server run on
+	// pipes.
 	app, cmdLine := shell, commandLine(shell, req.Command)
 	switch req.Kind {
 	case launcher.KindSFTP:

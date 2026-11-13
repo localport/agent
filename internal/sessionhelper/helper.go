@@ -80,9 +80,15 @@ func Run(log func(string, ...any)) int {
 	}
 	shell := a.Shell
 	if req.AgentAccount {
-		// The agent account's login shell is nologin.
+		// The agent account's login shell is nologin. No PAM runs for it, so
+		// /etc/nologin is checked here on every build.
 		shell = "/bin/sh"
-	} else if err := accountChecks(a); err != nil {
+		err = checkNologin(a.UID, nologinPath)
+	} else {
+		err = accountChecks(a)
+	}
+	if err != nil {
+		noteNologin(msgs, err, nologinPath)
 		return refuse(launcher.CodeAccountRefused, err)
 	}
 	if shell == "" {
@@ -113,8 +119,7 @@ func Run(log func(string, ...any)) int {
 	}
 	var pam *pamSession
 	if pamAvailable && !req.AgentAccount {
-		var nofile syscall.Rlimit
-		if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &nofile); err != nil {
+		if err := restoreStartFileLimit(); err != nil {
 			closePTY()
 			return refuse(launcher.CodePAMFailed, err)
 		}
@@ -125,11 +130,6 @@ func Run(log func(string, ...any)) int {
 			if errors.Is(err, errPAMAccount) {
 				return refuse(launcher.CodeAccountRefused, err)
 			}
-			return refuse(launcher.CodePAMFailed, err)
-		}
-		if err := keepPAMFileLimit(nofile); err != nil {
-			pam.close()
-			closePTY()
 			return refuse(launcher.CodePAMFailed, err)
 		}
 	}
@@ -327,9 +327,10 @@ func shellArgs(shell string, req launcher.HelperRequest) []string {
 // reply then fits what is kept under launcher.MaxMessage.
 const maxPAMMessageBytes = 8 << 10
 
-// pamMessages collects the informational and error messages PAM modules
-// send (pam_nologin's text, an expiry warning, pam_motd), sanitized for the
-// client's terminal: invalid UTF-8 and control bytes other than tab and
+// pamMessages collects the session setup's messages for the client: the
+// informational and error messages PAM modules send (pam_nologin's text, an
+// expiry warning, pam_motd) and, without PAM, the /etc/nologin text. They
+// are sanitized for the client's terminal: invalid UTF-8 and control bytes other than tab and
 // newline become U+FFFD.
 type pamMessages struct {
 	list  []string
@@ -337,7 +338,7 @@ type pamMessages struct {
 }
 
 func (m *pamMessages) add(s string) {
-	if m == nil || m.bytes >= maxPAMMessageBytes {
+	if m == nil || s == "" || m.bytes >= maxPAMMessageBytes {
 		return
 	}
 	s = strings.Map(func(r rune) rune {
@@ -376,6 +377,34 @@ func checkShadow(password string, expireDay int64, now time.Time) error {
 		return fmt.Errorf("%w: the account expired", errPAMAccount)
 	}
 	return nil
+}
+
+// nologinPath is the file whose presence stops the logins of every account
+// but root; on a PAM build pam_nologin applies it to every login but the
+// agent account's.
+const nologinPath = "/etc/nologin"
+
+// maxNologinText bounds the nologin text passed to the client.
+const maxNologinText = 1 << 10
+
+// nologinText is the start of the file at path, the text sshd prints for a
+// login it refuses; empty when it cannot be read.
+func nologinText(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, maxNologinText))
+	return string(b)
+}
+
+// noteNologin adds the nologin file's text to msgs when err is a nologin
+// refusal: the client sees it, as sshd prints it.
+func noteNologin(msgs *pamMessages, err error, path string) {
+	if errors.Is(err, errcode.New(errcode.LoginsDisabled)) {
+		msgs.add(nologinText(path))
+	}
 }
 
 // checkNologin refuses uid when the file at path exists and uid is not root,
@@ -490,25 +519,6 @@ func sessionEnv(a account, shell, term, path, clientAddr string, pamEnv []string
 		out = append(out, k+"="+env[k])
 	}
 	return out
-}
-
-// keepPAMFileLimit makes the RLIMIT_NOFILE a PAM module (pam_limits) set
-// reach the children. os/exec otherwise gives each child the soft limit the
-// helper started with, which Go saved before raising its own; calling
-// syscall.Setrlimit stops that. A limit PAM left as it was (before) keeps
-// the saved soft limit, so a session does not get Go's raised one.
-func keepPAMFileLimit(before syscall.Rlimit) error {
-	var now syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &now); err != nil {
-		return fmt.Errorf("read the open file limit: %w", err)
-	}
-	if now == before {
-		return nil
-	}
-	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &now); err != nil {
-		return fmt.Errorf("keep the open file limit PAM set: %w", err)
-	}
-	return nil
 }
 
 // startChild starts every process the helper runs. PAM modules and NSS open

@@ -141,9 +141,12 @@ func (l *PipeListener) Accept() (*os.File, error) {
 		}
 		if errors.Is(err, errPipeClientGone) {
 			// A client that connected and closed before the connect: the
-			// instance is reset and waits for the next one.
-			_ = windows.DisconnectNamedPipe(h)
-			continue
+			// instance is reset and waits for the next one. One that cannot
+			// be reset is closed; the next Accept creates another.
+			if err = windows.DisconnectNamedPipe(h); err == nil {
+				continue
+			}
+			err = fmt.Errorf("reset pipe instance: %w", err)
 		}
 		_ = windows.CloseHandle(h)
 		l.next = 0

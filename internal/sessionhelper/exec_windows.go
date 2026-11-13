@@ -360,7 +360,7 @@ func (p *piped) relay(channel *os.File, log func(string, ...any)) {
 		p.close()
 	}()
 	_, _ = windows.WaitForSingleObject(p.process, windows.INFINITE)
-	// The tree ends with the command, as a pseudoconsole's does on close; a
+	// The tree ends with the command, as a console session's does; a
 	// background process still holding the pipes would otherwise keep the
 	// output open after the exit.
 	p.close()
