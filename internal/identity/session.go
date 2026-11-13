@@ -64,7 +64,7 @@ type mintSessionBody struct {
 // ErrDeviceCredential.
 func (c *Client) MintSession(ctx context.Context, cur *Material, req SessionRequest) (*SessionCertificate, error) {
 	if cur.Meta.Kind == KindDevice {
-		return nil, fmt.Errorf("%w: %s", ErrDeviceCredential, security.SanitizeDisplay(cur.Meta.Identity))
+		return nil, ErrDeviceCredential.With(nil, security.SanitizeDisplay(cur.Meta.Identity))
 	}
 	leaf, err := leafOf(cur.CertPEM)
 	if err != nil {

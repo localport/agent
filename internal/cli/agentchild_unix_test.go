@@ -46,6 +46,19 @@ func TestAgentChildCmdPassesNoEnvironment(t *testing.T) {
 	}
 }
 
+// --verbose reaches the child as a global flag before the child command,
+// where App.Run parses it.
+func TestAgentChildCmdCarriesVerbose(t *testing.T) {
+	t.Cleanup(func() { verbose = false })
+	if err := New("test", "", "").Run([]string{"--verbose", "version"}); err != nil || !verbose {
+		t.Fatalf("Run(--verbose version) = %v, verbose %v; want parsed", err, verbose)
+	}
+	cmd := agentChildCmd("/usr/bin/localport", service.Account{UID: 990, GID: 991}, []string{"status"})
+	if !slices.Equal(cmd.Args, []string{"/usr/bin/localport", "--verbose", agentChildCommand, "status"}) {
+		t.Errorf("Args = %q", cmd.Args)
+	}
+}
+
 // The hidden command runs only as the agent account.
 func TestAgentChildRefusesAnyOtherAccount(t *testing.T) {
 	restore := lookupAgentAccount

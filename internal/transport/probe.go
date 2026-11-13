@@ -59,7 +59,7 @@ func Probe(
 			break
 		}
 	}
-	return nil, nil, fmt.Errorf("%w (tried: %s)", ErrNoTransport, strings.Join(attempts, "; "))
+	return nil, nil, ErrNoTransport.With(nil, "tried: "+strings.Join(attempts, "; "))
 }
 
 // DefaultDialers returns the priority-ordered set of dialers: raw first

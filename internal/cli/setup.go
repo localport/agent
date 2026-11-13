@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/security"
 )
@@ -82,7 +83,7 @@ func runSetup(args []string) error {
 	}
 	ref, err := store.SaveIssued(ctx, *material)
 	if err != nil {
-		return fmt.Errorf("save the credential: %w\n  the setup token is spent: ask for a new setup token and run setup again", err)
+		return errcode.WithRemedy(errcode.New(errcode.CredentialNotKept).With(err, ""), "the setup token is spent: ask for a new setup token and run setup again")
 	}
 
 	fmt.Fprintf(os.Stderr, "\n  set up\n")

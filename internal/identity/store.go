@@ -299,7 +299,7 @@ func removeCredentialDir(ctx context.Context, dir string) error {
 	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
 		return os.RemoveAll(dir)
 	}
-	release, err := waitLockFile(ctx, filepath.Join(dir, lockFile), saveLockWait, ErrRenewalInProgress)
+	release, err := WaitLockFile(ctx, filepath.Join(dir, lockFile), saveLockWait, ErrRenewalInProgress)
 	if err != nil {
 		return err
 	}

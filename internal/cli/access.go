@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/localport/agent/internal/access"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/security"
 )
@@ -103,7 +104,7 @@ func runAccess(args []string) error {
 		}
 		chosen, err = resolveCredential(store, firstNonEmpty(*identityArg, os.Getenv(identityEnv)), true, true)
 		if err != nil {
-			return fmt.Errorf("%w\n  (or pass a credential file with --pem / --p12)", err)
+			return errcode.WithRemedy(err, "or pass a credential file with --pem / --p12")
 		}
 	}
 
@@ -149,7 +150,7 @@ func runAccess(args []string) error {
 		OnConn: func(l string, port uint16) {
 			fmt.Fprintf(os.Stderr, "  [conn] %s -> port %d\n", l, port)
 		},
-		OnError: func(err error) { fmt.Fprintln(os.Stderr, "  [error]", err) },
+		OnError: func(err error) { fmt.Fprintln(os.Stderr, "  [error]", userText(err)) },
 	}
 
 	if *stdio != 0 {
@@ -220,7 +221,7 @@ func identityTLSConfig(ctx context.Context, ref identity.Ref, remote, serverName
 	// and ambiguity are decided.
 	cred, err := identity.OpenRef(store, ref)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w\n  (or pass a credential file with --pem / --p12)", err)
+		return nil, "", errcode.WithRemedy(err, "or pass a credential file with --pem / --p12")
 	}
 	// A refused reload means the file now holds a different principal. The process
 	// keeps presenting what it opened with, so the refusal must be visible.
@@ -349,7 +350,7 @@ func runAccessFromConfig(path string) error {
 			OnConn: func(l string, port uint16) {
 				fmt.Fprintf(os.Stderr, "  [%s] [conn] %s -> port %d\n", name, l, port)
 			},
-			OnError: func(err error) { fmt.Fprintf(os.Stderr, "  [%s] [error] %s\n", name, err) },
+			OnError: func(err error) { fmt.Fprintf(os.Stderr, "  [%s] [error] %s\n", name, userText(err)) },
 		}
 
 		wg.Add(1)
@@ -361,7 +362,7 @@ func runAccessFromConfig(path string) error {
 					firstErr = runErr
 				}
 				errMu.Unlock()
-				fmt.Fprintf(os.Stderr, "  [%s] error: %s\n", name, runErr)
+				fmt.Fprintf(os.Stderr, "  [%s] error: %s\n", name, userText(runErr))
 			}
 		}()
 	}

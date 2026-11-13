@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 )
 
@@ -71,7 +72,7 @@ func runSet(args []string) (err error) {
 		if err != nil {
 			return err
 		}
-		return resetDesktopPins(who, ref, resetKinds)
+		return resetPins(file, who, ref, resetKinds)
 	}
 	ref, err := updateDevice(file, fs, device, who, name)
 	if err != nil {
@@ -83,7 +84,7 @@ func runSet(args []string) (err error) {
 		// After the config lock is released (the two locks never nest), and
 		// after the saved settings were applied, so a failed reset leaves no
 		// setting saved but unapplied.
-		return errors.Join(applyErr, resetDesktopPins(who, ref, resetKinds))
+		return errors.Join(applyErr, resetPins(file, who, ref, resetKinds))
 	}
 	return applyErr
 }
@@ -99,7 +100,7 @@ func applySettings(who invoker) error {
 	switch {
 	case err != nil:
 		// Installing the service again applies the saved settings.
-		return fmt.Errorf("the settings are saved, but the device service did not reload: %w\n  apply them with: %s", err, serviceInstallCommand)
+		return errcode.WithRemedy(errcode.New(errcode.SettingsNotApplied).With(err, ""), "apply them with: "+serviceInstallCommand)
 	case reloaded:
 		fmt.Fprintf(os.Stderr, "  reloaded the device service\n")
 	default:
@@ -149,6 +150,18 @@ func lookupDevice(file config.LocalConfigFile, name string) (identity.Ref, error
 	return local.Devices[i].Identity, nil
 }
 
+// runPinsChild is runAsAgentAccount; tests record the dispatch.
+var runPinsChild = runAsAgentAccount
+
+// resetPins resets the pins of kinds for ref: as root on the system layout
+// in the set-pins agent child, which owns the store, otherwise in process.
+func resetPins(file config.LocalConfigFile, who invoker, ref identity.Ref, kinds []string) error {
+	if needsAgentChild(file) {
+		return runPinsChild(append([]string{"set-pins", ref.String()}, kinds...), nil, os.Stdout)
+	}
+	return resetDesktopPins(who, ref, kinds)
+}
+
 // desktopKeyNames names each desktop kind's pinned key in set's output.
 var desktopKeyNames = map[string]string{"rdp": "RDP server certificate key", "vnc": "VNC server key"}
 
@@ -169,7 +182,7 @@ func resetDesktopPins(who invoker, ref identity.Ref, kinds []string) error {
 		name := desktopKeyNames[kind]
 		result, err := pins.Reset(context.Background(), kind)
 		if err != nil {
-			return fmt.Errorf("reset the %s of %s: %w", name, ref, err)
+			return errcode.New(errcode.PinResetFailed).With(err, fmt.Sprintf("the %s of %s", name, ref))
 		}
 		switch result {
 		case identity.ResetForgot:
@@ -207,12 +220,12 @@ func findDevice(devices []config.LocalDevice, name string) (int, error) {
 			continue
 		}
 		if found >= 0 {
-			return -1, fmt.Errorf("%q names more than one device; use the full identity from the local config", name)
+			return -1, errcode.New(errcode.DeviceAmbiguous).With(nil, fmt.Sprintf("%q; use the full identity from the local config", name))
 		}
 		found = i
 	}
 	if found < 0 {
-		return -1, fmt.Errorf("no enrolled device %q in the local config", name)
+		return -1, errcode.New(errcode.NoDevice).With(nil, fmt.Sprintf("%q in the local config", name))
 	}
 	return found, nil
 }

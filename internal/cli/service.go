@@ -82,7 +82,7 @@ func installServiceLocked(who invoker, exe string) error {
 		return err
 	}
 	if len(local.Devices) == 0 {
-		return fmt.Errorf("%w: %s lists no device; enrol one with: sudo localport connect <join-token>", errNoDevice, file.Path)
+		return errNoDevice.With(nil, fmt.Sprintf("%s lists no device; enrol one with: sudo localport connect <join-token>", file.Path))
 	}
 	if needsSystemLayout(file) {
 		// Before prepareService, whose run.lock check needs the account's
@@ -114,7 +114,7 @@ func uninstallService(who invoker, purge bool) error {
 	runLockWait := time.Duration(0)
 	switch {
 	case errors.Is(err, service.ErrUnsupported):
-		fmt.Fprintf(os.Stderr, "  %v\n", err)
+		fmt.Fprintf(os.Stderr, "  %s\n", userText(err))
 	case err != nil:
 		return err
 	default:
@@ -126,7 +126,7 @@ func uninstallService(who invoker, purge bool) error {
 		unlock()
 		switch {
 		case errors.Is(err, service.ErrNotInstalled):
-			fmt.Fprintf(os.Stderr, "  %v\n", err)
+			fmt.Fprintf(os.Stderr, "  %s\n", userText(err))
 		case err != nil:
 			return err
 		default:
@@ -180,12 +180,12 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 			return err
 		}
 		if installed {
-			return fmt.Errorf("%w (%s); remove it and the devices together with: sudo localport service uninstall --purge", errServiceInstalled, m.Name())
+			return errServiceInstalled.With(nil, m.Name()+"; remove it and the devices together with: sudo localport service uninstall --purge")
 		}
 	}
 	releaseRun, err := config.LockRun(file, runLockWait)
 	if errors.Is(err, config.ErrRunLocked) {
-		return fmt.Errorf("%w; stop the localport run or connect --foreground serving the devices, then run the command again", err)
+		return errcode.WithRemedy(err, "stop the localport run or connect --foreground serving the devices, then run the command again")
 	}
 	if err != nil {
 		return err
@@ -234,14 +234,16 @@ func purgeDeviceStore(dir string, viaChild bool, store *identity.Store) error {
 	return runAsAgentAccount([]string{"purge"}, nil, os.Stdout)
 }
 
-func usageService() {
-	fmt.Fprint(os.Stderr, `Usage: localport service install
+func usageService() { fmt.Fprint(os.Stderr, serviceUsage) }
+
+const serviceUsage = `Usage: localport service install
        localport service uninstall [--purge]
 
   Both need root: run them with sudo (from an elevated prompt on Windows).
 
   install installs or rewrites the device service (systemd
-  localport-device.service, launchd io.localport.device, Windows service
+  localport-device.service, OpenRC and OpenWrt procd
+  /etc/init.d/localport-device, launchd io.localport.device, Windows service
   localport-device) for the devices already in the machine-wide local config,
   and starts it. It needs no join token, and is refused when the config lists
   no device, when someone other than root (Administrators) could replace the
@@ -264,5 +266,4 @@ func usageService() {
 Flags (uninstall):
   --purge   also delete the machine-wide local config, the device credentials
             and the recording spool
-`)
-}
+`

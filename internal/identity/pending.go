@@ -198,7 +198,7 @@ func (s *Store) tryLock(ref Ref) (release func(), held bool, err error) {
 // ErrRenewalInProgress when the lock is still held then, and ctx.Err() when
 // ctx ends first.
 func (s *Store) waitLock(ctx context.Context, ref Ref, wait time.Duration) (func(), error) {
-	return waitLockFile(ctx, filepath.Join(s.Dir(ref), lockFile), wait, ErrRenewalInProgress)
+	return WaitLockFile(ctx, filepath.Join(s.Dir(ref), lockFile), wait, ErrRenewalInProgress)
 }
 
 // tryLockFile takes the file lock at path without blocking. The lock is per
@@ -219,10 +219,10 @@ func tryLockFile(path string) (release func(), held bool, err error) {
 	}, true, nil
 }
 
-// waitLockFile takes the file lock at path, retrying for up to wait. It
+// WaitLockFile takes the file lock at path, retrying for up to wait. It
 // returns busy when the lock is still held then, and ctx.Err() when ctx ends
 // first.
-func waitLockFile(ctx context.Context, path string, wait time.Duration, busy error) (func(), error) {
+func WaitLockFile(ctx context.Context, path string, wait time.Duration, busy error) (func(), error) {
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 	poll := time.NewTicker(lockPollInterval)

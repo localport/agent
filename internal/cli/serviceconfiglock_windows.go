@@ -60,7 +60,7 @@ func lockServiceConfig(ctx context.Context) (unlock func(), err error) {
 	unlock, err = takeServiceConfigMutex(ctx)
 	if err != nil {
 		runtime.UnlockOSThread()
-		return nil, fmt.Errorf("%w: %w", errServiceConfigBusy, err)
+		return nil, errServiceConfigBusy.With(err, "")
 	}
 	return func() {
 		unlock()
@@ -81,7 +81,7 @@ func lockServiceDefinitions(ctx context.Context) (func(), error) {
 	dirs, err := openTransactionDirs()
 	if err != nil {
 		unlock()
-		return nil, fmt.Errorf("%w: %w", errServiceConfigBusy, err)
+		return nil, errServiceConfigBusy.With(err, "")
 	}
 	if err := refuseOpenTransactionIn(dirs, "", security.CheckServiceDir); err != nil {
 		unlock()

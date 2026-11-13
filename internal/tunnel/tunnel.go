@@ -416,23 +416,23 @@ func (t *Tunnel) dialTarget(port uint16) (net.Conn, int, error) {
 	if !t.IsDevice() {
 		conn, err := net.DialTimeout("tcp", t.opts.Local, dialTimeout)
 		if err != nil {
-			return nil, http.StatusBadGateway, fmt.Errorf("%w: %s: %w", ErrLocalDialFailed, t.opts.Local, err)
+			return nil, http.StatusBadGateway, ErrLocalDialFailed.With(err, t.opts.Local)
 		}
 		return conn, http.StatusOK, nil
 	}
 	if port == 0 {
-		return nil, http.StatusForbidden, fmt.Errorf("%w: the edge named no port", ErrPortRefused)
+		return nil, http.StatusForbidden, ErrPortRefused.With(nil, "the edge named no port")
 	}
 	if _, open := t.ports.Protocol(port); !open {
-		return nil, http.StatusForbidden, fmt.Errorf("%w: port %d is not in the device's port list", ErrPortRefused, port)
+		return nil, http.StatusForbidden, ErrPortRefused.With(nil, fmt.Sprintf("port %d is not in the device's port list", port))
 	}
 	if !t.opts.AllowPorts.Allows(port) {
-		return nil, http.StatusForbidden, fmt.Errorf("%w: port %d is outside this device's --allow-ports", ErrPortRefused, port)
+		return nil, http.StatusForbidden, ErrPortRefused.With(nil, fmt.Sprintf("port %d is outside this device's --allow-ports", port))
 	}
 	addr := net.JoinHostPort(t.opts.Host, strconv.Itoa(int(port)))
 	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err != nil {
-		return nil, http.StatusBadGateway, fmt.Errorf("%w: %s: %w", ErrLocalDialFailed, addr, err)
+		return nil, http.StatusBadGateway, ErrLocalDialFailed.With(err, addr)
 	}
 	return conn, http.StatusOK, nil
 }
@@ -727,7 +727,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 		}
 		if err := pc.SendRegister(reg); err != nil {
 			raw.Close()
-			return fmt.Errorf("%w: send register: %w", ErrRegisterFailed, err)
+			return ErrRegisterFailed.With(err, "send register")
 		}
 
 		_ = raw.SetReadDeadline(time.Now().Add(registrationTimeout))
@@ -735,7 +735,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 		_ = raw.SetReadDeadline(time.Time{})
 		if err != nil {
 			raw.Close()
-			return fmt.Errorf("%w: register response: %w", ErrRegisterFailed, err)
+			return ErrRegisterFailed.With(err, "register response")
 		}
 
 		switch msgType {
@@ -743,7 +743,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			ack, err := proto.ParseRegisterAck(body)
 			if err != nil {
 				raw.Close()
-				return fmt.Errorf("%w: parse ack: %w", ErrRegisterFailed, err)
+				return ErrRegisterFailed.With(err, "parse ack")
 			}
 			if !ack.Success {
 				raw.Close()
@@ -786,10 +786,10 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			rd, err := proto.ParseRedirect(body)
 			raw.Close()
 			if err != nil {
-				return fmt.Errorf("%w: parse redirect: %w", ErrRegisterFailed, err)
+				return ErrRegisterFailed.With(err, "parse redirect")
 			}
 			if !allowedRedirectHost(rd.EdgeAddr) {
-				return fmt.Errorf("%w: %q", ErrUntrustedRedirect, sanitizeDisplay(rd.EdgeAddr))
+				return ErrUntrustedRedirect.With(nil, fmt.Sprintf("%q", sanitizeDisplay(rd.EdgeAddr)))
 			}
 			if h := t.opts.Handler; h != nil {
 				h.OnRedirect(t.EventKey(), addr, rd.EdgeAddr)
@@ -802,14 +802,14 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			if ep != nil {
 				return fmt.Errorf("edge error [%s]: %s", ep.Code, ep.Message)
 			}
-			return fmt.Errorf("%w: an unreadable edge error", ErrRegisterFailed)
+			return ErrRegisterFailed.With(nil, "an unreadable edge error")
 
 		default:
 			raw.Close()
-			return fmt.Errorf("%w: unexpected message %s", ErrRegisterFailed, msgType)
+			return ErrRegisterFailed.With(nil, fmt.Sprintf("unexpected message %s", msgType))
 		}
 	}
-	return fmt.Errorf("%w: more than %d", ErrTooManyRedirects, maxRedirectHops)
+	return ErrTooManyRedirects.With(nil, fmt.Sprintf("more than %d", maxRedirectHops))
 }
 
 // refused lets the device credential act on a non-retryable refusal of the
@@ -820,7 +820,7 @@ func (t *Tunnel) refused(ctx context.Context, presented *identity.Presentation, 
 	}
 	retry, err := t.opts.Credential.Refused(ctx, presented, regErr.Code)
 	if err != nil {
-		return &RegistrationError{Message: fmt.Sprintf("%s; renewing the device certificate failed: %v", regErr.Message, err), Code: regErr.Code}
+		return &RegistrationError{Message: regErr.Message + "; renewing the device certificate failed", Code: regErr.Code, LimitType: regErr.LimitType, Err: err}
 	}
 	regErr.Retryable = retry
 	return regErr
@@ -1022,7 +1022,7 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 		select {
 		case t.dataSlots <- struct{}{}:
 		default:
-			t.emitError(fmt.Errorf("%w: %d already in flight", ErrInboundLimit, maxConcurrentDataConns))
+			t.emitError(ErrInboundLimit.With(nil, fmt.Sprintf("%d already in flight", maxConcurrentDataConns)))
 			return
 		}
 
@@ -1231,7 +1231,7 @@ func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
 		}
 	}
 	if dialer == nil {
-		closeEvt(0, 0, fmt.Errorf("%w: no control connection", ErrDataDialFailed))
+		closeEvt(0, 0, ErrDataDialFailed.With(nil, "no control connection"))
 		return
 	}
 
@@ -1240,7 +1240,7 @@ func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
 	edge, err := dialer.Dial(dialCtx, host, port)
 	cancelDial()
 	if err != nil {
-		closeEvt(0, 0, fmt.Errorf("%w: %s: %w", ErrDataDialFailed, dialer.Kind(), err))
+		closeEvt(0, 0, ErrDataDialFailed.With(err, string(dialer.Kind())))
 		return
 	}
 	pc := proto.NewConn(edge)
@@ -1258,7 +1258,7 @@ func (t *Tunnel) proxyData(connID, remote string, target connTarget) {
 	if err := pc.SendConnectionReady(&proto.ConnectionReadyPayload{ConnectionID: connID, Status: http.StatusOK}); err != nil {
 		local.Close()
 		edge.Close()
-		closeEvt(0, 0, fmt.Errorf("%w: connection ready: %w", ErrDataDialFailed, err))
+		closeEvt(0, 0, ErrDataDialFailed.With(err, "connection ready"))
 		return
 	}
 
@@ -1401,7 +1401,7 @@ func ignoreClosed(err error) error {
 func firstCopyError(errs ...error) error {
 	for _, err := range errs {
 		if e := ignoreClosed(err); e != nil {
-			return fmt.Errorf("%w: %w", ErrRelayFailed, e)
+			return ErrRelayFailed.With(e, "")
 		}
 	}
 	return nil
@@ -1547,15 +1547,31 @@ func jitter(max time.Duration) time.Duration {
 // built locally). Callers can errors.As into it to inspect the limit type
 // and decide whether to retry.
 type RegistrationError struct {
+	// Message and Code are the edge's, sanitized by the proto parsers, or
+	// the local AG001 message and code.
 	Message   string
 	Code      string
 	LimitType proto.LimitType
 	Retryable bool
+	// Err is a local failure that followed the refusal, such as a failed
+	// certificate renewal.
+	Err error
 }
 
-// Error renders the message: the public, sanitized one supplied by the edge,
-// which may carry local detail, or the local AG001 message.
+// Error is the message, its limit, and the cause for logs.
 func (e *RegistrationError) Error() string {
+	s := e.RemoteMessage()
+	if e.Err != nil {
+		s += ": " + e.Err.Error()
+	}
+	return s
+}
+
+func (e *RegistrationError) Unwrap() error { return e.Err }
+
+// RemoteMessage is the message and its limit, without the cause
+// (errcode.Remote).
+func (e *RegistrationError) RemoteMessage() string {
 	s := e.Message
 	if e.LimitType != "" && e.LimitType != proto.LimitUnspecified {
 		s += " [limit=" + string(e.LimitType) + "]"
@@ -1563,6 +1579,11 @@ func (e *RegistrationError) Error() string {
 	return s
 }
 
+// RemoteCode is the edge's code, or AG001 (errcode.Remote).
+func (e *RegistrationError) RemoteCode() string { return e.Code }
+
+// registrationErrorFrom is the refusal of ack, whose text proto.ParseRegisterAck
+// has sanitized.
 func registrationErrorFrom(ack *proto.RegisterAckPayload) *RegistrationError {
 	msg := ack.Error
 	if msg == "" {

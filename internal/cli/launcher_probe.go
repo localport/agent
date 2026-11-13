@@ -25,8 +25,8 @@ var sessionLauncher session.Launcher
 const launcherProbeTimeout = 5 * time.Second
 
 // probeLauncher asks the session launcher what it offers. A launcher that
-// does not answer is logged and reported as unknown; sessions then refuse
-// before their ticket is spent.
+// does not answer is logged and reported as unknown: the registration
+// carries no session_auth.
 func probeLauncher(ctx context.Context, logEvent func(string)) sessionProbe {
 	ctx, cancel := context.WithTimeout(ctx, launcherProbeTimeout)
 	defer cancel()

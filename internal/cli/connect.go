@@ -17,7 +17,6 @@ import (
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/service"
-	"github.com/localport/agent/internal/tunnel"
 	"github.com/localport/agent/internal/ui"
 )
 
@@ -61,7 +60,7 @@ func runConnect(version string, args []string) (retErr error) {
 	// that follows flags would be dropped while the token is spent.
 	if len(positional) > 0 {
 		fs.Usage()
-		return fmt.Errorf("%w: %q; put every flag before the join token or right after it", errExtraArgument, security.SanitizeDisplay(positional[0]))
+		return errExtraArgument.With(nil, fmt.Sprintf("%q; put every flag before the join token or right after it", security.SanitizeDisplay(positional[0])))
 	}
 
 	if *configPath != "" {
@@ -167,8 +166,9 @@ func runConnect(version string, args []string) (retErr error) {
 	// to load the new credential.
 	if svc != nil && inForce.Identity == ref {
 		if installErr := svc.install(); installErr != nil {
-			return errors.Join(err, fmt.Errorf("device %s is enrolled and its credential saved, but the %s service was not installed: %w\n  fix the cause, then install the service without a new join token: %s",
-				ref, svc.manager.Name(), installErr, serviceInstallCommand))
+			return errors.Join(err, errcode.WithRemedy(
+				errcode.New(errcode.EnrolledNotInstalled).With(installErr, fmt.Sprintf("device %s, service %s", ref, svc.manager.Name())),
+				"fix the cause, then install the service without a new join token: "+serviceInstallCommand))
 		}
 	}
 	if err != nil {
@@ -196,9 +196,10 @@ func runConnect(version string, args []string) (retErr error) {
 	return serveEnrolled(context.Background(), version, store, []config.LocalDevice{inForce}, *noUI, *noMux, nil)
 }
 
-// storeEnrolledKeys writes the enrolment's ticket key set. The credential is
-// already stored, so a failure warns and enrolment goes on: the device holds
-// no ticket keys until ticket_keys.json loads, and an identity.KeyRefresher
+// storeEnrolledKeys writes the enrolment's key set (session CA keys and
+// recording key). The credential is already stored, so a failure warns and
+// enrolment goes on: the device accepts no session until ticket_keys.json
+// loads, and an identity.KeyRefresher
 // fetch (run for every device that serves sessions) or a renewal after the
 // file is readable again writes the set. Only
 // identity.ErrTicketKeysUnreadable gets the file remedy.
@@ -208,16 +209,16 @@ func storeEnrolledKeys(store *identity.Store, ref identity.Ref, set *identity.De
 	}
 	keys, err := store.TicketKeys(ref)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "  warning: the device's ticket keys were not saved: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  warning: the device's session keys were not saved: %s\n", userText(err))
 		return
 	}
 	// Enrolment runs before the device registers, so no hint is held yet.
 	err = keys.Replace(context.Background(), keys.Generation(), *set)
 	switch {
 	case errors.Is(err, identity.ErrTicketKeysUnreadable):
-		fmt.Fprintf(os.Stderr, "  warning: the device's ticket keys were not saved to %s: %v\n  the device holds no session ticket keys until that file loads; fix its mode to owner-only, or remove it if it is malformed, owned by another user or not a regular file, and the next key fetch or renewal writes the set\n", keys.Path(), err)
+		fmt.Fprintf(os.Stderr, "  warning: the device's session keys were not saved to %s: %s\n  the device accepts no session until that file loads; fix its mode to owner-only, or remove it if it is malformed, owned by another user or not a regular file, and the next key fetch or renewal writes the set\n", keys.Path(), userText(err))
 	case err != nil:
-		fmt.Fprintf(os.Stderr, "  warning: the device's ticket keys were not saved to %s: %v\n", keys.Path(), err)
+		fmt.Fprintf(os.Stderr, "  warning: the device's session keys were not saved to %s: %s\n", keys.Path(), userText(err))
 	}
 }
 
@@ -253,7 +254,7 @@ const serviceInstallCommand = "sudo localport service install (an elevated promp
 func prepareService(file config.LocalConfigFile, exe string) (*deviceService, error) {
 	m, err := newServiceManager()
 	if err != nil {
-		return nil, fmt.Errorf("%w\n  run the device in the foreground with --foreground", err)
+		return nil, errcode.WithRemedy(err, "run the device in the foreground with --foreground")
 	}
 	dropIns, err := m.Check()
 	if err != nil {
@@ -307,7 +308,7 @@ func refuseManualRun(file config.LocalConfigFile, m service.Manager) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("%w by process %d, which is not the running device service %s\n  stop a localport run or connect --foreground serving the devices; when the service is starting, stopping or restarting, retry in a few seconds", err, holder, m.Name())
+	return errcode.WithRemedy(err, fmt.Sprintf("held by process %d, which is not the running device service %s\n  stop a localport run or connect --foreground serving the devices; when the service is starting, stopping or restarting, retry in a few seconds", holder, m.Name()))
 }
 
 // serviceRunLockWait bounds how long `run --service` waits for run.lock: a
@@ -338,9 +339,9 @@ func holdRunLock(ctx context.Context, file config.LocalConfigFile, command strin
 		return nil, errors.Join(err, instErr)
 	}
 	if installed {
-		return nil, fmt.Errorf("%w; the device service %s is installed: use it, or stop it before %s", err, m.Name(), command)
+		return nil, errcode.WithRemedy(err, fmt.Sprintf("the device service %s is installed: use it, or stop it before %s", m.Name(), command))
 	}
-	return nil, fmt.Errorf("%w; another localport run or connect --foreground serves them", err)
+	return nil, errcode.WithRemedy(err, "another localport run or connect --foreground serves them")
 }
 
 // unsafeBinaryRemedy follows a security.ErrUnsafeExecutable refusal.
@@ -368,10 +369,10 @@ func serviceExecutable() (string, error) {
 // can replace it.
 func checkServiceExecutable(exe string) error {
 	if err := security.CheckPackageManagerBinary(exe); err != nil {
-		return fmt.Errorf("%w\n  %s", err, packageManagerRemedy)
+		return errcode.WithRemedy(err, packageManagerRemedy)
 	}
 	if err := checkServiceBinary(exe); err != nil {
-		return fmt.Errorf("%w\n  %s", err, unsafeBinaryRemedy)
+		return errcode.WithRemedy(err, unsafeBinaryRemedy)
 	}
 	return nil
 }
@@ -444,7 +445,7 @@ func forgetUnrecorded(store *identity.Store, viaChild bool, ref identity.Ref) er
 		fmt.Fprintf(os.Stderr, "  removed %s, which no config entry uses\n", ref)
 	}
 	if err != nil {
-		return fmt.Errorf("the credential of %s was not removed: %w\n  remove it with: localport identity remove %s", ref, err, ref)
+		return errcode.WithRemedy(err, fmt.Sprintf("the credential of %s was not removed; remove it with: localport identity remove %s", ref, ref))
 	}
 	return nil
 }
@@ -458,12 +459,12 @@ func forgetUnrecorded(store *identity.Store, viaChild bool, ref identity.Ref) er
 func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFlags, who invoker, ref identity.Ref, fresh config.LocalDevice) (config.LocalDevice, error) {
 	unlock, err := config.LockLocal(file)
 	if err != nil {
-		return config.LocalDevice{}, fmt.Errorf("%w\n  %s", err, joinTokenSpent)
+		return config.LocalDevice{}, errcode.WithRemedy(err, joinTokenSpent)
 	}
 	defer unlock()
 	local, err := loadLocalOrEmpty(file)
 	if err != nil {
-		return config.LocalDevice{}, fmt.Errorf("%w\n  %s", err, joinTokenSpent)
+		return config.LocalDevice{}, errcode.WithRemedy(err, joinTokenSpent)
 	}
 
 	i := slices.IndexFunc(local.Devices, func(d config.LocalDevice) bool { return d.Identity == ref })
@@ -471,7 +472,7 @@ func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFl
 		fresh.Identity = ref
 		local.Devices = append(local.Devices, fresh)
 		if err := writeLocal(file, local, ref); err != nil {
-			return config.LocalDevice{}, fmt.Errorf("device %s is enrolled, but the local config was not written: %w: %w\n  %s", ref, errDeviceNotRecorded, err, joinTokenSpent)
+			return config.LocalDevice{}, errcode.WithRemedy(errcode.New(errcode.EnrolledNotRecorded).With(errors.Join(errDeviceNotRecorded, err), "device "+ref.String()), joinTokenSpent)
 		}
 		return fresh, nil
 	}
@@ -491,10 +492,10 @@ func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFl
 	case errors.Is(err, config.ErrInvalidLocalConfig):
 		return stored, mergeConflict(ref, err)
 	case errors.Is(err, config.ErrFilesRootMissing):
-		return stored, fmt.Errorf("%w\n  device %s keeps its new credential and its stored settings\n  mount or create its files root, or change it with: localport set %s --files-root DIR",
-			err, ref, ref.Identity)
+		return stored, errcode.WithRemedy(err, fmt.Sprintf("device %s keeps its new credential and its stored settings\n  mount or create its files root, or change it with: localport set %s --files-root DIR",
+			ref, ref.Identity))
 	default:
-		return stored, fmt.Errorf("device %s is enrolled, but the local config was not written: %w\n  %s", ref, err, joinTokenSpent)
+		return stored, errcode.WithRemedy(errcode.New(errcode.EnrolledNotRecorded).With(err, "device "+ref.String()), joinTokenSpent)
 	}
 }
 
@@ -502,8 +503,9 @@ func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFl
 var writeLocal = config.WriteLocal
 
 func mergeConflict(ref identity.Ref, err error) error {
-	return fmt.Errorf("%w: %w\n  device %s keeps its new credential and its stored settings\n  change them with: localport set %s [flags]",
-		errMergeConflict, err, ref, ref.Identity)
+	return errMergeConflict.With(err, fmt.Sprintf("device %s keeps its new credential and its stored settings\n  change them with: localport set %s [flags]",
+		ref, ref.Identity))
+
 }
 
 // printDeviceSettings prints what a device allows.
@@ -554,7 +556,7 @@ func prepareDevice(fs *flag.FlagSet, flags *deviceFlags, who invoker) (config.Lo
 		err = d.ValidateSettings()
 	}
 	if errors.Is(err, config.ErrLoginsWithoutSession) || errors.Is(err, config.ErrDesktopWithoutTarget) || errors.Is(err, errNoDefaultLogin) {
-		return d, fmt.Errorf("%w\n  before enrolment these flags are checked without the device's stored settings: re-enrol without them, then change them with localport set", err)
+		return d, errcode.WithRemedy(err, "before enrolment these flags are checked without the device's stored settings: re-enrol without them, then change them with localport set")
 	}
 	if err != nil {
 		return d, err
@@ -591,13 +593,9 @@ func runConfigFile(version, path string, noUI, noMux, noInspect, logRequests boo
 	})
 	defer stop()
 
+	// An edge refusal prints as its message and code (errcode.Render).
 	runErr := a.Run(ctx, renderer)
 	renderer.Shutdown()
-
-	var regErr *tunnel.RegistrationError
-	if errors.As(runErr, &regErr) && regErr.Code != "" {
-		return fmt.Errorf("%s [%s]", regErr.Error(), regErr.Code)
-	}
 	return runErr
 }
 

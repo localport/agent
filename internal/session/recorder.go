@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,13 +96,13 @@ var newRecordingSealer = recording.NewSealer
 // failed open, as does a later abort of the returned recorder.
 func (s *Server) startRecording(id, sessionID string, adm *admission, start time.Time, channels int32) (*sessionRecorder, error) {
 	if s.cfg.Uploader == nil || s.cfg.RecordingKey == nil {
-		return nil, fmt.Errorf("%w: no uploader", errRecordingUnavailable)
+		return nil, errRecordingUnavailable.With(nil, "no uploader")
 	}
 	reportFailed := func(reason string) { s.reportFailedOpen(id, sessionID, adm, reason, channels) }
 	key, sum, ok := s.cfg.RecordingKey()
 	if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != adm.Rec.PubSHA256 {
 		reportFailed(recording.ReasonRecordingFailed)
-		return nil, fmt.Errorf("%w: the held recording key changed", errRecordingUnavailable)
+		return nil, errRecordingUnavailable.With(nil, "the held recording key changed")
 	}
 	// Both policies open before the channel's helper starts; the edge attests
 	// the live connection, so the control plane checks the certificate at its admission
@@ -114,7 +113,7 @@ func (s *Server) startRecording(id, sessionID string, adm *admission, start time
 	sealer, err := newRecordingSealer(id, key)
 	if err != nil {
 		reportFailed(recording.ReasonRecordingFailed)
-		return nil, fmt.Errorf("%w: %w", errRecordingUnavailable, err)
+		return nil, errRecordingUnavailable.With(err, "")
 	}
 	h, err := s.cfg.Uploader.BeginOpen(ctx, recording.Meta{
 		ID:             id,
@@ -130,7 +129,7 @@ func (s *Server) startRecording(id, sessionID string, adm *admission, start time
 	if err != nil {
 		sealer.Discard()
 		reportFailed(startFailureReason(err))
-		return nil, fmt.Errorf("%w: %w", errRecordingUnavailable, err)
+		return nil, errRecordingUnavailable.With(err, "")
 	}
 	var handoff recordingHandoff = h
 	if wrap := wrapRecordingHandoff.Load(); wrap != nil {

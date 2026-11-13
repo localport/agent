@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 const (
@@ -331,7 +333,7 @@ func (r *KeyRefresher) fetch(ctx context.Context) error {
 	}
 	if err := keys.Replace(ctx, generation, *set); err != nil {
 		if errors.Is(err, ErrTicketKeysUnreadable) {
-			return fmt.Errorf("%w; fix the mode of ticket_keys.json to owner-only, or remove it if it is malformed, owned by another user or not a regular file", err)
+			return errcode.WithRemedy(err, "fix the mode of ticket_keys.json to owner-only, or remove it if it is malformed, owned by another user or not a regular file")
 		}
 		return err
 	}

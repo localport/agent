@@ -3,12 +3,13 @@
 package access
 
 import (
-	"fmt"
 	"net"
 	"os"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // socketMask gives a new socket mode 0600.
@@ -46,11 +47,11 @@ func removeStaleSocket(path string) error {
 		return err
 	}
 	if info.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("%s exists and is not a socket", path)
+		return errcode.New(errcode.ForwardListenFailed).With(nil, path+" exists and is not a socket")
 	}
 	if conn, dialErr := net.DialTimeout("unix", path, time.Second); dialErr == nil {
 		_ = conn.Close()
-		return fmt.Errorf("%s is in use by another process", path)
+		return errcode.New(errcode.ForwardListenFailed).With(nil, path+" is in use by another process")
 	}
 	return os.Remove(path)
 }

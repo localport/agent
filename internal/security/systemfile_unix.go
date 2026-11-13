@@ -58,7 +58,7 @@ func CheckSystemDir(dir string) error {
 		return err
 	}
 	if perm := info.Mode().Perm(); perm&0o022 != 0 {
-		return fmt.Errorf("%w: %s is writable by group or other (mode %#o, want 0750)", ErrUntrustedPath, dir, perm)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is writable by group or other (mode %#o, want 0750)", dir, perm))
 	}
 	return nil
 }
@@ -97,7 +97,7 @@ func ReadSystemFile(path string) ([]byte, error) {
 	f, err := openNoFollow(path)
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EMLINK) || errors.Is(err, refusedLinkErrno) {
-			return nil, fmt.Errorf("%w: %s is a symlink", ErrUntrustedPath, path)
+			return nil, ErrUntrustedPath.With(nil, fmt.Sprintf("%s is a symlink", path))
 		}
 		return nil, err
 	}
@@ -110,7 +110,7 @@ func ReadSystemFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	if perm := info.Mode().Perm(); perm&0o027 != 0 {
-		return nil, fmt.Errorf("%w: %s has too-open permissions %#o (want 0640 or stricter)", ErrUntrustedPath, path, perm)
+		return nil, ErrUntrustedPath.With(nil, fmt.Sprintf("%s has too-open permissions %#o (want 0640 or stricter)", path, perm))
 	}
 	return io.ReadAll(f)
 }
@@ -204,7 +204,7 @@ func openSystemDir(dir string) (*os.File, error) {
 	f, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EMLINK) || errors.Is(err, refusedLinkErrno) {
-			return nil, fmt.Errorf("%w: %s is not a directory of its own; the device directory must not be redirected", ErrUntrustedPath, dir)
+			return nil, ErrUntrustedPath.With(nil, fmt.Sprintf("%s is not a directory of its own; the device directory must not be redirected", dir))
 		}
 		return nil, fmt.Errorf("open %s: %w", dir, err)
 	}
@@ -213,7 +213,7 @@ func openSystemDir(dir string) (*os.File, error) {
 
 func checkSystemRegular(info os.FileInfo, path string) error {
 	if info.Mode()&os.ModeType != 0 {
-		return fmt.Errorf("%w: %s is not a regular file", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is not a regular file", path))
 	}
 	return checkSystemOwner(info, path)
 }
@@ -221,10 +221,10 @@ func checkSystemRegular(info os.FileInfo, path string) error {
 func checkSystemOwner(info os.FileInfo, path string) error {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return fmt.Errorf("%w: cannot read ownership of %s", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("cannot read ownership of %s", path))
 	}
 	if int(st.Uid) != systemOwner {
-		return fmt.Errorf("%w: %w: %s is owned by uid %d, not %d", ErrUntrustedPath, errForeignOwner, path, st.Uid, systemOwner)
+		return ErrUntrustedPath.With(errForeignOwner, fmt.Sprintf("%s is owned by uid %d, not %d", path, st.Uid, systemOwner))
 	}
 	return nil
 }

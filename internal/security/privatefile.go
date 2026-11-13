@@ -155,11 +155,11 @@ func walkPrivateDir(root, dir string, followRoot, secure bool) error {
 	if err := inspectPrivateDir(absRoot, followRoot, secure); err != nil {
 		if errors.Is(err, errForeignOwner) {
 			if followRoot {
-				return fmt.Errorf("%w; change its owner to this account, or when not running as root or Administrator, set LOCALPORT_HOME to a directory this account owns", err)
+				return errcode.WithRemedy(err, "change its owner to this account, or when not running as root or Administrator, set LOCALPORT_HOME to a directory this account owns")
 			}
 			// The system-wide directory belongs to root or Administrators by
 			// design; the remedy is the account, not the directory.
-			return fmt.Errorf("%w; run the agent as the directory's owner (root, or an Administrator on Windows)", err)
+			return errcode.WithRemedy(err, "run the agent as the directory's owner (root, or an Administrator on Windows)")
 		}
 		return err
 	}

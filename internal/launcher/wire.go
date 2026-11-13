@@ -394,7 +394,7 @@ var ErrLauncherVersion = errcode.New(errcode.LauncherVersion)
 func clientRefusal(code string, messages []string) error {
 	r := &RefusalError{Code: code, Messages: messages}
 	if code == CodeVersionMismatch {
-		return fmt.Errorf("%w: %w", ErrLauncherVersion, r)
+		return ErrLauncherVersion.With(r, "")
 	}
 	return r
 }

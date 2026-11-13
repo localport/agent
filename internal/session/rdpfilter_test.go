@@ -386,6 +386,60 @@ func TestRDPFilterStaticChannels(t *testing.T) {
 	}
 }
 
+// The recorded Connect Response assigns io 1003, cliprdr 1004, drdynvc 1005
+// and message 1006, and the Attach User Confirm user 1002. A zero or
+// repeated id in either ends the connection before the client sees it.
+func TestRDPFilterChannelIDs(t *testing.T) {
+	const scNet, scMsg = "030c0c00eb030200ec03ed03", "040c0600ee03"
+	for name, tc := range map[string]struct {
+		net, msg string
+		user     string // Attach User Confirm initiator, hex
+	}{
+		"io zero":                {net: "030c0c0000000200ec03ed03"},
+		"channel zero":           {net: "030c0c00eb0302000000ed03"},
+		"channel equals io":      {net: "030c0c00eb030200eb03ed03"},
+		"channels equal":         {net: "030c0c00eb030200ec03ec03"},
+		"message zero":           {msg: "040c06000000"},
+		"message equals io":      {msg: "040c0600eb03"},
+		"message equals channel": {msg: "040c0600ed03"},
+		"user equals io":         {user: "0002"},
+		"user equals channel":    {user: "0003"},
+		"user equals message":    {user: "0005"},
+		"user zero":              {user: "fc17"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			steps := rdpTranscript(t, "base")
+			cr := hex.EncodeToString(steps[1].pdu)
+			if tc.net != "" {
+				cr = strings.Replace(cr, scNet, tc.net, 1)
+			}
+			if tc.msg != "" {
+				cr = strings.Replace(cr, scMsg, tc.msg, 1)
+			}
+			response, _ := hex.DecodeString(cr)
+			r := newRDPRun(t, rdpProtocolSSL, allClipboard)
+			r.pass(rdpClient, steps[0].pdu)
+			if tc.user == "" {
+				r.send(rdpServer, response)
+				r.wantEnd(CloseDesktopProtocolViolation)
+				if got := r.got[rdpClient].next(1); len(got) != 0 {
+					t.Fatalf("the client got %x", got)
+				}
+				return
+			}
+			r.pass(rdpServer, response)
+			for _, s := range steps[2:4] {
+				r.pass(s.from, s.pdu)
+			}
+			confirm := bytes.Clone(steps[4].pdu)
+			user, _ := hex.DecodeString(tc.user)
+			copy(confirm[len(confirm)-2:], user)
+			r.send(rdpServer, confirm)
+			r.wantEnd(CloseDesktopProtocolViolation)
+		})
+	}
+}
+
 // Channel names compare case-insensitively, and each name other than
 // drdynvc and an allowed cliprdr is refused: the recorded Connect Initial
 // with one CS_NET name replaced by another of the same length.

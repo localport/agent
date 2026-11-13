@@ -42,7 +42,7 @@ func CheckPackageManagerBinary(path string) error {
 		roots = append(roots, filepath.Join(data, "scoop"))
 	}
 	if manager := packageManagerOf(path, roots); manager != "" {
-		return fmt.Errorf("%w: %s installed %s", ErrPackageManagerExecutable, manager, path)
+		return ErrPackageManagerExecutable.With(nil, fmt.Sprintf("%s installed %s", manager, path))
 	}
 	return nil
 }
@@ -56,7 +56,7 @@ func CheckPackageManagerBinary(path string) error {
 // account are never trusted here, unlike the private file checks.
 func CheckServiceBinary(path string) error {
 	if !filepath.IsAbs(path) {
-		return fmt.Errorf("%w: %s is not an absolute path", ErrUnsafeExecutable, path)
+		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s is not an absolute path", path))
 	}
 	trusted, err := binaryTrustees()
 	if err != nil {
@@ -85,7 +85,7 @@ func CheckServiceBinary(path string) error {
 // with the replace rights, so a binary placed there passes the binary rule.
 func CheckServiceDir(dir string) error {
 	if !filepath.IsAbs(dir) {
-		return fmt.Errorf("%w: %s is not an absolute path", ErrUnsafeExecutable, dir)
+		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s is not an absolute path", dir))
 	}
 	trusted, err := binaryTrustees()
 	if err != nil {
@@ -172,11 +172,11 @@ func checkBinaryEntry(path string, leaf bool, rights windows.ACCESS_MASK, truste
 	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 	switch {
 	case info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0:
-		return fmt.Errorf("%w: %s is a reparse point; resolve it first", ErrUnsafeExecutable, path)
+		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s is a reparse point; resolve it first", path))
 	case leaf && isDir:
-		return fmt.Errorf("%w: %s is a directory", ErrUnsafeExecutable, path)
+		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s is a directory", path))
 	case !leaf && !isDir:
-		return fmt.Errorf("%w: %s is not a directory", ErrUnsafeExecutable, path)
+		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s is not a directory", path))
 	}
 
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT,
@@ -189,14 +189,14 @@ func checkBinaryEntry(path string, leaf bool, rights windows.ACCESS_MASK, truste
 		return fmt.Errorf("read owner of %s: %w", path, err)
 	}
 	if !sidIn(owner, trusted) {
-		return fmt.Errorf("%w: %s is owned by %s, not by SYSTEM, Administrators or TrustedInstaller", ErrUnsafeExecutable, path, owner)
+		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s is owned by %s, not by SYSTEM, Administrators or TrustedInstaller", path, owner))
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
 		return fmt.Errorf("read DACL of %s: %w", path, err)
 	}
 	if dacl == nil {
-		return fmt.Errorf("%w: %s has no DACL, which grants full access to everyone", ErrUnsafeExecutable, path)
+		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s has no DACL, which grants full access to everyone", path))
 	}
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
@@ -212,10 +212,10 @@ func checkBinaryEntry(path string, leaf bool, rights windows.ACCESS_MASK, truste
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
 			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 			if ace.Mask&rights != 0 && !sidIn(sid, trusted) {
-				return fmt.Errorf("%w: %s lets %s replace or change it; only SYSTEM, Administrators and TrustedInstaller may", ErrUnsafeExecutable, path, sid)
+				return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s lets %s replace or change it; only SYSTEM, Administrators and TrustedInstaller may", path, sid))
 			}
 		default:
-			return fmt.Errorf("%w: %s carries an access-control entry of type %d this check cannot evaluate", ErrUnsafeExecutable, path, ace.Header.AceType)
+			return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s carries an access-control entry of type %d this check cannot evaluate", path, ace.Header.AceType))
 		}
 	}
 	return nil

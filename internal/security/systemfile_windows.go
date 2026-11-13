@@ -337,7 +337,7 @@ func openSystemHandle(path string, access uint32, disposition uint32, sa *window
 	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || isDir != dir {
 		_ = windows.CloseHandle(h)
-		return 0, fmt.Errorf("%w: %s is a reparse point or not the expected type", ErrUntrustedPath, path)
+		return 0, ErrUntrustedPath.With(nil, fmt.Sprintf("%s is a reparse point or not the expected type", path))
 	}
 	return h, nil
 }
@@ -346,10 +346,10 @@ func openSystemHandle(path string, access uint32, disposition uint32, sa *window
 func checkRegularFile(h windows.Handle, path string) error {
 	ft, err := windows.GetFileType(h)
 	if err != nil {
-		return fmt.Errorf("%w: cannot read the file type of %s: %v", ErrUntrustedPath, path, err)
+		return ErrUntrustedPath.With(err, fmt.Sprintf("cannot read the file type of %s", path))
 	}
 	if ft != windows.FILE_TYPE_DISK {
-		return fmt.Errorf("%w: %s is not a regular file", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is not a regular file", path))
 	}
 	return nil
 }
@@ -382,7 +382,7 @@ func checkSystemOwner(h windows.Handle, path string) error {
 		return err
 	}
 	if !sidIn(owner, trusted) {
-		return fmt.Errorf("%w: %w: %s is owned by %s, not by SYSTEM or Administrators", ErrUntrustedPath, errForeignOwner, path, owner)
+		return ErrUntrustedPath.With(errForeignOwner, fmt.Sprintf("%s is owned by %s, not by SYSTEM or Administrators", path, owner))
 	}
 	return nil
 }
@@ -404,7 +404,7 @@ func checkSystemObject(h windows.Handle, path string, serviceAccess windows.ACCE
 		return fmt.Errorf("read DACL of %s: %w", path, err)
 	}
 	if dacl == nil {
-		return fmt.Errorf("%w: %s has no DACL, which grants full access to everyone", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s has no DACL, which grants full access to everyone", path))
 	}
 	trusted, err := systemTrustees()
 	if err != nil {
@@ -431,14 +431,15 @@ func checkSystemObject(h windows.Handle, path string, serviceAccess windows.ACCE
 			case sidIn(sid, trusted):
 			case sid.Equals(service):
 				if ace.Mask&^serviceAccess != 0 {
-					return fmt.Errorf("%w: %s grants NT SERVICE\\%s access %#x beyond %#x; only SYSTEM and Administrators may change it", ErrUntrustedPath, path, WindowsServiceName, uint32(ace.Mask), uint32(serviceAccess))
+					return ErrUntrustedPath.With(nil, fmt.Sprintf("%s grants NT SERVICE\\%s access %#x beyond %#x; only SYSTEM and Administrators may change it", path, WindowsServiceName, uint32(ace.Mask), uint32(serviceAccess)))
 				}
 			default:
-				return fmt.Errorf("%w: %s grants access to %s; only SYSTEM, Administrators and NT SERVICE\\%s may reach it", ErrUntrustedPath, path, sid, WindowsServiceName)
+				return ErrUntrustedPath.With(nil, fmt.Sprintf("%s grants access to %s; only SYSTEM, Administrators and NT SERVICE\\%s may reach it", path, sid, WindowsServiceName))
 			}
 		default:
-			return fmt.Errorf("%w: %s carries an access-control entry of type %d this check cannot evaluate; refusing rather than assuming it grants nothing",
-				ErrUntrustedPath, path, ace.Header.AceType)
+			return ErrUntrustedPath.With(nil, fmt.Sprintf("%s carries an access-control entry of type %d this check cannot evaluate; refusing rather than assuming it grants nothing",
+				path, ace.Header.AceType))
+
 		}
 	}
 	return nil

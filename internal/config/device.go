@@ -57,7 +57,7 @@ var ErrFilesRootMissing = errcode.New(errcode.FilesRootMissing)
 // checks are reported on their own.
 var ErrInvalidLocalConfig = errcode.New(errcode.InvalidLocalConfig)
 
-func invalidLocal(err error) error { return fmt.Errorf("%w: %w", ErrInvalidLocalConfig, err) }
+func invalidLocal(err error) error { return ErrInvalidLocalConfig.With(err, "") }
 
 // LocalConfigVersion is the schema version of the local device config.
 const LocalConfigVersion = 2
@@ -652,7 +652,7 @@ func LockRunContext(ctx context.Context, f LocalConfigFile, wait time.Duration) 
 		return nil, fmt.Errorf("lock %s: %w", path, err)
 	}
 	if !held {
-		return nil, fmt.Errorf("%w (%s is held)", ErrRunLocked, path)
+		return nil, ErrRunLocked.With(nil, path+" is held")
 	}
 	if err := recordHolder(lock); err != nil {
 		return nil, errors.Join(fmt.Errorf("record the holder of %s: %w", path, err), unlockAndClose(lock))

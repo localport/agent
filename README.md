@@ -139,7 +139,8 @@ Terminal sessions (Linux and macOS):
 SSH clients:
 
 - `localport ssh-config <device-host>...` prints an `ssh_config` block per device: ssh runs `localport ssh-cert` while it reads the config, which mints a 5-minute certificate for a per-device client key when the stored one has under a minute left, and `localport ssh-proxy` carries the connection to the device's edge. `localport ssh [login@]<device-host>` does the same in one command and runs the system `ssh`.
-- The client key, certificate and edge URL live under `<state root>/ssh/<credential>/`, one set per device and login (`<login>@<device-host>`), so two logins never replace each other's certificate, and the device host keys in `<state root>/known_hosts`, which each mint rewrites from the control plane's answer; ssh accepts exactly that key (`StrictHostKeyChecking yes`).
+- The client key, certificate and edge URL live under `<state root>/ssh/<credential>/`, one set per device and login (`<login>@<device-host>`), so two logins never replace each other's certificate, and the device host keys in that credential's `known_hosts` beside them, which each mint rewrites from the control plane's answer; ssh accepts exactly that key (`StrictHostKeyChecking yes`).
+- A login with a shell character (``' ` " ; & < > | ( ) { } $``) or a leading `-` is refused; on Windows so is `\`, so a domain account is named in its UPN form: `localport ssh alice@corp.example@<device-host>`. With an OpenSSH client older than 9.6 on `PATH`, `ssh-config` warns that ssh passes command-line user and host names to these commands unfiltered (CVE-2023-51385).
 - The device's SSH server serves shells, commands, `sftp` (and so `scp` and `rsync`) and `LANG`/`LC_*` environment variables. Agent forwarding and X11 are refused. OpenSSH 9.9 or later negotiates post-quantum key exchange; older clients use `curve25519-sha256`.
 - Port forwarding (`ssh -L`, `-W`, `-R`, and the forwards VS Code Remote SSH opens) needs `forwarding` enabled on the device (`--enable terminal,forwarding`; it requires `terminal` and is refused with `--host`) and a grant that permits the direction (local or remote) for the person or machine. Local forwards may reach any destination the login can; remote forwards listen on the device's loopback only. Unix-socket forwards work on Linux and macOS; Windows serves TCP forwards only. Every dial and listen runs as the login, in one helper process per SSH connection. A connection holds at most 32 open forwards and 8 remote listeners, and a device at most 64 open forwards across its connections. A recorded connection records each forward's open and close (address, result, byte counts), never the forwarded data.
 
@@ -183,7 +184,7 @@ make build
 
 - Product and guides: [localport.io/docs](https://localport.io/docs)
 - Wire protocol: [docs/PROTOCOL.md](docs/PROTOCOL.md)
-- Error codes (`[AG###]`) and what to do: [docs/ERRORS.md](docs/ERRORS.md)
+- Error codes (`[AG###]`) and what to do: [docs/ERRORS.md](docs/ERRORS.md). Commands show a message and its codes; `localport --verbose <command>` also prints the network or service cause they leave out.
 
 ## How it works
 

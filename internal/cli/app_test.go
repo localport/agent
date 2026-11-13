@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"errors"
+	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 func TestAppVersionAndHelp(t *testing.T) {
@@ -12,6 +16,22 @@ func TestAppVersionAndHelp(t *testing.T) {
 	}
 	if err := app.Run([]string{"help"}); err != nil {
 		t.Fatalf("help: %v", err)
+	}
+}
+
+// Without --verbose a command's error shows its message and code and points
+// at the flag when a cause was left out; with it, the full chain.
+func TestErrorTextAndVerbose(t *testing.T) {
+	t.Cleanup(func() { verbose = false })
+	app := New("1.2.3", "abc123", "2026-04-13")
+	err := errcode.New(errcode.NoTransport).With(&url.Error{Op: "Get", URL: "https://edge.localport.dev/v1/x", Err: errors.New("eof")}, "")
+	text := app.ErrorText(err)
+	if strings.Contains(text, "/v1/x") || !strings.Contains(text, "[AG071]") || !strings.Contains(text, "--verbose") {
+		t.Fatalf("ErrorText = %q", text)
+	}
+	verbose = true
+	if text := app.ErrorText(err); text != err.Error() {
+		t.Fatalf("verbose ErrorText = %q, want %q", text, err.Error())
 	}
 }
 

@@ -3,7 +3,6 @@ package access
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +11,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // connectTimeout bounds one dial and TLS handshake, so an unreachable device
@@ -110,7 +111,7 @@ func (s *Session) clientConn(ctx context.Context) (*http.ClientConn, error) {
 	}
 
 	if s.TLSConfig == nil {
-		return nil, errors.New("no certificate to present")
+		return nil, errcode.New(errcode.ClientCertUnusable).With(nil, "no certificate to present")
 	}
 	if s.transport == nil {
 		var protocols http.Protocols
@@ -165,7 +166,7 @@ func (s *Session) dialTLS(ctx context.Context, network, addr string) (net.Conn, 
 	}
 	if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
 		_ = tlsConn.Close()
-		return nil, fmt.Errorf("%s is not answering as a Localport edge: it did not accept HTTP/2", s.Device)
+		return nil, errcode.New(errcode.DeviceUnreachable).With(nil, s.Device+" is not answering as a Localport edge: it did not accept HTTP/2")
 	}
 	s.dialed = newReadErrConn(tlsConn)
 	return s.dialed, nil
@@ -268,16 +269,16 @@ func (a streamAddr) String() string  { return string(a) }
 func statusError(port uint16, status int) error {
 	switch status {
 	case http.StatusForbidden:
-		return fmt.Errorf("not allowed: check this identity's access to the device, and that port %d is allowed on it", port)
+		return errcode.New(errcode.DeviceRefused).With(nil, fmt.Sprintf("not allowed: check this identity's access to the device, and that port %d is allowed on it", port))
 	case http.StatusMisdirectedRequest:
-		return errors.New("address does not match the device")
+		return errcode.New(errcode.DeviceRefused).With(nil, "the address does not match the device")
 	case http.StatusMethodNotAllowed:
-		return errors.New("not a fleet device address")
+		return errcode.New(errcode.DeviceRefused).With(nil, "not a fleet device address")
 	case http.StatusBadGateway:
-		return fmt.Errorf("nothing is listening on port %d on the device", port)
+		return errcode.New(errcode.DeviceRefused).With(nil, fmt.Sprintf("nothing is listening on port %d on the device", port))
 	case http.StatusServiceUnavailable:
-		return errors.New("device is busy, retry")
+		return errcode.New(errcode.DeviceRefused).With(nil, "the device is busy, retry")
 	default:
-		return fmt.Errorf("edge refused the connection: %d", status)
+		return errcode.New(errcode.DeviceRefused).With(nil, fmt.Sprintf("the edge answered %d", status))
 	}
 }

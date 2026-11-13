@@ -100,7 +100,7 @@ func ownedService(name string, s interface{ Config() (mgr.Config, error) }) (mgr
 		return cfg, fmt.Errorf("read service %s: %w", name, err)
 	}
 	if !strings.Contains(cfg.Description, Marker) {
-		return cfg, fmt.Errorf("%w: Windows service %q; remove it (sc.exe delete %s), then run the command again", ErrForeignUnit, name, name)
+		return cfg, ErrForeignUnit.With(nil, fmt.Sprintf("Windows service %q; remove it (sc.exe delete %s), then run the command again", name, name))
 	}
 	return cfg, nil
 }
@@ -177,7 +177,7 @@ func checkNotMarkedForDelete(name string, s interface{ ChangeNothing() error }) 
 // with its remedy, and returns any other error unchanged.
 func markedForDelete(err error) error {
 	if errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
-		return fmt.Errorf("%w: close the Services console, Event Viewer and any other tool showing the service, or restart Windows, then run the command again", ErrMarkedForDelete)
+		return ErrMarkedForDelete.With(nil, "close the Services console, Event Viewer and any other tool showing the service, or restart Windows, then run the command again")
 	}
 	return err
 }

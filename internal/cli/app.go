@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // App is the top-level CLI router. It dispatches `localport <command> …`
@@ -19,7 +21,39 @@ func New(version, commit, date string) *App {
 	return &App{version: version, commit: commit, date: date, stderr: os.Stderr}
 }
 
+// verbose is the global --verbose flag: user-facing errors print their full
+// cause chain instead of errcode.Render's text.
+var verbose bool
+
+// userText is err as a one-shot command shows it: errcode.Render's text, or
+// the full chain under --verbose.
+func userText(err error) string {
+	if verbose {
+		return err.Error()
+	}
+	text, _ := errcode.Render(err)
+	return text
+}
+
+// ErrorText is the final error of a command as main prints it: userText,
+// and a pointer to --verbose when a cause was left out.
+func (a *App) ErrorText(err error) string {
+	if verbose {
+		return err.Error()
+	}
+	text, hidden := errcode.Render(err)
+	if hidden {
+		text += "\n  run the command again with --verbose for the cause"
+	}
+	return text
+}
+
+// Run parses the global flags (--verbose), which come before the command,
+// then runs the command.
 func (a *App) Run(args []string) error {
+	for len(args) > 0 && (args[0] == "--verbose" || args[0] == "-verbose") {
+		verbose, args = true, args[1:]
+	}
 	if len(args) == 0 {
 		return runTunnel(a.version, args)
 	}
@@ -87,6 +121,9 @@ Commands:
   login     Sign in as YOURSELF and get a short-lived certificate
   identity  List, renew and remove the credentials on this machine
   version   Print version and exit
+
+Global flags (before the command):
+  --verbose  print an error's full cause, network and server detail included
 
 Examples:
   # Expose a service running on localhost (protocol and port):

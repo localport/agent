@@ -1,11 +1,12 @@
-// Package errcode holds the agent's local error codes. Every named refusal
-// the agent reports to the user carries one, printed as "message [AG###]",
-// so support can name the failure without the message text. A caller that
-// wraps a sentinel with detail ("%w: detail") prints the code before the
-// detail, and a coded error wrapping another prints both codes. OS failures
-// and flag usage errors carry no code. docs/ERRORS.md lists each code with
-// what to do. Codes from the control plane or the edge (such as SE031) are
-// not defined here and pass through unchanged.
+// Package errcode holds the agent's local error codes and the renderer of
+// user-facing errors. Every agent-side failure the user sees carries a code,
+// printed as "message: detail [AG###]", so support can name the failure
+// without the message text; With adds the local detail and the cause, and a
+// coded error wrapping another prints both codes. Render builds the user
+// text from typed parts only; Error() is the full chain for logs and
+// --verbose. Flag usage errors carry no code. docs/ERRORS.md lists each code
+// with what to do. Codes from the control plane or the edge (such as SE031)
+// are not defined here and pass through unchanged (Remote).
 package errcode
 
 import "fmt"
@@ -14,20 +15,36 @@ import "fmt"
 // package in blocks of ten.
 type Code string
 
-// Error is a coded error. Its sentinels come from New; a caller wraps one
-// with fmt.Errorf("...: %w", sentinel) or sets Err to keep a cause. errors.Is
-// matches any Error with the same Code.
+// Error is a coded error. Its sentinels come from New; With adds the local
+// detail the user sees and the cause. errors.Is matches any Error with the
+// same Code.
 type Error struct {
 	Code Code
 	Msg  string
-	Err  error
+	// Detail is local text the user sees after Msg: a path, a value, a
+	// remedy. Never text from the network, the control plane or the edge.
+	Detail string
+	// Err is the cause. Render shows only its typed parts (see Render).
+	Err error
 }
 
+// With returns a copy of e carrying cause and detail; either may be nil or
+// empty. A sentinel stays unchanged.
+func (e *Error) With(cause error, detail string) *Error {
+	return &Error{Code: e.Code, Msg: e.Msg, Detail: detail, Err: cause}
+}
+
+// Error is the full diagnostic text, cause included, for logs and
+// --verbose: "msg: detail: cause [code]".
 func (e *Error) Error() string {
-	if e.Err != nil {
-		return e.Msg + ": " + e.Err.Error() + " [" + string(e.Code) + "]"
+	s := e.Msg
+	if e.Detail != "" {
+		s += ": " + e.Detail
 	}
-	return e.Msg + " [" + string(e.Code) + "]"
+	if e.Err != nil {
+		s += ": " + e.Err.Error()
+	}
+	return s + " [" + string(e.Code) + "]"
 }
 
 func (e *Error) Unwrap() error { return e.Err }
@@ -121,6 +138,33 @@ const (
 	ServiceConfigBusy    Code = "AG091"
 	UninstallEntryNotSet Code = "AG092"
 	PurgeFailed          Code = "AG093"
+
+	NoSessionCert        Code = "AG101"
+	SSHFilesBusy         Code = "AG102"
+	SSHLoginRefused      Code = "AG103"
+	SSHConfigPathUnsafe  Code = "AG104"
+	SSHClientFiles       Code = "AG105"
+	SessionCertRefused   Code = "AG106"
+	SessionMintFailed    Code = "AG107"
+	SessionConnectFailed Code = "AG108"
+	SessionEnded         Code = "AG109"
+
+	EnrolledNotRecorded  Code = "AG110"
+	EnrolledNotInstalled Code = "AG119"
+	CredentialExpired    Code = "AG111"
+	ExecutableUnknown    Code = "AG112"
+	CurrentUserUnknown   Code = "AG113"
+	OpenSSHUnavailable   Code = "AG114"
+	CredentialNotKept    Code = "AG115"
+	SettingsNotApplied   Code = "AG116"
+	PinResetFailed       Code = "AG117"
+	DeviceAmbiguous      Code = "AG118"
+
+	ClientCertUnusable  Code = "AG121"
+	AccessConfigInvalid Code = "AG122"
+	ForwardListenFailed Code = "AG123"
+	DeviceRefused       Code = "AG124"
+	DeviceUnreachable   Code = "AG125"
 )
 
 // NewJoinCommand is the remedy for every lost or unusable device credential.
@@ -165,7 +209,7 @@ var registry = []Entry{
 
 	{ForeignUnit, "Foreign service definition", "a service definition not written by localport is in the way"},
 	{NotInstalled, "Device service not installed", "no device service is installed"},
-	{Unsupported, "No supported service manager", "this system has no service manager localport can install into (systemd, launchd or the Windows service manager)"},
+	{Unsupported, "No supported service manager", "this system has no service manager localport can install into (systemd, OpenRC, OpenWrt procd, launchd or the Windows service manager)"},
 	{MarkedForDelete, "Windows service marked for deletion", "the device service is deleted, but Windows keeps it until every handle to it closes"},
 	{StoreNotPurged, "Device credentials not purged", "removing the device credentials and the recording spool failed"},
 
@@ -200,6 +244,33 @@ var registry = []Entry{
 	{ServiceConfigBusy, "Service configuration busy", "another installer or service command is changing the device services"},
 	{UninstallEntryNotSet, "Uninstall entry not written", "the Add/Remove Programs entry was not written; the install was undone"},
 	{PurgeFailed, "Device state not purged", "the uninstall finished, but removing the device identities and config failed"},
+
+	{NoSessionCert, "No session certificate", "no session certificate"},
+	{SSHFilesBusy, "SSH client files busy", "another localport ssh-cert is still minting a certificate for this credential"},
+	{SSHLoginRefused, "Login refused for SSH", "this login cannot be used with localport's SSH commands"},
+	{SSHConfigPathUnsafe, "Path unusable in ssh_config", "a localport path holds a character ssh_config cannot carry safely"},
+	{SSHClientFiles, "SSH client files unusable", "the SSH client files of this credential cannot be read or written"},
+	{SessionCertRefused, "Session certificate answer refused", "the control plane's session certificate answer is not usable"},
+	{SessionMintFailed, "Session certificate not issued", "the control plane did not issue a session certificate"},
+	{SessionConnectFailed, "Session connection failed", "the connection to the device's session failed"},
+	{SessionEnded, "Session ended", "the session ended"},
+
+	{EnrolledNotRecorded, "Device enrolled, config not written", "the device is enrolled, but the local config was not written"},
+	{CredentialExpired, "Credential expired", "the credential has expired"},
+	{ExecutableUnknown, "localport path unknown", "the path of this localport executable cannot be found"},
+	{CurrentUserUnknown, "Current user unknown", "the account running this command cannot be looked up"},
+	{OpenSSHUnavailable, "OpenSSH client unavailable", "the OpenSSH client (ssh) cannot be run"},
+	{CredentialNotKept, "Credential not saved", "the issued credential could not be saved in the credential store"},
+	{SettingsNotApplied, "Settings saved but not applied", "the settings are saved, but the device service did not reload"},
+	{PinResetFailed, "Desktop key not forgotten", "the trusted desktop server key could not be forgotten"},
+	{DeviceAmbiguous, "Device name ambiguous", "the name matches more than one enrolled device"},
+	{EnrolledNotInstalled, "Device enrolled, service not installed", "the device is enrolled and its credential saved, but its service was not installed"},
+
+	{ClientCertUnusable, "Client certificate unusable", "the client certificate cannot be used"},
+	{AccessConfigInvalid, "Invalid access config", "invalid access config"},
+	{ForwardListenFailed, "Local forward not opened", "the local forward could not listen"},
+	{DeviceRefused, "Device refused the connection", "the device or its edge refused the connection"},
+	{DeviceUnreachable, "Device unreachable", "the device could not be reached"},
 }
 
 // New returns the sentinel of a registered code. An unregistered code is a

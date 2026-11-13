@@ -25,14 +25,14 @@ func main() {
 
 	app := cli.New(version, commit, date)
 	if err := app.Run(os.Args[1:]); err != nil {
-		os.Exit(report(os.Stderr, err))
+		os.Exit(report(os.Stderr, app, err))
 	}
 }
 
-// report prints err, its code included, and returns the exit status: a
-// positive ExitError Code, else 1.
-func report(w io.Writer, err error) int {
-	fmt.Fprintln(w, "error:", err)
+// report prints err as the user sees it (cli.App.ErrorText), its codes
+// included, and returns the exit status: a positive ExitError Code, else 1.
+func report(w io.Writer, app *cli.App, err error) int {
+	fmt.Fprintln(w, "error:", app.ErrorText(err))
 	var exitErr *service.ExitError
 	if errors.As(err, &exitErr) && exitErr.Code > 0 {
 		return exitErr.Code

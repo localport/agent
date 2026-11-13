@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -8,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 )
 
@@ -166,17 +169,167 @@ func TestSSHCertMintsOnceAndReusesWhileFresh(t *testing.T) {
 	}
 }
 
-// A login that cannot name a client file is refused before any mint.
-func TestSSHCertRefusesALoginThatCannotNameAFile(t *testing.T) {
+// refusedOnEveryClient are logins no client OS accepts: they cannot name a
+// file or would act in ssh_config's shell commands.
+var refusedOnEveryClient = []string{"", "..", "a/b", "-oProxyCommand=x", "a;b", "$(id)", "a`id`", "a'b", `a"b`, "a|b", "a&b", "a>b", "a(b)", "{a}"}
+
+// ssh-cert and ssh-proxy refuse such a login before any mint or file read.
+func TestSSHHelpersRefuseALoginBeforeAnyWork(t *testing.T) {
 	target := newSSHTarget(t)
 	m := newFakeMint(t, time.Now())
-	for _, login := range []string{"..", "a/b", `dom\user`, "a*b", ""} {
-		if err := target.ensureCert(context.Background(), login, m.mint, time.Now()); err == nil {
-			t.Errorf("login %q accepted", login)
+	for _, login := range refusedOnEveryClient {
+		refused := errcode.New(errcode.SSHLoginRefused)
+		if err := target.ensureCert(context.Background(), login, m.mint, time.Now()); !errors.Is(err, refused) {
+			t.Errorf("ssh-cert login %q = %v, want a login refusal", login, err)
+		}
+		if err := target.proxy(context.Background(), login, strings.NewReader(""), io.Discard, nil, m.mint); !errors.Is(err, refused) {
+			t.Errorf("ssh-proxy login %q = %v, want a login refusal", login, err)
 		}
 	}
 	if m.calls != 0 {
 		t.Fatalf("calls = %d, want no mint", m.calls)
+	}
+}
+
+// ssh-proxy only reads the client files: without a certificate or a key it
+// fails with AG101 naming ssh-cert, and it creates no key.
+func TestSSHProxyWithoutClientFilesCreatesNothing(t *testing.T) {
+	target := newSSHTarget(t)
+	m := newFakeMint(t, time.Now())
+	f := target.files("pi")
+	proxy := func() error {
+		return target.proxy(context.Background(), "pi", strings.NewReader(""), io.Discard, nil, m.mint)
+	}
+	if err := proxy(); !errors.Is(err, errNoSessionCert) || !strings.Contains(err.Error(), "localport ssh-cert") {
+		t.Fatalf("no files: proxy = %v, want AG101 naming ssh-cert", err)
+	}
+	if err := target.ensureCert(context.Background(), "pi", m.mint, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(f.key); err != nil {
+		t.Fatal(err)
+	}
+	if err := proxy(); !errors.Is(err, errNoSessionCert) {
+		t.Fatalf("no key: proxy = %v, want AG101", err)
+	}
+	if _, err := os.Stat(f.key); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("proxy created the key: %v", err)
+	}
+}
+
+// ssh-cert waits for the lock another holds and gives up when its context
+// ends, minting nothing; once the lock is free it mints.
+func TestSSHCertWaitsForTheLock(t *testing.T) {
+	target := newSSHTarget(t)
+	m := newFakeMint(t, time.Now())
+	f := target.files("pi")
+	if err := os.MkdirAll(filepath.Dir(f.lock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release, err := identity.WaitLockFile(context.Background(), f.lock, time.Second, errSSHFilesBusy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := target.ensureCert(ctx, "pi", m.mint, time.Now()); !errors.Is(err, context.DeadlineExceeded) || m.calls != 0 {
+		t.Fatalf("held: ensureCert = %v, calls %d; want the deadline and no mint", err, m.calls)
+	}
+	release()
+	if err := target.ensureCert(context.Background(), "pi", m.mint, time.Now()); err != nil || m.calls != 1 {
+		t.Fatalf("free: ensureCert = %v, calls %d; want one mint", err, m.calls)
+	}
+}
+
+// A backslash, * and ? name no Windows file; elsewhere a backslash passes
+// unless it would escape the next one or the closing quote. A UPN login
+// and a login with a space pass everywhere.
+func TestCheckSSHLoginPerClientOS(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, login := range refusedOnEveryClient {
+			if checkSSHLogin(login, goos) == nil {
+				t.Errorf("%s: login %q accepted", goos, login)
+			}
+		}
+		for _, login := range []string{"pi", "alice@corp.example", "John Smith", "a-b.c_d"} {
+			if err := checkSSHLogin(login, goos); err != nil {
+				t.Errorf("%s: login %q = %v", goos, login, err)
+			}
+		}
+	}
+	for login, windowsOK := range map[string]bool{`CORP\alice`: false, "a*b": false, "a?b": false} {
+		if err := checkSSHLogin(login, "linux"); err != nil {
+			t.Errorf("linux: login %q = %v", login, err)
+		}
+		if got := checkSSHLogin(login, "windows") == nil; got != windowsOK {
+			t.Errorf("windows: login %q accepted = %v", login, got)
+		}
+	}
+	for _, login := range []string{`alice\`, `a\\b`} {
+		if checkSSHLogin(login, "linux") == nil {
+			t.Errorf("linux: login %q accepted", login)
+		}
+	}
+}
+
+// splitLoginHost splits at the last @, as ssh does.
+func TestSplitLoginHost(t *testing.T) {
+	for arg, want := range map[string][2]string{
+		"pi@" + testDeviceHost:                 {"pi", testDeviceHost},
+		"alice@corp.example@" + testDeviceHost: {"alice@corp.example", testDeviceHost},
+	} {
+		login, host, err := splitLoginHost(arg)
+		if err != nil || login != want[0] || host != want[1] {
+			t.Errorf("splitLoginHost(%q) = %q, %q, %v; want %q", arg, login, host, err, want)
+		}
+	}
+	if _, _, err := splitLoginHost("@" + testDeviceHost); err == nil {
+		t.Error("an empty login accepted")
+	}
+}
+
+// ssh_config paths: a quote, $, ` or a line break is refused everywhere, a
+// backslash outside Windows.
+func TestCheckSSHConfigPath(t *testing.T) {
+	for _, goos := range []string{"linux", "windows"} {
+		for _, p := range []string{`/opt/"q"/localport`, "/home/$USER/x", "/opt/`id`", "/opt/a\nb", "/opt/a\rb"} {
+			if checkSSHConfigPath(p, goos) == nil {
+				t.Errorf("%s: path %q accepted", goos, p)
+			}
+		}
+		for _, p := range []string{"/opt/local port/100%/localport", "/opt/a;b|c&(d)/localport"} {
+			if err := checkSSHConfigPath(p, goos); err != nil {
+				t.Errorf("%s: path %q = %v", goos, p, err)
+			}
+		}
+	}
+	if err := checkSSHConfigPath(`C:\Program Files (x86)\Localport\localport.exe`, "windows"); err != nil {
+		t.Errorf("windows: program path = %v", err)
+	}
+	if checkSSHConfigPath(`/opt/a\b/localport`, "linux") == nil {
+		t.Error("linux: a backslash accepted")
+	}
+}
+
+// Each credential keeps its own known_hosts: a mint with one credential
+// leaves the host key another credential trusts for the same device.
+func TestKnownHostsPerCredential(t *testing.T) {
+	ana := newSSHTarget(t)
+	bob := ana
+	bob.ref.Identity = "bob"
+	now := time.Now()
+	ma, mb := newFakeMint(t, now), newFakeMint(t, now)
+	if ana.files("pi").knownHosts == bob.files("pi").knownHosts {
+		t.Fatal("two credentials share known_hosts")
+	}
+	if err := ana.ensureCert(context.Background(), "pi", ma.mint, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := bob.ensureCert(context.Background(), "pi", mb.mint, now); err != nil {
+		t.Fatal(err)
+	}
+	if key, err := knownHostKey(ana.files("pi").knownHosts, testDeviceHost); err != nil || !bytes.Equal(key.Marshal(), ma.hostKey.Marshal()) {
+		t.Fatalf("ana's host key = %v, %v; want her mint's", key, err)
 	}
 }
 
@@ -278,35 +431,48 @@ func TestSSHConfigBlock(t *testing.T) {
 	keep := func(path string) string { return strings.ReplaceAll(sshConfigValue(path), "%%r@", "%r@") }
 	for _, want := range []string{
 		"Host " + testDeviceHost + "\n",
-		`  ProxyCommand "/opt/local port/100%%/localport" ssh-proxy --identity ` + ref + " %r %h\n",
+		`  ProxyCommand "/opt/local port/100%%/localport" ssh-proxy --identity ` + ref + ` "%r" "%h"` + "\n",
 		"  IdentityFile " + keep(f.key) + "\n",
 		"  CertificateFile " + keep(f.cert) + "\n",
 		"  UserKnownHostsFile " + sshConfigValue(f.knownHosts) + "\n",
 		"  HostKeyAlias " + testDeviceHost + "\n",
 		"  StrictHostKeyChecking yes\n",
 		"  IdentitiesOnly yes\n",
-		`Match host ` + testDeviceHost + ` exec "\"/opt/local port/100%%/localport\" ssh-cert --identity ` + ref + ` %r %h"` + "\n",
+		`Match host ` + testDeviceHost + ` exec "\"/opt/local port/100%%/localport\" ssh-cert --identity ` + ref + ` \"%r\" \"%h\""` + "\n",
 	} {
 		if !strings.Contains(block, want) {
 			t.Errorf("block lacks %q:\n%s", want, block)
 		}
+	}
+	// An exe without a space is quoted too, so a shell character in it stays
+	// part of the path.
+	block, err = target.sshConfigBlock("/opt/a;b/localport")
+	if err != nil || !strings.Contains(block, `  ProxyCommand "/opt/a;b/localport" ssh-proxy`) {
+		t.Errorf("block = %q, %v; want the exe quoted", block, err)
 	}
 	if _, err := target.sshConfigBlock("/opt/\"q\"/localport"); err == nil {
 		t.Error("a path with a quote accepted")
 	}
 }
 
-func TestOpensshBeforePQ(t *testing.T) {
-	for out, want := range map[string]bool{
-		"OpenSSH_9.6p1 Ubuntu-3ubuntu13, OpenSSL 3.0.13": true,
-		"OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2":      true,
-		"OpenSSH_8.9p1":                true,
-		"OpenSSH_9.9p1, OpenSSL 3.4.0": false,
-		"OpenSSH_10.0p2":               false,
-		"something else":               false,
+// The post-quantum notice of `localport ssh` (below 9.9) and the name filter
+// warning of ssh-config (below 9.6).
+func TestOpensshBefore(t *testing.T) {
+	for out, want := range map[string][2]bool{
+		"OpenSSH_9.6p1 Ubuntu-3ubuntu13, OpenSSL 3.0.13": {true, false},
+		"OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2":      {true, true},
+		"OpenSSH_8.9p1":                {true, true},
+		"OpenSSH_9.9p1, OpenSSL 3.4.0": {false, false},
+		"OpenSSH_10.0p2":               {false, false},
+		"something else":               {false, false},
 	} {
-		if _, got := opensshBeforePQ(out); got != want {
-			t.Errorf("opensshBeforePQ(%q) = %v, want %v", out, got, want)
+		_, pq := opensshBefore(out, sshPQMinMajor, sshPQMinMinor)
+		_, filter := opensshBefore(out, sshNameFilterMajor, sshNameFilterMinor)
+		if pq != want[0] || filter != want[1] {
+			t.Errorf("opensshBefore(%q) = pq %v, filter %v; want %v", out, pq, filter, want)
 		}
+	}
+	if w := opensshNameFilterWarning("9.5"); !strings.Contains(w, "OpenSSH 9.5") || !strings.Contains(w, "9.6 or later") {
+		t.Errorf("warning = %q", w)
 	}
 }

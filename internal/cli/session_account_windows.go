@@ -33,5 +33,5 @@ func sessionAccountError(current, service *windows.SID) error {
 	if current.Equals(service) {
 		return nil
 	}
-	return fmt.Errorf("%w; this process runs as %s", errSessionsNeedDeviceService, current)
+	return errSessionsNeedDeviceService.With(nil, "this process runs as "+current.String())
 }

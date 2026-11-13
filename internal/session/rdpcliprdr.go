@@ -24,15 +24,14 @@ const (
 	cbASCIINames   = 0x0004
 )
 
-// CLIPRDR_GENERAL_CAPABILITY generalFlags (MS-RDPECLIP 2.2.2.1.1.1).
+// CLIPRDR_GENERAL_CAPABILITY (MS-RDPECLIP 2.2.2.1.1.1). The filter forwards
+// only the long format names flag; file transfer and clipboard locking are
+// not offered.
 const (
-	cbUseLongFormatNames  = 0x00000002
-	cbStreamFileclip      = 0x00000004
-	cbFileclipNoFilePaths = 0x00000008
-	cbCanLockClipdata     = 0x00000010
-	cbHugeFileSupport     = 0x00000020
-	cbFileAndLockFlags    = cbStreamFileclip | cbFileclipNoFilePaths | cbCanLockClipdata | cbHugeFileSupport
-	cbCapsTypeGeneral     = 0x0001
+	cbCapsTypeGeneral    = 0x0001
+	cbCapsVersion1       = 1
+	cbCapsVersion2       = 2
+	cbUseLongFormatNames = 0x00000002
 )
 
 const (
@@ -283,17 +282,18 @@ func (s *rdpClipboard) emptyView(d clipDir) rdpFrame {
 	return rdpFrame{to: d.owner().other(), payload: cliprdrPDU(cbFormatList, 0, nil)}
 }
 
-// caps records a Clipboard Capabilities PDU's general flags and returns its
-// data with the file and lock flags cleared.
+// caps reads a Clipboard Capabilities PDU and returns the data the filter
+// sends on: one general capability set it builds from the sender's version
+// and its long format names flag. Other sets and flags are not forwarded.
 func (s *rdpClipboard) caps(from rdpSide, flags uint16, data []byte) ([]byte, error) {
 	bad := rdpViolation("malformed cliprdr Clipboard Capabilities")
 	if flags != 0 || len(data) < 4 {
 		return nil, bad
 	}
-	out := slices.Clone(data)
-	count := int(binary.LittleEndian.Uint16(out))
-	sets := out[4:]
-	general := false
+	count := int(binary.LittleEndian.Uint16(data))
+	sets := data[4:]
+	var version, general uint32
+	seen := false
 	for range count {
 		if len(sets) < 4 {
 			return nil, bad
@@ -303,19 +303,26 @@ func (s *rdpClipboard) caps(from rdpSide, flags uint16, data []byte) ([]byte, er
 			return nil, bad
 		}
 		if typ == cbCapsTypeGeneral {
-			if general || n < 12 {
+			if seen || n < 12 {
 				return nil, bad
 			}
-			general = true
-			f := binary.LittleEndian.Uint32(sets[8:])
-			s.flags[from] = f
-			binary.LittleEndian.PutUint32(sets[8:], f&^cbFileAndLockFlags)
+			seen = true
+			version = binary.LittleEndian.Uint32(sets[4:])
+			general = binary.LittleEndian.Uint32(sets[8:]) & cbUseLongFormatNames
 		}
 		sets = sets[n:]
 	}
-	if len(sets) != 0 {
+	// Without a general set version stays 0 and is refused.
+	if len(sets) != 0 || (version != cbCapsVersion1 && version != cbCapsVersion2) {
 		return nil, bad
 	}
+	s.flags[from] = general
+	out := make([]byte, 16)
+	binary.LittleEndian.PutUint16(out, 1)
+	binary.LittleEndian.PutUint16(out[4:], cbCapsTypeGeneral)
+	binary.LittleEndian.PutUint16(out[6:], 12)
+	binary.LittleEndian.PutUint32(out[8:], version)
+	binary.LittleEndian.PutUint32(out[12:], general)
 	return out, nil
 }
 

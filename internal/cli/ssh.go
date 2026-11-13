@@ -18,6 +18,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/session"
@@ -47,6 +49,10 @@ const (
 	// sshPQMinMajor and sshPQMinMinor are the first OpenSSH release that
 	// offers mlkem768x25519-sha256, the device's post-quantum key exchange.
 	sshPQMinMajor, sshPQMinMinor = 9, 9
+	// sshNameFilterMajor and sshNameFilterMinor are the first OpenSSH
+	// release that refuses shell characters in command-line user and host
+	// names before expanding them into ProxyCommand and Match exec.
+	sshNameFilterMajor, sshNameFilterMinor = 9, 6
 )
 
 // sshMintTimeout bounds the mint ssh-cert makes under the shared lock, below
@@ -72,8 +78,8 @@ func (t sshTarget) mintWithAPI(ctx context.Context, req identity.SessionRequest)
 		return nil, err
 	}
 	if time.Now().After(cur.Meta.NotAfter) {
-		return nil, fmt.Errorf("credential %s expired at %s; renew it with: localport identity renew, or sign in again with: localport login",
-			t.ref, cur.Meta.NotAfter.Format(time.RFC3339))
+		return nil, errcode.New(errcode.CredentialExpired).With(nil, fmt.Sprintf("%s expired at %s; renew it with: localport identity renew, or sign in again with: localport login",
+			t.ref, cur.Meta.NotAfter.Format(time.RFC3339)))
 	}
 	client, err := identity.NewClient(firstNonEmpty(cur.Meta.APIURL, resolveAPIURL("")))
 	if err != nil {
@@ -84,8 +90,10 @@ func (t sshTarget) mintWithAPI(ctx context.Context, req identity.SessionRequest)
 
 // sshFiles are the client files of a target. The client key, its
 // certificate and the edge URL are per credential, device and login, so runs
-// for two logins never replace each other's certificate; known_hosts and the
-// lock are shared, so one lock covers every write ssh reads.
+// for two logins never replace each other's certificate; known_hosts is per
+// credential, so a mint with one credential never replaces the host key
+// another trusts; the lock is shared, so one lock covers every write ssh
+// reads.
 type sshFiles struct {
 	key, cert, url, knownHosts, lock string
 }
@@ -93,12 +101,13 @@ type sshFiles struct {
 // files are the client files of login, which checkSSHLogin has accepted.
 func (t sshTarget) files(login string) sshFiles {
 	root, _ := t.store.StateRoot()
-	key := filepath.Join(t.clientDir(root), login+"@"+t.host)
+	dir := t.clientDir(root)
+	key := filepath.Join(dir, login+"@"+t.host)
 	return sshFiles{
 		key:        key,
 		cert:       key + "-cert.pub",
 		url:        key + ".url",
-		knownHosts: filepath.Join(root, "known_hosts"),
+		knownHosts: filepath.Join(dir, "known_hosts"),
 		lock:       filepath.Join(root, "ssh", ".lock"),
 	}
 }
@@ -108,12 +117,28 @@ func (t sshTarget) clientDir(root string) string {
 	return filepath.Join(root, "ssh", t.ref.Path())
 }
 
-// checkSSHLogin refuses a login that cannot name a client file: outside the
-// login grammar (config.ValidLogin), or holding a character Windows file
-// names refuse.
-func checkSSHLogin(login string) error {
-	if !config.ValidLogin(login) || strings.ContainsAny(login, `\<>"|?*`) {
-		return fmt.Errorf("%q is not a login localport can keep a certificate for", security.SanitizeDisplay(login))
+// sshLoginShellChars are refused in a login: ssh_config passes %r to sh -c
+// inside double quotes, and these are the characters OpenSSH 9.6 refuses in
+// a command-line login (valid_ruser) plus $, which double quotes still
+// expand.
+const sshLoginShellChars = "'`\";&<>|(){}$"
+
+// checkSSHLogin refuses a login that cannot name a client file or travel
+// through ssh_config's shell commands on a goos client: outside the login
+// grammar (config.ValidLogin), starting with '-', or holding a shell
+// character. A backslash is refused on Windows, where file names cannot
+// hold it, and elsewhere when it would escape the next backslash or the
+// closing quote. A Windows domain account is written in its UPN form,
+// alice@corp.example, which splitLoginHost keeps whole.
+func checkSSHLogin(login, goos string) error {
+	bad := !config.ValidLogin(login) || login[0] == '-' || strings.ContainsAny(login, sshLoginShellChars)
+	if goos == "windows" {
+		bad = bad || strings.ContainsAny(login, `\*?`)
+	} else {
+		bad = bad || strings.HasSuffix(login, `\`) || strings.Contains(login, `\\`)
+	}
+	if bad {
+		return errcode.New(errcode.SSHLoginRefused).With(nil, fmt.Sprintf("%q", security.SanitizeDisplay(login)))
 	}
 	return nil
 }
@@ -154,17 +179,20 @@ func resolveSSHTarget(identityArg, rawHost string, interactive bool) (sshTarget,
 // the certificate, each atomically and all under the shared lock, so
 // concurrent connections mint once and never see the key change.
 func (t sshTarget) ensureCert(ctx context.Context, login string, mint sessionMinter, now time.Time) error {
-	if err := checkSSHLogin(login); err != nil {
+	if err := checkSSHLogin(login, runtime.GOOS); err != nil {
 		return err
 	}
 	f := t.files(login)
 	base, follow := t.store.StateRoot()
 	if err := security.EnsurePrivateDir(base, filepath.Dir(f.key), follow); err != nil {
-		return fmt.Errorf("ssh client directory: %w", err)
+		return errcode.New(errcode.SSHClientFiles).With(err, "ssh client directory")
 	}
-	release, err := lockSSHFiles(ctx, f.lock)
-	if err != nil {
+	release, err := identity.WaitLockFile(ctx, f.lock, sshLockWait, errSSHFilesBusy)
+	if errors.Is(err, errSSHFilesBusy) {
 		return err
+	}
+	if err != nil {
+		return errcode.New(errcode.SSHClientFiles).With(err, "lock "+f.lock)
 	}
 	defer release()
 
@@ -184,7 +212,7 @@ func (t sshTarget) ensureCert(ctx context.Context, login string, mint sessionMin
 	})
 	cancel()
 	if err != nil {
-		return fmt.Errorf("session certificate for %s@%s: %w", login, t.host, err)
+		return errcode.New(errcode.SessionMintFailed).With(err, login+"@"+t.host)
 	}
 	cert, hostKey, edgeURL, err := checkSessionCertificate(resp, signer.PublicKey(), login, now)
 	if err != nil {
@@ -199,54 +227,38 @@ func (t sshTarget) ensureCert(ctx context.Context, login string, mint sessionMin
 	return security.WritePrivateFileAtomic(f.cert, ssh.MarshalAuthorizedKey(cert))
 }
 
-// lockSSHFiles takes the exclusive lock on path, waiting up to sshLockWait.
-func lockSSHFiles(ctx context.Context, path string) (func(), error) {
-	f, err := security.OpenLockFile(path)
+var (
+	// errSSHFilesBusy: another ssh-cert held the client files' lock for all
+	// of sshLockWait.
+	errSSHFilesBusy = errcode.New(errcode.SSHFilesBusy)
+	// errNoSessionCert: ssh-proxy found no certificate, edge URL or client
+	// key; ssh-cert writes them.
+	errNoSessionCert = errcode.New(errcode.NoSessionCert)
+)
+
+// loadClientKey reads the target's ed25519 client key; a missing key is
+// fs.ErrNotExist in the chain.
+func loadClientKey(path string) (ssh.Signer, error) {
+	raw, err := security.ReadPrivateFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, errcode.New(errcode.SSHClientFiles).With(err, "ssh client key "+path)
 	}
-	deadline := time.Now().Add(sshLockWait)
-	for {
-		held, err := security.TryLockFile(f)
-		if err != nil {
-			f.Close()
-			return nil, fmt.Errorf("lock %s: %w", path, err)
-		}
-		if held {
-			return func() {
-				_ = security.UnlockFile(f)
-				f.Close()
-			}, nil
-		}
-		if time.Now().After(deadline) {
-			f.Close()
-			return nil, fmt.Errorf("lock %s: another localport ssh-cert still holds it after %s", path, sshLockWait)
-		}
-		select {
-		case <-ctx.Done():
-			f.Close()
-			return nil, ctx.Err()
-		case <-time.After(50 * time.Millisecond):
-		}
+	signer, err := ssh.ParsePrivateKey(raw)
+	if err != nil {
+		return nil, errcode.New(errcode.SSHClientFiles).With(err, "ssh client key "+path)
 	}
+	if signer.PublicKey().Type() != ssh.KeyAlgoED25519 {
+		return nil, errcode.New(errcode.SSHClientFiles).With(nil, fmt.Sprintf("ssh client key %s is %s, not ed25519", path, signer.PublicKey().Type()))
+	}
+	return signer, nil
 }
 
 // loadOrCreateClientKey reads the target's ed25519 client key, generating it
-// on first use. The key never leaves this machine.
+// on first use. The key never leaves this machine. Called under the lock.
 func loadOrCreateClientKey(path string) (ssh.Signer, error) {
-	raw, err := security.ReadPrivateFile(path)
-	if err == nil {
-		signer, parseErr := ssh.ParsePrivateKey(raw)
-		if parseErr != nil {
-			return nil, fmt.Errorf("ssh client key %s: %w", path, parseErr)
-		}
-		if signer.PublicKey().Type() != ssh.KeyAlgoED25519 {
-			return nil, fmt.Errorf("ssh client key %s is %s, not ed25519", path, signer.PublicKey().Type())
-		}
-		return signer, nil
-	}
+	signer, err := loadClientKey(path)
 	if !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("ssh client key %s: %w", path, err)
+		return signer, err
 	}
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -302,24 +314,24 @@ func parseUserCertificate(line []byte) (*ssh.Certificate, error) {
 func checkSessionCertificate(resp *identity.SessionCertificate, key ssh.PublicKey, login string, now time.Time) (*ssh.Certificate, ssh.PublicKey, string, error) {
 	cert, err := parseUserCertificate([]byte(resp.Certificate))
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("session certificate: %w", err)
+		return nil, nil, "", errcode.New(errcode.SessionCertRefused).With(err, "")
 	}
 	if !bytes.Equal(cert.Key.Marshal(), key.Marshal()) {
-		return nil, nil, "", errors.New("session certificate is for another key")
+		return nil, nil, "", errcode.New(errcode.SessionCertRefused).With(nil, "the certificate is for another key")
 	}
 	if !slices.Equal(cert.ValidPrincipals, []string{login}) {
-		return nil, nil, "", errors.New("session certificate names another login")
+		return nil, nil, "", errcode.New(errcode.SessionCertRefused).With(nil, "the certificate names another login")
 	}
 	if now.Unix() >= int64(min(cert.ValidBefore, 1<<62)) {
-		return nil, nil, "", errors.New("session certificate has already expired; check this machine's clock")
+		return nil, nil, "", errcode.New(errcode.SessionCertRefused).With(nil, "the certificate has already expired; check this machine's clock")
 	}
 	hostKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(resp.HostKey))
 	if err != nil || hostKey.Type() != ssh.KeyAlgoECDSA256 {
-		return nil, nil, "", errors.New("session response carries no ecdsa-sha2-nistp256 host key")
+		return nil, nil, "", errcode.New(errcode.SessionCertRefused).With(nil, "no ecdsa-sha2-nistp256 host key")
 	}
 	u, err := url.Parse(resp.URL)
 	if err != nil || u.Scheme != "wss" || u.Host == "" {
-		return nil, nil, "", errors.New("session response carries no wss URL")
+		return nil, nil, "", errcode.New(errcode.SessionCertRefused).With(nil, "no wss URL")
 	}
 	return cert, hostKey, u.String(), nil
 }
@@ -330,7 +342,7 @@ func checkSessionCertificate(resp *identity.SessionCertificate, key ssh.PublicKe
 func writeKnownHost(path, alias string, key ssh.PublicKey) error {
 	old, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("read %s: %w", path, err)
+		return errcode.New(errcode.SSHClientFiles).With(err, "read "+path)
 	}
 	var out bytes.Buffer
 	for line := range bytes.Lines(old) {
@@ -422,11 +434,11 @@ func dialSession(ctx context.Context, rawURL string, certWire []byte, opts *webs
 	defer cancel()
 	ws, _, err := websocket.Dial(dialCtx, rawURL, opts)
 	if err != nil {
-		return nil, fmt.Errorf("connect to the edge: %w", err)
+		return nil, errcode.New(errcode.SessionConnectFailed).With(err, "connect to the edge")
 	}
 	if err := ws.Write(dialCtx, websocket.MessageBinary, certWire); err != nil {
 		_ = ws.CloseNow()
-		return nil, fmt.Errorf("send the session certificate: %w", err)
+		return nil, errcode.New(errcode.SessionConnectFailed).With(err, "send the session certificate")
 	}
 	return &sessionStream{Conn: websocket.NetConn(ctx, ws, websocket.MessageBinary), ws: ws}, nil
 }
@@ -444,11 +456,11 @@ func knownHostKey(path, alias string) (ssh.PublicKey, error) {
 		_, rest, _ := bytes.Cut(bytes.TrimSpace(line), []byte(" "))
 		key, _, _, _, err := ssh.ParseAuthorizedKey(rest)
 		if err != nil {
-			return nil, fmt.Errorf("known_hosts entry for %s: %w", alias, err)
+			return nil, errcode.New(errcode.SSHClientFiles).With(err, "known_hosts entry for "+alias)
 		}
 		return key, nil
 	}
-	return nil, fmt.Errorf("known_hosts holds no entry for %s", alias)
+	return nil, errNoSessionCert.With(nil, "known_hosts holds no entry for "+alias)
 }
 
 // proxy carries one SSH connection between in and out and the device over a
@@ -460,29 +472,36 @@ func knownHostKey(path, alias string) (ssh.PublicKey, error) {
 // certificate file, which OpenSSH and later runs keep using) and resumes on a
 // new stream within sshResumeWindow. The end of in is a deliberate close.
 func (t sshTarget) proxy(ctx context.Context, login string, in io.Reader, out io.Writer, opts *websocket.DialOptions, mint sessionMinter) error {
-	if err := checkSSHLogin(login); err != nil {
+	if err := checkSSHLogin(login, runtime.GOOS); err != nil {
 		return err
 	}
 	f := t.files(login)
+	// ssh-proxy only reads: ssh-cert writes these files under the lock.
+	missing := func(err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return errNoSessionCert.With(nil, fmt.Sprintf("%s@%s; run: localport ssh-cert --identity %s %s %s", login, t.host, t.ref, login, t.host))
+		}
+		return err
+	}
 	rawURL, err := os.ReadFile(f.url)
 	if err != nil {
-		return fmt.Errorf("no session certificate for %s; run: localport ssh-cert --identity %s <login> %s", t.host, t.ref, t.host)
+		return missing(err)
 	}
 	rawCert, err := os.ReadFile(f.cert)
 	if err != nil {
-		return fmt.Errorf("no session certificate for %s; run: localport ssh-cert --identity %s <login> %s", t.host, t.ref, t.host)
+		return missing(err)
 	}
 	cert, err := parseUserCertificate(rawCert)
 	if err != nil {
-		return fmt.Errorf("session certificate %s: %w", f.cert, err)
+		return errcode.New(errcode.SSHClientFiles).With(err, "session certificate "+f.cert)
 	}
-	key, err := loadOrCreateClientKey(f.key)
+	key, err := loadClientKey(f.key)
 	if err != nil {
-		return err
+		return missing(err)
 	}
 	certSigner, err := ssh.NewCertSigner(cert, key)
 	if err != nil {
-		return fmt.Errorf("session certificate %s: %w", f.cert, err)
+		return errcode.New(errcode.SSHClientFiles).With(err, "session certificate "+f.cert)
 	}
 	hostKey, err := knownHostKey(f.knownHosts, t.host)
 	if err != nil {
@@ -494,7 +513,7 @@ func (t sshTarget) proxy(ctx context.Context, login string, in io.Reader, out io
 		// Like a resume certificate it stays in memory: the file keeps the
 		// one OpenSSH presents to the device.
 		if cert, certSigner, rawURL, err = t.mintAgain(ctx, login, key, mint); err != nil {
-			return fmt.Errorf("session ended: %s; a new certificate: %w", reason, err)
+			return errcode.New(errcode.SessionMintFailed).With(err, "after the session ended: "+security.SanitizeDisplay(reason))
 		}
 		stream, cr, _, err = openSession(ctx, string(rawURL), cert, certSigner, hostKey, opts)
 	}
@@ -516,7 +535,7 @@ func (t sshTarget) proxy(ctx context.Context, login string, in io.Reader, out io
 		if reason, closed := stream.closeReason(); closed && !slices.Contains(sshResumableEnds, reason) {
 			cr.Conn.End(errSessionEnded)
 			<-copied
-			return fmt.Errorf("session ended: %s", security.SanitizeDisplay(reason))
+			return errcode.New(errcode.SessionEnded).With(nil, security.SanitizeDisplay(reason))
 		}
 		if stream, pos, err = t.resume(ctx, sshResumeWindow, cr, cert, key, mint, opts); err != nil {
 			cr.Conn.End(errSessionEnded)
@@ -529,9 +548,9 @@ func (t sshTarget) proxy(ctx context.Context, login string, in io.Reader, out io
 		return nil
 	}
 	if errors.Is(err, session.ErrResumeLost) {
-		return errors.New("session ended: resume_lost")
+		return errcode.New(errcode.SessionEnded).With(nil, "resume_lost")
 	}
-	return fmt.Errorf("session stream: %w", err)
+	return errcode.New(errcode.SessionConnectFailed).With(err, "session stream")
 }
 
 var errSessionEnded = errors.New("ssh-proxy: session ended")
@@ -554,9 +573,9 @@ func openSession(ctx context.Context, edgeURL string, cert *ssh.Certificate, sig
 	if err != nil {
 		_ = stream.Close()
 		if reason, ok := stream.closeReason(); ok {
-			return nil, nil, reason, fmt.Errorf("session ended: %s", security.SanitizeDisplay(reason))
+			return nil, nil, reason, errcode.New(errcode.SessionEnded).With(nil, security.SanitizeDisplay(reason))
 		}
-		return nil, nil, "", fmt.Errorf("session prelude: %w", err)
+		return nil, nil, "", errcode.New(errcode.SessionConnectFailed).With(err, "session prelude")
 	}
 	_ = stream.SetDeadline(time.Time{})
 	return stream, cr, "", nil
@@ -603,7 +622,7 @@ func (t sshTarget) resume(ctx context.Context, window time.Duration, cr *session
 			return nil, 0, ctx.Err()
 		}
 		if time.Now().Add(backoff).After(deadline) {
-			return nil, 0, fmt.Errorf("session ended: not resumed within %s: %w", window, err)
+			return nil, 0, errcode.New(errcode.SessionEnded).With(err, fmt.Sprintf("not resumed within %s", window))
 		}
 		select {
 		case <-ctx.Done():
@@ -630,17 +649,17 @@ func (t sshTarget) resumeAttempt(ctx context.Context, deadline time.Time, cr *se
 	cancel()
 	if err != nil {
 		if !identity.Retryable(err) {
-			return nil, 0, false, fmt.Errorf("resume the session: %w", err)
+			return nil, 0, false, errcode.New(errcode.SessionConnectFailed).With(err, "resume the session")
 		}
 		return nil, 0, true, err
 	}
 	resumeCert, _, edgeURL, err := checkSessionCertificate(resp, key.PublicKey(), login, time.Now())
 	if err != nil {
-		return nil, 0, false, fmt.Errorf("resume the session: %w", err)
+		return nil, 0, false, errcode.New(errcode.SessionConnectFailed).With(err, "resume the session")
 	}
 	signer, err := ssh.NewCertSigner(resumeCert, key)
 	if err != nil {
-		return nil, 0, false, fmt.Errorf("resume the session: %w", err)
+		return nil, 0, false, errcode.New(errcode.SessionConnectFailed).With(err, "resume the session")
 	}
 	stream, err = dialSession(ctx, edgeURL, resumeCert.Marshal(), opts)
 	if err != nil {
@@ -654,10 +673,10 @@ func (t sshTarget) resumeAttempt(ctx context.Context, deadline time.Time, cr *se
 	_ = stream.Close()
 	var refused *session.ResumeError
 	if errors.As(err, &refused) && !refused.Retryable() {
-		return nil, 0, false, fmt.Errorf("session ended: %s", refused.Code)
+		return nil, 0, false, errcode.New(errcode.SessionEnded).With(nil, refused.Code)
 	}
 	if reason, closed := stream.closeReason(); closed && !slices.Contains(sshResumableEnds, reason) {
-		return nil, 0, false, fmt.Errorf("session ended: %s", security.SanitizeDisplay(reason))
+		return nil, 0, false, errcode.New(errcode.SessionEnded).With(nil, security.SanitizeDisplay(reason))
 	}
 	return nil, 0, true, err
 }
@@ -669,8 +688,8 @@ func (t sshTarget) sshConfigOptions(exe string) ([][2]string, error) {
 	dir := t.clientDir(root)
 	knownHosts := t.files("").knownHosts
 	for _, p := range []string{exe, dir, knownHosts} {
-		if strings.ContainsAny(p, "\"\n\r") {
-			return nil, fmt.Errorf("path %q holds a quote or line break, which ssh_config cannot carry", p)
+		if err := checkSSHConfigPath(p, runtime.GOOS); err != nil {
+			return nil, err
 		}
 	}
 	// ssh expands %r to the login, naming the per-login files of files().
@@ -686,11 +705,25 @@ func (t sshTarget) sshConfigOptions(exe string) ([][2]string, error) {
 	}, nil
 }
 
-// sshCommandLine is `<exe> <command> --identity <ref> %r %h` with exe quoted
-// when it holds a space and every literal % doubled, as ssh_config expands
-// % tokens in ProxyCommand and Match exec.
+// checkSSHConfigPath refuses a path ssh_config cannot carry on a goos
+// client: a quote or line break ends the value, $ starts an environment
+// expansion in the file options and in sh, and ` and, outside Windows, \
+// act inside the double quotes of a shell command.
+func checkSSHConfigPath(p, goos string) error {
+	bad := strings.ContainsAny(p, "\"`$\n\r") || (goos != "windows" && strings.Contains(p, `\`))
+	if bad {
+		return errcode.New(errcode.SSHConfigPathUnsafe).With(nil, fmt.Sprintf("%q", security.SanitizeDisplay(p)))
+	}
+	return nil
+}
+
+// sshCommandLine is `<exe> <command> --identity <ref> "%r" "%h"`, which
+// ssh_config runs through the shell in ProxyCommand and Match exec: exe,
+// the login and the host are double-quoted, which leaves only the
+// characters checkSSHConfigPath and checkSSHLogin refuse active, and every
+// literal % in exe is doubled.
 func sshCommandLine(exe, command, ref string) string {
-	return sshConfigValue(exe) + " " + command + " --identity " + ref + " %r %h"
+	return `"` + strings.ReplaceAll(exe, "%", "%%") + `" ` + command + " --identity " + ref + ` "%r" "%h"`
 }
 
 // sshConfigValue doubles % and quotes a value holding a space or tab.
@@ -738,7 +771,7 @@ func (t sshTarget) sshConfigBlock(exe string) (string, error) {
 func configCommand() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
-		return "", fmt.Errorf("locate this binary: %w", err)
+		return "", errcode.New(errcode.ExecutableUnknown).With(err, "")
 	}
 	if onPath, err := exec.LookPath("localport"); err == nil && sameFile(onPath, self) {
 		return "localport", nil
@@ -755,30 +788,40 @@ func sameFile(a, b string) bool {
 // opensshVersionPattern matches `ssh -V` output on Unix and Windows builds.
 var opensshVersionPattern = regexp.MustCompile(`OpenSSH_(?:for_Windows_)?(\d+)\.(\d+)`)
 
-// opensshBeforePQ reports whether `ssh -V` output names an OpenSSH release
-// older than sshPQMinMajor.sshPQMinMinor, and the version it found.
-func opensshBeforePQ(versionOutput string) (string, bool) {
+// opensshBefore reports whether `ssh -V` output names an OpenSSH release
+// older than wantMajor.wantMinor, and the version it found.
+func opensshBefore(versionOutput string, wantMajor, wantMinor int) (string, bool) {
 	m := opensshVersionPattern.FindStringSubmatch(versionOutput)
 	if m == nil {
 		return "", false
 	}
 	major, _ := strconv.Atoi(m[1])
 	minor, _ := strconv.Atoi(m[2])
-	return m[1] + "." + m[2], major < sshPQMinMajor || (major == sshPQMinMajor && minor < sshPQMinMinor)
+	return m[1] + "." + m[2], major < wantMajor || (major == wantMajor && minor < wantMinor)
+}
+
+// opensshVersion is the output of `<sshPath> -V`, empty when it fails.
+func opensshVersion(sshPath string) string {
+	out, err := exec.Command(sshPath, "-V").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
 
 // splitLoginHost splits `[login@]host`; without a login it is the current
 // user's name, without any Windows domain prefix, as ssh defaults it.
 func splitLoginHost(arg string) (string, string, error) {
-	if login, host, ok := strings.Cut(arg, "@"); ok {
-		if login == "" {
+	// At the last @, as ssh does, so a UPN login keeps its own @.
+	if i := strings.LastIndexByte(arg, '@'); i >= 0 {
+		if i == 0 {
 			return "", "", errors.New("empty login before @")
 		}
-		return login, host, nil
+		return arg[:i], arg[i+1:], nil
 	}
 	u, err := user.Current()
 	if err != nil {
-		return "", "", fmt.Errorf("no login given and the current user cannot be looked up: %w", err)
+		return "", "", errcode.New(errcode.CurrentUserUnknown).With(err, "no login given")
 	}
 	name := u.Username
 	if i := strings.LastIndexByte(name, '\\'); i >= 0 {
@@ -877,8 +920,21 @@ device through Localport. Add them to ~/.ssh/config:
 		}
 		out.WriteString(block)
 	}
+	if sshPath, err := exec.LookPath("ssh"); err == nil {
+		if version, old := opensshBefore(opensshVersion(sshPath), sshNameFilterMajor, sshNameFilterMinor); old {
+			fmt.Fprint(os.Stderr, opensshNameFilterWarning(version))
+		}
+	}
 	_, err = os.Stdout.WriteString(out.String())
 	return err
+}
+
+// opensshNameFilterWarning tells the user of OpenSSH version, older than
+// 9.6, that ssh passes command-line names to these lines unfiltered.
+func opensshNameFilterWarning(version string) string {
+	return fmt.Sprintf("localport: OpenSSH %s passes a user or host name given on its command line to ProxyCommand and Match exec unfiltered, "+
+		"so a program that runs ssh with an untrusted name (such as git) can run shell commands through these lines; "+
+		"OpenSSH 9.6 or later refuses such names (CVE-2023-51385)\n", version)
 }
 
 // runSSH is `localport ssh [--identity <ref>] [login@]<device-host> [ssh
@@ -905,7 +961,7 @@ func runSSH(args []string) error {
 	}
 	sshPath, err := exec.LookPath("ssh")
 	if err != nil {
-		return fmt.Errorf("the OpenSSH client (ssh) is not installed or not on PATH: %w", err)
+		return errcode.New(errcode.OpenSSHUnavailable).With(err, "not installed or not on PATH")
 	}
 	t, err := resolveSSHTarget(*ident, host, true)
 	if err != nil {
@@ -917,14 +973,12 @@ func runSSH(args []string) error {
 	if err != nil {
 		return err
 	}
-	if out, verErr := exec.Command(sshPath, "-V").CombinedOutput(); verErr == nil {
-		if version, old := opensshBeforePQ(string(out)); old {
-			fmt.Fprintf(os.Stderr, "localport: OpenSSH %s negotiates curve25519-sha256; OpenSSH 9.9 or later adds post-quantum key exchange (mlkem768x25519-sha256)\n", version)
-		}
+	if version, old := opensshBefore(opensshVersion(sshPath), sshPQMinMajor, sshPQMinMinor); old {
+		fmt.Fprintf(os.Stderr, "localport: OpenSSH %s negotiates curve25519-sha256; OpenSSH 9.9 or later adds post-quantum key exchange (mlkem768x25519-sha256)\n", version)
 	}
 	self, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("locate this binary: %w", err)
+		return errcode.New(errcode.ExecutableUnknown).With(err, "")
 	}
 	opts, err := t.sshConfigOptions(self)
 	if err != nil {

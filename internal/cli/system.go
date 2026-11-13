@@ -133,10 +133,10 @@ type installHost interface {
 // running binary belongs to.
 func runSystemSteps(ctx context.Context, host installHost, version string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("%w: name a step: begin, apply, rollback or uninstall", errInstallerStepInvalid)
+		return errInstallerStepInvalid.With(nil, "name a step: begin, apply, rollback or uninstall")
 	}
 	if !host.elevated() {
-		return fmt.Errorf("%w: system %s", errInstallerNotElevated, args[0])
+		return errInstallerNotElevated.With(nil, fmt.Sprintf("system %s", args[0]))
 	}
 	step, rest := args[0], args[1:]
 	purge := step == opUninstall && len(rest) == 2 && rest[1] == "--purge"
@@ -148,7 +148,7 @@ func runSystemSteps(ctx context.Context, host installHost, version string, args 
 		want = 1
 	}
 	if len(rest) != want || !filepath.IsAbs(rest[0]) || (want == 2 && !txnName.MatchString(rest[1])) {
-		return fmt.Errorf("%w: system %s: want an absolute install directory%s", errInstallerStepInvalid, step, map[bool]string{true: " and a transaction id", false: ""}[want == 2])
+		return errInstallerStepInvalid.With(nil, fmt.Sprintf("system %s: want an absolute install directory%s", step, map[bool]string{true: " and a transaction id", false: ""}[want == 2]))
 	}
 	dir := filepath.Clean(rest[0])
 	switch step {
@@ -161,7 +161,7 @@ func runSystemSteps(ctx context.Context, host installHost, version string, args 
 	case opUninstall:
 		return runUninstall(ctx, host, dir, purge)
 	}
-	return fmt.Errorf("%w: system: unknown step %q", errInstallerStepInvalid, step)
+	return errInstallerStepInvalid.With(nil, fmt.Sprintf("system: unknown step %q", step))
 }
 
 // systemExitError gives err the exit status of its installer code, the
@@ -191,7 +191,7 @@ func withServiceLock(ctx context.Context, host installHost, dir string, fn func(
 	defer unlock()
 	if exists(dir) {
 		if err := host.checkInstallDir(dir); err != nil {
-			return fmt.Errorf("%w: %s: %w", errInstallDirUnsafe, dir, err)
+			return errInstallDirUnsafe.With(err, dir)
 		}
 		if err := recoverTransactions(ctx, host, dir); err != nil {
 			return err
@@ -209,21 +209,21 @@ func withServiceLock(ctx context.Context, host installHost, dir string, fn func(
 func beginInstall(ctx context.Context, host installHost, dir, txn string) error {
 	return withServiceLock(ctx, host, dir, func() error {
 		if err := host.prepareInstallDir(dir); err != nil {
-			return fmt.Errorf("%w: %s: %w", errInstallDirUnsafe, dir, err)
+			return errInstallDirUnsafe.With(err, dir)
 		}
 		t := &transaction{host: host, dir: dir, j: journal{Op: opInstall, Txn: txn, Phase: phaseBegun}}
 		// Recovery removed every earlier transaction directory it could; one
 		// left under this id holds files of an earlier transaction.
 		if exists(t.txnDir()) {
-			return fmt.Errorf("%w: %s is left from an earlier transaction; restart Windows, then run the installer again", errInstallNotCommitted, t.txnDir())
+			return errInstallNotCommitted.With(nil, fmt.Sprintf("%s is left from an earlier transaction; restart Windows, then run the installer again", t.txnDir()))
 		}
 		for _, d := range []string{t.stagingDir(), t.backupDir()} {
 			if err := os.MkdirAll(d, 0o755); err != nil {
-				return fmt.Errorf("%w: %w", errInstallNotCommitted, err)
+				return errInstallNotCommitted.With(err, "")
 			}
 		}
 		if err := t.save(); err != nil {
-			return fmt.Errorf("%w: %w", errInstallNotCommitted, err)
+			return errInstallNotCommitted.With(err, "")
 		}
 		return nil
 	})
@@ -240,26 +240,26 @@ func applyInstall(ctx context.Context, host installHost, dir, txn, version strin
 	}
 	defer unlock()
 	if err := host.checkInstallDir(dir); err != nil {
-		return fmt.Errorf("%w: %s: %w", errInstallDirUnsafe, dir, err)
+		return errInstallDirUnsafe.With(err, dir)
 	}
 	t, err := loadTransaction(host, dir, txn)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errInstallNotCommitted, err)
+		return errInstallNotCommitted.With(err, "")
 	}
 	if t.j.Op != opInstall || t.j.Phase != phaseBegun {
-		return fmt.Errorf("%w: transaction %s is %s %s, not a begun install", errInstallerStepInvalid, txn, t.j.Op, t.j.Phase)
+		return errInstallerStepInvalid.With(nil, fmt.Sprintf("transaction %s is %s %s, not a begun install", txn, t.j.Op, t.j.Phase))
 	}
 	if err := refuseOtherOpenTransaction(host, dir); err != nil {
 		return err
 	}
 	for _, name := range productFiles {
 		if fi, err := os.Lstat(filepath.Join(t.stagingDir(), name)); err != nil || !fi.Mode().IsRegular() {
-			return t.fail(ctx, fmt.Errorf("%w: staged %s is missing or not a regular file: %v", errInstallNotCommitted, name, err))
+			return t.fail(ctx, errInstallNotCommitted.With(err, fmt.Sprintf("staged %s is missing or not a regular file", name)))
 		}
 	}
 	running, existed, err := t.snapshot()
 	if err != nil {
-		return t.fail(ctx, fmt.Errorf("%w: %w", errInstallNotCommitted, err))
+		return t.fail(ctx, errInstallNotCommitted.With(err, ""))
 	}
 	if len(running) > 0 {
 		if err := t.do(ctx, txnAction{Kind: actStop, Names: running}, errServicesNotStopped); err != nil {
@@ -304,22 +304,22 @@ func runUninstall(ctx context.Context, host installHost, dir string, purge bool)
 		}
 		foreign, err := host.foreignServicesIn(dir)
 		if err != nil {
-			return fmt.Errorf("%w: %w", errUninstallNotPrepared, err)
+			return errUninstallNotPrepared.With(err, "")
 		}
 		if len(foreign) > 0 {
-			return fmt.Errorf("%w: %s", errForeignServiceInDir, strings.Join(foreign, ", "))
+			return errForeignServiceInDir.With(nil, strings.Join(foreign, ", "))
 		}
 		id := make([]byte, 8)
 		if _, err := rand.Read(id); err != nil {
-			return fmt.Errorf("%w: %w", errUninstallNotPrepared, err)
+			return errUninstallNotPrepared.With(err, "")
 		}
 		t := &transaction{host: host, dir: dir, j: journal{Op: opUninstall, Txn: "u" + hex.EncodeToString(id), Phase: phaseBegun}}
 		if err := os.MkdirAll(t.backupDir(), 0o755); err != nil {
-			return fmt.Errorf("%w: %w", errUninstallNotPrepared, err)
+			return errUninstallNotPrepared.With(err, "")
 		}
 		running, existed, err := t.snapshot()
 		if err != nil {
-			return t.fail(ctx, fmt.Errorf("%w: %w", errUninstallNotPrepared, err))
+			return t.fail(ctx, errUninstallNotPrepared.With(err, ""))
 		}
 		if len(running) > 0 {
 			if err := t.do(ctx, txnAction{Kind: actStop, Names: running}, errUninstallNotPrepared); err != nil {
@@ -356,7 +356,7 @@ func runUninstall(ctx context.Context, host installHost, dir string, purge bool)
 		if purge {
 			// Irreversible, so after the commit point; the uninstall stands.
 			if err := host.purge(ctx); err != nil {
-				return fmt.Errorf("%w: %w", errPurgeFailed, err)
+				return errPurgeFailed.With(err, "")
 			}
 		}
 		return nil
@@ -497,18 +497,18 @@ func (t *transaction) snapshot() (running []string, existed bool, err error) {
 
 // do records a, makes the change, and records it done. A failure rolls the
 // transaction back and returns the change's error under code.
-func (t *transaction) do(ctx context.Context, a txnAction, code error) error {
+func (t *transaction) do(ctx context.Context, a txnAction, code *errcode.Error) error {
 	t.j.Actions = append(t.j.Actions, a)
 	if err := t.save(); err != nil {
-		return t.fail(ctx, fmt.Errorf("%w: %w", code, err))
+		return t.fail(ctx, code.With(err, ""))
 	}
 	last := &t.j.Actions[len(t.j.Actions)-1]
 	if err := t.apply(ctx, last); err != nil {
-		return t.fail(ctx, fmt.Errorf("%w: %w", code, err))
+		return t.fail(ctx, code.With(err, ""))
 	}
 	last.Done = true
 	if err := t.save(); err != nil {
-		return t.fail(ctx, fmt.Errorf("%w: %w", code, err))
+		return t.fail(ctx, code.With(err, ""))
 	}
 	return nil
 }
@@ -544,15 +544,15 @@ func (t *transaction) apply(ctx context.Context, a *txnAction) error {
 
 // editPath records and makes the machine Path change edit (add or remove
 // t.dir), when the value changes.
-func (t *transaction) editPath(ctx context.Context, edit string, code error) error {
+func (t *transaction) editPath(ctx context.Context, edit string, code *errcode.Error) error {
 	if edit == "add" {
 		if fi, err := os.Stat(t.dir); err != nil || !fi.IsDir() {
-			return t.fail(ctx, fmt.Errorf("%w: %s is not an existing directory", code, t.dir))
+			return t.fail(ctx, code.With(nil, t.dir+" is not an existing directory"))
 		}
 	}
 	prior, expandable, err := t.host.readPath()
 	if err != nil {
-		return t.fail(ctx, fmt.Errorf("%w: %w", code, err))
+		return t.fail(ctx, code.With(err, ""))
 	}
 	next := pathWithout(prior, t.dir, t.host.expand)
 	if edit == "add" {
@@ -588,12 +588,12 @@ func (t *transaction) rollback(ctx context.Context) error {
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("%w: transaction %s: %w", errInstallMixed, t.j.Txn, err)
+		return errInstallMixed.With(err, fmt.Sprintf("transaction %s", t.j.Txn))
 	}
 	removeOrQueue(t.host, t.txnDir())
 	t.closeMarker()
 	if len(t.removed) > 0 {
-		return fmt.Errorf("%w: transaction %s was undone, but services %s were removed instead of restored because the program they ran fails the device service binary rule; run `localport service install` as an Administrator", errInstallMixed, t.j.Txn, strings.Join(t.removed, ", "))
+		return errInstallMixed.With(nil, fmt.Sprintf("transaction %s was undone, but services %s were removed instead of restored because the program they ran fails the device service binary rule; run `localport service install` as an Administrator", t.j.Txn, strings.Join(t.removed, ", ")))
 	}
 	return nil
 }
@@ -653,7 +653,7 @@ func (t *transaction) commit() error {
 	t.j.Phase = phaseCommitted
 	if err := t.save(); err != nil {
 		// Not committed: the caller's error path rolls back.
-		return fmt.Errorf("%w: %w", errInstallNotCommitted, err)
+		return errInstallNotCommitted.With(err, "")
 	}
 	t.finish()
 	return nil
@@ -668,7 +668,7 @@ func (t *transaction) finish() {
 	for _, a := range t.j.Actions {
 		if a.Kind == actPath && a.Done {
 			if err := t.host.broadcastEnvironment(); err != nil {
-				t.host.warn(fmt.Sprintf("the Path change is saved, but running programs were not told: %v", err))
+				t.host.warn(fmt.Sprintf("the Path change is saved, but running programs were not told: %s", userText(err)))
 			}
 			return
 		}
@@ -686,7 +686,7 @@ func recoverTransactions(ctx context.Context, host installHost, dir string) erro
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("%w: %w", errInstallMixed, err)
+		return errInstallMixed.With(err, "")
 	}
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), leftoverPrefix) {
@@ -704,7 +704,7 @@ func recoverTransactions(ctx context.Context, host installHost, dir string) erro
 			removeOrQueue(host, filepath.Join(dir, txnRoot, e.Name()))
 			continue
 		case err != nil:
-			return fmt.Errorf("%w: %w; fix or remove %s, then run the installer again", errInstallMixed, err, filepath.Join(dir, txnRoot, e.Name()))
+			return errInstallMixed.With(err, "fix or remove "+filepath.Join(dir, txnRoot, e.Name())+", then run the installer again")
 		}
 		switch t.j.Phase {
 		case phaseCommitted:
@@ -774,7 +774,7 @@ func equalFoldPath(a, b string) bool {
 func refuseOtherOpenTransaction(host installHost, dir string) error {
 	dirs, err := host.listOpen()
 	if err != nil {
-		return fmt.Errorf("%w: %w", errServiceConfigBusy, err)
+		return errServiceConfigBusy.With(err, "")
 	}
 	return refuseOpenTransactionIn(dirs, dir, host.checkInstallDir)
 }
@@ -789,7 +789,7 @@ func refuseOpenTransactionIn(dirs []string, except string, check func(string) er
 			continue
 		}
 		if txn := openInstallTransaction(d); txn != "" {
-			return fmt.Errorf("%w: an interrupted install or uninstall (transaction %s) is open in %s; run the Localport installer, or the uninstaller, for that directory, which undoes it first", errServiceConfigBusy, txn, d)
+			return errServiceConfigBusy.With(nil, fmt.Sprintf("an interrupted install or uninstall (transaction %s) is open in %s; run the Localport installer, or the uninstaller, for that directory, which undoes it first", txn, d))
 		}
 	}
 	return nil
@@ -803,7 +803,7 @@ func (t *transaction) closeMarker() {
 		return
 	}
 	if err := t.host.markClosed(t.dir); err != nil {
-		t.host.warn(fmt.Sprintf("the open-transaction record for %s was not removed: %v", t.dir, err))
+		t.host.warn(fmt.Sprintf("the open-transaction record for %s was not removed: %s", t.dir, userText(err)))
 	}
 }
 
@@ -855,7 +855,7 @@ func removeOrQueue(host installHost, path string) {
 			p = leftover
 		}
 		if err := host.deleteAtReboot(p); err != nil {
-			host.warn(fmt.Sprintf("%s was not deleted and could not be queued for deletion at reboot: %v", p, err))
+			host.warn(fmt.Sprintf("%s was not deleted and could not be queued for deletion at reboot: %s", p, userText(err)))
 		}
 	}
 }
@@ -887,7 +887,7 @@ func removeEmptyOrQueue(host installHost, path string) {
 		return
 	}
 	if err := host.deleteAtReboot(path); err != nil {
-		host.warn(fmt.Sprintf("%s was not removed: %v", path, err))
+		host.warn(fmt.Sprintf("%s was not removed: %s", path, userText(err)))
 	}
 }
 

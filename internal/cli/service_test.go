@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/service"
@@ -107,6 +108,20 @@ func holdRun(t *testing.T, file config.LocalConfigFile) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = release() })
+}
+
+// The service usage and AG043 name the five managers service.Default picks
+// from (internal/service default_linux.go, default_darwin.go, windows.go).
+func TestServiceTextsNameEveryManager(t *testing.T) {
+	unsupported := errcode.New(errcode.Unsupported).Error()
+	for _, manager := range []string{"systemd", "OpenRC", "procd", "launchd", "Windows service"} {
+		if !strings.Contains(serviceUsage, manager) {
+			t.Errorf("service usage does not name %s", manager)
+		}
+		if !strings.Contains(unsupported, manager) {
+			t.Errorf("AG043 does not name %s", manager)
+		}
+	}
 }
 
 // A privileged connect refuses, before any enrolment request, a foreign
@@ -247,7 +262,7 @@ func TestConnectWritesTheEnrolledTicketKeysAndWarnsWhenItCannot(t *testing.T) {
 			if saves != 1 {
 				t.Fatalf("credential saves = %d, want 1", saves)
 			}
-			warned := strings.Contains(stderr, "ticket keys were not saved to "+filepath.Join(store.Dir(ref), "ticket_keys.json"))
+			warned := strings.Contains(stderr, "session keys were not saved to "+filepath.Join(store.Dir(ref), "ticket_keys.json"))
 			if gaveRemedy := strings.Contains(stderr, remedy); warned != c.warns || gaveRemedy != c.remedy {
 				t.Fatalf("warned = %v, remedy = %v, want %v and %v; stderr:\n%s", warned, gaveRemedy, c.warns, c.remedy, stderr)
 			}

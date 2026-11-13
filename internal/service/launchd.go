@@ -103,7 +103,7 @@ func (l launchd) Check() ([]string, error) {
 			return nil, err
 		}
 		if loaded {
-			return nil, fmt.Errorf("%w: launchd has %s loaded, but not from %s; unload it with launchctl bootout %s, then run the command again", ErrForeignUnit, j.label, j.plist, target(j.label))
+			return nil, ErrForeignUnit.With(nil, fmt.Sprintf("launchd has %s loaded, but not from %s; unload it with launchctl bootout %s, then run the command again", j.label, j.plist, target(j.label)))
 		}
 	}
 	return nil, nil
@@ -300,7 +300,7 @@ func prepareLogDir(dir string, acct Account) error {
 // control character.
 func xmlPath(p string) (string, error) {
 	if !filepath.IsAbs(p) || strings.ContainsFunc(p, unicode.IsControl) {
-		return "", fmt.Errorf("%w: %q", ErrUnsafeExecutable, p)
+		return "", ErrUnsafeExecutable.With(nil, fmt.Sprintf("%q", p))
 	}
 	var b bytes.Buffer
 	if err := xml.EscapeText(&b, []byte(p)); err != nil {

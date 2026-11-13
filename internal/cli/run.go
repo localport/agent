@@ -197,11 +197,7 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 	runner.served = nil
 	stopOutliving()
 	renderer.Shutdown()
-
-	var regErr *tunnel.RegistrationError
-	if errors.As(runErr, &regErr) && regErr.Code != "" {
-		return fmt.Errorf("%s [%s]", regErr.Error(), regErr.Code)
-	}
+	// An edge refusal prints as its message and code (errcode.Render).
 	return runErr
 }
 
@@ -318,7 +314,7 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 	case errors.Is(err, identity.ErrRecordingKeyDropped):
 		logEvent(fmt.Sprintf("identity: %s: %v; the next key fetch or renewal stores it again", ref, err))
 	case err != nil:
-		logEvent(fmt.Sprintf("identity: cannot read the ticket keys of %s: %v", ref, err))
+		logEvent(fmt.Sprintf("identity: cannot read the session keys of %s: %v", ref, err))
 	}
 	if len(spec.Capabilities) == 0 || spec.Credential == nil {
 		spec.HintRevoked = hintRevoked(keys, nil, logEvent)
@@ -386,7 +382,7 @@ func hintRevoked(keys *identity.TicketKeys, refresher *identity.KeyRefresher, lo
 	return func(kids []string) {
 		added, err := keys.Hint(kids)
 		if err != nil {
-			logEvent(fmt.Sprintf("identity: ignored the revoked ticket keys the edge sent: %v", err))
+			logEvent(fmt.Sprintf("identity: ignored the revoked session key ids the edge sent: %v", err))
 			return
 		}
 		if added && refresher != nil {

@@ -120,7 +120,7 @@ func (p *DesktopPins) Lookup(kind, target string) (key [32]byte, held bool, err 
 // bounds the wait for another writer.
 func (p *DesktopPins) Pin(ctx context.Context, kind, target string, key [32]byte) (PinResult, error) {
 	if kind == "" || target == "" {
-		return 0, fmt.Errorf("%w: a pin needs a kind and a target", ErrDesktopPinsUnreadable)
+		return 0, ErrDesktopPinsUnreadable.With(nil, "a pin needs a kind and a target")
 	}
 	var result PinResult
 	err := p.update(ctx, func(pins map[string]desktopPin) bool {
@@ -183,7 +183,7 @@ func (p *DesktopPins) update(ctx context.Context, change func(map[string]desktop
 func (p *DesktopPins) updateOrDiscard(ctx context.Context, discard bool, change func(map[string]desktopPin) bool) (discarded bool, err error) {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
-	release, err := waitLockFile(ctx, filepath.Join(p.dir, desktopPinsLockFile), pinsLockWait, ErrDesktopPinsBusy)
+	release, err := WaitLockFile(ctx, filepath.Join(p.dir, desktopPinsLockFile), pinsLockWait, ErrDesktopPinsBusy)
 	if err != nil {
 		return false, err
 	}
@@ -231,22 +231,22 @@ func removeSharedFile(ctx context.Context, path string, wait time.Duration) erro
 // result.
 func (p *DesktopPins) read() (pins map[string]desktopPin, dirTrusted bool, err error) {
 	if err := p.store.trusted(p.dir); err != nil {
-		return nil, false, fmt.Errorf("%w: %w", ErrDesktopPinsUnreadable, err)
+		return nil, false, ErrDesktopPinsUnreadable.With(err, "")
 	}
 	raw, err := security.ReadPrivateFile(filepath.Join(p.dir, desktopPinsFile))
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]desktopPin{}, true, nil
 	}
 	if err != nil {
-		return nil, true, fmt.Errorf("%w: %w", ErrDesktopPinsUnreadable, err)
+		return nil, true, ErrDesktopPinsUnreadable.With(err, "")
 	}
 	pins = map[string]desktopPin{}
 	if err := json.Unmarshal(raw, &pins); err != nil {
-		return nil, true, fmt.Errorf("%w: parse: %w", ErrDesktopPinsUnreadable, err)
+		return nil, true, ErrDesktopPinsUnreadable.With(err, "parse")
 	}
 	for kind, pin := range pins {
 		if b, err := hex.DecodeString(pin.KeySHA256); err != nil || len(b) != 32 || kind == "" || pin.Target == "" {
-			return nil, true, fmt.Errorf("%w: invalid pin for %q", ErrDesktopPinsUnreadable, security.SanitizeDisplay(kind))
+			return nil, true, ErrDesktopPinsUnreadable.With(nil, fmt.Sprintf("invalid pin for %q", security.SanitizeDisplay(kind)))
 		}
 	}
 	return pins, true, nil

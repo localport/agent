@@ -40,7 +40,7 @@ func inspectPrivateDir(path string, follow, secure bool) error {
 		// symlink or non-directory. The errno differs by OS (ELOOP, EMLINK on
 		// FreeBSD, EFTYPE on NetBSD, ENOTDIR).
 		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EMLINK) || errors.Is(err, refusedLinkErrno) {
-			return fmt.Errorf("%w: %s is not a directory of its own; credential paths must not be redirected", ErrUntrustedPath, path)
+			return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is not a directory of its own; credential paths must not be redirected", path))
 		}
 		return fmt.Errorf("open %s: %w", path, err)
 	}
@@ -51,20 +51,20 @@ func inspectPrivateDir(path string, follow, secure bool) error {
 		return fmt.Errorf("inspect %s: %w", path, err)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("%w: %s is not a directory", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is not a directory", path))
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return fmt.Errorf("%w: cannot read ownership of %s", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("cannot read ownership of %s", path))
 	}
 	if uid := os.Geteuid(); int(st.Uid) != uid {
-		return fmt.Errorf("%w: %w: %s is owned by uid %d, not %d", ErrUntrustedPath, errForeignOwner, path, st.Uid, uid)
+		return ErrUntrustedPath.With(errForeignOwner, fmt.Sprintf("%s is owned by uid %d, not %d", path, st.Uid, uid))
 	}
 	if !secure {
 		// Another account that can write the directory can replace what is in
 		// it. The secure walk instead narrows the mode below.
 		if perm := info.Mode().Perm(); perm&0o022 != 0 {
-			return fmt.Errorf("%w: %s is writable by group or other (mode %#o, want 0700)", ErrUntrustedPath, path, perm)
+			return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is writable by group or other (mode %#o, want 0700)", path, perm))
 		}
 		return nil
 	}
@@ -89,17 +89,17 @@ func verifyPrivate(f *os.File, path string) error {
 		return fmt.Errorf("inspect %s: %w", path, err)
 	}
 	if mode := info.Mode(); mode&os.ModeType != 0 {
-		return fmt.Errorf("%w: %s is not a regular file", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is not a regular file", path))
 	}
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return fmt.Errorf("%w: %s has too-open permissions %#o (want 0600 or stricter)", ErrUntrustedPath, path, perm)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s has too-open permissions %#o (want 0600 or stricter)", path, perm))
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return fmt.Errorf("%w: cannot read ownership of %s", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("cannot read ownership of %s", path))
 	}
 	if uid := os.Geteuid(); int(st.Uid) != uid {
-		return fmt.Errorf("%w: %w: %s is owned by uid %d, not %d", ErrUntrustedPath, errForeignOwner, path, st.Uid, uid)
+		return ErrUntrustedPath.With(errForeignOwner, fmt.Sprintf("%s is owned by uid %d, not %d", path, st.Uid, uid))
 	}
 	return nil
 }

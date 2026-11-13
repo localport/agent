@@ -188,7 +188,7 @@ func owned(path string) (bool, error) {
 		return false, fmt.Errorf("read %s: %w", path, err)
 	}
 	if !bytes.Contains(content, []byte(Marker)) {
-		return true, fmt.Errorf("%w: %s; move it aside or remove it, then run the command again", ErrForeignUnit, path)
+		return true, ErrForeignUnit.With(nil, fmt.Sprintf("%s; move it aside or remove it, then run the command again", path))
 	}
 	return true, nil
 }

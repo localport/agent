@@ -42,7 +42,7 @@ func writeSystemLog(failed bool, line string) {
 		err = w.Info(line)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "  could not write to the system log: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  could not write to the system log: %s\n", userText(err))
 	}
 }
 

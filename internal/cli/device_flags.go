@@ -175,7 +175,7 @@ func (f *deviceFlags) apply(fs *flag.FlagSet, d *config.LocalDevice, who invoker
 	if !who.privileged {
 		for _, l := range d.Logins {
 			if who.current == "" {
-				return errors.New("--logins: the user running this command cannot be looked up, and without root a device serves only that user")
+				return errcode.New(errcode.CurrentUserUnknown).With(nil, "--logins: without root a device serves only the user running this command")
 			}
 			if l != who.current {
 				return fmt.Errorf("--logins: %q is not the user running this command; without root a device serves only %s", l, who.current)

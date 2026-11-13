@@ -179,8 +179,11 @@ type rdpFilter struct {
 	// names are the CS_NET channel names the client asked for, in order.
 	names []string
 	// io, message and user are the MCS channel ids the server assigned; 0
-	// until assigned. channels holds the ids of cliprdr and drdynvc.
+	// until assigned. static holds every SC_NET id in CS_NET order and
+	// channels the ids of cliprdr and drdynvc. All assigned ids are non-zero
+	// and pairwise distinct, so each Send Data routes to one channel.
 	io, message, user uint16
+	static            []uint16
 	channels          [2]uint16
 	// serverChunk is the server's VCChunkSize, 0 when absent; clientChunk
 	// reports whether the client's capability set carried the field.
@@ -784,17 +787,27 @@ func (p *rdpPump) connectResponse(pdu, mcs []byte) error {
 				return rdpViolation("truncated SC_MCS_MSGCHANNEL")
 			}
 			message = binary.LittleEndian.Uint16(body)
+			if message == 0 {
+				return rdpViolation("SC_MCS_MSGCHANNEL channel 0")
+			}
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	if !seen[gccServerSecurity] || !seen[gccServerNetwork] || io == 0 {
+	if !seen[gccServerSecurity] || !seen[gccServerNetwork] {
 		return rdpViolation("MCS Connect Response without SC_SECURITY or SC_NET")
 	}
+	assigned := append([]uint16{io}, ids...)
+	if message != 0 {
+		assigned = append(assigned, message)
+	}
+	if !distinctChannels(assigned) {
+		return rdpViolation("SC_NET channel ids %v are zero or repeated", assigned)
+	}
 	p.f.mu.Lock()
-	p.f.io, p.f.message = io, message
+	p.f.io, p.f.message, p.f.static = io, message, ids
 	for i, name := range names {
 		switch name {
 		case "cliprdr":
@@ -816,12 +829,34 @@ func (p *rdpPump) attachUserConfirm(mcs []byte) error {
 	if len(mcs) != 4 {
 		return rdpViolation("malformed MCS Attach User Confirm")
 	}
-	if mcs[1] == 0 {
-		p.f.mu.Lock()
-		p.f.user = binary.BigEndian.Uint16(mcs[2:]) + mcsUserIDBase
-		p.f.mu.Unlock()
+	if mcs[1] != 0 {
+		return nil
 	}
+	user := binary.BigEndian.Uint16(mcs[2:]) + mcsUserIDBase
+	f := p.f
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	assigned := append([]uint16{user, f.io}, f.static...)
+	if f.message != 0 {
+		assigned = append(assigned, f.message)
+	}
+	if f.io == 0 || !distinctChannels(assigned) {
+		return rdpViolation("MCS user channel %d is zero or taken", user)
+	}
+	f.user = user
 	return nil
+}
+
+// distinctChannels reports whether every id is non-zero and no two are equal.
+func distinctChannels(ids []uint16) bool {
+	seen := make(map[uint16]bool, len(ids))
+	for _, id := range ids {
+		if id == 0 || seen[id] {
+			return false
+		}
+		seen[id] = true
+	}
+	return true
 }
 
 // sendData frames an MCS Send Data Request or Indication and routes its

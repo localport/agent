@@ -877,7 +877,8 @@ stream:
      `desktop_channel_refused` before the Connect Initial reaches the
      target; the agent never rewrites CS_NET. The Connect Response must
      select no RDP Standard Security encryption; its SC_NET maps the names
-     to channel ids. Send Data on any id other than the I/O channel, the
+     to channel ids. The I/O, message, static and user channel ids must be
+     non-zero and distinct, or the connection ends. Send Data on any id other than the I/O channel, the
      message channel, the user channel from Attach User Confirm and the
      mapped `cliprdr` and `drdynvc` ids, or a client Send Data from another
      initiator, ends the connection.
@@ -922,9 +923,10 @@ stream:
      for a channel it declined; at most 8 ids are pending, open or server
      closing.
    - Clipboard (`cliprdr`), per the connection's current certificate:
-     Clipboard Capabilities pass with `CB_STREAM_FILECLIP_ENABLED`,
-     `CB_FILECLIP_NO_FILE_PATHS`, `CB_CAN_LOCK_CLIPDATA` and
-     `CB_HUGE_FILE_SUPPORT_ENABLED` cleared; Monitor Ready passes server to
+     Clipboard Capabilities reach the peer as one general capability set
+     the agent builds, with the sender's version (1 or 2) and only
+     `CB_USE_LONG_FORMAT_NAMES` of its flags; other sets are dropped, and a
+     PDU without exactly one general set ends the connection. Monitor Ready passes server to
      client. A Format List from the server passes only when `copy` is
      allowed, from the client only when `paste` is, reduced to CF_TEXT (1),
      CF_OEMTEXT (7), CF_UNICODETEXT (13) and CF_LOCALE (16). A list refused
@@ -1416,10 +1418,16 @@ credential, device and login, the client key
 `ssh/<team>/<kind>-<identity>/<login>@<device-host>` (ed25519, OpenSSH format,
 0600, generated on first use, never sent), its certificate beside it as
 `<login>@<device-host>-cert.pub` and the edge URL as `<login>@<device-host>.url`,
-so runs for two logins never replace each other's certificate; and
-`known_hosts`, one line per device host. A login the device's login rule refuses
-(`config.ValidLogin`), or one holding a character Windows forbids in a file
-name, is refused. `ssh-cert` mints only when the stored
+so runs for two logins never replace each other's certificate; and, per
+credential, `known_hosts` beside them, one line per device host. A login is
+refused when the device's login rule refuses it (`config.ValidLogin`), when it
+starts with `-` or holds any of ``' ` " ; & < > | ( ) { } $``, on a Windows
+client when it holds `\`, `*` or `?`, and elsewhere when it ends in `\` or
+holds `\\`. A Windows domain account is named in its UPN form,
+`alice@corp.example`; `localport ssh` splits `[login@]<device-host>` at the
+last `@`. `ssh-proxy` only reads the client files: without a certificate, URL
+or client key it fails with AG101 and names the `ssh-cert` command.
+`ssh-cert` mints only when the stored
 certificate is not for this key and login, or has under 60 s left. It checks
 the answer (a user certificate for the client key and exactly the login,
 not expired, an `ecdsa-sha2-nistp256` host key, a `wss` URL) before writing,
@@ -1437,24 +1445,31 @@ close frame or a reason in `sshResumableEnds` (`closed`, `edge_shutdown`,
 `wrong_edge`), is resumed within 5 minutes: a mint with `resume_certificate`
 (never written to the certificate file), a new WebSocket with the resume
 certificate first, then the resume prelude. Any other close reason, or a final
-refusal, is printed as `localport: session ended: <reason>`.
+refusal, is printed as `error: the session ended: <reason> [AG109]`, the
+edge's reason unchanged.
 
 `localport ssh-config <device-host>...` prints, per device:
 
     Host <device-host>
-      ProxyCommand localport ssh-proxy --identity <ref> %r %h
+      ProxyCommand "localport" ssh-proxy --identity <ref> "%r" "%h"
       IdentityFile <client dir>/%r@<device-host>
       CertificateFile <client dir>/%r@<device-host>-cert.pub
-      UserKnownHostsFile <state root>/known_hosts
+      UserKnownHostsFile <client dir>/known_hosts
       HostKeyAlias <device-host>
       StrictHostKeyChecking yes
       IdentitiesOnly yes
-    Match host <device-host> exec "localport ssh-cert --identity <ref> %r %h"
+    Match host <device-host> exec "\"localport\" ssh-cert --identity <ref> \"%r\" \"%h\""
 
 ssh runs the `Match exec` while it reads its config, so the certificate is
 fresh before ssh loads it and before the proxy starts; a failed mint leaves
 `ssh-proxy` with no usable certificate, so ssh stops at the proxy and never
-connects to the host name directly. `localport ssh [login@]<device-host>`
+connects to the host name directly. ssh runs both commands through the shell,
+so the command, the login and the host are double-quoted, and a localport
+path or state root holding a quote, `$`, `` ` ``, a line break or, outside
+Windows, `\` is refused. OpenSSH before 9.6 passes a user or host name given on
+its command line to these commands unfiltered (CVE-2023-51385); with such a
+client on `PATH`, `ssh-config` prints a warning on stderr.
+`localport ssh [login@]<device-host>`
 runs the same mint and then the system `ssh` with these options; with an
 OpenSSH client older than 9.9 it prints a one-line notice that the
 connection uses `curve25519-sha256`, not post-quantum key exchange.

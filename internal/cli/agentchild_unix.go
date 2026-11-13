@@ -38,17 +38,22 @@ func runAsAgentAccount(args []string, stdin io.Reader, stdout io.Writer) error {
 		if code <= 0 {
 			code = 1
 		}
-		return &service.ExitError{Code: code, Err: fmt.Errorf("%w: localport %s", errcode.New(errcode.AgentChildFailed), args[0])}
+		return &service.ExitError{Code: code, Err: errcode.New(errcode.AgentChildFailed).With(nil, fmt.Sprintf("localport %s", args[0]))}
 	case err != nil && cmd.Process == nil:
-		return fmt.Errorf("%w: %w", errcode.New(errcode.AgentChildStart), err)
+		return errcode.New(errcode.AgentChildStart).With(err, "")
 	}
 	return err
 }
 
-// agentChildCmd is the child's command: fixed argv, no environment, the
+// agentChildCmd is the child's command: fixed argv (--verbose first when
+// set, so the child prints its error the same way), no environment, the
 // root directory, and the agent account's uid, gid and only group.
 func agentChildCmd(exe string, acct service.Account, args []string) *exec.Cmd {
-	cmd := exec.Command(exe, append([]string{agentChildCommand}, args...)...)
+	argv := []string{agentChildCommand}
+	if verbose {
+		argv = []string{"--verbose", agentChildCommand}
+	}
+	cmd := exec.Command(exe, append(argv, args...)...)
 	cmd.Env = []string{}
 	cmd.Dir = "/"
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{

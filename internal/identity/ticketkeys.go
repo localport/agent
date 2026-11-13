@@ -279,7 +279,7 @@ func (t *TicketKeys) Replace(ctx context.Context, generation uint64, set DeviceK
 
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	release, err := waitLockFile(ctx, filepath.Join(t.dir, ticketKeysLockFile), keysLockWait, ErrTicketKeysBusy)
+	release, err := WaitLockFile(ctx, filepath.Join(t.dir, ticketKeysLockFile), keysLockWait, ErrTicketKeysBusy)
 	if err != nil {
 		return err
 	}
@@ -331,22 +331,22 @@ func (t *TicketKeys) publishLocked(pubs map[string]ed25519.PublicKey, recKey hel
 // ErrRecordingKeyDropped.
 func (t *TicketKeys) read() (ticketKeysRecord, map[string]ed25519.PublicKey, heldRecordingKey, error) {
 	if err := t.store.trusted(t.dir); err != nil {
-		return ticketKeysRecord{}, nil, heldRecordingKey{}, fmt.Errorf("%w: %w", ErrTicketKeysUnreadable, err)
+		return ticketKeysRecord{}, nil, heldRecordingKey{}, ErrTicketKeysUnreadable.With(err, "")
 	}
 	raw, err := security.ReadPrivateFile(filepath.Join(t.dir, ticketKeysFile))
 	if errors.Is(err, fs.ErrNotExist) {
 		return ticketKeysRecord{}, map[string]ed25519.PublicKey{}, heldRecordingKey{}, nil
 	}
 	if err != nil {
-		return ticketKeysRecord{}, nil, heldRecordingKey{}, fmt.Errorf("%w: %w", ErrTicketKeysUnreadable, err)
+		return ticketKeysRecord{}, nil, heldRecordingKey{}, ErrTicketKeysUnreadable.With(err, "")
 	}
 	var rec ticketKeysRecord
 	if err := json.Unmarshal(raw, &rec); err != nil {
-		return ticketKeysRecord{}, nil, heldRecordingKey{}, fmt.Errorf("%w: parse: %w", ErrTicketKeysUnreadable, err)
+		return ticketKeysRecord{}, nil, heldRecordingKey{}, ErrTicketKeysUnreadable.With(err, "parse")
 	}
 	pubs, err := parseTicketKeys(rec.Keys)
 	if err != nil {
-		return ticketKeysRecord{}, nil, heldRecordingKey{}, fmt.Errorf("%w: %w", ErrTicketKeysUnreadable, err)
+		return ticketKeysRecord{}, nil, heldRecordingKey{}, ErrTicketKeysUnreadable.With(err, "")
 	}
 	recKey, err := parseRecordingKey(rec.RecordingKey)
 	if err != nil {

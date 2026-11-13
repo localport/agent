@@ -119,6 +119,24 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Path, e.Message)
 }
 
+// RemoteMessage is the server's message, or, when it sent none, a text
+// naming the HTTP status class (errcode.Remote).
+func (e *APIError) RemoteMessage() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	switch {
+	case e.Status >= 500:
+		return "the control plane failed to answer the request (HTTP 5xx)"
+	case e.Status >= 400:
+		return "the control plane refused the request (HTTP 4xx)"
+	}
+	return "the control plane answered unexpectedly (HTTP 3xx)"
+}
+
+// RemoteCode is the server's code, empty when it sent none (errcode.Remote).
+func (e *APIError) RemoteCode() string { return e.Code }
+
 // errorCode returns the control plane's code for err, or "" when err did not
 // come from the control plane. Wrapping-safe.
 func errorCode(err error) string {
@@ -321,9 +339,11 @@ func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue
 		}
 		var env errorEnvelope
 		if json.Unmarshal(raw, &env) == nil {
-			apiErr.Code = env.Code
+			// Server text reaches terminals and logs: no control or bidi
+			// characters.
+			apiErr.Code = security.SanitizeDisplay(env.Code)
 			// Fall back to the type label when the response has no message.
-			apiErr.Message = firstNonEmpty(env.Message, env.Error)
+			apiErr.Message = security.SanitizeDisplay(firstNonEmpty(env.Message, env.Error))
 		}
 		return apiErr
 	}

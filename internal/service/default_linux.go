@@ -20,7 +20,7 @@ func Default() (Manager, error) {
 		// Merged-/usr systems have both; older Debian ships only /bin/systemctl.
 		systemctl, ok := firstExisting("/usr/bin/systemctl", "/bin/systemctl")
 		if !ok {
-			return nil, fmt.Errorf("%w: systemd runs, but neither /usr/bin/systemctl nor /bin/systemctl exists", ErrUnsupported)
+			return nil, ErrUnsupported.With(nil, "systemd runs, but neither /usr/bin/systemctl nor /bin/systemctl exists")
 		}
 		return systemd{unitPath: SystemdUnitPath, systemctl: systemctl, run: execRun}, nil
 	}
@@ -31,14 +31,14 @@ func Default() (Manager, error) {
 		rcService, ok1 := firstExisting("/sbin/rc-service", "/usr/sbin/rc-service")
 		rcUpdate, ok2 := firstExisting("/sbin/rc-update", "/usr/sbin/rc-update")
 		if !ok1 || !ok2 {
-			return nil, fmt.Errorf("%w: OpenRC runs, but rc-service or rc-update is missing", ErrUnsupported)
+			return nil, ErrUnsupported.With(nil, "OpenRC runs, but rc-service or rc-update is missing")
 		}
 		return openrc{initDir: openrcInitDir, runlevelDir: openrcRunlevelDir, rcService: rcService, rcUpdate: rcUpdate, logDir: openrcAgentLogDir, account: LookupAccount, run: execRun}, nil
 	}
 	if comm, err := os.ReadFile("/proc/1/comm"); err == nil && string(bytes.TrimSpace(comm)) == "procd" {
 		ubus, ok := firstExisting("/bin/ubus", "/usr/bin/ubus", "/sbin/ubus")
 		if !ok {
-			return nil, fmt.Errorf("%w: procd runs, but ubus is missing", ErrUnsupported)
+			return nil, ErrUnsupported.With(nil, "procd runs, but ubus is missing")
 		}
 		return procd{initDir: procdInitDir, ubus: ubus, run: execRun}, nil
 	}

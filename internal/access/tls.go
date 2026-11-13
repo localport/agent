@@ -7,14 +7,15 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/localport/agent/internal/security"
 	pkcs12 "software.sslmate.com/src/go-pkcs12"
+
+	"github.com/localport/agent/internal/errcode"
+	"github.com/localport/agent/internal/security"
 )
 
 // BuildTLSConfig builds a mutual TLS client config from exactly one of
@@ -76,17 +77,17 @@ func loadPEM(path string) (tls.Certificate, error) {
 		// The identity store's certificate file has no key. crypto/tls reports that as
 		// a PEM block type error, so replace it with a specific message.
 		if bytes.Contains(data, []byte("BEGIN CERTIFICATE")) && !bytes.Contains(data, []byte("PRIVATE KEY")) {
-			return tls.Certificate{}, fmt.Errorf( //nolint:staticcheck // ST1005, multi-line message
-				"%s holds certificates but no private key.\n"+
+			return tls.Certificate{}, errcode.New(errcode.ClientCertUnusable).With(nil,
+				path+" holds certificates but no private key\n"+
 					"  --pem wants ONE file containing the leaf, its chain and the key.\n"+
 					"  If this came from the identity store, drop --pem entirely: "+
-					"`localport access` presents a stored credential on its own.", path)
+					"`localport access` presents a stored credential on its own.")
 		}
 		return tls.Certificate{}, classify("parse pem file", err)
 	}
 	leaf, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("parse leaf: %w", err)
+		return tls.Certificate{}, errcode.New(errcode.ClientCertUnusable).With(err, "parse the leaf certificate")
 	}
 	// Set Leaf so crypto/tls does not parse it on each handshake.
 	cert.Leaf = leaf
@@ -107,12 +108,12 @@ func loadPEM(path string) (tls.Certificate, error) {
 			continue
 		}
 		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-			return tls.Certificate{}, fmt.Errorf("parse certificate in %s: %w", path, err)
+			return tls.Certificate{}, errcode.New(errcode.ClientCertUnusable).With(err, "parse the certificate in "+path)
 		}
 		cas++
 	}
 	if cas == 0 {
-		return tls.Certificate{}, fmt.Errorf("pem file %s does not contain any CA certificates", path)
+		return tls.Certificate{}, errcode.New(errcode.ClientCertUnusable).With(nil, path+" holds no CA certificate")
 	}
 	return cert, nil
 }
@@ -130,7 +131,7 @@ func loadFromPKCS12(path, password string) (tls.Certificate, error) {
 		return tls.Certificate{}, classify("decode pkcs12", err)
 	}
 	if len(chain) == 0 {
-		return tls.Certificate{}, fmt.Errorf("pkcs12 %s carries no CA chain", path)
+		return tls.Certificate{}, errcode.New(errcode.ClientCertUnusable).With(nil, path+" carries no CA chain")
 	}
 	cert := tls.Certificate{
 		PrivateKey:  key,
@@ -147,24 +148,25 @@ func loadFromPKCS12(path, password string) (tls.Certificate, error) {
 
 func assertLeafFresh(cert tls.Certificate) error {
 	if len(cert.Certificate) == 0 {
-		return errors.New("certificate is empty")
+		return errcode.New(errcode.ClientCertUnusable).With(nil, "the certificate is empty")
 	}
 	// Both loaders set Leaf. Parse only for certificates built elsewhere.
 	leaf := cert.Leaf
 	if leaf == nil {
 		parsed, err := x509.ParseCertificate(cert.Certificate[0])
 		if err != nil {
-			return fmt.Errorf("parse leaf: %w", err)
+			return errcode.New(errcode.ClientCertUnusable).With(err, "parse the leaf certificate")
 		}
 		leaf = parsed
 	}
 	if now := time.Now(); now.Before(leaf.NotBefore) {
 		// Usually a wrong clock. A device without RTC or NTP boots in the past.
-		return fmt.Errorf("client cert is not valid until %s, and this machine's clock reads %s",
-			leaf.NotBefore.Format(time.RFC3339), now.Format(time.RFC3339))
+		return errcode.New(errcode.ClientCertUnusable).With(nil, fmt.Sprintf("not valid until %s, and this machine's clock reads %s",
+			leaf.NotBefore.Format(time.RFC3339), now.Format(time.RFC3339)))
+
 	}
 	if time.Now().After(leaf.NotAfter) {
-		return fmt.Errorf("client cert expired at %s", leaf.NotAfter.Format(time.RFC3339))
+		return errcode.New(errcode.ClientCertUnusable).With(nil, "expired at "+leaf.NotAfter.Format(time.RFC3339))
 	}
 	if d := time.Until(leaf.NotAfter); d < 24*time.Hour {
 		fmt.Fprintf(os.Stderr, "warning: client cert expires in %s\n", d.Round(time.Minute))
@@ -172,15 +174,10 @@ func assertLeafFresh(cert tls.Certificate) error {
 	return nil
 }
 
-// classify names the two failures an operator can act on.
+// classify codes a credential file failure; a missing or unreadable file
+// keeps its *fs.PathError, which errcode.Render shows with its path.
 func classify(prefix string, err error) error {
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("%s: file not found: %w", prefix, err)
-	case errors.Is(err, fs.ErrPermission):
-		return fmt.Errorf("%s: permission denied: %w", prefix, err)
-	}
-	return fmt.Errorf("%s: %w", prefix, err)
+	return errcode.New(errcode.ClientCertUnusable).With(err, prefix)
 }
 
 // resolveServerName returns the name used to verify the server certificate.

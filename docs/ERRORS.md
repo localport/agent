@@ -1,16 +1,25 @@
 # Agent error codes
 
-A refusal the agent reports to you carries its code, such as `[AG021]`,
-right after its message; details may follow the code, and a refusal caused
-by another shows both codes. Operating system failures (such as a permission
-error) and flag usage errors carry no code. Codes the control plane or the
-edge send (such as `[SE031]`) come from the service and are not listed here;
-include them when you contact support.
+A failure the agent reports to you is a message, the local detail you act on
+(a path, a value, the command to run), and its code, such as `[AG021]`. A
+failure caused by another shows both codes, innermost first. A refusal from
+the control plane or the edge shows the service's message and code (such as
+`[SE031]`) exactly as received; those codes are not listed here. Flag usage
+errors carry no code. Include every code when you contact support.
+
+Commands leave out causes from the network, the service or agent internals
+(endpoint paths, HTTP status, TLS and connection errors) and say so; run the
+command again with the global flag `--verbose` (`localport --verbose
+<command>`) to print the full cause. A local cause you act on, such as a
+file path with its permission error or a port already in use, is always
+shown. The agent that runs tunnels and devices (`run`, `connect`, the tunnel
+form) prints full causes in its log.
 
 Codes are grouped by area: AG00x credentials and keys, AG01x file and binary
 checks, AG02x local config, AG03x commands, AG04x the device service, AG05x
 terminal sessions, AG06x recordings, AG07x network, AG08x and AG09x the
-Windows installer. The Windows installer and uninstaller exit with the
+Windows installer, AG10x SSH clients, AG11x commands (enrolment, settings,
+credentials), AG12x `localport access`. The Windows installer and uninstaller exit with the
 number of their code (`AG084` exits 84). Two refusals of the installer
 itself use the Windows Installer codes instead: exit 1618, another
 Localport installer or uninstaller is running (wait for it to finish, then
@@ -52,7 +61,7 @@ run it again), and exit 1633, the machine is not running 64-bit Windows.
 | AG039 | Internal command | `__agent` is the command localport runs itself, as the agent account. Run the command you meant without it. |
 | AG041 | Foreign service definition | A service under the device service's name was not written by localport. Remove it as the message says, then retry. |
 | AG042 | Device service not installed | Nothing to remove. Install the service with `sudo localport service install`. |
-| AG043 | No supported service manager | This machine has no systemd, launchd or Windows service manager. Run the devices with `localport run` under your own supervisor. |
+| AG043 | No supported service manager | This machine has no systemd, OpenRC, OpenWrt procd, launchd or Windows service manager. Run the devices with `localport run` under your own supervisor. |
 | AG044 | Windows service marked for deletion | Windows keeps a deleted service until every handle to it closes. Close the Services console, Event Viewer and any tool showing the service, or restart Windows, then retry. |
 | AG045 | Device credentials not purged | `service uninstall --purge` removed the service, but deleting the device credentials or the recording spool failed; the message names the path. Fix that path's owner or mode, then run `sudo localport service uninstall --purge` again. |
 | AG053 | Device sessions locked | Another localport process serves this device's sessions. Stop the other process. |
@@ -83,3 +92,27 @@ run it again), and exit 1633, the machine is not running 64-bit Windows.
 | AG091 | Service configuration busy | Another installer, uninstaller, `localport connect` or `localport service` command is changing the device services and did not finish within 2 minutes; or an install or uninstall that was interrupted is still open in an install directory, which the message names (its undo would reverse this change); or the lock could not be taken (the message names the cause). Wait for the other command to finish and run the command again. For an interrupted install or uninstall, run the Localport installer, or the uninstaller, for the directory the message names: it undoes the interrupted one first. Running an installer for a different directory refuses again. |
 | AG092 | Uninstall entry not written | The installer could not write its Add/Remove Programs entry, so it undid the install: the previous files, settings and services are as they were. The message names the cause; fix it, then run the installer again. |
 | AG093 | Device state not purged | The uninstall finished, but removing the device identities and config it was asked to purge failed, so they stay under `%ProgramData%\localport-device`. The message names the cause; fix it, then delete that directory as an Administrator. The device certificates stay valid until the devices are removed in the dashboard. |
+| AG101 | No session certificate | `ssh-proxy` found no session certificate, edge URL or client key for this credential, login and device; `ssh-cert`, which the `Match exec` line of the `ssh-config` block runs, writes them. Run the `localport ssh-cert` command the message names, or connect with `localport ssh`. |
+| AG102 | SSH client files busy | Another `localport ssh-cert` held the lock on this credential's client files for 30 seconds, longer than a certificate mint takes. Retry; when it persists, end the stuck `localport ssh-cert` process. |
+| AG103 | Login refused for SSH | The login holds a shell character (`' ` " ; & < > \| ( ) { } $`), starts with `-`, holds `\`, `*` or `?` on Windows, or ends in `\` elsewhere, so it cannot travel through ssh_config's commands. Name a Windows domain account in its UPN form, `alice@corp.example`. |
+| AG104 | Path unusable in ssh_config | The localport path or the state root holds a quote, `$`, `` ` ``, a line break or, outside Windows, `\`. Move localport or `LOCALPORT_HOME` to a path without them. |
+| AG105 | SSH client files unusable | The client key, certificate, URL, known_hosts file or their directory under `<state root>/ssh/` cannot be read or written; the message names the file. Fix its owner or mode, or remove it so the next `localport ssh-cert` writes it again. |
+| AG106 | Session certificate answer refused | The control plane answered with a certificate for another key or login, an expired one, or no usable host key or URL. Check this machine's clock; when it persists, contact support. |
+| AG107 | Session certificate not issued | The control plane refused or did not answer the mint; its own code follows when it refused. Check the login and your access to the device, or run with `--verbose` for the cause. |
+| AG108 | Session connection failed | The connection to the device's edge broke or could not open. Check this machine's network; run with `--verbose` for the cause. |
+| AG109 | Session ended | The edge ended the session; the reason it gave follows the message. Connect again; when the reason persists, contact support with it. |
+| AG110 | Device enrolled, config not written | The join token is spent and the device holds its credential, but `agent.yaml` was not written; the message names the cause and what to run. Fix the cause, then create a new join command in the dashboard. |
+| AG111 | Credential expired | The credential's certificate expired. Renew it with `localport identity renew`, or sign in again with `localport login`. |
+| AG112 | localport path unknown | The operating system did not report where this localport executable is. Run localport by its full path. |
+| AG113 | Current user unknown | The account running the command cannot be looked up, so no default login exists. Name the login (`login@host`, or `--logins`). |
+| AG114 | OpenSSH client unavailable | `ssh` is not installed, not on `PATH`, or could not start. Install the OpenSSH client. |
+| AG115 | Credential not saved | The credential was issued but could not be saved; the message says what to run again. Fix the credential directory's owner or mode first. |
+| AG116 | Settings saved but not applied | `set` saved the settings, but reloading the device service failed. Apply them with the command the message names. |
+| AG117 | Desktop key not forgotten | `set --rdp-reset-pin` or `--vnc-reset-pin` could not change `desktop_pins.json`; its own code follows. Retry; fix the file's owner or mode if it persists. |
+| AG118 | Device name ambiguous | The name matches more than one enrolled device. Use the full identity from the local config. |
+| AG119 | Device enrolled, service not installed | The device is enrolled and its credential saved, but installing its service failed. Fix the cause the message names, then run the `localport service install` command it shows; no new join token is needed. |
+| AG121 | Client certificate unusable | The client certificate or key from `--pem`, `--p12`, the access config or the store cannot be read, parsed or used, or is not yet valid or expired. Check the file and this machine's clock, or obtain a new credential. |
+| AG122 | Invalid access config | The access config file cannot be read or holds an invalid entry; the message names the file and the entry. Fix the entry. |
+| AG123 | Local forward not opened | A `-L` local address or socket could not listen: in use, or a path that is not a socket. Choose another address, or stop the process holding it. |
+| AG124 | Device refused the connection | The device or its edge refused this certificate, identity or port; the message says which and what to do. |
+| AG125 | Device unreachable | The device is offline, its address is unknown, or it does not answer as a Localport edge. Check the address and that the device is connected. |

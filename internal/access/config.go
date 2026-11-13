@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"go.yaml.in/yaml/v4"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // AccessConfig lists the fleet devices the access subcommand forwards locally.
@@ -44,7 +46,7 @@ func (e *Entry) UsesIdentity() bool { return e.PEM == "" && e.P12 == "" }
 func LoadAccessConfig(path string) (*AccessConfig, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, errcode.New(errcode.AccessConfigInvalid).With(err, "read "+path)
 	}
 	// Unknown keys are errors. A misspelled `forward` or `identity` would
 	// otherwise read as absent and change the ports or the credential used.
@@ -53,13 +55,13 @@ func LoadAccessConfig(path string) (*AccessConfig, error) {
 
 	var cc AccessConfig
 	if err := dec.Decode(&cc); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, errcode.New(errcode.AccessConfigInvalid).With(err, "parse "+path)
 	}
 	if cc.Version != 1 {
-		return nil, fmt.Errorf("parse %s: unsupported config version %d: this agent reads version 1", path, cc.Version)
+		return nil, errcode.New(errcode.AccessConfigInvalid).With(nil, fmt.Sprintf("%s: unsupported config version %d: this agent reads version 1", path, cc.Version))
 	}
 	if len(cc.Access) == 0 {
-		return nil, errors.New("access config: no devices listed")
+		return nil, errcode.New(errcode.AccessConfigInvalid).With(nil, "no devices listed")
 	}
 	// Local ports must be unique across entries since every forward binds on
 	// this machine.
@@ -71,19 +73,19 @@ func LoadAccessConfig(path string) (*AccessConfig, error) {
 			label = fmt.Sprintf("#%d", i+1)
 		}
 		if err := entry.validate(); err != nil {
-			return nil, fmt.Errorf("device %s: %w", label, err)
+			return nil, errcode.New(errcode.AccessConfigInvalid).With(err, "device "+label)
 		}
 		for _, raw := range entry.Forward {
 			f, err := ParseForward(raw, "127.0.0.1")
 			if err != nil {
-				return nil, fmt.Errorf("device %s: %w", label, err)
+				return nil, errcode.New(errcode.AccessConfigInvalid).With(err, "device "+label)
 			}
 			// Port 0 is assigned by the OS and never collides.
 			if !f.Socket && strings.HasSuffix(f.LocalAddr, ":0") {
 				continue
 			}
 			if prev, dup := boundBy[f.LocalAddr]; dup {
-				return nil, fmt.Errorf("devices %s and %s both listen on %s", prev, label, f.LocalAddr)
+				return nil, errcode.New(errcode.AccessConfigInvalid).With(nil, fmt.Sprintf("devices %s and %s both listen on %s", prev, label, f.LocalAddr))
 			}
 			boundBy[f.LocalAddr] = label
 		}

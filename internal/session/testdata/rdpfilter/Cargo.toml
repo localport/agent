@@ -5,6 +5,12 @@
 # security upgrade, and the clipboard and dynamic channel PDUs both sides
 # encode. Regenerate from this directory:
 #   cargo run -q > ../rdpfilter.golden
+#
+# The lock holds rsa 0.10.0-rc.18, inside the range of RUSTSEC-2023-0071,
+# because picky and sspi pin that exact version. The advisory's private-key
+# operations are not reached: the generator uses password credentials,
+# skips the security upgrade on both sides and holds no key. Move to rsa
+# 0.10.0 or later once picky and sspi release with it.
 [package]
 name = "rdpfilter-golden"
 version = "0.0.0"

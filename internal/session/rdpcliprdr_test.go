@@ -8,7 +8,7 @@ import (
 )
 
 // clipCaps runs the cliprdr capability exchange: both sides' capabilities
-// reach the other with the file and lock flags cleared.
+// reach the other with only the long format names flag kept.
 func clipCaps(r *rdpRun) {
 	r.t.Helper()
 	if r.clipReady {
@@ -256,6 +256,64 @@ func TestRDPClipboardFilePDUs(t *testing.T) {
 	r.expect(rdpServer, rdpPDU(t, "c.filecontents_fail"))
 	r.send(rdpServer, rdpPDU(t, "s.lock"))
 	r.marker(rdpServer)
+}
+
+// capsSet is one CLIPRDR_CAPS_SET of type typ carrying body.
+func capsSet(typ uint16, body ...byte) []byte {
+	b := binary.LittleEndian.AppendUint16(nil, typ)
+	b = binary.LittleEndian.AppendUint16(b, uint16(4+len(body)))
+	return append(b, body...)
+}
+
+// capsData is Clipboard Capabilities data holding sets.
+func capsData(sets ...[]byte) []byte {
+	b := binary.LittleEndian.AppendUint16(nil, uint16(len(sets)))
+	b = append(b, 0, 0)
+	for _, s := range sets {
+		b = append(b, s...)
+	}
+	return b
+}
+
+// The filter sends on one general set it builds: other sets, trailing bytes
+// of the general set and every flag but long format names are dropped.
+func TestRDPClipboardCapsRebuilt(t *testing.T) {
+	general := func(version, flags uint32, extra ...byte) []byte {
+		b := binary.LittleEndian.AppendUint32(nil, version)
+		b = binary.LittleEndian.AppendUint32(b, flags)
+		return capsSet(cbCapsTypeGeneral, append(b, extra...)...)
+	}
+	want := capsData(general(cbCapsVersion2, cbUseLongFormatNames))
+	for name, data := range map[string][]byte{
+		"unknown set before":    capsData(capsSet(0x7f, 1, 2, 3, 4), general(cbCapsVersion2, 0xffffffff)),
+		"unknown set after":     capsData(general(cbCapsVersion2, cbUseLongFormatNames), capsSet(0x02)),
+		"long general set":      capsData(general(cbCapsVersion2, cbUseLongFormatNames, 9, 9, 9, 9)),
+		"file and lock flagged": capsData(general(cbCapsVersion2, 0x3e)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRDPRun(t, rdpProtocolSSL, allClipboard)
+			r.connect("base")
+			r.send(rdpServer, r.svc(rdpServer, rdpCliprdr, cliprdrPDU(cbClipCaps, 0, data), 0))
+			r.expect(rdpClient, r.svc(rdpServer, rdpCliprdr, cliprdrPDU(cbClipCaps, 0, want), 0))
+		})
+	}
+	for name, data := range map[string][]byte{
+		"no general set":     capsData(capsSet(0x02)),
+		"two general sets":   capsData(general(cbCapsVersion2, 0), general(cbCapsVersion2, 0)),
+		"short general set":  capsData(capsSet(cbCapsTypeGeneral, 2, 0, 0, 0)),
+		"version 3":          capsData(general(3, 0)),
+		"version 0":          capsData(general(0, 0)),
+		"set past the data":  capsData([]byte{1, 0, 20, 0, 2, 0, 0, 0}),
+		"count short":        append(capsData(general(cbCapsVersion1, 0)), capsSet(0x02)...),
+		"truncated set head": capsData([]byte{1, 0}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRDPRun(t, rdpProtocolSSL, allClipboard)
+			r.connect("base")
+			r.send(rdpServer, r.svc(rdpServer, rdpCliprdr, cliprdrPDU(cbClipCaps, 0, data), 0))
+			r.wantEnd(CloseDesktopProtocolViolation)
+		})
+	}
 }
 
 // Malformed and misdirected cliprdr PDUs end the connection.

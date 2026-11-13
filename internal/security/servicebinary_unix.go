@@ -26,7 +26,7 @@ func CheckPackageManagerBinary(string) error { return nil }
 // path must have no symlinks left (filepath.EvalSymlinks).
 func CheckServiceBinary(path string) error {
 	if !filepath.IsAbs(path) {
-		return fmt.Errorf("%w: %s is not an absolute path", ErrUnsafeExecutable, path)
+		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s is not an absolute path", path))
 	}
 	path = filepath.Clean(path)
 	for p := path; ; p = filepath.Dir(p) {
@@ -60,24 +60,24 @@ type binaryEntry struct {
 func checkRootOnly(e binaryEntry, goos string, groupName func(gid uint32) (string, error)) error {
 	switch {
 	case e.leaf && !e.mode.IsRegular():
-		return fmt.Errorf("%w: %s is not a regular file", ErrUnsafeExecutable, e.path)
+		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s is not a regular file", e.path))
 	case !e.leaf && !e.mode.IsDir():
-		return fmt.Errorf("%w: %s is not a directory; resolve symlinks first", ErrUnsafeExecutable, e.path)
+		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s is not a directory; resolve symlinks first", e.path))
 	case e.uid != 0:
-		return fmt.Errorf("%w: %s is owned by uid %d, not root", ErrUnsafeExecutable, e.path, e.uid)
+		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s is owned by uid %d, not root", e.path, e.uid))
 	case e.mode&0o002 != 0:
-		return fmt.Errorf("%w: every user can write to %s", ErrUnsafeExecutable, e.path)
+		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("every user can write to %s", e.path))
 	case e.mode&0o020 == 0 || e.gid == 0:
 		return nil
 	}
 	name, err := groupName(e.gid)
 	if err != nil {
-		return fmt.Errorf("%w: %s is writable by group %d, whose name cannot be read: %v", ErrUnsafeExecutable, e.path, e.gid, err)
+		return ErrUnsafeExecutable.With(err, fmt.Sprintf("%s is writable by group %d, whose name cannot be read", e.path, e.gid))
 	}
 	if goos == "linux" && name == "staff" {
 		return nil
 	}
-	return fmt.Errorf("%w: group %s can write to %s", ErrUnsafeExecutable, name, e.path)
+	return ErrUnsafeExecutable.With(nil, fmt.Sprintf("group %s can write to %s", name, e.path))
 }
 
 func groupName(gid uint32) (string, error) {

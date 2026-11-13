@@ -691,6 +691,31 @@ func TestUnusableMetadataIsRefusedOnRead(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
+// The server's message and code reach terminals and logs: control and bidi
+// characters are dropped where the error response is decoded.
+func TestAPIErrorDropsControlCharacters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"code":"SE011\n","message":"Renewal \u001b[2Jdenied`+"\xe2\x80\xae"+`\nerror: fake line"}`)
+	}))
+	defer srv.Close()
+	client := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	leaf := selfSigned(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod")
+	cur := &Material{
+		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}),
+		Key:     fileKey{testKey(t)},
+		Meta:    Meta{Identity: "deploy-prod", Source: SourceToken},
+	}
+	_, err := client.Renew(context.Background(), cur)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("Renew = %v, want an APIError", err)
+	}
+	if apiErr.Code != "SE011" || apiErr.Message != "Renewal [2Jdeniederror: fake line" {
+		t.Fatalf("code %q, message %q; want control and bidi characters dropped", apiErr.Code, apiErr.Message)
+	}
+}
+
 // A 403 on renew keeps the APIError code and adds the `localport setup` hint.
 func TestRenewRefusalSaysToRunSetupAgain(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

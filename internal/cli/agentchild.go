@@ -80,10 +80,10 @@ func runAgentChild(app *App, args []string) error {
 		return err
 	}
 	if euid := os.Geteuid(); euid != acct.UID || euid == 0 {
-		return fmt.Errorf("%w: run as uid %d", errcode.New(errcode.AgentChildOnly), euid)
+		return errcode.New(errcode.AgentChildOnly).With(nil, fmt.Sprintf("run as uid %d", euid))
 	}
 	if len(args) == 0 || !slices.Contains(agentChildCommands, args[0]) {
-		return fmt.Errorf("%w: unknown command", errcode.New(errcode.AgentChildOnly))
+		return errcode.New(errcode.AgentChildOnly).With(nil, "unknown command")
 	}
 	asAgentChild = true
 	switch args[0] {
@@ -102,15 +102,15 @@ func runAgentChild(app *App, args []string) error {
 // root, runs it as `set-pins <ref> <kind>...`.
 func runSetPinsChild(args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("%w: set-pins needs a device and a kind", errcode.New(errcode.AgentChildOnly))
+		return errcode.New(errcode.AgentChildOnly).With(nil, "set-pins needs a device and a kind")
 	}
 	ref, err := identity.ParseDeviceRef(args[0])
 	if err != nil {
-		return fmt.Errorf("%w: set-pins: %w", errcode.New(errcode.AgentChildOnly), err)
+		return errcode.New(errcode.AgentChildOnly).With(err, "set-pins")
 	}
 	for _, kind := range args[1:] {
 		if _, ok := desktopKeyNames[kind]; !ok {
-			return fmt.Errorf("%w: set-pins: unknown kind %q", errcode.New(errcode.AgentChildOnly), kind)
+			return errcode.New(errcode.AgentChildOnly).With(nil, fmt.Sprintf("set-pins: unknown kind %q", kind))
 		}
 	}
 	return resetDesktopPins(currentInvoker(false), ref, args[1:])
@@ -151,13 +151,13 @@ func enrolInStore(store *identity.Store, req enrolRequest) (enrolResult, error) 
 		// logs.
 		err = security.SanitizeError(err, req.JoinToken)
 		if mayHaveSpent(err) {
-			return enrolResult{}, fmt.Errorf("%w\n  if the control plane redeemed the token before this failure, %s", err, joinTokenSpent)
+			return enrolResult{}, errcode.WithRemedy(err, "if the control plane redeemed the token before this failure, "+joinTokenSpent)
 		}
 		return enrolResult{}, err
 	}
 	ref, err := saveIssued(store, ctx, *material)
 	if err != nil {
-		return enrolResult{}, fmt.Errorf("%w: %w\n  %s", errcode.New(errcode.CredentialNotSaved), err, joinTokenSpent)
+		return enrolResult{}, errcode.New(errcode.CredentialNotSaved).With(err, joinTokenSpent)
 	}
 	storeEnrolledKeys(store, ref, material.DeviceKeys)
 	fmt.Fprintf(os.Stderr, "\n  enrolled\n")
@@ -174,7 +174,7 @@ func runEnrolChild(in io.Reader, out io.Writer) error {
 	dec := json.NewDecoder(io.LimitReader(in, 64<<10))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
-		return fmt.Errorf("%w: enrol: read the request: %w", errcode.New(errcode.AgentChildOnly), err)
+		return errcode.New(errcode.AgentChildOnly).With(err, "enrol: read the request")
 	}
 	store, err := currentInvoker(false).store()
 	if err != nil {
@@ -200,7 +200,7 @@ func enrolAsAgent(req enrolRequest) (enrolResult, error) {
 	}
 	var res enrolResult
 	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
-		return enrolResult{}, fmt.Errorf("%w: read the enrolment result: %w\n  %s", errcode.New(errcode.AgentChildFailed), err, joinTokenSpent)
+		return enrolResult{}, errcode.New(errcode.AgentChildFailed).With(err, "read the enrolment result; "+joinTokenSpent)
 	}
 	return res, nil
 }
@@ -213,7 +213,7 @@ func runPurgeChild() error {
 		return err
 	}
 	if err := purgeStore(store); err != nil {
-		return fmt.Errorf("%w: %w", errcode.New(errcode.StoreNotPurged), err)
+		return errcode.New(errcode.StoreNotPurged).With(err, "")
 	}
 	return nil
 }

@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/security"
 )
 
 // set as root reloads the installed device service; it never restarts it.
@@ -124,6 +127,38 @@ func TestSetPinsChildResetsThePin(t *testing.T) {
 		if err := runSetPinsChild(args); !errors.Is(err, errcode.New(errcode.AgentChildOnly)) {
 			t.Errorf("set-pins %q = %v, want AgentChildOnly", args, err)
 		}
+	}
+}
+
+// Root on the system layout never opens the store: a pin reset runs in the
+// set-pins agent child. A reset after a setting takes the same resetPins
+// path; writing the system config here would need the localport group.
+func TestSetRootResetsPinsInTheAgentChild(t *testing.T) {
+	file := asRoot(t, &fakeManager{installed: true})
+	writeDevices(t, file)
+	file.System = true
+	t.Cleanup(security.OverrideSystemOwner(os.Getuid()))
+	restoreRoot, restoreRun := agentChildRoot, runPinsChild
+	t.Cleanup(func() { agentChildRoot, runPinsChild = restoreRoot, restoreRun })
+	systemLocalConfig = func() (config.LocalConfigFile, error) { return file, nil }
+	agentChildRoot = func() bool { return true }
+	var calls [][]string
+	runPinsChild = func(args []string, _ io.Reader, _ io.Writer) error {
+		calls = append(calls, args)
+		return nil
+	}
+	ref := deviceRef("factory.gw-01").String()
+	for _, args := range [][]string{
+		{"factory.gw-01", "--rdp-reset-pin", "--vnc-reset-pin"},
+		{"factory.gw-01", "--vnc-reset-pin"},
+	} {
+		if err := runSet(args); err != nil {
+			t.Fatalf("set %q = %v", args, err)
+		}
+	}
+	want := [][]string{{"set-pins", ref, "rdp", "vnc"}, {"set-pins", ref, "vnc"}}
+	if !slices.EqualFunc(calls, want, slices.Equal) {
+		t.Fatalf("children = %q, want %q", calls, want)
 	}
 }
 

@@ -3,12 +3,13 @@ package access
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // Forward is one local listener mapped to one port on the device.
@@ -49,7 +50,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 	for _, f := range p.Forwards {
 		ln, err := f.listen()
 		if err != nil {
-			return fmt.Errorf("listen %s: %w", f.LocalAddr, err)
+			return errcode.New(errcode.ForwardListenFailed).With(err, f.LocalAddr)
 		}
 		listeners = append(listeners, ln)
 		if p.OnListen != nil {
@@ -88,7 +89,7 @@ func (p *Proxy) serve(ctx context.Context, ln net.Listener, f Forward, wg *sync.
 				return
 			}
 			if p.OnError != nil {
-				p.OnError(fmt.Errorf("accept: %w", err))
+				p.OnError(errcode.New(errcode.ForwardListenFailed).With(err, "accept"))
 			}
 			continue
 		}
@@ -208,29 +209,29 @@ func streamError(device string, err error) error {
 		strings.Contains(msg, "tls: unknown certificate"),
 		strings.Contains(msg, "tls: certificate required"),
 		strings.Contains(msg, "tls: unknown certificate authority"):
-		return fmt.Errorf("%s refused this certificate: check that the identity has access to the device, and run `localport identity list`: %w", device, err)
+		return errcode.New(errcode.DeviceRefused).With(err, device+" refused this certificate: check that the identity has access to the device, and run `localport identity list`")
 	case strings.Contains(msg, "tls: revoked certificate"):
-		return fmt.Errorf("%s reports this certificate as revoked: it cannot be renewed, so obtain a new one with `localport setup <TOKEN>` or `localport login`: %w", device, err)
+		return errcode.New(errcode.DeviceRefused).With(err, device+" reports this certificate as revoked: it cannot be renewed, so obtain a new one with `localport setup <TOKEN>` or `localport login`")
 	case strings.Contains(msg, "tls: access denied"):
-		return fmt.Errorf("%s denied this identity: its access to the device was withdrawn or narrowed, check the grants in the dashboard: %w", device, err)
+		return errcode.New(errcode.DeviceRefused).With(err, device+" denied this identity: its access to the device was withdrawn or narrowed, check the grants in the dashboard")
 	case strings.Contains(msg, "tls: certificate expired"),
 		strings.Contains(msg, "tls: expired certificate"):
-		return fmt.Errorf("%s rejected the certificate as expired: for a sign-in, run `localport login` again; for a machine credential, run `localport identity renew`: %w", device, err)
+		return errcode.New(errcode.DeviceRefused).With(err, device+" rejected the certificate as expired: for a sign-in, run `localport login` again; for a machine credential, run `localport identity renew`")
 	default:
-		return fmt.Errorf("connection to %s ended: %w", device, err)
+		return errcode.New(errcode.DeviceUnreachable).With(err, "the connection to "+device+" ended")
 	}
 }
 
 // dialError reports an unreachable device.
 func dialError(device string, err error) error {
-	return fmt.Errorf("cannot reach %s: device offline or unknown address: %w", device, err)
+	return errcode.New(errcode.DeviceUnreachable).With(err, device+": device offline or unknown address")
 }
 
 // handshakeError reports a refusal during the handshake.
 func handshakeError(device string, err error) error {
 	msg := err.Error()
 	if strings.Contains(msg, "first record does not look like a TLS handshake") {
-		return fmt.Errorf("%s is not answering with TLS on this port: %w", device, err)
+		return errcode.New(errcode.DeviceUnreachable).With(err, device+" is not answering with TLS on this port")
 	}
-	return fmt.Errorf("cannot reach %s: device offline or unknown address: %w", device, err)
+	return errcode.New(errcode.DeviceUnreachable).With(err, device+": device offline or unknown address")
 }

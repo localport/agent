@@ -111,10 +111,10 @@ func inspectPrivateDir(path string, follow, secure bool) error {
 		return fmt.Errorf("inspect %s: %w", path, err)
 	}
 	if !follow && info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return fmt.Errorf("%w: %s is a reparse point; credential paths must not be redirected", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is a reparse point; credential paths must not be redirected", path))
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		return fmt.Errorf("%w: %s is not a directory", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is not a directory", path))
 	}
 
 	current, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT,
@@ -177,7 +177,7 @@ func openLockNoFollow(path string) (*os.File, error) {
 		// with ERROR_ACCESS_DENIED. The open already failed, Lstat only
 		// names the cause.
 		if fi, lErr := os.Lstat(path); lErr == nil && (fi.IsDir() || fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0) {
-			return nil, fmt.Errorf("%w: %s is not a regular file of its own", ErrUntrustedPath, path)
+			return nil, ErrUntrustedPath.With(nil, fmt.Sprintf("%s is not a regular file of its own", path))
 		}
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
@@ -188,7 +188,7 @@ func openLockNoFollow(path string) (*os.File, error) {
 	}
 	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
 		_ = windows.CloseHandle(h)
-		return nil, fmt.Errorf("%w: %s is not a regular file of its own", ErrUntrustedPath, path)
+		return nil, ErrUntrustedPath.With(nil, fmt.Sprintf("%s is not a regular file of its own", path))
 	}
 	return os.NewFile(uintptr(h), path), nil
 }
@@ -201,20 +201,20 @@ func verifyPrivate(f *os.File, path string) error {
 		return fmt.Errorf("inspect %s: %w", path, err)
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return fmt.Errorf("%w: %s is a reparse point; credential paths must not be redirected", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is a reparse point; credential paths must not be redirected", path))
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-		return fmt.Errorf("%w: %s is a directory, not a regular file", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is a directory, not a regular file", path))
 	}
 	// Refuse anything that is not a regular disk file, as on Unix. A named
 	// pipe or device such as `\\.\pipe\...` opens and reads but has no DACL to
 	// check.
 	ft, err := windows.GetFileType(h)
 	if err != nil {
-		return fmt.Errorf("%w: cannot read the file type of %s: %v", ErrUntrustedPath, path, err)
+		return ErrUntrustedPath.With(err, fmt.Sprintf("cannot read the file type of %s", path))
 	}
 	if ft != windows.FILE_TYPE_DISK {
-		return fmt.Errorf("%w: %s is not a regular file", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is not a regular file", path))
 	}
 
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT,
@@ -232,7 +232,7 @@ func verifyPrivate(f *os.File, path string) error {
 	}
 	// A NULL DACL grants everyone full control.
 	if dacl == nil {
-		return fmt.Errorf("%w: %s has no DACL, which grants full access to everyone", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s has no DACL, which grants full access to everyone", path))
 	}
 
 	// The owner must be a trustee allowedTrustees returns for path, matching
@@ -258,12 +258,14 @@ func verifyPrivate(f *os.File, path string) error {
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
 			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 			if !sidIn(sid, allowed) {
-				return fmt.Errorf("%w: %s grants access to %s; only this account, SYSTEM, Administrators and, under the device identity directory, NT SERVICE\\localport-device may reach a private key",
-					ErrUntrustedPath, path, sid)
+				return ErrUntrustedPath.With(nil, fmt.Sprintf("%s grants access to %s; only this account, SYSTEM, Administrators and, under the device identity directory, NT SERVICE\\localport-device may reach a private key",
+					path, sid))
+
 			}
 		default:
-			return fmt.Errorf("%w: %s carries an access-control entry of type %d this check cannot evaluate; refusing rather than assuming it grants nothing",
-				ErrUntrustedPath, path, ace.Header.AceType)
+			return ErrUntrustedPath.With(nil, fmt.Sprintf("%s carries an access-control entry of type %d this check cannot evaluate; refusing rather than assuming it grants nothing",
+				path, ace.Header.AceType))
+
 		}
 	}
 	return nil
@@ -285,7 +287,7 @@ const inheritOnlyACE = 0x08
 // itself to anyone but the trustees allowedTrustees returns.
 func assertNoForeignWriter(dacl *windows.ACL, path string) error {
 	if dacl == nil {
-		return fmt.Errorf("%w: %s has no DACL, which grants full access to everyone", ErrUntrustedPath, path)
+		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s has no DACL, which grants full access to everyone", path))
 	}
 	allowed, err := allowedTrustees(path)
 	if err != nil {
@@ -308,11 +310,12 @@ func assertNoForeignWriter(dacl *windows.ACL, path string) error {
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
 			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 			if ace.Mask&directoryWriteRights != 0 && !sidIn(sid, allowed) {
-				return fmt.Errorf("%w: %s lets %s write to it; only this account, SYSTEM, Administrators and, under the device identity directory, NT SERVICE\\localport-device may", ErrUntrustedPath, path, sid)
+				return ErrUntrustedPath.With(nil, fmt.Sprintf("%s lets %s write to it; only this account, SYSTEM, Administrators and, under the device identity directory, NT SERVICE\\localport-device may", path, sid))
 			}
 		default:
-			return fmt.Errorf("%w: %s carries an access-control entry of type %d this check cannot evaluate; refusing rather than assuming it grants nothing",
-				ErrUntrustedPath, path, ace.Header.AceType)
+			return ErrUntrustedPath.With(nil, fmt.Sprintf("%s carries an access-control entry of type %d this check cannot evaluate; refusing rather than assuming it grants nothing",
+				path, ace.Header.AceType))
+
 		}
 	}
 	return nil
@@ -338,7 +341,7 @@ func assertOwnerIsTrusted(owner *windows.SID, path string) error {
 		return err
 	}
 	if !sidIn(owner, trusted) {
-		return fmt.Errorf("%w: %w: %s is owned by %s, not by this account, SYSTEM, Administrators or, under the device identity directory, NT SERVICE\\localport-device", ErrUntrustedPath, errForeignOwner, path, owner)
+		return ErrUntrustedPath.With(errForeignOwner, fmt.Sprintf("%s is owned by %s, not by this account, SYSTEM, Administrators or, under the device identity directory, NT SERVICE\\localport-device", path, owner))
 	}
 	return nil
 }

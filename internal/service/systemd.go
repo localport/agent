@@ -75,7 +75,7 @@ func (s systemd) Check() (dropIns []string, err error) {
 			key, value, _ := strings.Cut(strings.TrimSpace(line), "=")
 			switch {
 			case key == "FragmentPath" && value != "" && value != u.path:
-				return nil, fmt.Errorf("%w: systemd loads %s from %s; remove or unmask that unit and run systemctl daemon-reload, then run the command again", ErrForeignUnit, u.name, value)
+				return nil, ErrForeignUnit.With(nil, fmt.Sprintf("systemd loads %s from %s; remove or unmask that unit and run systemctl daemon-reload, then run the command again", u.name, value))
 			case key == "DropInPaths":
 				dropIns = append(dropIns, strings.Fields(value)...)
 			}

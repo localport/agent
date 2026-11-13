@@ -93,12 +93,7 @@ func runTunnel(version string, args []string) error {
 
 	err = a.Run(ctx, renderer)
 	renderer.Shutdown()
-	// Print one line for a fatal error. The sanitized message is followed by
-	// the opaque debug code for support.
-	var regErr *tunnel.RegistrationError
-	if errors.As(err, &regErr) && regErr.Code != "" {
-		return fmt.Errorf("%s [%s]", regErr.Error(), regErr.Code)
-	}
+	// An edge refusal prints as its message and code (errcode.Render).
 	return err
 }
 

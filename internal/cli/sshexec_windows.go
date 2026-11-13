@@ -2,10 +2,11 @@ package cli
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // execSSH runs ssh on this console and exits with its status; Windows has no
@@ -21,7 +22,7 @@ func execSSH(path string, argv []string) error {
 		os.Exit(exit.ExitCode())
 	}
 	if err != nil {
-		return fmt.Errorf("run %s: %w", path, err)
+		return errcode.New(errcode.OpenSSHUnavailable).With(err, "run "+path)
 	}
 	os.Exit(0)
 	return nil

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 )
 
@@ -56,7 +57,7 @@ func runLogin(args []string) error {
 	}
 	ref, err := store.SaveIssued(ctx, *material)
 	if err != nil {
-		return fmt.Errorf("save the credential: %w\n  sign in again with localport login", err)
+		return errcode.WithRemedy(errcode.New(errcode.CredentialNotKept).With(err, ""), "sign in again with localport login")
 	}
 
 	fmt.Fprintf(os.Stderr, "\n  signed in\n")

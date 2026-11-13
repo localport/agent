@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 func TestParseDevice(t *testing.T) {
@@ -381,15 +384,15 @@ func TestLoadAccessConfigRejectsUnknownFields(t *testing.T) {
 	}
 }
 
-// classify matches wrapped errors, which os.IsNotExist does not unwrap.
+// A missing credential file is AG121 and the user sees its path and reason.
 func TestBuildTLSConfigNamesFileErrors(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "absent.pem")
 	_, err := BuildTLSConfig(missing, "", "", "gw-01.eu.localport.dev:443", "")
-	if err == nil {
-		t.Fatal("want an error for a missing PEM file")
+	if !errors.Is(err, errcode.New(errcode.ClientCertUnusable)) || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing PEM file: %v, want AG121 with the not-exist cause", err)
 	}
-	if !strings.Contains(err.Error(), "file not found") {
-		t.Fatalf("error should name the cause, got %q", err)
+	if text, _ := errcode.Render(err); !strings.Contains(text, missing+": no such file or directory") {
+		t.Fatalf("rendered %q, want the path and reason", text)
 	}
 
 	// Windows has no mode bits to loosen. There the DACL decides, and a file

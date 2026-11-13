@@ -531,7 +531,7 @@ func (s *Spool) WriteSegment(id string, seg Segment) error {
 	if err := s.writeFile(s.segPath(id, seg.Index), seg.Object); err != nil {
 		s.adjust(-delta)
 		if diskFull(err) {
-			return fmt.Errorf("%w: %w", ErrDiskLow, err)
+			return ErrDiskLow.With(err, "")
 		}
 		return fmt.Errorf("recording spool: %w", err)
 	}
