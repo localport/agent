@@ -204,7 +204,7 @@ func (o openrc) runlevelsOf(name string) ([]string, error) {
 // by the shell's own rules, so they must match systemdSafePath.
 func openrcScripts(exe string) (map[string][]byte, error) {
 	if !systemdSafePath.MatchString(exe) {
-		return nil, fmt.Errorf("%w: %q (OpenRC needs an absolute path of letters, digits and ._+@/-)", ErrUnsafeExecutable, exe)
+		return nil, ErrUnsafeExecutable.With(nil, fmt.Sprintf("%q (OpenRC needs an absolute path of letters, digits and ._+@/-)", exe))
 	}
 	return map[string][]byte{
 		OpenRCService: fmt.Appendf(nil, `#!/sbin/openrc-run

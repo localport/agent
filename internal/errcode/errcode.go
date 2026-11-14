@@ -159,6 +159,7 @@ const (
 	SettingsNotApplied   Code = "AG116"
 	PinResetFailed       Code = "AG117"
 	DeviceAmbiguous      Code = "AG118"
+	DeviceNotFound       Code = "AG120"
 
 	ClientCertUnusable  Code = "AG121"
 	AccessConfigInvalid Code = "AG122"
@@ -264,6 +265,7 @@ var registry = []Entry{
 	{SettingsNotApplied, "Settings saved but not applied", "the settings are saved, but the device service did not reload"},
 	{PinResetFailed, "Desktop key not forgotten", "the trusted desktop server key could not be forgotten"},
 	{DeviceAmbiguous, "Device name ambiguous", "the name matches more than one enrolled device"},
+	{DeviceNotFound, "Device not found", "the name matches no enrolled device"},
 	{EnrolledNotInstalled, "Device enrolled, service not installed", "the device is enrolled and its credential saved, but its service was not installed"},
 
 	{ClientCertUnusable, "Client certificate unusable", "the client certificate cannot be used"},

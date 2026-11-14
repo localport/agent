@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/security"
@@ -177,17 +178,18 @@ func TestWriteLocalChecksTheFilesRootExists(t *testing.T) {
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, root := range []string{filepath.Join(t.TempDir(), "missing"), file} {
+	for _, root := range []string{filepath.Join(t.TempDir(), "missing"), file, filepath.Join(file, "below-a-file")} {
 		cfg := &LocalConfig{Devices: []LocalDevice{{Identity: ref, FilesRoot: root}}}
 		if err := WriteLocal(f, cfg, cfg.Devices[0].Identity); err == nil {
 			t.Fatalf("WriteLocal(files_root %s) must be refused", root)
 		}
-		if err := CheckFilesRoot(root); err == nil {
-			t.Fatalf("CheckFilesRoot(%s) must be refused", root)
+		err := CheckFilesRoot(root)
+		if !errors.Is(err, ErrFilesRootMissing) {
+			t.Fatalf("CheckFilesRoot(%s) = %v, want ErrFilesRootMissing", root, err)
 		}
-	}
-	if err := CheckFilesRoot(filepath.Join(t.TempDir(), "missing")); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("CheckFilesRoot(missing) = %v, want fs.ErrNotExist", err)
+		if text, _ := errcode.Render(err); !strings.Contains(text, root) {
+			t.Fatalf("CheckFilesRoot(%s): Render = %q, want the path shown", root, text)
+		}
 	}
 	if err := CheckFilesRoot(t.TempDir()); err != nil {
 		t.Fatalf("CheckFilesRoot(existing dir) = %v", err)
@@ -241,8 +243,8 @@ func TestLocalConfigValidation(t *testing.T) {
 		{"version 1", "version: 1\ndevices:\n  - identity: " + testIdentity + "\n", "linux", "unsupported local config version 1"},
 		{"no devices", "version: 2\ndevices: []\n", "linux", "lists no devices"},
 		{"unknown key", device("    hosts: 10.0.0.2\n"), "linux", "field hosts not found"},
-		{"identity of another kind", "version: 2\ndevices:\n  - identity: 01kpq7x2abcd34/client/gw-01\n", "linux", "is not of the form <team>/device/<tunnel>.<prefix>"},
-		{"identity without tunnel", "version: 2\ndevices:\n  - identity: 01kpq7x2abcd34/device/gw-01\n", "linux", "is not of the form <team>/device/<tunnel>.<prefix>"},
+		{"identity of another kind", "version: 2\ndevices:\n  - identity: 01kpq7x2abcd34/client/gw-01\n", "linux", "device 1: identity \"01kpq7x2abcd34/client/gw-01\" is not of the form <team>/device/<tunnel>.<prefix>"},
+		{"identity without tunnel", "version: 2\ndevices:\n  - identity: 01kpq7x2abcd34/device/gw-01\n", "linux", "device 1: identity \"01kpq7x2abcd34/device/gw-01\" is not of the form <team>/device/<tunnel>.<prefix>"},
 		{"duplicate device", device("") + "  - identity: " + testIdentity + "\n", "linux", "is listed twice"},
 		{"host with port", device("    host: 10.0.0.2:502\n"), "linux", "host takes an address without a port"},
 		{"host with scheme", device("    host: tcp://10.0.0.2\n"), "linux", "host takes an address without a scheme"},
@@ -259,9 +261,9 @@ func TestLocalConfigValidation(t *testing.T) {
 		{"17 logins", device("    logins: [" + strings.Join(logins17, ", ") + "]\n"), "linux", "17 logins, over the limit of 16"},
 		{"unknown capability", device("    enable: [shell]\n"), "linux", `enable "shell" is not one of terminal, files, desktop`},
 		{"duplicate capability", device("    enable: [files, files]\n"), "linux", "enable lists files twice"},
-		{"terminal with host", device("    host: 10.0.0.2\n    enable: [terminal]\n"), "linux", "terminal: terminal, files and forwarding act on this machine only"},
-		{"files with host", device("    host: 10.0.0.2\n    enable: [files]\n"), "linux", "files: terminal, files and forwarding act on this machine only"},
-		{"forwarding with host", device("    host: 10.0.0.2\n    enable: [forwarding]\n"), "linux", "forwarding: terminal, files and forwarding act on this machine only"},
+		{"terminal with host", device("    host: 10.0.0.2\n    enable: [terminal]\n"), "linux", "cannot be enabled with a host: device " + testIdentity + ": terminal"},
+		{"files with host", device("    host: 10.0.0.2\n    enable: [files]\n"), "linux", "cannot be enabled with a host: device " + testIdentity + ": files"},
+		{"forwarding with host", device("    host: 10.0.0.2\n    enable: [forwarding]\n"), "linux", "cannot be enabled with a host: device " + testIdentity + ": forwarding"},
 		{"forwarding without terminal", device("    enable: [files, forwarding]\n    logins: [pi]\n"), "linux", "forwarding rides an ssh connection and needs terminal enabled"},
 		{"logins without terminal or files", device("    enable: [desktop]\n    rdp: 127.0.0.1:3389\n    logins: [pi]\n"), "linux", "logins apply only to a device that enables terminal or files"},
 		{"password logins off Windows", device("    enable: [terminal]\n    logins: [pi]\n    password_logins: [pi]\n"), "linux",
@@ -284,6 +286,10 @@ func TestLocalConfigValidation(t *testing.T) {
 			_, err := parseLocal([]byte(tc.body), tc.goos)
 			if !errors.Is(err, ErrInvalidLocalConfig) || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want ErrInvalidLocalConfig naming %q", err, tc.want)
+			}
+			// The user sees the rule without --verbose.
+			if text, hidden := errcode.Render(err); !strings.Contains(text, tc.want) || hidden {
+				t.Fatalf("Render = %q, %v; want the rule %q shown", text, hidden, tc.want)
 			}
 		})
 	}

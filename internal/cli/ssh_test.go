@@ -191,8 +191,8 @@ func TestSSHHelpersRefuseALoginBeforeAnyWork(t *testing.T) {
 	}
 }
 
-// ssh-proxy only reads the client files: without a certificate or a key it
-// fails with AG101 naming ssh-cert, and it creates no key.
+// ssh-proxy only reads the client files: without a certificate, a key or
+// known_hosts it fails with AG101 naming ssh-cert, and it creates no key.
 func TestSSHProxyWithoutClientFilesCreatesNothing(t *testing.T) {
 	target := newSSHTarget(t)
 	m := newFakeMint(t, time.Now())
@@ -215,6 +215,15 @@ func TestSSHProxyWithoutClientFilesCreatesNothing(t *testing.T) {
 	if _, err := os.Stat(f.key); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("proxy created the key: %v", err)
 	}
+	if err := target.ensureCert(context.Background(), "pi", m.mint, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(f.knownHosts); err != nil {
+		t.Fatal(err)
+	}
+	if err := proxy(); !errors.Is(err, errNoSessionCert) || !strings.Contains(err.Error(), "localport ssh-cert") {
+		t.Fatalf("no known_hosts: proxy = %v, want AG101 naming ssh-cert", err)
+	}
 }
 
 // ssh-cert waits for the lock another holds and gives up when its context
@@ -232,8 +241,13 @@ func TestSSHCertWaitsForTheLock(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	if err := target.ensureCert(ctx, "pi", m.mint, time.Now()); !errors.Is(err, context.DeadlineExceeded) || m.calls != 0 {
+	err = target.ensureCert(ctx, "pi", m.mint, time.Now())
+	if !errors.Is(err, context.DeadlineExceeded) || m.calls != 0 {
 		t.Fatalf("held: ensureCert = %v, calls %d; want the deadline and no mint", err, m.calls)
+	}
+	// A wait that ends with the context is not reported as unusable files.
+	if errors.Is(err, errcode.New(errcode.SSHClientFiles)) {
+		t.Fatalf("held: ensureCert = %v, want no AG105", err)
 	}
 	release()
 	if err := target.ensureCert(context.Background(), "pi", m.mint, time.Now()); err != nil || m.calls != 1 {

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/launcher"
 )
 
@@ -121,6 +122,17 @@ func TestSystemdUnitsRefuseUnsafeExecutable(t *testing.T) {
 	for _, bad := range []string{"localport", "/opt/my tools/localport", "/opt/%h/localport", "/opt/$HOME/localport", "/opt/\"x\"/localport", "/opt/x\n/localport"} {
 		if _, err := systemdUnits(bad); !errors.Is(err, ErrUnsafeExecutable) {
 			t.Errorf("systemdUnits(%q) = %v, want ErrUnsafeExecutable", bad, err)
+		}
+	}
+}
+
+// The refusal shows the path and the characters each manager allows.
+func TestUnsafeExecutableRefusalsNameThePath(t *testing.T) {
+	const bad = "/opt/my tools/localport"
+	for name, generate := range map[string]func(string) (map[string][]byte, error){"systemd": systemdUnits, "openrc": openrcScripts, "procd": procdScripts} {
+		_, err := generate(bad)
+		if text, _ := errcode.Render(err); !errors.Is(err, ErrUnsafeExecutable) || !strings.Contains(text, bad) || !strings.Contains(text, "._+@/-") {
+			t.Errorf("%s: Render = %q, want the path and the allowed characters", name, text)
 		}
 	}
 }

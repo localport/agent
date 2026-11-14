@@ -90,9 +90,9 @@ func (who invoker) defaultLogin() (string, error) {
 	}
 	switch {
 	case name == "" || name == "root":
-		return "", fmt.Errorf("--logins: %w: this account has none; name the accounts terminal and files sessions may use with --logins", errNoDefaultLogin)
+		return "", errNoDefaultLogin.With(nil, "this account has none; name the accounts terminal and files sessions may use with --logins")
 	case !config.ValidLogin(name):
-		return "", fmt.Errorf("--logins: %w: %q is not a valid user name; name the accounts with --logins", errNoDefaultLogin, security.SanitizeDisplay(name))
+		return "", errNoDefaultLogin.With(nil, fmt.Sprintf("%q is not a valid user name; name the accounts with --logins", security.SanitizeDisplay(name)))
 	}
 	return name, nil
 }
@@ -162,7 +162,7 @@ func (f *deviceFlags) apply(fs *flag.FlagSet, d *config.LocalDevice, who invoker
 	}
 	if !d.UsesLogins() {
 		if given["logins"] && len(d.Logins) > 0 {
-			return fmt.Errorf("--logins: %w", config.ErrLoginsWithoutSession)
+			return config.ErrLoginsWithoutSession.With(nil, "--logins")
 		}
 		d.Logins, d.PasswordLogins = nil, nil
 	} else if len(d.Logins) == 0 && who.goos != "windows" {

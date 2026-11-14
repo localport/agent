@@ -29,6 +29,7 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/session"
 )
@@ -380,6 +381,11 @@ func TestSSHProxyRetriesNoMoreThanOnce(t *testing.T) {
 		err := runProxyAlone(t, e)
 		if err == nil || !strings.Contains(err.Error(), reasons[0]) {
 			t.Fatalf("%v: proxy = %v, want the session ended with %s", reasons, err, reasons[0])
+		}
+		// The edge's reason is a remote code, shown as received.
+		var remote errcode.Remote
+		if text, _ := errcode.Render(err); !errors.As(err, &remote) || !strings.Contains(text, "["+reasons[0]+"]") {
+			t.Fatalf("%v: Render = %q, want the edge reason %s as a remote code", reasons, text, reasons[0])
 		}
 		if mints, _ := e.state(); len(mints) != wantMints {
 			t.Fatalf("%v: %d mints, want %d", reasons, len(mints), wantMints)

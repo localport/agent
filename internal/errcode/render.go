@@ -2,6 +2,7 @@ package errcode
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"net/url"
@@ -37,10 +38,27 @@ func (r *Remedy) Error() string { return r.Err.Error() + "\n  " + r.Text }
 
 func (r *Remedy) Unwrap() error { return r.Err }
 
+// Invalid is local input the user must fix: a flag or config value, or the
+// content of a local file its parser refused. Render prints its text. Build
+// it with Invalidf from local input only, never around network, control
+// plane or edge text; an Invalid whose chain holds a coded, remote or
+// network error renders that chain by type instead.
+type Invalid struct{ err error }
+
+// Invalidf formats like fmt.Errorf, %w included.
+func Invalidf(format string, args ...any) error {
+	return &Invalid{err: fmt.Errorf(format, args...)}
+}
+
+func (e *Invalid) Error() string { return e.err.Error() }
+
+func (e *Invalid) Unwrap() error { return e.err }
+
 // Render is the user text of err, built from typed parts of its chain and
 // never from a node's Error(): each *Error's message and detail, a local
 // cause the user acts on (*fs.PathError, *os.LinkError, a listen address in
-// use) and a Remote's message, followed by every code, innermost first.
+// use, an *Invalid) and a Remote's message, followed by every code,
+// innermost first. Each error of a join prints on its own line.
 // Other causes (network, TLS, server internals, plain wrappers) are left
 // out; hidden reports that one was, so the caller can point at --verbose,
 // which prints Error(). A chain with no *Error and no Remote is plain local
@@ -57,19 +75,37 @@ func Render(err error) (text string, hidden bool) {
 		}
 		return err.Error(), false
 	}
-	text = strings.Join(r.parts, ": ")
+	return r.text(), r.hidden
+}
+
+// renderer collects the shown parts of one chain. Each error of a join
+// (errors.Join, or fmt.Errorf with several %w) is its own branch, rendered
+// on its own line.
+type renderer struct {
+	parts, codes, remedies, branches []string
+	typed, hidden                    bool
+}
+
+func (r *renderer) text() string {
+	text := strings.Join(r.parts, ": ")
 	for _, c := range r.codes {
 		text += " [" + c + "]"
 	}
-	for _, rem := range r.remedies {
-		text += "\n  " + rem
+	lines := make([]string, 0, 1+len(r.branches)+len(r.remedies))
+	if text != "" {
+		lines = append(lines, text)
 	}
-	return text, r.hidden
-}
-
-type renderer struct {
-	parts, codes, remedies []string
-	typed, hidden          bool
+	indent := ""
+	if text != "" {
+		indent = "  "
+	}
+	for _, b := range r.branches {
+		lines = append(lines, indent+strings.ReplaceAll(b, "\n", "\n"+indent))
+	}
+	for _, rem := range r.remedies {
+		lines = append(lines, "  "+rem)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (r *renderer) walk(err error) {
@@ -89,6 +125,14 @@ func (r *renderer) walk(err error) {
 			r.walk(e.Err)
 		}
 		r.codes = append(r.codes, string(e.Code))
+		return
+	case *Invalid:
+		r.typed = true
+		if holdsTyped(e.err) {
+			r.walk(e.err)
+		} else {
+			r.parts = append(r.parts, e.Error())
+		}
 		return
 	case Remote:
 		r.typed = true
@@ -113,7 +157,7 @@ func (r *renderer) walk(err error) {
 		r.parts = append(r.parts, e.Error())
 		return
 	case *net.OpError:
-		if e.Op == "listen" && errors.Is(e.Err, syscall.EADDRINUSE) && e.Addr != nil {
+		if e.Op == "listen" && addrInUse(e.Err) && e.Addr != nil {
 			r.parts = append(r.parts, "listen "+e.Addr.String()+": address already in use")
 			return
 		}
@@ -130,7 +174,13 @@ func (r *renderer) walk(err error) {
 	switch u := err.(type) {
 	case interface{ Unwrap() []error }:
 		for _, inner := range u.Unwrap() {
-			r.walk(inner)
+			var b renderer
+			b.walk(inner)
+			r.typed = r.typed || b.typed
+			r.hidden = r.hidden || b.hidden
+			if t := b.text(); t != "" {
+				r.branches = append(r.branches, t)
+			}
 		}
 	case interface{ Unwrap() error }:
 		if inner := u.Unwrap(); inner != nil {
@@ -159,6 +209,14 @@ func errnoText(err error) string {
 		return "file exists"
 	}
 	return "failed"
+}
+
+// holdsTyped reports whether err's chain holds a coded, remote or network
+// error, which Render shows or hides by type rather than as text.
+func holdsTyped(err error) bool {
+	var coded *Error
+	var remote Remote
+	return errors.As(err, &coded) || errors.As(err, &remote) || isNetwork(err)
 }
 
 // isNetwork reports whether err's chain holds a network or URL error.

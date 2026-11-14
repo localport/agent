@@ -153,10 +153,10 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 	}); err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden && cur.Meta.Kind == KindDevice {
-			return nil, fmt.Errorf("%w: this device can no longer renew its certificate; %s", err, errcode.NewJoinCommand)
+			return nil, errcode.WithRemedy(err, "this device can no longer renew its certificate; "+errcode.NewJoinCommand)
 		}
 		if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden {
-			return nil, fmt.Errorf("%w: this credential can no longer be renewed; run `localport setup <TOKEN>` again", err)
+			return nil, errcode.WithRemedy(err, "this credential can no longer be renewed; run `localport setup <TOKEN>` again")
 		}
 		return nil, err
 	}

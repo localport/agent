@@ -32,7 +32,8 @@ func Probe(
 	}
 
 	host, port := SplitHostPort(edgeAddr)
-	var attempts []string
+	var tried []string
+	var failures []error
 
 	for _, d := range dialers {
 		attemptCtx, cancel := context.WithTimeout(ctx, budget)
@@ -48,7 +49,8 @@ func Probe(
 			return conn, d, nil
 		}
 
-		attempts = append(attempts, fmt.Sprintf("%s=%v", d.Kind(), err))
+		tried = append(tried, d.Kind().String())
+		failures = append(failures, fmt.Errorf("%s: %w", d.Kind(), err))
 		if logger != nil {
 			logger.Debug("transport probe failed",
 				slog.String("transport", d.Kind().String()),
@@ -59,7 +61,9 @@ func Probe(
 			break
 		}
 	}
-	return nil, nil, ErrNoTransport.With(nil, "tried: "+strings.Join(attempts, "; "))
+	// The dial errors carry addresses and TLS text, so they are the cause
+	// (--verbose and logs), and the user text names only the kinds tried.
+	return nil, nil, ErrNoTransport.With(errors.Join(failures...), "tried "+strings.Join(tried, ", "))
 }
 
 // DefaultDialers returns the priority-ordered set of dialers: raw first

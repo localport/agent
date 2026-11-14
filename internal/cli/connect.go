@@ -158,7 +158,7 @@ func runConnect(version string, args []string) (retErr error) {
 	ref := res.Ref
 
 	inForce, err := recordDevice(file, fs, device, who, ref, d)
-	if errors.Is(err, errDeviceNotRecorded) {
+	if isDeviceNotRecorded(err) {
 		return errors.Join(err, forgetUnrecorded(store, viaChild, ref))
 	}
 	// The device is in the config whenever its entry is in force, even when
@@ -431,9 +431,20 @@ func mayHaveSpent(err error) bool {
 // device's stored settings, which stay in force.
 var errMergeConflict = errcode.New(errcode.MergeConflict)
 
-// errDeviceNotRecorded means a newly enrolled identity has no entry in the
-// local config: its saved credential would be used by nothing.
-var errDeviceNotRecorded = errors.New("the device has no config entry")
+// deviceNotRecorded wraps the failed config write of a newly enrolled
+// identity, whose saved credential would then be used by nothing. It adds no
+// text, so the user sees the write error as it is.
+type deviceNotRecorded struct{ err error }
+
+func (e *deviceNotRecorded) Error() string { return e.err.Error() }
+
+func (e *deviceNotRecorded) Unwrap() error { return e.err }
+
+// isDeviceNotRecorded reports whether err holds a deviceNotRecorded.
+func isDeviceNotRecorded(err error) bool {
+	var notRecorded *deviceNotRecorded
+	return errors.As(err, &notRecorded)
+}
 
 // forgetUnrecorded removes the credential of a new identity whose config
 // entry was not written, in the agent account's store when viaChild.
@@ -472,7 +483,7 @@ func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFl
 		fresh.Identity = ref
 		local.Devices = append(local.Devices, fresh)
 		if err := writeLocal(file, local, ref); err != nil {
-			return config.LocalDevice{}, errcode.WithRemedy(errcode.New(errcode.EnrolledNotRecorded).With(errors.Join(errDeviceNotRecorded, err), "device "+ref.String()), joinTokenSpent)
+			return config.LocalDevice{}, errcode.WithRemedy(errcode.New(errcode.EnrolledNotRecorded).With(&deviceNotRecorded{err}, "device "+ref.String()), joinTokenSpent)
 		}
 		return fresh, nil
 	}

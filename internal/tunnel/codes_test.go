@@ -5,9 +5,11 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/proto"
 	"github.com/localport/agent/internal/transport"
@@ -63,6 +65,31 @@ func TestRegisterFailuresAreCoded(t *testing.T) {
 				t.Fatalf("connect = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+// The redirect target is edge text: it reaches --verbose and logs, not the
+// user text.
+func TestUntrustedRedirectHidesTheAddress(t *testing.T) {
+	err := registerAnswers(t, redirectTo(t, "evil.example.com:443"))
+	text, hidden := errcode.Render(err)
+	if strings.Contains(text, "evil.example.com") || !hidden || !strings.Contains(err.Error(), "evil.example.com") {
+		t.Fatalf("Render = %q, %v; Error() = %q; want the address in the cause only", text, hidden, err)
+	}
+}
+
+// An edge error frame during registration shows the edge's message and code
+// as received and stays retryable.
+func TestRegisterEdgeErrorIsARetryableRemoteRefusal(t *testing.T) {
+	err := registerAnswers(t, func(e *fakeEdge) {
+		e.send(t, proto.MsgError, &proto.ErrorPayload{Code: "RS001", Message: "no port available"})
+	})
+	var regErr *RegistrationError
+	if !errors.As(err, &regErr) || !regErr.Retryable {
+		t.Fatalf("connect = %v, want a retryable RegistrationError", err)
+	}
+	if text, _ := errcode.Render(err); text != "no port available [RS001]" {
+		t.Fatalf("Render = %q, want the edge message and code", text)
 	}
 }
 

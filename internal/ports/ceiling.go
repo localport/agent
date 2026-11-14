@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // MaxRanges bounds a ceiling. The edge refuses a registration with more.
@@ -62,7 +64,7 @@ func Parse(entries []string) (Ceiling, error) {
 		return nil, nil
 	}
 	if len(entries) > MaxRanges {
-		return nil, fmt.Errorf("at most %d port entries are allowed, got %d", MaxRanges, len(entries))
+		return nil, errcode.Invalidf("at most %d port entries are allowed, got %d", MaxRanges, len(entries))
 	}
 	ranges := make([]Range, 0, len(entries))
 	for _, entry := range entries {
@@ -89,17 +91,17 @@ func parseRange(entry string) (Range, error) {
 	low, high, isRange := strings.Cut(entry, "-")
 	from, err := parsePort(low)
 	if err != nil {
-		return Range{}, fmt.Errorf("port %q: %w", entry, err)
+		return Range{}, errcode.Invalidf("port %q: %w", entry, err)
 	}
 	if !isRange {
 		return Range{From: from, To: from}, nil
 	}
 	to, err := parsePort(high)
 	if err != nil {
-		return Range{}, fmt.Errorf("port range %q: %w", entry, err)
+		return Range{}, errcode.Invalidf("port range %q: %w", entry, err)
 	}
 	if from > to {
-		return Range{}, fmt.Errorf("port range %q: start is above end", entry)
+		return Range{}, errcode.Invalidf("port range %q: start is above end", entry)
 	}
 	return Range{From: from, To: to}, nil
 }
@@ -107,7 +109,7 @@ func parseRange(entry string) (Range, error) {
 func parsePort(s string) (uint16, error) {
 	n, err := strconv.Atoi(strings.TrimSpace(s))
 	if err != nil || n < 1 || n > 65535 {
-		return 0, fmt.Errorf("expected a port from 1 to 65535")
+		return 0, errcode.Invalidf("expected a port from 1 to 65535")
 	}
 	return uint16(n), nil
 }

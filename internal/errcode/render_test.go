@@ -45,6 +45,38 @@ func TestRenderKeepsALocalPathError(t *testing.T) {
 	if !errors.As(err, &pathErr) {
 		t.Fatal("the cause is not in the chain")
 	}
+	denied := errcode.New(errcode.InvalidLocalConfig).With(&fs.PathError{Op: "open", Path: "/etc/localport/agent.yaml", Err: syscall.EACCES}, "")
+	want = "invalid local config: open /etc/localport/agent.yaml: " + syscall.EACCES.Error() + " [AG028]"
+	if text, hidden := errcode.Render(denied); text != want || hidden {
+		t.Fatalf("permission: Render = %q, %v; want %q", text, hidden, want)
+	}
+}
+
+// Local input the user must fix prints in full under the agent error,
+// nested context included; the cause stays in the chain.
+func TestRenderShowsInvalidLocalInput(t *testing.T) {
+	leaf := errcode.Invalidf("-L %s: device port must be 1-65535", "99999")
+	err := errcode.New(errcode.AccessConfigInvalid).With(errcode.Invalidf("device %s: %w", "plc", leaf), "")
+	want := errcode.New(errcode.AccessConfigInvalid).Msg + ": device plc: -L 99999: device port must be 1-65535 [AG122]"
+	if text, hidden := errcode.Render(err); text != want || hidden {
+		t.Fatalf("Render = %q, %v; want %q", text, hidden, want)
+	}
+	if !errors.Is(err, leaf) {
+		t.Fatal("the leaf is not in the chain")
+	}
+}
+
+// An Invalid built around a coded or network error renders that chain by
+// type, so its codes stay separate and network text stays hidden.
+func TestRenderInvalidAroundTypedErrors(t *testing.T) {
+	coded := errcode.Invalidf("device %s: %w", "plc", errcode.New(errcode.RunLocked))
+	if text, _ := errcode.Render(coded); text != errcode.New(errcode.RunLocked).Msg+" [AG021]" {
+		t.Fatalf("coded: Render = %q", text)
+	}
+	network := errcode.Invalidf("fetch: %w", &url.Error{Op: "Get", URL: "https://x/v1/y", Err: errors.New("eof")})
+	if text, hidden := errcode.Render(network); strings.Contains(text, "/v1/y") || !hidden {
+		t.Fatalf("network: Render = %q, %v", text, hidden)
+	}
 }
 
 // Detail is shown; a plain wrapper's words are not, and do not count as a
@@ -140,6 +172,22 @@ func TestRenderKeepsAListenAddressInUse(t *testing.T) {
 	text, _ := errcode.Render(errcode.New(errcode.PortRefused).With(lerr, ""))
 	if !strings.Contains(text, "listen "+ln.Addr().String()+": address already in use") {
 		t.Fatalf("Render = %q", text)
+	}
+}
+
+// Each error of a join prints on its own line with its own codes; under an
+// agent error the branches are indented below it.
+func TestRenderJoinedErrors(t *testing.T) {
+	first := errcode.New(errcode.RunLocked).With(nil, "run.lock is held")
+	second := errcode.New(errcode.InvalidLocalConfig).With(errcode.Invalidf("device x is listed twice"), "")
+	want := first.Msg + ": run.lock is held [AG021]\n" + second.Msg + ": device x is listed twice [AG028]"
+	if text, hidden := errcode.Render(errors.Join(first, second)); text != want || hidden {
+		t.Fatalf("top level: Render = %q, %v; want %q", text, hidden, want)
+	}
+	nested := errcode.New(errcode.NoTransport).With(errors.Join(first, errors.New("internal")), "")
+	want = errcode.New(errcode.NoTransport).Msg + " [AG071]\n  " + first.Msg + ": run.lock is held [AG021]"
+	if text, hidden := errcode.Render(nested); text != want || !hidden {
+		t.Fatalf("nested: Render = %q, %v; want %q and a hidden cause", text, hidden, want)
 	}
 }
 

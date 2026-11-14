@@ -2,7 +2,6 @@ package access
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -55,7 +54,7 @@ func LoadAccessConfig(path string) (*AccessConfig, error) {
 
 	var cc AccessConfig
 	if err := dec.Decode(&cc); err != nil {
-		return nil, errcode.New(errcode.AccessConfigInvalid).With(err, "parse "+path)
+		return nil, errcode.New(errcode.AccessConfigInvalid).With(errcode.Invalidf("%w", err), "parse "+path)
 	}
 	if cc.Version != 1 {
 		return nil, errcode.New(errcode.AccessConfigInvalid).With(nil, fmt.Sprintf("%s: unsupported config version %d: this agent reads version 1", path, cc.Version))
@@ -95,16 +94,16 @@ func LoadAccessConfig(path string) (*AccessConfig, error) {
 
 func (e *Entry) validate() error {
 	if e.Device == "" {
-		return errors.New("'device' is required")
+		return errcode.Invalidf("'device' is required")
 	}
 	if len(e.Forward) == 0 {
-		return errors.New("'forward' needs at least one port")
+		return errcode.Invalidf("'forward' needs at least one port")
 	}
 	if e.PEM != "" && e.P12 != "" {
-		return errors.New("set at most one of 'pem' or 'p12' (omit both to use the stored identity)")
+		return errcode.Invalidf("set at most one of 'pem' or 'p12' (omit both to use the stored identity)")
 	}
 	if e.Identity != "" && !e.UsesIdentity() {
-		return errors.New("'identity' selects a stored credential, so it cannot be combined with 'pem' or 'p12'")
+		return errcode.Invalidf("'identity' selects a stored credential, so it cannot be combined with 'pem' or 'p12'")
 	}
 
 	var missing []string
@@ -117,7 +116,7 @@ func (e *Entry) validate() error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("file(s) not found: %s", strings.Join(missing, ", "))
+		return errcode.Invalidf("file(s) not found: %s", strings.Join(missing, ", "))
 	}
 	return nil
 }

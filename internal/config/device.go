@@ -242,26 +242,26 @@ func decodeLocal(raw []byte, goos string) (*LocalConfig, error) {
 	var lf localFile
 	if err := dec.Decode(&lf); err != nil {
 		if errors.Is(err, io.EOF) {
-			return nil, errors.New("local config is empty")
+			return nil, errcode.Invalidf("local config is empty")
 		}
-		return nil, fmt.Errorf("parse local config: %w", err)
+		return nil, errcode.Invalidf("parse local config: %w", err)
 	}
 	var extra yaml.Node
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return nil, errors.New("local config holds more than one YAML document")
+		return nil, errcode.Invalidf("local config holds more than one YAML document")
 	}
 	if lf.Version != LocalConfigVersion {
-		return nil, fmt.Errorf("unsupported local config version %d: this agent reads version %d", lf.Version, LocalConfigVersion)
+		return nil, errcode.Invalidf("unsupported local config version %d: this agent reads version %d", lf.Version, LocalConfigVersion)
 	}
 	cfg := &LocalConfig{Devices: make([]LocalDevice, 0, len(lf.Devices))}
 	for i, d := range lf.Devices {
 		ref, err := identity.ParseDeviceRef(d.Identity)
 		if err != nil {
-			return nil, fmt.Errorf("device %d: %w", i+1, err)
+			return nil, errcode.Invalidf("device %d: %w", i+1, err)
 		}
 		allowed, err := ports.ParseFlag(d.AllowPorts)
 		if err != nil {
-			return nil, fmt.Errorf("device %s: allow_ports: %w", ref, err)
+			return nil, errcode.Invalidf("device %s: allow_ports: %w", ref, err)
 		}
 		enable := make([]Capability, len(d.Enable))
 		for j, c := range d.Enable {
@@ -347,7 +347,7 @@ func ensureSystemDir(f LocalConfigFile) (int, error) {
 	}
 	gid, err := agentGroupID()
 	if errors.Is(err, security.ErrAgentGroupMissing) {
-		return 0, fmt.Errorf("local config %s: %w; create it with: %s", f.Path, err, SystemInstallCommand)
+		return 0, errcode.WithRemedy(fmt.Errorf("local config %s: %w", f.Path, err), "the "+security.AgentGroup+" group does not exist; create it with: "+SystemInstallCommand)
 	}
 	if err != nil {
 		return 0, err
@@ -408,12 +408,12 @@ func (c *LocalConfig) Validate() error {
 
 func (c *LocalConfig) validate(goos string) error {
 	if len(c.Devices) == 0 {
-		return errors.New("local config lists no devices")
+		return errcode.Invalidf("local config lists no devices")
 	}
 	seen := make(map[identity.Ref]struct{}, len(c.Devices))
 	for _, d := range c.Devices {
 		if _, dup := seen[d.Identity]; dup {
-			return fmt.Errorf("device %s is listed twice", d.Identity)
+			return errcode.Invalidf("device %s is listed twice", d.Identity)
 		}
 		seen[d.Identity] = struct{}{}
 		if err := d.validate(goos); err != nil {
@@ -456,53 +456,54 @@ func (d LocalDevice) validateSettings(name, goos string) error {
 			return err
 		}
 	}
+	device := "device " + name
 	if err := validLogins(d.Logins); err != nil {
-		return fmt.Errorf("device %s: %w", name, err)
+		return errcode.Invalidf("%s: %w", device, err)
 	}
 	for i, c := range d.Enable {
 		switch c {
 		case CapabilityTerminal, CapabilityFiles, CapabilityDesktop, CapabilityForwarding:
 		default:
-			return fmt.Errorf("device %s: enable %q is not one of terminal, files, desktop, forwarding", name, c)
+			return errcode.Invalidf("%s: enable %q is not one of terminal, files, desktop, forwarding", device, security.SanitizeDisplay(string(c)))
 		}
 		if slices.Contains(d.Enable[:i], c) {
-			return fmt.Errorf("device %s: enable lists %s twice", name, c)
+			return errcode.Invalidf("%s: enable lists %s twice", device, c)
 		}
 		// Terminal, files and forwarding act on the machine running the agent.
 		if (c == CapabilityTerminal || c == CapabilityFiles || c == CapabilityForwarding) && d.Host != "" {
-			return fmt.Errorf("device %s: %s: %w", name, c, ErrHostCapability)
+			return ErrHostCapability.With(nil, device+": "+string(c))
 		}
 	}
 	if slices.Contains(d.Enable, CapabilityForwarding) && !slices.Contains(d.Enable, CapabilityTerminal) {
-		return fmt.Errorf("device %s: %w", name, ErrForwardingWithoutTerminal)
+		return ErrForwardingWithoutTerminal.With(nil, device)
 	}
 	if err := validPasswordLogins(d, goos); err != nil {
-		return fmt.Errorf("device %s: %w", name, err)
+		return errcode.Invalidf("%s: %w", device, err)
 	}
 	if len(d.Logins) > 0 && !d.UsesLogins() {
-		return fmt.Errorf("device %s: %w", name, ErrLoginsWithoutSession)
+		return ErrLoginsWithoutSession.With(nil, device)
 	}
 	if d.RunAsAgent && len(d.Logins) > 0 {
-		return fmt.Errorf("device %s: %w", name, ErrRunAsAgentLogins)
+		return ErrRunAsAgentLogins.With(nil, device)
 	}
 	if len(d.Logins) == 0 && d.UsesLogins() && !d.RunAsAgent {
-		return fmt.Errorf("device %s: %w", name, ErrSessionWithoutLogins)
+		return ErrSessionWithoutLogins.With(nil, device)
 	}
 	if slices.Contains(d.Enable, CapabilityDesktop) && d.RDP == "" && d.VNC == "" {
-		return fmt.Errorf("device %s: %w", name, ErrDesktopWithoutTarget)
+		return ErrDesktopWithoutTarget.With(nil, device)
 	}
 	for _, target := range []struct{ key, value string }{{"rdp", d.RDP}, {"vnc", d.VNC}} {
 		if target.value == "" {
 			continue
 		}
 		if err := validDesktopTarget(target.value); err != nil {
-			return fmt.Errorf("device %s: %s: %w", name, target.key, err)
+			return errcode.Invalidf("%s: %s: %w", device, target.key, err)
 		}
 	}
 	// Existence is checked on write and at session time, not here, so an
 	// unmounted volume never stops the devices from loading.
 	if d.FilesRoot != "" && !filepath.IsAbs(d.FilesRoot) {
-		return fmt.Errorf("device %s: files_root: %q is not an absolute path", name, security.SanitizeDisplay(d.FilesRoot))
+		return errcode.Invalidf("%s: files_root: %q is not an absolute path", device, security.SanitizeDisplay(d.FilesRoot))
 	}
 	return nil
 }
@@ -548,14 +549,14 @@ func validPasswordLogins(d LocalDevice, goos string) error {
 		return nil
 	}
 	if goos != "windows" {
-		return errors.New("password_logins is available on Windows only")
+		return errcode.Invalidf("password_logins is available on Windows only")
 	}
 	for i, l := range d.PasswordLogins {
 		if !slices.Contains(d.Logins, l) {
-			return fmt.Errorf("password login %q is not one of logins", security.SanitizeDisplay(l))
+			return errcode.Invalidf("password login %q is not one of logins", security.SanitizeDisplay(l))
 		}
 		if slices.Contains(d.PasswordLogins[:i], l) {
-			return fmt.Errorf("password login %q is listed twice", security.SanitizeDisplay(l))
+			return errcode.Invalidf("password login %q is listed twice", security.SanitizeDisplay(l))
 		}
 	}
 	return nil
@@ -563,14 +564,14 @@ func validPasswordLogins(d LocalDevice, goos string) error {
 
 func validLogins(logins []string) error {
 	if len(logins) > MaxLogins {
-		return fmt.Errorf("%d logins, over the limit of %d", len(logins), MaxLogins)
+		return errcode.Invalidf("%d logins, over the limit of %d", len(logins), MaxLogins)
 	}
 	for i, l := range logins {
 		if !ValidLogin(l) {
-			return fmt.Errorf("login %q is not a valid user name (no ':', '/', ',' or control characters, not all digits, no leading or trailing space, at most %d bytes)", security.SanitizeDisplay(l), MaxLoginLen)
+			return errcode.Invalidf("login %q is not a valid user name (no ':', '/', ',' or control characters, not all digits, no leading or trailing space, at most %d bytes)", security.SanitizeDisplay(l), MaxLoginLen)
 		}
 		if slices.Contains(logins[:i], l) {
-			return fmt.Errorf("login %q is listed twice", l)
+			return errcode.Invalidf("login %q is listed twice", security.SanitizeDisplay(l))
 		}
 	}
 	return nil
@@ -592,10 +593,10 @@ func ParseDesktopTarget(value, def string) (string, error) {
 func validDesktopTarget(value string) error {
 	host, port, err := net.SplitHostPort(value)
 	if err != nil || host == "" {
-		return fmt.Errorf("%q is not HOST:PORT", security.SanitizeDisplay(value))
+		return errcode.Invalidf("%q is not HOST:PORT", security.SanitizeDisplay(value))
 	}
 	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("%q has no port between 1 and 65535", security.SanitizeDisplay(value))
+		return errcode.Invalidf("%q has no port between 1 and 65535", security.SanitizeDisplay(value))
 	}
 	return nil
 }
@@ -778,11 +779,11 @@ func unlockAndClose(lock *os.File) error {
 func CheckFilesRoot(path string) error {
 	shown := security.SanitizeDisplay(path)
 	if !filepath.IsAbs(path) {
-		return fmt.Errorf("%q is not an absolute path", shown)
+		return errcode.Invalidf("%q is not an absolute path", shown)
 	}
 	info, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("%q does not exist: %w: %w", shown, ErrFilesRootMissing, fs.ErrNotExist)
+		return ErrFilesRootMissing.With(nil, fmt.Sprintf("%q does not exist", shown))
 	}
 	if err != nil {
 		// The PathError would repeat the unsanitized path.
@@ -790,10 +791,10 @@ func CheckFilesRoot(path string) error {
 		if errors.As(err, &pathErr) {
 			err = pathErr.Err
 		}
-		return fmt.Errorf("inspect %q: %w", shown, err)
+		return ErrFilesRootMissing.With(err, fmt.Sprintf("inspect %q", shown))
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("%q is not a directory: %w", shown, ErrFilesRootMissing)
+		return ErrFilesRootMissing.With(nil, fmt.Sprintf("%q is not a directory", shown))
 	}
 	return nil
 }

@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // The renewal digest is the one value the agent and the control plane must
@@ -716,6 +718,29 @@ func TestAPIErrorDropsControlCharacters(t *testing.T) {
 	}
 }
 
+// A 403 on a device renew keeps the server code and names the new join
+// command as the remedy.
+func TestDeviceRenewRefusalNamesANewJoinCommand(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"code":"SE031","message":"device removed from the team"}`)
+	}))
+	defer srv.Close()
+	client := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	leaf := selfSigned(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/device/tun12345.gw-01")
+	cur := &Material{
+		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}),
+		Key:     fileKey{testKey(t)},
+		Meta:    Meta{Identity: "tun12345.gw-01", Kind: KindDevice, Source: SourceToken},
+	}
+	_, err := client.Renew(context.Background(), cur)
+	text, _ := errcode.Render(err)
+	if !strings.Contains(text, errcode.NewJoinCommand) || !strings.Contains(text, "[SE031]") {
+		t.Fatalf("Render = %q, want the server code and the join command remedy", text)
+	}
+}
+
 // A 403 on renew keeps the APIError code and adds the `localport setup` hint.
 func TestRenewRefusalSaysToRunSetupAgain(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -736,8 +761,8 @@ func TestRenewRefusalSaysToRunSetupAgain(t *testing.T) {
 	if err == nil {
 		t.Fatal("a refused renewal returned no error")
 	}
-	if !strings.Contains(err.Error(), "localport setup") {
-		t.Fatalf("error does not say how to recover: %v", err)
+	if text, _ := errcode.Render(err); !strings.Contains(text, "localport setup") || !strings.Contains(text, "[SE011]") {
+		t.Fatalf("Render = %q, want the server code and how to recover", text)
 	}
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.Code != "SE011" {

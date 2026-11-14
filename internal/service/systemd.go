@@ -203,7 +203,7 @@ var systemdSafePath = regexp.MustCompile(`^/[A-Za-z0-9._+@/-]+$`)
 // launcher beside it (SessionExecutable), by unit name.
 func systemdUnits(exe string) (map[string][]byte, error) {
 	if !systemdSafePath.MatchString(exe) {
-		return nil, fmt.Errorf("%w: %q (systemd needs an absolute path of letters, digits and ._+@/-)", ErrUnsafeExecutable, exe)
+		return nil, ErrUnsafeExecutable.With(nil, fmt.Sprintf("%q (systemd needs an absolute path of letters, digits and ._+@/-)", exe))
 	}
 	session := SessionExecutable(exe)
 	identityDir := filepath.Join(systemdDeviceDir, "identity")

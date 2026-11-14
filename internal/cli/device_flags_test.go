@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 )
 
@@ -186,6 +187,20 @@ func TestTheStoreFollowsThePrivilege(t *testing.T) {
 	}
 }
 
+// With no usable default login the refusal says why and what to pass.
+func TestNoDefaultLoginNamesTheRemedy(t *testing.T) {
+	for _, who := range []invoker{
+		{privileged: true, current: "root", goos: "linux"},
+		{privileged: false, current: "1000", goos: "linux"},
+	} {
+		_, err := who.defaultLogin()
+		text, _ := errcode.Render(err)
+		if !errors.Is(err, errNoDefaultLogin) || !strings.Contains(text, "with --logins") {
+			t.Errorf("%q: Render = %q, want AG code with the --logins remedy", who.current, text)
+		}
+	}
+}
+
 func TestFindDevice(t *testing.T) {
 	ref := func(id string) identity.Ref {
 		return identity.Ref{Team: "01kpq7x2abcd34", Kind: identity.KindDevice, Identity: id}
@@ -200,10 +215,10 @@ func TestFindDevice(t *testing.T) {
 	if i, err := findDevice(devices, ref("factory.gw-01").String()); err != nil || i != 0 {
 		t.Fatalf("full identity = %d, %v", i, err)
 	}
-	if _, err := findDevice(devices, "gw-01"); err == nil {
-		t.Fatal("an ambiguous name matched")
+	if _, err := findDevice(devices, "gw-01"); !errors.Is(err, errcode.New(errcode.DeviceAmbiguous)) {
+		t.Fatalf("an ambiguous name = %v, want AG118", err)
 	}
-	if _, err := findDevice(devices, "nope"); err == nil {
-		t.Fatal("an unknown name matched")
+	if _, err := findDevice(devices, "nope"); !errors.Is(err, errcode.New(errcode.DeviceNotFound)) {
+		t.Fatalf("an unknown name = %v, want AG120", err)
 	}
 }

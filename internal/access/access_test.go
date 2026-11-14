@@ -100,6 +100,11 @@ func TestStatusErrorsAreActionable(t *testing.T) {
 			t.Fatalf("status %d says %q, want it to mention %q", status, err.Error(), want)
 		}
 	}
+	// An unmapped status stays out of the user text; --verbose names it.
+	err := statusError(502, 418)
+	if text, hidden := errcode.Render(err); strings.Contains(text, "418") || !hidden || !strings.Contains(err.Error(), "418") {
+		t.Fatalf("unmapped status: Render = %q, %v; Error() = %q", text, hidden, err)
+	}
 }
 
 func contains(haystack, needle string) bool {
@@ -139,22 +144,29 @@ access:
 	}
 }
 
+// Each refusal shows the user its reason, not only the code.
 func TestLoadAccessConfigRefusesIncompleteEntries(t *testing.T) {
-	cases := map[string]string{
-		"version 2":   "version: 2\naccess: []\n",
-		"no devices":  "version: 1\naccess: []\n",
-		"no forward":  "version: 1\naccess:\n  - device: gw.example.com\n",
-		"no device":   "version: 1\naccess:\n  - forward: [\"502\"]\n",
-		"file and id": "version: 1\naccess:\n  - device: gw.example.com\n    forward: [\"502\"]\n    identity: x\n    p12: /tmp/x.p12\n",
+	cases := map[string]struct{ body, reason string }{
+		"version 2":   {"version: 2\naccess: []\n", "unsupported config version 2"},
+		"no devices":  {"version: 1\naccess: []\n", "no devices listed"},
+		"no forward":  {"version: 1\naccess:\n  - device: gw.example.com\n", "'forward' needs at least one port"},
+		"no device":   {"version: 1\naccess:\n  - forward: [\"502\"]\n", "'device' is required"},
+		"file and id": {"version: 1\naccess:\n  - device: gw.example.com\n    forward: [\"502\"]\n    identity: x\n    p12: /tmp/x.p12\n", "cannot be combined"},
+		"bad forward": {"version: 1\naccess:\n  - device: gw.example.com\n    forward: [\"99999\"]\n", "-L 99999: device port must be 1-65535"},
+		"bad yaml":    {"version: 1\naccess: [\n", "yaml"},
 	}
-	for name, body := range cases {
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "access.yaml")
-			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte(c.body), 0o600); err != nil {
 				t.Fatalf("write: %v", err)
 			}
-			if _, err := LoadAccessConfig(path); err == nil {
-				t.Fatal("want the file refused")
+			_, err := LoadAccessConfig(path)
+			if !errors.Is(err, errcode.New(errcode.AccessConfigInvalid)) {
+				t.Fatalf("LoadAccessConfig = %v, want AG122", err)
+			}
+			if text, hidden := errcode.Render(err); !strings.Contains(text, c.reason) || hidden {
+				t.Fatalf("Render = %q, %v; want the reason %q shown", text, hidden, c.reason)
 			}
 		})
 	}

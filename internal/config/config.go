@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/security"
@@ -325,10 +326,10 @@ func parseDeviceHost(name, host string) (string, error) {
 		return DefaultDeviceHost, nil
 	}
 	if strings.Contains(host, "://") {
-		return "", fmt.Errorf("device %q: host takes an address without a scheme", name)
+		return "", errcode.Invalidf("device %q: host takes an address without a scheme", name)
 	}
 	if hasExplicitPort(host) {
-		return "", fmt.Errorf("device %q: host takes an address without a port, ports are set in the dashboard", name)
+		return "", errcode.Invalidf("device %q: host takes an address without a port, ports are set in the dashboard", name)
 	}
 	return host, nil
 }

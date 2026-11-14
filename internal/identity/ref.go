@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // Kind mirrors the SPIFFE path prefix. `user` and `client` are separate
@@ -84,11 +86,11 @@ func (r Ref) valid() bool {
 func ParseDeviceRef(raw string) (Ref, error) {
 	parts := strings.Split(raw, "/")
 	if len(parts) != 3 || Kind(parts[1]) != KindDevice {
-		return Ref{}, fmt.Errorf("identity %q is not of the form <team>/device/<tunnel>.<prefix>", raw)
+		return Ref{}, errcode.Invalidf("identity %q is not of the form <team>/device/<tunnel>.<prefix>", raw)
 	}
 	ref := Ref{Team: parts[0], Kind: KindDevice, Identity: parts[2]}
 	if !ref.valid() {
-		return Ref{}, fmt.Errorf("identity %q is not of the form <team>/device/<tunnel>.<prefix>", raw)
+		return Ref{}, errcode.Invalidf("identity %q is not of the form <team>/device/<tunnel>.<prefix>", raw)
 	}
 	return ref, nil
 }
@@ -165,7 +167,7 @@ func ParseSelector(raw string) (Selector, error) {
 	parts := strings.Split(raw, "/")
 	for _, p := range parts {
 		if p == "" {
-			return Selector{}, fmt.Errorf("identity %q has an empty part; use <identity>, <team>/<identity> or <team>/<kind>/<identity>", raw)
+			return Selector{}, errcode.Invalidf("identity %q has an empty part; use <identity>, <team>/<identity> or <team>/<kind>/<identity>", raw)
 		}
 	}
 	switch len(parts) {
@@ -176,11 +178,11 @@ func ParseSelector(raw string) (Selector, error) {
 	case 3:
 		kind := Kind(parts[1])
 		if !kind.Valid() {
-			return Selector{}, fmt.Errorf("unknown identity kind %q (want user, client or device)", parts[1])
+			return Selector{}, errcode.Invalidf("unknown identity kind %q (want user, client or device)", parts[1])
 		}
 		return Selector{Team: parts[0], Kind: kind, Identity: parts[2]}, nil
 	default:
-		return Selector{}, fmt.Errorf("identity %q has too many parts; use <identity>, <team>/<identity> or <team>/<kind>/<identity>", raw)
+		return Selector{}, errcode.Invalidf("identity %q has too many parts; use <identity>, <team>/<identity> or <team>/<kind>/<identity>", raw)
 	}
 }
 

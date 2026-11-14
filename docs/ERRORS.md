@@ -11,8 +11,9 @@ Commands leave out causes from the network, the service or agent internals
 (endpoint paths, HTTP status, TLS and connection errors) and say so; run the
 command again with the global flag `--verbose` (`localport --verbose
 <command>`) to print the full cause. A local cause you act on, such as a
-file path with its permission error or a port already in use, is always
-shown. The agent that runs tunnels and devices (`run`, `connect`, the tunnel
+file path with its permission error, a port already in use or a config or
+flag value the agent refused, is always shown. Several failures at once
+print one per line. The agent that runs tunnels and devices (`run`, `connect`, the tunnel
 form) prints full causes in its log.
 
 Codes are grouped by area: AG00x credentials and keys, AG01x file and binary
@@ -46,7 +47,7 @@ run it again), and exit 1633, the machine is not running 64-bit Windows.
 | AG024 | Logins without terminal or files | Logins apply only to terminal and files. Enable one of them, or remove the logins. |
 | AG025 | Terminal or files without logins | Name at least one login with `--logins`. |
 | AG026 | Desktop without target | Give desktop a target with `--rdp` or `--vnc`. |
-| AG027 | Files root missing | The files root must be an existing directory. Mount or create it, or change it with `localport set`. |
+| AG027 | Files root missing | The files root must be an existing directory the agent can inspect; the message names the path and the reason. Mount or create it, or change it with `localport set`. |
 | AG029 | Logins with run_as_agent | A device with `run_as_agent: true` runs terminal and files sessions as the agent account `localport`, so it lists no logins. Remove `--logins`, or drop `--run-as-agent` on a host with usable logins. |
 | AG030 | Forwarding without terminal | SSH port forwarding rides an `ssh` connection, so it needs terminal on the same device. Enable both, for example `--enable terminal,forwarding`. |
 | AG028 | Invalid local config | The local config failed validation; the message names the field. Every command that reads it refuses the same way, `localport set` included, so correct `agent.yaml` by hand: in `$LOCALPORT_HOME` (or `~/.localport`), or as root in the machine-wide config directory. |
@@ -69,7 +70,7 @@ run it again), and exit 1633, the machine is not running 64-bit Windows.
 | AG055 | Session launcher from another release | The agent and the session launcher service (`localport-session`) come from different localport releases, usually right after an upgrade. Restart the launcher service: `sudo systemctl restart localport-session` (Linux), `sudo launchctl kickstart -k system/io.localport.session` (macOS), or restart the `localport-session` service (Windows). |
 | AG061 | Recording spool full | The recording spool reached its size limit, so recordings stop until uploads catch up. Check the device's connection to the control plane. |
 | AG062 | Disk space low for recordings | The disk holding the recording spool is nearly full. Free disk space. |
-| AG063 | Recording unavailable | A recording could not start; the message names the cause after the code. Causes: no recording uploader, a recording key that is not held or does not match the ticket, a key that cannot seal the recording's key (malformed, or the wrap fails), too little time before the session's deadline, a spool that cannot store the entry, no session mux, or the control plane refusing, not answering or answering the open with segments already stored. A strict session is refused and a best-effort session runs unrecorded. Retry the session; when it persists, act on the named cause. |
+| AG063 | Recording unavailable | A recording could not start; the message names the cause. Causes: no recording uploader, a recording key that is not held or does not match the ticket, a key that cannot seal the recording's key (malformed, or the wrap fails), too little time before the session's deadline, a spool that cannot store the entry, no session mux, or the control plane refusing, not answering or answering the open with segments already stored. A strict session is refused and a best-effort session runs unrecorded. Retry the session; when it persists, act on the named cause. |
 | AG071 | No transport | No connection to the edge worked. Check that this machine reaches the edge on TCP 443 and that no firewall or proxy blocks it. |
 | AG072 | Registration failed | The connection to the edge broke or carried an unexpected answer while the tunnel or device registered. localport retries on its own; when it persists, contact support with the agent log. |
 | AG073 | Redirect to an untrusted host | The edge sent this agent to a host outside the Localport service, so the agent refused to follow. localport retries on its own; contact support. |
@@ -94,7 +95,7 @@ run it again), and exit 1633, the machine is not running 64-bit Windows.
 | AG093 | Device state not purged | The uninstall finished, but removing the device identities and config it was asked to purge failed, so they stay under `%ProgramData%\localport-device`. The message names the cause; fix it, then delete that directory as an Administrator. The device certificates stay valid until the devices are removed in the dashboard. |
 | AG101 | No session certificate | `ssh-proxy` found no session certificate, edge URL or client key for this credential, login and device; `ssh-cert`, which the `Match exec` line of the `ssh-config` block runs, writes them. Run the `localport ssh-cert` command the message names, or connect with `localport ssh`. |
 | AG102 | SSH client files busy | Another `localport ssh-cert` held the lock on this credential's client files for 30 seconds, longer than a certificate mint takes. Retry; when it persists, end the stuck `localport ssh-cert` process. |
-| AG103 | Login refused for SSH | The login holds a shell character (`' ` " ; & < > \| ( ) { } $`), starts with `-`, holds `\`, `*` or `?` on Windows, or ends in `\` elsewhere, so it cannot travel through ssh_config's commands. Name a Windows domain account in its UPN form, `alice@corp.example`. |
+| AG103 | Login refused for SSH | The login holds a shell character (`' ` " ; & < > \| ( ) { } $`), starts with `-`, holds `\`, `*` or `?` on Windows, or holds `\\` or ends in `\` elsewhere, so it cannot travel through ssh_config's commands. Name a Windows domain account in its UPN form, `alice@corp.example`. |
 | AG104 | Path unusable in ssh_config | The localport path or the state root holds a quote, `$`, `` ` ``, a line break or, outside Windows, `\`. Move localport or `LOCALPORT_HOME` to a path without them. |
 | AG105 | SSH client files unusable | The client key, certificate, URL, known_hosts file or their directory under `<state root>/ssh/` cannot be read or written; the message names the file. Fix its owner or mode, or remove it so the next `localport ssh-cert` writes it again. |
 | AG106 | Session certificate answer refused | The control plane answered with a certificate for another key or login, an expired one, or no usable host key or URL. Check this machine's clock; when it persists, contact support. |
@@ -111,6 +112,7 @@ run it again), and exit 1633, the machine is not running 64-bit Windows.
 | AG117 | Desktop key not forgotten | `set --rdp-reset-pin` or `--vnc-reset-pin` could not change `desktop_pins.json`; its own code follows. Retry; fix the file's owner or mode if it persists. |
 | AG118 | Device name ambiguous | The name matches more than one enrolled device. Use the full identity from the local config. |
 | AG119 | Device enrolled, service not installed | The device is enrolled and its credential saved, but installing its service failed. Fix the cause the message names, then run the `localport service install` command it shows; no new join token is needed. |
+| AG120 | Device not found | The name matches no device in the local config. Check the spelling, or use the full identity the local config lists. |
 | AG121 | Client certificate unusable | The client certificate or key from `--pem`, `--p12`, the access config or the store cannot be read, parsed or used, or is not yet valid or expired. Check the file and this machine's clock, or obtain a new credential. |
 | AG122 | Invalid access config | The access config file cannot be read or holds an invalid entry; the message names the file and the entry. Fix the entry. |
 | AG123 | Local forward not opened | A `-L` local address or socket could not listen: in use, or a path that is not a socket. Choose another address, or stop the process holding it. |

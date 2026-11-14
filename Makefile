@@ -53,7 +53,7 @@ DARWIN_NAMES = $(foreach a,$(SESSION_DARWIN),localport-darwin-$(a) localport-ses
 
 DIST = dist
 
-.PHONY: winres check-packaging build build-all build-session-linux build-session-armv6 build-session-darwin build-darwin sign-darwin dist release-sign release-dryrun packages repo repo-apk clean test test-root vet-all smoke lint fmt vet notices notices-check
+.PHONY: winres check-packaging build build-all build-session-linux build-session-armv6 build-session-darwin build-darwin sign-darwin dist release-sign release-dryrun packages repo repo-apk clean test test-root vet-all smoke lint errwrapcheck fmt vet notices notices-check
 
 build:
 	$(GO_BUILD) -o bin/localport ./cmd/localport
@@ -208,6 +208,7 @@ clean:
 
 test:
 	go test -race ./...
+	go -C tools/errwrapcheck test ./...
 
 # The tests that need euid 0. Each is named TestRoot... and skips without root,
 # so `test` runs none of them unprivileged. The pam tag needs the libpam
@@ -227,8 +228,16 @@ vet-all:
 smoke:
 	./scripts/smoke.sh
 
-lint:
+lint: errwrapcheck
 	golangci-lint run ./...
+
+# errwrapcheck (tools/errwrapcheck, its own module) runs as a vet tool per
+# platform, since build tags select different files.
+errwrapcheck:
+	go -C tools/errwrapcheck build -o $(CURDIR)/bin/errwrapcheck .
+	@for p in $(PLATFORMS); do \
+		GOOS=$${p%/*} GOARCH=$${p#*/} GOARM=6 go vet -vettool=$(CURDIR)/bin/errwrapcheck ./... || exit 1; \
+	done
 
 fmt:
 	go fmt ./...

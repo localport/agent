@@ -225,7 +225,7 @@ func findDevice(devices []config.LocalDevice, name string) (int, error) {
 		found = i
 	}
 	if found < 0 {
-		return -1, errcode.New(errcode.NoDevice).With(nil, fmt.Sprintf("%q in the local config", name))
+		return -1, errcode.New(errcode.DeviceNotFound).With(nil, fmt.Sprintf("%q in the local config", name))
 	}
 	return found, nil
 }

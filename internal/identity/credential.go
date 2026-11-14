@@ -50,7 +50,7 @@ func Open(store *Store, sel Selector) (*Credential, error) {
 // A device credential is refused with ErrDeviceCredential.
 func OpenRef(store *Store, ref Ref) (*Credential, error) {
 	if ref.Kind == KindDevice {
-		return nil, fmt.Errorf("%s: %w", ref, ErrDeviceCredential)
+		return nil, ErrDeviceCredential.With(nil, ref.String())
 	}
 	c := &Credential{store: store, ref: ref}
 	if err := c.reload(); err != nil {

@@ -3,13 +3,16 @@ package cli
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/ports"
 	"github.com/localport/agent/internal/security"
@@ -191,7 +194,7 @@ func TestAMergeWriteFailureIsNotAConflict(t *testing.T) {
 	if !sameDevice(inForce, stored) {
 		t.Fatalf("in force %+v, want the stored entry", inForce)
 	}
-	if errors.Is(err, errDeviceNotRecorded) {
+	if isDeviceNotRecorded(err) {
 		t.Fatal("a stored device keeps its config entry, so its credential is in use")
 	}
 }
@@ -201,14 +204,18 @@ func TestAMergeWriteFailureIsNotAConflict(t *testing.T) {
 func TestAnAppendWriteFailureForgetsTheNewCredential(t *testing.T) {
 	stored := storedDevice(t)
 	file := storedConfig(t, stored)
-	failing := errors.New("no space left on device")
+	failing := &fs.PathError{Op: "write", Path: file.Path, Err: syscall.ENOSPC}
 	writeLocal = func(config.LocalConfigFile, *config.LocalConfig, identity.Ref) error { return failing }
 	t.Cleanup(func() { writeLocal = config.WriteLocal })
-	fs, flags := parseDeviceFlags(t)
+	flagSet, flags := parseDeviceFlags(t)
 	newRef := deviceRef("factory.gw-02")
-	_, err := recordDevice(file, fs, flags, piInvoker, newRef, config.LocalDevice{})
-	if !errors.Is(err, errDeviceNotRecorded) || !errors.Is(err, failing) {
-		t.Fatalf("recordDevice = %v, want errDeviceNotRecorded wrapping the write error", err)
+	_, err := recordDevice(file, flagSet, flags, piInvoker, newRef, config.LocalDevice{})
+	if !isDeviceNotRecorded(err) || !errors.Is(err, failing) {
+		t.Fatalf("recordDevice = %v, want deviceNotRecorded wrapping the write error", err)
+	}
+	// The marker adds no hidden cause: the user sees the write error in full.
+	if text, hidden := errcode.Render(err); !strings.Contains(text, syscall.ENOSPC.Error()) || hidden {
+		t.Fatalf("Render = %q, %v; want the write error shown", text, hidden)
 	}
 
 	store := &identity.Store{Root: filepath.Join(os.Getenv(identity.HomeEnv), "identity")}
@@ -339,8 +346,8 @@ func TestConnectForgetsTheCredentialWhenTheConfigWriteFails(t *testing.T) {
 	writeLocal = func(config.LocalConfigFile, *config.LocalConfig, identity.Ref) error { return failing }
 	t.Cleanup(func() { writeLocal = config.WriteLocal })
 
-	if err := runConnect("test", connectArgs); !errors.Is(err, errDeviceNotRecorded) || !errors.Is(err, failing) {
-		t.Fatalf("runConnect = %v, want errDeviceNotRecorded wrapping the write error", err)
+	if err := runConnect("test", connectArgs); !isDeviceNotRecorded(err) || !errors.Is(err, failing) {
+		t.Fatalf("runConnect = %v, want deviceNotRecorded wrapping the write error", err)
 	}
 	store := &identity.Store{Root: filepath.Join(os.Getenv(identity.HomeEnv), "identity")}
 	if _, err := os.Lstat(store.Dir(ref)); !errors.Is(err, os.ErrNotExist) {

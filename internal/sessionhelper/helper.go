@@ -414,7 +414,7 @@ func checkNologin(uid uint32, path string) error {
 		return nil
 	}
 	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("%w: %w", errPAMAccount, errcode.New(errcode.LoginsDisabled))
+		return errcode.New(errcode.LoginsDisabled).With(errPAMAccount, "")
 	}
 	return nil
 }

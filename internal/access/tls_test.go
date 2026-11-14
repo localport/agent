@@ -18,6 +18,8 @@ import (
 	"time"
 
 	pkcs12 "software.sslmate.com/src/go-pkcs12"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 func TestBuildTLSConfigBundle(t *testing.T) {
@@ -104,6 +106,10 @@ func TestPKCS12IsReadThroughThePrivateFilePath(t *testing.T) {
 
 	if _, err := BuildTLSConfig("", archive, "hunter2", "host:1", ""); err != nil {
 		t.Fatalf("a 0600 archive must load: %v", err)
+	}
+	_, err := BuildTLSConfig("", archive, "wrong", "host:1", "")
+	if text, hidden := errcode.Render(err); !strings.Contains(text, "password incorrect") || hidden {
+		t.Fatalf("wrong password: Render = %q, %v; want the reason shown", text, hidden)
 	}
 
 	if err := os.Chmod(archive, 0o644); err != nil {

@@ -188,7 +188,8 @@ func (t sshTarget) ensureCert(ctx context.Context, login string, mint sessionMin
 		return errcode.New(errcode.SSHClientFiles).With(err, "ssh client directory")
 	}
 	release, err := identity.WaitLockFile(ctx, f.lock, sshLockWait, errSSHFilesBusy)
-	if errors.Is(err, errSSHFilesBusy) {
+	// Busy and a cancelled wait are not faults of the files.
+	if errors.Is(err, errSSHFilesBusy) || (err != nil && ctx.Err() != nil) {
 		return err
 	}
 	if err != nil {
@@ -481,7 +482,11 @@ func (t sshTarget) proxy(ctx context.Context, login string, in io.Reader, out io
 		if errors.Is(err, fs.ErrNotExist) {
 			return errNoSessionCert.With(nil, fmt.Sprintf("%s@%s; run: localport ssh-cert --identity %s %s %s", login, t.host, t.ref, login, t.host))
 		}
-		return err
+		var coded *errcode.Error
+		if errors.As(err, &coded) {
+			return err
+		}
+		return errcode.New(errcode.SSHClientFiles).With(err, "")
 	}
 	rawURL, err := os.ReadFile(f.url)
 	if err != nil {
@@ -505,7 +510,7 @@ func (t sshTarget) proxy(ctx context.Context, login string, in io.Reader, out io
 	}
 	hostKey, err := knownHostKey(f.knownHosts, t.host)
 	if err != nil {
-		return fmt.Errorf("device host key: %w", err)
+		return missing(err)
 	}
 	stream, cr, reason, err := openSession(ctx, strings.TrimSpace(string(rawURL)), cert, certSigner, hostKey, opts)
 	if err != nil && slices.Contains(sshRetryEnds, reason) {
@@ -513,7 +518,7 @@ func (t sshTarget) proxy(ctx context.Context, login string, in io.Reader, out io
 		// Like a resume certificate it stays in memory: the file keeps the
 		// one OpenSSH presents to the device.
 		if cert, certSigner, rawURL, err = t.mintAgain(ctx, login, key, mint); err != nil {
-			return errcode.New(errcode.SessionMintFailed).With(err, "after the session ended: "+security.SanitizeDisplay(reason))
+			return errcode.New(errcode.SessionMintFailed).With(errors.Join(edgeEnd{security.SanitizeDisplay(reason)}, err), "after the edge ended the session")
 		}
 		stream, cr, _, err = openSession(ctx, string(rawURL), cert, certSigner, hostKey, opts)
 	}
@@ -535,7 +540,7 @@ func (t sshTarget) proxy(ctx context.Context, login string, in io.Reader, out io
 		if reason, closed := stream.closeReason(); closed && !slices.Contains(sshResumableEnds, reason) {
 			cr.Conn.End(errSessionEnded)
 			<-copied
-			return errcode.New(errcode.SessionEnded).With(nil, security.SanitizeDisplay(reason))
+			return endedByEdge(reason)
 		}
 		if stream, pos, err = t.resume(ctx, sshResumeWindow, cr, cert, key, mint, opts); err != nil {
 			cr.Conn.End(errSessionEnded)
@@ -555,6 +560,19 @@ func (t sshTarget) proxy(ctx context.Context, login string, in io.Reader, out io
 
 var errSessionEnded = errors.New("ssh-proxy: session ended")
 
+// edgeEnd is the close reason the edge gave for a session stream, shown as
+// received (an errcode.Remote). reason is sanitized by endedByEdge.
+type edgeEnd struct{ reason string }
+
+func (e edgeEnd) Error() string         { return "the edge ended the session stream: " + e.reason }
+func (e edgeEnd) RemoteMessage() string { return "the edge ended the session stream" }
+func (e edgeEnd) RemoteCode() string    { return e.reason }
+
+// endedByEdge is the AG error for a stream the edge closed with reason.
+func endedByEdge(reason string) error {
+	return errcode.New(errcode.SessionEnded).With(edgeEnd{security.SanitizeDisplay(reason)}, "")
+}
+
 // sshRetryEnds are the edge close reasons of a refused first stream after
 // which ssh-proxy mints one new certificate and tries once more
 // (docs/COMMUNICATION.md, end reasons).
@@ -573,7 +591,7 @@ func openSession(ctx context.Context, edgeURL string, cert *ssh.Certificate, sig
 	if err != nil {
 		_ = stream.Close()
 		if reason, ok := stream.closeReason(); ok {
-			return nil, nil, reason, errcode.New(errcode.SessionEnded).With(nil, security.SanitizeDisplay(reason))
+			return nil, nil, reason, endedByEdge(reason)
 		}
 		return nil, nil, "", errcode.New(errcode.SessionConnectFailed).With(err, "session prelude")
 	}
@@ -676,7 +694,7 @@ func (t sshTarget) resumeAttempt(ctx context.Context, deadline time.Time, cr *se
 		return nil, 0, false, errcode.New(errcode.SessionEnded).With(nil, refused.Code)
 	}
 	if reason, closed := stream.closeReason(); closed && !slices.Contains(sshResumableEnds, reason) {
-		return nil, 0, false, errcode.New(errcode.SessionEnded).With(nil, security.SanitizeDisplay(reason))
+		return nil, 0, false, endedByEdge(reason)
 	}
 	return nil, 0, true, err
 }

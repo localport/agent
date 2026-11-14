@@ -789,7 +789,8 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 				return ErrRegisterFailed.With(err, "parse redirect")
 			}
 			if !allowedRedirectHost(rd.EdgeAddr) {
-				return ErrUntrustedRedirect.With(nil, fmt.Sprintf("%q", sanitizeDisplay(rd.EdgeAddr)))
+				// The address is edge text: the cause, shown by --verbose and logs.
+				return ErrUntrustedRedirect.With(fmt.Errorf("redirect to %q", sanitizeDisplay(rd.EdgeAddr)), "")
 			}
 			if h := t.opts.Handler; h != nil {
 				h.OnRedirect(t.EventKey(), addr, rd.EdgeAddr)
@@ -800,7 +801,8 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			ep, _ := proto.ParseError(body)
 			raw.Close()
 			if ep != nil {
-				return fmt.Errorf("edge error [%s]: %s", ep.Code, ep.Message)
+				// An edge error frame is retried, as any failed attempt.
+				return &RegistrationError{Message: ep.Message, Code: ep.Code, Retryable: true}
 			}
 			return ErrRegisterFailed.With(nil, "an unreadable edge error")
 

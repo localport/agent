@@ -279,6 +279,7 @@ func statusError(port uint16, status int) error {
 	case http.StatusServiceUnavailable:
 		return errcode.New(errcode.DeviceRefused).With(nil, "the device is busy, retry")
 	default:
-		return errcode.New(errcode.DeviceRefused).With(nil, fmt.Sprintf("the edge answered %d", status))
+		// An unmapped status is transport detail: the cause, for --verbose.
+		return errcode.New(errcode.DeviceRefused).With(fmt.Errorf("the edge answered HTTP %d", status), "the edge refused the stream")
 	}
 }

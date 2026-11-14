@@ -70,7 +70,7 @@ func loadPEM(path string) (tls.Certificate, error) {
 	// open descriptor and must not be a symlink.
 	data, err := security.ReadPrivateFile(path)
 	if err != nil {
-		return tls.Certificate{}, classify("read pem file", err)
+		return tls.Certificate{}, errcode.New(errcode.ClientCertUnusable).With(err, "read pem file")
 	}
 	cert, err := tls.X509KeyPair(data, data)
 	if err != nil {
@@ -83,11 +83,11 @@ func loadPEM(path string) (tls.Certificate, error) {
 					"  If this came from the identity store, drop --pem entirely: "+
 					"`localport access` presents a stored credential on its own.")
 		}
-		return tls.Certificate{}, classify("parse pem file", err)
+		return tls.Certificate{}, unparsable(path, err)
 	}
 	leaf, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
-		return tls.Certificate{}, errcode.New(errcode.ClientCertUnusable).With(err, "parse the leaf certificate")
+		return tls.Certificate{}, unparsable(path, err)
 	}
 	// Set Leaf so crypto/tls does not parse it on each handshake.
 	cert.Leaf = leaf
@@ -108,7 +108,7 @@ func loadPEM(path string) (tls.Certificate, error) {
 			continue
 		}
 		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-			return tls.Certificate{}, errcode.New(errcode.ClientCertUnusable).With(err, "parse the certificate in "+path)
+			return tls.Certificate{}, unparsable(path, err)
 		}
 		cas++
 	}
@@ -124,11 +124,11 @@ func loadFromPKCS12(path, password string) (tls.Certificate, error) {
 	// Owner-only, as for PEM. Archive passwords are often weak or shared.
 	raw, err := security.ReadPrivateFile(path)
 	if err != nil {
-		return tls.Certificate{}, classify("read pkcs12", err)
+		return tls.Certificate{}, errcode.New(errcode.ClientCertUnusable).With(err, "read pkcs12")
 	}
 	key, leaf, chain, err := pkcs12.DecodeChain(raw, password)
 	if err != nil {
-		return tls.Certificate{}, classify("decode pkcs12", err)
+		return tls.Certificate{}, unparsable(path, err)
 	}
 	if len(chain) == 0 {
 		return tls.Certificate{}, errcode.New(errcode.ClientCertUnusable).With(nil, path+" carries no CA chain")
@@ -174,10 +174,11 @@ func assertLeafFresh(cert tls.Certificate) error {
 	return nil
 }
 
-// classify codes a credential file failure; a missing or unreadable file
-// keeps its *fs.PathError, which errcode.Render shows with its path.
-func classify(prefix string, err error) error {
-	return errcode.New(errcode.ClientCertUnusable).With(err, prefix)
+// unparsable codes a credential file its parser refused. The parser's text
+// describes the local file (a wrong pkcs12 password included), so the user
+// sees it.
+func unparsable(path string, err error) error {
+	return errcode.New(errcode.ClientCertUnusable).With(errcode.Invalidf("%w", err), "parse "+path)
 }
 
 // resolveServerName returns the name used to verify the server certificate.
