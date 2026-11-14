@@ -2,13 +2,16 @@ package identity
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"os"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/localport/agent/internal/errcode"
 )
+
+// errSignInExpired is a sign-in poll that reached its deadline.
+var errSignInExpired = errcode.New(errcode.SignInExpired)
 
 // `localport login` implements RFC 8628 device authorization: the user opens a
 // page on any device, types a short code, and receives a short-lived
@@ -87,9 +90,10 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 	// The CSR is sent at start and the server pins its hash, so only the
 	// approved key can collect the certificate.
 	var start deviceStartResponse
+	startKey := newIdempotencyKey()
 	if err := retry(ctx, DefaultRetryBudget, nil, func() error {
 		start = deviceStartResponse{}
-		return c.post(ctx, "/v1/mtls/device/start", "", map[string]string{
+		return c.post(ctx, "/v1/mtls/device/start", "", startKey, map[string]string{
 			"csr_pem":  string(kp.csrPEM),
 			"hostname": hostname(),
 			"agent_os": runtime.GOOS + "/" + runtime.GOARCH,
@@ -98,7 +102,7 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 		return nil, err
 	}
 	if start.DeviceCode == "" || start.UserCode == "" {
-		return nil, errors.New("control plane returned an incomplete sign-in request")
+		return nil, errAnswer.With(nil, "the sign-in request has no device or user code")
 	}
 
 	if onPrompt != nil {
@@ -123,6 +127,12 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Each poll is one logical request with its own key. A poll whose outcome
+	// the control plane did not record (Retryable) is repeated under the same
+	// key, so a lost answer to the poll that consumed the device code returns
+	// the same certificate.
+	pollKey := newIdempotencyKey()
+
 	// Recorded so an expiry after transport errors is reported as
 	// unreachable, not as unapproved.
 	var lastUnreachable error
@@ -136,19 +146,19 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 
 		if time.Now().After(deadline) {
 			if lastUnreachable != nil {
-				return nil, fmt.Errorf("could not reach the control plane while waiting for approval: %w", lastUnreachable)
+				return nil, errSignInExpired.With(lastUnreachable, "the control plane could not be reached while waiting for approval")
 			}
-			return nil, errors.New("sign-in expired before it was approved; run `localport login` again")
+			return nil, errSignInExpired.With(nil, "")
 		}
 
 		var tok deviceTokenResponse
-		err := c.post(ctx, "/v1/mtls/device/token", "", map[string]string{
+		err := c.post(ctx, "/v1/mtls/device/token", "", pollKey, map[string]string{
 			"device_code": start.DeviceCode,
 			"csr_pem":     string(kp.csrPEM),
 		}, &tok)
 		if err == nil {
 			if tok.CertPEM == "" {
-				return nil, errors.New("control plane returned no certificate")
+				return nil, errAnswer.With(nil, "no certificate")
 			}
 			// No renew_after. A sign-in does not renew.
 			return consumerOnly(c.assemble(kp.key, issuedMaterial{
@@ -170,9 +180,12 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 		case Retryable(err):
 			// Retryable failure. The code stays valid, so keep polling.
 			lastUnreachable = err
+			continue
 		default:
 			// Refused as unknown, denied, consumed or expired.
 			return nil, err
 		}
+		// A pending or slow_down answer is recorded and ends this poll.
+		pollKey = newIdempotencyKey()
 	}
 }

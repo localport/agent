@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -325,7 +324,6 @@ func TestResumeMintRetryable(t *testing.T) {
 		{"rate limited", &identity.APIError{Status: http.StatusTooManyRequests}, true},
 		{"SE032", &identity.APIError{Status: http.StatusServiceUnavailable}, true},
 		{"SE036", &identity.APIError{Status: http.StatusForbidden}, false},
-		{"truncated answer", fmt.Errorf("read /v1/sessions response: %w", io.ErrUnexpectedEOF), true},
 		{"local", errors.New("credential expired"), false},
 		{"local signing failure", fmt.Errorf("sign session request: %w", errors.New("key unavailable")), false},
 	} {

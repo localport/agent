@@ -69,13 +69,40 @@ func Render(err error) (text string, hidden bool) {
 	}
 	var r renderer
 	r.walk(err)
-	if !r.typed {
-		if isNetwork(err) {
-			return "a network operation failed", true
-		}
-		return err.Error(), false
+	switch {
+	case r.typed:
+		text, hidden = r.text(), r.hidden
+	case isNetwork(err):
+		return "a network operation failed", true
+	default:
+		text = err.Error()
 	}
-	return r.text(), r.hidden
+	return redact(err, text), hidden
+}
+
+// Redactor is an error that masks secrets in the text of its chain
+// (security.RedactError). Render applies every Redactor in the chain to the
+// text it returns, since that text is built from inner nodes.
+type Redactor interface {
+	Redact(text string) string
+}
+
+// redact applies each Redactor in err's chain, joins included, to text.
+func redact(err error, text string) string {
+	if rd, ok := err.(Redactor); ok {
+		text = rd.Redact(text)
+	}
+	switch u := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, inner := range u.Unwrap() {
+			text = redact(inner, text)
+		}
+	case interface{ Unwrap() error }:
+		if inner := u.Unwrap(); inner != nil {
+			text = redact(inner, text)
+		}
+	}
+	return text
 }
 
 // renderer collects the shown parts of one chain. Each error of a join

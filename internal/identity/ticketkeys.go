@@ -30,22 +30,23 @@ var ErrTicketKeysBusy = errcode.New(errcode.TicketKeysBusy)
 var ErrTicketKeysUnreadable = errcode.New(errcode.TicketKeysUnreadable)
 
 // ErrRecordingKeyDropped means Load found a recording key in ticket_keys.json
-// that does not parse: the ticket keys loaded, the recording key was skipped,
+// that does not parse: the session CA keys loaded, the recording key was skipped,
 // and the next Replace (key fetch or renewal) writes a valid one.
 var ErrRecordingKeyDropped = errors.New("the stored team recording key does not parse and was skipped")
 
 // keysLockWait bounds the wait for .keys.lock. Its holders do file I/O only.
 const keysLockWait = 10 * time.Second
 
-// ticketKIDPattern is the kid grammar of the control plane's ticket keys.
+// ticketKIDPattern is the kid grammar of the control plane's session CA keys.
 var ticketKIDPattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 
 // ErrNotDeviceIdentity means a ticket key store was asked for a ref that is
-// not a valid device identity; only devices hold ticket keys.
-var ErrNotDeviceIdentity = errors.New("only a device identity holds ticket keys")
+// not a valid device identity; only devices hold session CA keys.
+var ErrNotDeviceIdentity = errors.New("only a device identity holds session CA keys")
 
-// TicketKeys is a device identity's session ticket verification keys and its
-// team's recording key, kept in ticket_keys.json beside meta.json. Only the
+// TicketKeys is a device identity's session CA keys (the SSH user certificate
+// signers) and its team's recording key, kept in ticket_keys.json beside
+// meta.json. Only the
 // control plane changes the stored set (Replace, from enrolment, renewal and
 // KeyRefresher's fetch); a kid absent from its set is revoked.
 //
@@ -156,7 +157,7 @@ func (s *Store) forgetTicketKeys(dir string) {
 
 // Load reads ticket_keys.json into memory. An absent file is an empty set; a
 // file it cannot read returns ErrTicketKeysUnreadable and leaves memory
-// unchanged. A recording key that does not parse is skipped: the ticket keys
+// unchanged. A recording key that does not parse is skipped: the session CA keys
 // load, the recording key held before (if any) stays, and Load returns
 // ErrRecordingKeyDropped for the caller to log.
 func (t *TicketKeys) Load() error {
@@ -267,10 +268,10 @@ func (t *TicketKeys) Hint(kids []string) (added bool, err error) {
 // key stay. ctx bounds the wait for another writer.
 func (t *TicketKeys) Replace(ctx context.Context, generation uint64, set DeviceKeys) error {
 	if _, err := parseTicketKeys(set.TicketKeys); err != nil {
-		return fmt.Errorf("control plane sent unusable ticket keys: %w", err)
+		return errAnswer.With(err, "session CA keys")
 	}
 	if _, err := parseRecordingKey(set.RecordingKey); err != nil {
-		return fmt.Errorf("control plane sent an unusable recording key: %w", err)
+		return errAnswer.With(err, "recording key")
 	}
 	rec := ticketKeysRecord{Keys: set.TicketKeys, RecordingKey: set.RecordingKey}
 	if rec.Keys == nil {
@@ -358,7 +359,7 @@ func (t *TicketKeys) read() (ticketKeysRecord, map[string]ed25519.PublicKey, hel
 func writeTicketKeys(dir string, rec ticketKeysRecord) error {
 	raw, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode ticket keys: %w", err)
+		return fmt.Errorf("encode session CA keys: %w", err)
 	}
 	return security.WritePrivateFileAtomic(filepath.Join(dir, ticketKeysFile), append(raw, '\n'))
 }

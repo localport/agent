@@ -1,10 +1,11 @@
 package security
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // ResolveToken returns a token from the flag value, the environment variable or
@@ -43,7 +44,7 @@ func ResolveOptionalToken(flagValue, envName string) (string, error) {
 	// Token files follow the owner-only rules for private keys.
 	data, err := ReadPrivateFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read %s_FILE: %w", envName, err)
+		return "", errcode.New(errcode.TokenFileUnreadable).With(err, envName+"_FILE")
 	}
 	return strings.TrimSpace(string(data)), nil
 }
@@ -61,15 +62,26 @@ func RedactString(text string, secrets ...string) string {
 	return out
 }
 
-// SanitizeError wraps an error with its message redacted of the given
-// secrets. The returned error is a plain string; the original is discarded
-// because keeping the underlying err exposes the secret through %+v.
-func SanitizeError(err error, secrets ...string) error {
+// RedactError wraps err so its Error() and its errcode.Render text have every
+// occurrence of each secret swapped for [REDACTED]. The chain stays reachable
+// through errors.Is and errors.As. It is the output layer: code that builds
+// an error from text holding a secret redacts it there too, since a caller
+// that formats an inner node itself bypasses this wrapper.
+func RedactError(err error, secrets ...string) error {
 	if err == nil {
 		return nil
 	}
-	return errors.New(RedactString(err.Error(), secrets...))
+	return &redactedError{err: err, secrets: secrets}
 }
+
+type redactedError struct {
+	err     error
+	secrets []string
+}
+
+func (e *redactedError) Error() string             { return RedactString(e.err.Error(), e.secrets...) }
+func (e *redactedError) Unwrap() error             { return e.err }
+func (e *redactedError) Redact(text string) string { return RedactString(text, e.secrets...) }
 
 // SanitizeDisplay strips characters that a terminal or log viewer could
 // interpret, such as escape sequences for title changes, hidden text or OSC 52

@@ -3,7 +3,6 @@ package identity
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"path/filepath"
 	"time"
@@ -58,7 +57,7 @@ func (s *Store) LoadPending(ref Ref) (*Material, error) {
 	}
 	m, err := loadMaterial(s.dir(ref), *pending)
 	if err != nil {
-		return nil, fmt.Errorf("no usable pending credential for %s: %w", ref, err)
+		return nil, errUnreadable.With(err, "the renewed credential of "+ref.String())
 	}
 	return m, nil
 }
@@ -105,7 +104,7 @@ func (s *Store) savePending(m *Material, renewedFrom string) (Ref, error) {
 	m.Meta.RenewedFrom = renewedFrom
 	cur, err := readMeta(filepath.Join(dir, metaFile))
 	if err != nil {
-		return Ref{}, fmt.Errorf("read current credential: %w", err)
+		return Ref{}, errUnreadable.With(err, "the current credential")
 	}
 	if cur.Serial != renewedFrom {
 		return Ref{}, ErrCredentialReplaced
@@ -169,10 +168,10 @@ func (s *Store) Promote(ref Ref, serial string) error {
 	// The pair must load before it replaces the only other usable one.
 	m, err := loadMaterial(dir, *pending)
 	if err != nil {
-		return fmt.Errorf("pending credential for %s is unusable: %w", ref, err)
+		return errUnreadable.With(err, "the renewed credential of "+ref.String())
 	}
 	if _, err := m.TLSCertificate(); err != nil {
-		return fmt.Errorf("pending credential for %s is unusable: %w", ref, err)
+		return errUnreadable.With(err, "the renewed credential of "+ref.String())
 	}
 
 	promoted := *pending
@@ -206,7 +205,7 @@ func (s *Store) waitLock(ctx context.Context, ref Ref, wait time.Duration) (func
 func tryLockFile(path string) (release func(), held bool, err error) {
 	f, err := security.OpenLockFile(path)
 	if err != nil {
-		return nil, false, fmt.Errorf("open lock %s: %w", filepath.Base(path), err)
+		return nil, false, errStoreUnusable.With(err, "open the lock "+filepath.Base(path))
 	}
 	held, err = security.TryLockFile(f)
 	if err != nil || !held {

@@ -33,6 +33,7 @@ func TestProcdScripts(t *testing.T) {
 			"\tprocd_set_param group localport",
 			"\tprocd_set_param no_new_privs 1",
 			`	procd_set_param limits core="0 0"`,
+			"\tprocd_set_param term_timeout 30",
 			"\tprocd_send_signal " + ProcdService + " '*' HUP",
 		},
 		ProcdLauncherService: {
@@ -40,6 +41,9 @@ func TestProcdScripts(t *testing.T) {
 			"# " + Marker,
 			"START=95",
 			"\tprocd_set_param command /usr/local/bin/localport-session launcher",
+			// An upgrade changes the binary's checksum, which makes start
+			// restart the launcher.
+			"\tprocd_set_param file /usr/local/bin/localport-session",
 		},
 	} {
 		got := lines(scripts[name])

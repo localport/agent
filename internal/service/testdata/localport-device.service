@@ -1,0 +1,58 @@
+# Managed by localport connect; localport service uninstall removes it.
+# Configure the devices with localport set; /etc/localport-device/agent.yaml
+# holds their settings and /etc/localport-device/identity their private keys,
+# so keep that directory out of backups and configuration management.
+
+[Unit]
+Description=Localport fleet device agent
+Documentation=https://localport.io/docs
+After=network-online.target localport-session.socket
+Wants=network-online.target localport-session.socket
+
+[Service]
+User=localport
+Group=localport
+ExecStart=/usr/local/bin/localport run --service
+# localport set changes the config and reloads; the agent applies the
+# changed devices only.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+# A core dump would contain the device's private keys.
+LimitCORE=0
+# The agent starts no session itself: the root launcher behind
+# localport-session.socket does, outside this sandbox.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+# "-": a path that does not exist yet does not fail the start.
+ReadWritePaths=-/etc/localport-device/identity -/etc/localport-device/run.lock
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+RemoveIPC=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -7,7 +7,12 @@ import (
 	"os/user"
 	"strconv"
 	"strings"
+
+	"github.com/localport/agent/internal/errcode"
 )
+
+// errAccount is a failure to create, look up or remove the agent account.
+var errAccount = errcode.New(errcode.AccountNotChanged)
 
 // Account is the agent account's ids.
 type Account struct {
@@ -16,6 +21,14 @@ type Account struct {
 
 // accountDescription is the account's GECOS / RealName.
 const accountDescription = "Localport agent"
+
+// accountHome is the Linux account's home, which does not exist.
+// packaging/nfpm/sysusers.conf and postinstall.sh create the same account.
+const accountHome = "/nonexistent"
+
+// SysusersFile is where the Linux packages install the account's sysusers.d
+// definition. Its presence marks an account the package created and owns.
+const SysusersFile = "/usr/lib/sysusers.d/localport.conf"
 
 // EnsureAccount creates the system group and user AgentAccount when missing
 // (no login shell, no home) and returns their ids. It is idempotent, as the
@@ -61,20 +74,25 @@ func (hostAccounts) lookup(name string) (int, int, bool, error) {
 func lookupAccount(db accounts) (Account, error) {
 	uid, gid, found, err := db.lookup(AgentAccount)
 	if err != nil {
-		return Account{}, fmt.Errorf("look up the account %s: %w", AgentAccount, err)
+		return Account{}, errAccount.With(err, "look up "+AgentAccount)
 	}
 	if !found {
-		return Account{}, fmt.Errorf("the account %s does not exist; run localport service install", AgentAccount)
+		return Account{}, errcode.New(errcode.AccountMissing).With(nil, "")
 	}
 	return Account{UID: uid, GID: gid}, nil
 }
 
 func ensureAccount(ctx context.Context, run runner, db accounts) (Account, error) {
 	if _, _, found, err := db.lookup(AgentAccount); err != nil {
-		return Account{}, fmt.Errorf("look up the account %s: %w", AgentAccount, err)
+		return Account{}, errAccount.With(err, "look up "+AgentAccount)
 	} else if !found {
 		if err := createAccount(ctx, run); err != nil {
-			return Account{}, fmt.Errorf("create the account %s: %w", AgentAccount, err)
+			// A concurrent install or package postinstall may have created
+			// it between the lookup and the create.
+			if acct, lookupErr := lookupAccount(db); lookupErr == nil {
+				return acct, nil
+			}
+			return Account{}, errAccount.With(err, "create "+AgentAccount)
 		}
 	}
 	return lookupAccount(db)
@@ -88,11 +106,13 @@ var ErrNoAccountTool = errors.New("no userdel or deluser on this host")
 // account is no error; a host without the tools returns ErrNoAccountTool. The caller removes it only once it owns nothing the
 // device service left behind.
 func RemoveAccount(ctx context.Context) error {
-	if _, _, found, err := (hostAccounts{}).lookup(AgentAccount); err != nil || !found {
-		return err
+	if _, _, found, err := (hostAccounts{}).lookup(AgentAccount); err != nil {
+		return errAccount.With(err, "look up "+AgentAccount)
+	} else if !found {
+		return nil
 	}
 	if err := deleteAccount(ctx, execRun); err != nil {
-		return fmt.Errorf("remove the account %s: %w", AgentAccount, err)
+		return errAccount.With(err, "remove "+AgentAccount)
 	}
 	return nil
 }
@@ -141,11 +161,11 @@ func commandsFor(tool string, shadow, groupExists bool, shell string) (group, us
 		if !groupExists {
 			group = []string{strings.TrimSuffix(tool, "useradd") + "groupadd", "--system", AgentAccount}
 		}
-		return group, []string{tool, "--system", "--gid", AgentAccount, "--no-create-home", "--home-dir", "/nonexistent",
+		return group, []string{tool, "--system", "--gid", AgentAccount, "--no-create-home", "--home-dir", accountHome,
 			"--shell", shell, "--comment", accountDescription, AgentAccount}
 	}
 	if !groupExists {
 		group = []string{strings.TrimSuffix(tool, "adduser") + "addgroup", "-S", AgentAccount}
 	}
-	return group, []string{tool, "-S", "-D", "-H", "-h", "/var/empty", "-s", shell, "-G", AgentAccount, "-g", accountDescription, AgentAccount}
+	return group, []string{tool, "-S", "-D", "-H", "-h", accountHome, "-s", shell, "-G", AgentAccount, "-g", accountDescription, AgentAccount}
 }

@@ -19,8 +19,8 @@ type DeviceInfo struct {
 	Region string `json:"region"`
 }
 
-// DeviceKeys mirrors the control plane's DeviceKeys: the session ticket
-// verification keys and the team's recording public key. The device keeps
+// DeviceKeys mirrors the control plane's DeviceKeys: the session CA keys
+// and the team's recording public key. The device keeps
 // them in its TicketKeys, never in meta.json.
 type DeviceKeys struct {
 	TicketKeys   []TicketKey `json:"ticket_keys"`
@@ -64,26 +64,29 @@ func (c *Client) EnrolDevice(
 	}
 
 	var resp enrolResponse
+	key := newIdempotencyKey()
 	if err := retry(ctx, budget, onWait, func() error {
 		resp = enrolResponse{}
-		return c.post(ctx, "/v1/devices/enrol", "", map[string]string{
+		return c.post(ctx, "/v1/devices/enrol", "", key, map[string]string{
 			"join_token": joinToken,
 			"csr_pem":    string(kp.csrPEM),
-		}, &resp)
+		}, &resp, joinToken)
 	}); err != nil {
 		return nil, err
 	}
 	if resp.CertPEM == "" {
-		return nil, errors.New("control plane returned no certificate for the CSR")
+		return nil, errAnswer.With(nil, "no certificate for the CSR")
 	}
 	// DNS names compare without case; the host is stored lowercase. A fleet
 	// without a public domain has no device host.
-	resp.DeviceHost = lowerASCII(resp.DeviceHost)
+	// The shown value is the one received, so redaction matches an echo.
+	host := resp.DeviceHost
+	resp.DeviceHost = lowerASCII(host)
 	if resp.DeviceHost != "" && !validDeviceHost(resp.DeviceHost) {
-		return nil, fmt.Errorf("control plane returned an invalid device host %q", security.SanitizeDisplay(resp.DeviceHost))
+		return nil, errAnswer.With(nil, fmt.Sprintf("invalid device host %q", security.RedactString(security.SanitizeDisplay(host), joinToken)))
 	}
 	if resp.Region != "" && !ValidRegion(resp.Region) {
-		return nil, fmt.Errorf("control plane returned an invalid region %q", security.SanitizeDisplay(resp.Region))
+		return nil, errAnswer.With(nil, fmt.Sprintf("invalid region %q", security.RedactString(security.SanitizeDisplay(resp.Region), joinToken)))
 	}
 
 	m, err := c.assemble(kp.key, issuedMaterial{

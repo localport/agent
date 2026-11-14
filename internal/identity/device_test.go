@@ -298,7 +298,7 @@ func TestEnrolDeviceRefusesAnInvalidHostOrRegion(t *testing.T) {
 	}
 }
 
-// A null or absent ticket key set is not stored, as FetchDeviceKeys refuses
+// A null or absent session CA key set is not stored, as FetchDeviceKeys refuses
 // it; an empty one is a valid set.
 func TestEnrolDeviceStoresNoNullKeySet(t *testing.T) {
 	for name, keys := range map[string]any{"absent": nil, "null": map[string]any{"ticket_keys": nil}} {
@@ -631,9 +631,9 @@ func TestSaveDiscardsAPendingRenewal(t *testing.T) {
 	if files != 2 {
 		t.Fatalf("%d certificate and key files remain, want the new pair only", files)
 	}
-	// The ticket keys the renewal stored are not credential files and stay.
+	// The session CA keys the renewal stored are not credential files and stay.
 	if _, ok := store.mustTicketKeys(deviceRef).Lookup("k1"); !ok {
-		t.Fatal("Save without keys dropped the stored ticket keys")
+		t.Fatal("Save without keys dropped the stored session CA keys")
 	}
 	if _, err := os.Stat(filepath.Join(store.Dir(deviceRef), ticketKeysFile)); err != nil {
 		t.Fatalf("%s did not survive Save: %v", ticketKeysFile, err)

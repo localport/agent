@@ -1,8 +1,6 @@
 package config
 
 import (
-	"errors"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -88,7 +86,7 @@ type DeviceSpec struct {
 	// ClipboardNotices queues the clipboard notices of the device's desktop
 	// sessions; nil sends none.
 	ClipboardNotices *tunnel.ClipboardNotices
-	// HintRevoked receives the ticket key ids a RegisterAck names revoked.
+	// HintRevoked receives the session CA key ids a RegisterAck names revoked.
 	HintRevoked func(kids []string)
 }
 
@@ -110,11 +108,20 @@ type tunnelFile struct {
 }
 
 // Load reads the YAML at path, substitutes environment references and returns
-// a validated Config.
+// a validated Config. Every failure carries errcode.TunnelConfigInvalid with
+// the path.
 func Load(path string) (*Config, error) {
+	cfg, err := load(path)
+	if err != nil {
+		return nil, errcode.New(errcode.TunnelConfigInvalid).With(err, path)
+	}
+	return cfg, nil
+}
+
+func load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, err
 	}
 
 	expanded, resolved, err := interpolate(string(raw))
@@ -136,7 +143,7 @@ func Load(path string) (*Config, error) {
 		if len(resolved) > 0 {
 			msg = redactQuoted(msg)
 		}
-		return nil, fmt.Errorf("parse yaml: %s", msg)
+		return nil, errcode.Invalidf("parse yaml: %s", msg)
 	}
 	return build(&fc)
 }
@@ -178,10 +185,10 @@ func TunnelFromFlags(token, region, local, proto, name string) (*Config, error) 
 	switch resolvedProto {
 	case "http", "tcp", "tls":
 	default:
-		return nil, fmt.Errorf("protocol %q is not one of http, tcp, tls", resolvedProto)
+		return nil, errcode.Invalidf("protocol %q is not one of http, tcp, tls", resolvedProto)
 	}
 	if resolvedLocal == "" {
-		return nil, errors.New("no upstream address to forward to")
+		return nil, errcode.Invalidf("no upstream address to forward to")
 	}
 
 	return &Config{Tunnels: []TunnelSpec{{
@@ -200,10 +207,10 @@ const maxTunnelNameLength = 64
 // are allowed because the control plane slugifies the name.
 func validTunnelName(name string) error {
 	if len(name) > maxTunnelNameLength {
-		return fmt.Errorf("--name is %d characters, over the %d character limit", len(name), maxTunnelNameLength)
+		return errcode.Invalidf("--name is %d characters, over the %d character limit", len(name), maxTunnelNameLength)
 	}
 	if name != security.SanitizeDisplay(name) {
-		return errors.New("--name contains control characters")
+		return errcode.Invalidf("--name contains control characters")
 	}
 	return nil
 }
@@ -214,8 +221,9 @@ func validRegion(region string) error {
 	if region == "" || identity.ValidRegion(region) {
 		return nil
 	}
-	return fmt.Errorf("--region %q is not a valid region, expected lowercase letters, "+
+	return errcode.Invalidf("--region %q is not a valid region, expected lowercase letters, "+
 		"digits and internal dashes", region)
+
 }
 
 // ParseLocal splits an upstream value into protocol and address. A scheme
@@ -276,10 +284,10 @@ func NormProto(p string) string {
 
 func build(fc *fileConfig) (*Config, error) {
 	if fc.Version != 1 {
-		return nil, fmt.Errorf("unsupported config version %d: this agent reads version 1, see https://localport.io/docs/configuration", fc.Version)
+		return nil, errcode.Invalidf("unsupported config version %d: this agent reads version 1, see https://localport.io/docs/configuration", fc.Version)
 	}
 	if len(fc.Tunnels) == 0 {
-		return nil, errors.New("the file lists no tunnels")
+		return nil, errcode.Invalidf("the file lists no tunnels")
 	}
 
 	out := &Config{}
@@ -295,19 +303,19 @@ func build(fc *fileConfig) (*Config, error) {
 
 func buildTunnel(idx int, t tunnelFile) (*TunnelSpec, error) {
 	if t.Name == "" {
-		return nil, fmt.Errorf("tunnel %d: name is required", idx)
+		return nil, errcode.Invalidf("tunnel %d: name is required", idx)
 	}
 	if t.Token == "" {
-		return nil, fmt.Errorf("tunnel %q: token is required", t.Name)
+		return nil, errcode.Invalidf("tunnel %q: token is required", t.Name)
 	}
 	if t.Upstream == "" {
-		return nil, fmt.Errorf("tunnel %q: upstream is required", t.Name)
+		return nil, errcode.Invalidf("tunnel %q: upstream is required", t.Name)
 	}
 	proto, local := ParseLocal(t.Upstream, "")
 	switch proto {
 	case "http", "tcp", "tls":
 	default:
-		return nil, fmt.Errorf("tunnel %q: upstream scheme %q is not one of http, tcp, tls", t.Name, proto)
+		return nil, errcode.Invalidf("tunnel %q: upstream scheme %q is not one of http, tcp, tls", t.Name, proto)
 	}
 	return &TunnelSpec{
 		Name:     t.Name,

@@ -187,7 +187,7 @@ func SystemStore(dir string) (*Store, error) {
 func (s *Store) EnsureRoot() error {
 	base, follow := s.StateRoot()
 	if err := security.EnsurePrivateDir(base, s.Root, follow); err != nil {
-		return fmt.Errorf("credential store %s: %w", s.Root, err)
+		return errStoreUnusable.With(err, s.Root)
 	}
 	return nil
 }
@@ -195,6 +195,14 @@ func (s *Store) EnsureRoot() error {
 // ErrDeviceCredential refuses a fleet device's credential where a consumer
 // credential is required: access, setup and login.
 var ErrDeviceCredential = errcode.New(errcode.DeviceCredential)
+
+var (
+	// errUnreadable is a stored credential that cannot be read or used.
+	errUnreadable = errcode.New(errcode.CredentialUnreadable)
+	// errStoreUnusable is a store directory that cannot be created, read
+	// or changed.
+	errStoreUnusable = errcode.New(errcode.CredentialStoreUnusable)
+)
 
 // defaultRoot returns the base directory of an unprivileged process,
 // LOCALPORT_HOME or ~/.localport, and true: both are chosen by the user, so
@@ -208,7 +216,7 @@ func defaultRoot() (string, bool, error) {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, ".localport"), true, nil
 	}
-	return "", false, fmt.Errorf("locate credential directory: no home directory (set %s)", HomeEnv)
+	return "", false, errStoreUnusable.With(nil, "no home directory to hold it; set "+HomeEnv)
 }
 
 // StateRoot returns the state root, where the private directory walk of the
@@ -280,10 +288,10 @@ func (s *Store) ListWithSkipped() ([]Ref, []Skipped, error) {
 func (s *Store) Remove(ctx context.Context, ref Ref) error {
 	dir := s.dir(ref)
 	if _, err := os.Stat(dir); err != nil {
-		return fmt.Errorf("no credential at %s: %w", dir, err)
+		return errUnreadable.With(err, ref.String())
 	}
 	if err := removeCredentialDir(ctx, dir); err != nil {
-		return fmt.Errorf("remove credential %s: %w", ref, err)
+		return errStoreUnusable.With(err, "remove "+ref.String())
 	}
 	s.forgetTicketKeys(dir)
 	return nil
@@ -326,7 +334,7 @@ func (s *Store) RemoveDevices(ctx context.Context) ([]string, error) {
 	}
 	for i, dir := range dirs {
 		if err := removeCredentialDir(ctx, dir); err != nil {
-			return dirs[:i], fmt.Errorf("remove %s: %w", dir, err)
+			return dirs[:i], errStoreUnusable.With(err, "remove "+dir)
 		}
 		s.forgetTicketKeys(dir)
 	}
@@ -383,12 +391,12 @@ func resolveIn(sel Selector, all []Ref) (Ref, error) {
 		return found[0], nil
 	case 0:
 		if len(all) == 0 {
-			return Ref{}, errors.New("no credential on this machine (run: localport login, or localport setup <TOKEN>)")
+			return Ref{}, errcode.New(errcode.NoCredential).With(nil, "")
 		}
-		return Ref{}, fmt.Errorf("no credential matches; this machine holds:\n%s", indentRefs(all))
+		return Ref{}, errcode.New(errcode.NoMatchingCredential).With(nil, "this machine holds:\n"+indentRefs(all))
 	default:
 		// List each candidate in full selector form.
-		return Ref{}, fmt.Errorf("several credentials match; narrow with --identity:\n%s", indentRefs(found))
+		return Ref{}, errcode.New(errcode.CredentialsAmbiguous).With(nil, "candidates:\n"+indentRefs(found))
 	}
 }
 
@@ -397,16 +405,16 @@ func resolveIn(sel Selector, all []Ref) (Ref, error) {
 func (s *Store) Load(ref Ref) (*Material, error) {
 	dir := s.dir(ref)
 	if err := s.trusted(dir); err != nil {
-		return nil, err
+		return nil, errUnreadable.With(err, ref.String())
 	}
 
 	meta, err := readMeta(filepath.Join(dir, metaFile))
 	if err != nil {
-		return nil, err
+		return nil, errUnreadable.With(err, ref.String())
 	}
 	m, err := loadMaterial(dir, meta)
 	if err != nil {
-		return nil, fmt.Errorf("no usable credential for %s: %w", ref, err)
+		return nil, errUnreadable.With(err, ref.String())
 	}
 	return m, nil
 }

@@ -81,6 +81,7 @@ func (c *Client) MintSession(ctx context.Context, cur *Material, req SessionRequ
 	}
 	// Sign per attempt, since a retry can cross a minute boundary.
 	var resp SessionCertificate
+	key := newIdempotencyKey()
 	if err := retry(ctx, DefaultRetryBudget, nil, func() error {
 		body.Timestamp = time.Now().Unix()
 		sig, signErr := cur.Key.Sign(rand.Reader, sessionRequestDigest(body), crypto.SHA256)
@@ -89,12 +90,12 @@ func (c *Client) MintSession(ctx context.Context, cur *Material, req SessionRequ
 		}
 		body.Sig = base64.StdEncoding.EncodeToString(sig)
 		resp = SessionCertificate{}
-		return c.post(ctx, "/v1/sessions", "", body, &resp)
+		return c.post(ctx, "/v1/sessions", "", key, body, &resp)
 	}); err != nil {
 		return nil, err
 	}
 	if resp.Certificate == "" || resp.URL == "" || resp.HostKey == "" {
-		return nil, fmt.Errorf("session certificate response is incomplete")
+		return nil, errAnswer.With(nil, "the session certificate answer has no certificate, URL or host key")
 	}
 	return &resp, nil
 }

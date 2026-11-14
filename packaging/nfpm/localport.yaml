@@ -34,6 +34,11 @@ contents:
     file_info:
       mode: 0755
 
+  - src: packaging/nfpm/sysusers.conf
+    dst: /usr/lib/sysusers.d/localport.conf
+    file_info:
+      mode: 0644
+
   - src: packaging/pam/localport.debian
     dst: /etc/pam.d/localport
     type: config|noreplace

@@ -39,6 +39,7 @@ func TestOpenRCScripts(t *testing.T) {
 			"no_new_privs=yes",
 			`rc_ulimit="-c 0"`,
 			"respawn_max=0",
+			`retry="TERM/30/KILL/5"`,
 			`extra_started_commands="reload mainpid"`,
 			"\tneed net " + OpenRCLauncherService,
 			`	supervise-daemon "${RC_SVCNAME}" --signal HUP`,

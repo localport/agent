@@ -67,9 +67,10 @@ func (c *Client) RedeemSetupToken(
 	}
 
 	var resp issueResponse
+	key := newIdempotencyKey()
 	if err := retry(ctx, budget, onWait, func() error {
 		resp = issueResponse{}
-		return c.post(ctx, "/v1/mtls/certs", token, map[string]string{
+		return c.post(ctx, "/v1/mtls/certs", token, key, map[string]string{
 			"csr_pem": string(kp.csrPEM),
 		}, &resp)
 	}); err != nil {
@@ -77,7 +78,7 @@ func (c *Client) RedeemSetupToken(
 	}
 	if resp.CertPEM == "" {
 		// Fail before writing an empty credential.
-		return nil, errors.New("control plane returned no certificate for the CSR")
+		return nil, errAnswer.With(nil, "no certificate for the CSR")
 	}
 
 	return consumerOnly(c.assemble(kp.key, issuedMaterial{
@@ -136,8 +137,10 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 		path = "/v1/devices/renew"
 	}
 
-	// Sign per attempt, since a retry can cross a minute boundary.
+	// Sign per attempt, since a retry can cross a minute boundary; the key
+	// stays, and the signature is not part of what it identifies.
 	var resp renewResponse
+	key := newIdempotencyKey()
 	if err := retry(ctx, DefaultRetryBudget, nil, func() error {
 		digest := renewalDigest(kp.csrDER, time.Now().Unix()/60, serial)
 		sig, signErr := cur.Key.Sign(rand.Reader, digest, crypto.SHA256)
@@ -145,7 +148,7 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 			return fmt.Errorf("sign renewal: %w", signErr)
 		}
 		resp = renewResponse{}
-		return c.post(ctx, path, "", map[string]string{
+		return c.post(ctx, path, "", key, map[string]string{
 			"cert_pem":  string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})),
 			"csr_pem":   string(kp.csrPEM),
 			"signature": base64.StdEncoding.EncodeToString(sig),
@@ -161,7 +164,7 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 		return nil, err
 	}
 	if resp.CertPEM == "" {
-		return nil, errors.New("control plane returned no certificate")
+		return nil, errAnswer.With(nil, "no certificate")
 	}
 
 	// Keep the Source of the replaced credential. Keep the team name when the
@@ -202,8 +205,8 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 // a broken control plane, and storing it would replace a working credential.
 func checkIssued(m *Material, want Ref) error {
 	if got := (Ref{Team: m.Meta.Team, Kind: m.Meta.Kind, Identity: m.Meta.Identity}); got != want {
-		return fmt.Errorf("control plane issued a certificate for %s, but %s was requested",
-			security.SanitizeDisplay(got.String()), security.SanitizeDisplay(want.String()))
+		return errAnswer.With(nil, fmt.Sprintf("the certificate is for %s, but %s was requested",
+			security.SanitizeDisplay(got.String()), security.SanitizeDisplay(want.String())))
 	}
 	_, err := m.TLSCertificate()
 	return err

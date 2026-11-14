@@ -479,7 +479,7 @@ func TestRenewalStoresTheCredentialWhenTicketKeysAreUnreadable(t *testing.T) {
 			}
 			logged := 0
 			for _, e := range events {
-				if strings.Contains(e, "ticket keys were not stored") && strings.Contains(e, ticketKeysRemedy) {
+				if strings.Contains(e, "session CA keys were not stored") && strings.Contains(e, ticketKeysRemedy) {
 					logged++
 				}
 			}
@@ -512,7 +512,7 @@ func TestRenewalLogsAKeyFailureOtherThanReadingWithoutTheRemedy(t *testing.T) {
 	var events []string
 	r := &Renewer{Store: store, Ref: deviceRef, OnEvent: func(e string) { events = append(events, e) }}
 	r.storeTicketKeys(context.Background(), deviceRef, 0, &Material{DeviceKeys: &DeviceKeys{TicketKeys: []TicketKey{{KID: "K!"}}}})
-	if len(events) != 1 || !strings.Contains(events[0], "ticket keys were not stored") || strings.Contains(events[0], ticketKeysRemedy) {
+	if len(events) != 1 || !strings.Contains(events[0], "session CA keys were not stored") || strings.Contains(events[0], ticketKeysRemedy) {
 		t.Fatalf("events %q: want the key failure logged once without the file remedy", events)
 	}
 }

@@ -158,7 +158,7 @@ func (r *DeviceRegistrar) Registered(p *Presentation) {
 // RegisteredCertificate returns the certificate, with its key, of the last
 // acknowledged registration, and false before the first. It can differ from
 // Store.Load between a RegisterAck on a renewed certificate and its promotion;
-// the edge binds session tickets to this one.
+// the edge binds sessions to this one.
 func (r *DeviceRegistrar) RegisteredCertificate() (*tls.Certificate, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

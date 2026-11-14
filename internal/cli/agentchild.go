@@ -149,7 +149,7 @@ func enrolInStore(store *identity.Store, req enrolRequest) (enrolResult, error) 
 	if err != nil {
 		// The error may quote the request. Keep the token out of terminals and
 		// logs.
-		err = security.SanitizeError(err, req.JoinToken)
+		err = security.RedactError(err, req.JoinToken)
 		if mayHaveSpent(err) {
 			return enrolResult{}, errcode.WithRemedy(err, "if the control plane redeemed the token before this failure, "+joinTokenSpent)
 		}

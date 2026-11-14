@@ -1,8 +1,7 @@
-// Package service installs, restarts and removes the fleet device service:
-// the systemd unit localport-device.service on Linux, the launchd daemon
-// io.localport.device on macOS and the Windows service localport-device. It is
-// the single source of their definitions and of the Windows Event Log
-// source. Every definition runs `<binary> run --service`. Service managers
+// Package service installs, restarts and removes the fleet device service and
+// the session launcher beside it: systemd units, OpenRC or OpenWrt procd init
+// scripts on Linux, launchd daemons on macOS and Windows services. It is the
+// single source of their definitions and of the Windows Event Log source. Every definition runs `<binary> run --service`. Service managers
 // run by absolute path, never through PATH.
 //
 // A definition this package writes carries Marker. An existing file or
@@ -30,6 +29,14 @@ import (
 // Marker identifies a service definition this package wrote.
 const Marker = "Managed by localport connect; localport service uninstall removes it."
 
+// StopBudget is how long every service manager lets the agent stop after
+// SIGTERM, a Windows stop or a Windows preshutdown before it kills it. It
+// exceeds tunnel.StopBound, the agent's longest graceful stop.
+const StopBudget = 30 * time.Second
+
+// stopBudgetSeconds is StopBudget as the integer the definitions carry.
+const stopBudgetSeconds = int(StopBudget / time.Second)
+
 // Manager controls the device service of one platform.
 type Manager interface {
 	// Name is the service's name in its service manager.
@@ -50,9 +57,6 @@ type Manager interface {
 	Install(ctx context.Context, exe string) error
 	// Restart restarts the installed service.
 	Restart(ctx context.Context) error
-	// Stop stops the agent service and returns once it has stopped; the
-	// launcher keeps running. Install starts it again.
-	Stop(ctx context.Context) error
 	// Reload makes the running service re-read its config: SIGHUP on Linux
 	// and macOS, SERVICE_CONTROL_PARAMCHANGE on Windows.
 	Reload(ctx context.Context) error
@@ -77,6 +81,12 @@ var (
 	// carry verbatim. It is security.ErrUnsafeExecutable, which also refuses
 	// a binary someone other than root could replace.
 	ErrUnsafeExecutable = security.ErrUnsafeExecutable
+
+	// errManager is a service manager command, query or call that failed.
+	errManager = errcode.New(errcode.ServiceManagerFailed)
+	// errDefinition is a definition file that could not be read, written or
+	// removed.
+	errDefinition = errcode.New(errcode.ServiceDefinitionFailed)
 )
 
 // ExitRunLocked is the exit status of `run --service` when run.lock stays
@@ -140,12 +150,13 @@ func execRun(ctx context.Context, name string, args ...string) (string, error) {
 	if output == "" {
 		output = strings.TrimSpace(stdout.String())
 	}
-	return "", &CommandError{
-		Command:  strings.Join(append([]string{name}, args...), " "),
+	command := strings.Join(append([]string{name}, args...), " ")
+	return "", errManager.With(&CommandError{
+		Command:  command,
 		ExitCode: code,
 		Output:   output,
 		Err:      err,
-	}
+	}, command)
 }
 
 // Executable is the real path of the running binary, every symlink resolved:
@@ -155,11 +166,11 @@ func execRun(ctx context.Context, name string, args ...string) (string, error) {
 func Executable() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return "", fmt.Errorf("locate the localport executable: %w", err)
+		return "", errcode.New(errcode.ExecutableUnknown).With(err, "")
 	}
 	real, err := filepath.EvalSymlinks(exe)
 	if err != nil {
-		return "", fmt.Errorf("resolve the localport executable %s: %w", exe, err)
+		return "", errcode.New(errcode.ExecutableUnknown).With(err, exe)
 	}
 	return filepath.Abs(real)
 }
@@ -185,7 +196,7 @@ func owned(path string) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read %s: %w", path, err)
+		return false, errDefinition.With(err, "read "+path)
 	}
 	if !bytes.Contains(content, []byte(Marker)) {
 		return true, ErrForeignUnit.With(nil, fmt.Sprintf("%s; move it aside or remove it, then run the command again", path))
@@ -216,26 +227,26 @@ func writeOwnedMode(path string, content []byte, mode os.FileMode) error {
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".localport-device-*")
 	if err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+		return errDefinition.With(err, "write "+path)
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.Write(content); err != nil {
 		tmp.Close()
-		return fmt.Errorf("write %s: %w", path, err)
+		return errDefinition.With(err, "write "+path)
 	}
 	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
-		return fmt.Errorf("write %s: %w", path, err)
+		return errDefinition.With(err, "write "+path)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		return fmt.Errorf("write %s: %w", path, err)
+		return errDefinition.With(err, "write "+path)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+		return errDefinition.With(err, "write "+path)
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+		return errDefinition.With(err, "write "+path)
 	}
 	return nil
 }
@@ -251,7 +262,7 @@ func removeOwned(path string) error {
 		return ErrNotInstalled
 	}
 	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("remove %s: %w", path, err)
+		return errDefinition.With(err, "remove "+path)
 	}
 	return nil
 }

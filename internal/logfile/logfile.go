@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 const (
@@ -43,7 +45,7 @@ type File struct {
 func Open(path string) (*File, error) {
 	l := &File{path: path, max: MaxSize, keep: MaxBackups}
 	if err := l.reopen(); err != nil {
-		return nil, err
+		return nil, errcode.New(errcode.LogFileUnusable).With(err, path)
 	}
 	return l, nil
 }

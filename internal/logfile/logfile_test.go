@@ -3,13 +3,23 @@
 package logfile
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/localport/agent/internal/errcode"
 )
+
+// A path that is not a regular file is refused before any descriptor moves.
+func TestOpenOfADirectoryIsCoded(t *testing.T) {
+	if _, err := Open(t.TempDir()); !errors.Is(err, errcode.New(errcode.LogFileUnusable)) {
+		t.Fatalf("Open(dir) = %v, want code %s", err, errcode.LogFileUnusable)
+	}
+}
 
 // The test re-runs itself as a child so the descriptor moves happen in a
 // process of their own: LOGFILE_CHILD names the log, LOGFILE_ROUNDS how many

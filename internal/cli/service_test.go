@@ -35,7 +35,6 @@ func (f *fakeManager) Check() ([]string, error)      { return nil, f.checkErr }
 func (f *fakeManager) Installed() (bool, error)      { return f.installed, f.installedErr }
 func (f *fakeManager) Restart(context.Context) error { return nil }
 func (f *fakeManager) Reload(context.Context) error  { f.reloads++; return nil }
-func (f *fakeManager) Stop(context.Context) error    { return nil }
 func (f *fakeManager) MainPID(context.Context) (int, error) {
 	return f.mainPID, nil
 }

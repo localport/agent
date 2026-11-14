@@ -242,7 +242,7 @@ func TestFetchDeviceKeysSendsTheCertificateAndASignedProof(t *testing.T) {
 	}
 }
 
-// A response without a ticket key set must not reach Replace, which would
+// A response without a session CA key set must not reach Replace, which would
 // empty the set; an empty array is a valid set.
 func TestFetchDeviceKeysRefusesAResponseWithoutKeys(t *testing.T) {
 	store, _ := savedDevice(t, newTestCA(t), time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))

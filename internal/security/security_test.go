@@ -2,8 +2,11 @@ package security
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 func TestResolveTokenFlagBeatsEnv(t *testing.T) {
@@ -28,6 +31,14 @@ func TestResolveTokenFallsBackToEnv(t *testing.T) {
 	}
 }
 
+func TestUnreadableTokenFileIsCoded(t *testing.T) {
+	t.Setenv("LOCALPORT_TOKEN", "")
+	t.Setenv("LOCALPORT_TOKEN_FILE", t.TempDir()+"/missing")
+	if _, err := ResolveToken("", "LOCALPORT_TOKEN"); !errors.Is(err, errcode.New(errcode.TokenFileUnreadable)) {
+		t.Fatalf("ResolveToken = %v, want code %s", err, errcode.TokenFileUnreadable)
+	}
+}
+
 func TestResolveTokenMissing(t *testing.T) {
 	t.Setenv("LOCALPORT_TOKEN", "")
 	if _, err := ResolveToken("", "LOCALPORT_TOKEN"); err == nil {
@@ -45,10 +56,27 @@ func TestRedactString(t *testing.T) {
 	}
 }
 
-func TestSanitizeError(t *testing.T) {
-	err := SanitizeError(errors.New("oops tok_xyz happened"), "tok_xyz")
-	if err == nil || strings.Contains(err.Error(), "tok_xyz") {
-		t.Fatalf("not redacted: %v", err)
+// The output layer masks every rendering and keeps the chain matchable.
+func TestRedactErrorMasksTextAndKeepsTheChain(t *testing.T) {
+	coded := errcode.New(errcode.CredentialNotKept)
+	inner := coded.With(errors.New("server said tok_xyz"), "detail tok_xyz")
+	err := fmt.Errorf("setup: %w", RedactError(inner, "tok_xyz"))
+
+	rendered, _ := errcode.Render(err)
+	for name, text := range map[string]string{
+		"Error()": err.Error(),
+		"%+v":     fmt.Sprintf("%+v", err),
+		"Render":  rendered,
+	} {
+		if strings.Contains(text, "tok_xyz") || !strings.Contains(text, "[REDACTED]") {
+			t.Errorf("%s = %q, want the secret redacted", name, text)
+		}
+	}
+	if !errors.Is(err, coded) {
+		t.Fatal("the coded error is no longer reachable through the wrapper")
+	}
+	if !strings.Contains(rendered, "["+string(errcode.CredentialNotKept)+"]") {
+		t.Fatalf("Render = %q, want the code shown", rendered)
 	}
 }
 

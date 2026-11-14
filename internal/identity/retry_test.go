@@ -25,7 +25,12 @@ func TestRetryClassification(t *testing.T) {
 		{"nil is not an error", nil, false},
 		{"dial failure", &url.Error{Op: "Post", URL: "https://api", Err: errors.New("dial tcp: connection refused")}, true},
 		{"connection reset reading the body", fmt.Errorf("read /v1/x response: %w", &net.OpError{Op: "read", Err: errors.New("connection reset")}), true},
-		{"truncated body", fmt.Errorf("read /v1/x response: %w", io.ErrUnexpectedEOF), true},
+		{"truncated body", &responseReadError{path: "/v1/x", err: io.ErrUnexpectedEOF}, true},
+		{"body read reset", fmt.Errorf("issue: %w", &responseReadError{path: "/v1/x", err: errors.New("stream error: stream ID 3; INTERNAL_ERROR")}), true},
+		{"idempotent request in flight", &APIError{Status: http.StatusConflict, Code: codeIdempotencyInFlight}, true},
+		{"conflict", &APIError{Status: http.StatusConflict, Code: "SE015"}, false},
+		{"idempotency payload mismatch is final", &APIError{Status: http.StatusUnprocessableEntity, Code: "SE038"}, false},
+		{"idempotency key missing is final", &APIError{Status: http.StatusBadRequest, Code: "SE039"}, false},
 		{"local signing failure is final", fmt.Errorf("sign renewal: %w", errors.New("key unavailable")), false},
 		{"malformed 200 body is final", fmt.Errorf("parse /v1/x response: %w", &json.SyntaxError{Offset: 1}), false},
 		{"request encoding is final", fmt.Errorf("encode request: %w", errors.New("unsupported value")), false},
@@ -227,7 +232,7 @@ func TestRetryKeepsTryingWhenTheControlPlaneHangs(t *testing.T) {
 		if attempts > 1 {
 			return &APIError{Path: "/v1/mtls/certs", Status: http.StatusForbidden}
 		}
-		return c.post(context.Background(), "/v1/mtls/certs", "tok", map[string]string{}, nil)
+		return c.post(context.Background(), "/v1/mtls/certs", "tok", "", map[string]string{}, nil)
 	})
 	if err == nil {
 		t.Fatal("want the refusal that ended the loop")
@@ -253,7 +258,7 @@ func TestRetryStopsWhenTheCallerCancels(t *testing.T) {
 	err := retry(ctx, 5*time.Second, nil, func() error {
 		attempts++
 		cancel()
-		return c.post(ctx, "/v1/mtls/certs", "tok", map[string]string{}, nil)
+		return c.post(ctx, "/v1/mtls/certs", "tok", "", map[string]string{}, nil)
 	})
 	if err == nil {
 		t.Fatal("want the attempt's error")
@@ -275,7 +280,7 @@ func TestRetryDoesNotRetryARefusal(t *testing.T) {
 	attempts := 0
 	err := retry(context.Background(), 5*time.Second, nil, func() error {
 		attempts++
-		return c.post(context.Background(), "/v1/mtls/certs", "tok", map[string]string{}, nil)
+		return c.post(context.Background(), "/v1/mtls/certs", "tok", "", map[string]string{}, nil)
 	})
 	if err == nil {
 		t.Fatal("want the refusal returned")

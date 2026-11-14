@@ -1,6 +1,6 @@
 package security
 
-import "errors"
+import "github.com/localport/agent/internal/errcode"
 
 // System files are the root-owned device config directory and the files in it
 // that root writes and the unprivileged agent account reads through group
@@ -16,7 +16,7 @@ const AgentGroup = "localport"
 
 // ErrAgentGroupMissing means the agent group does not exist on this host:
 // `localport service install` creates it.
-var ErrAgentGroupMissing = errors.New("the " + AgentGroup + " group does not exist")
+var ErrAgentGroupMissing = errcode.New(errcode.AgentGroupMissing)
 
 // systemOwner is the uid every system file and directory must be owned by.
 var systemOwner = 0

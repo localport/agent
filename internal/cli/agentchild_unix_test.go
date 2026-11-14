@@ -26,6 +26,7 @@ import (
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/service"
+	"github.com/localport/agent/internal/testroot"
 )
 
 func TestAgentChildCmdPassesNoEnvironment(t *testing.T) {
@@ -160,6 +161,40 @@ func TestEnsureIdentityDir(t *testing.T) {
 	}
 }
 
+// An empty root-owned identity directory, left by a crash between Mkdir and
+// Fchown, is given to the account; one that holds anything is refused.
+func TestRootEnsureIdentityDirAdoptsAnEmptyRootDir(t *testing.T) {
+	if os.Getuid() != 0 {
+		testroot.Require(t, "needs root")
+	}
+	acct := service.Account{UID: 65534, GID: 65534}
+	dir := filepath.Join(t.TempDir(), "identity")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureIdentityDir(dir, acct); err != nil {
+		t.Fatalf("empty root dir: %v", err)
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := fi.Sys().(*syscall.Stat_t); int(st.Uid) != acct.UID || int(st.Gid) != acct.GID {
+		t.Fatalf("owner = %d:%d, want %d:%d", st.Uid, st.Gid, acct.UID, acct.GID)
+	}
+
+	full := filepath.Join(t.TempDir(), "identity")
+	if err := os.Mkdir(full, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(full, "key"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureIdentityDir(full, acct); err == nil || !strings.Contains(err.Error(), "not the account") {
+		t.Fatalf("non-empty root dir = %v, want a refusal", err)
+	}
+}
+
 // The account stays while the identity directory still holds credentials,
 // so they keep their owner's uid.
 func TestRemoveAgentAccountKeepsAnAccountWithCredentials(t *testing.T) {
@@ -180,7 +215,7 @@ func TestRemoveAgentAccountKeepsAnAccountWithCredentials(t *testing.T) {
 // only: chgrp to root needs it.
 func TestRootRemoveAgentAccountGivesTheRemainingFilesToGroupRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
-		t.Skip("chgrp to root needs root")
+		testroot.Require(t, "chgrp to root needs root")
 	}
 	dir := t.TempDir()
 	file := config.LocalConfigFile{Path: filepath.Join(dir, "agent.yaml")}
@@ -195,9 +230,12 @@ func TestRootRemoveAgentAccountGivesTheRemainingFilesToGroupRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	saved := removeAccount
-	t.Cleanup(func() { removeAccount = saved })
+	saved, savedSysusers := removeAccount, sysusersFile
+	t.Cleanup(func() { removeAccount, sysusersFile = saved, savedSysusers })
+	sysusersFile = filepath.Join(t.TempDir(), "localport.conf")
+	removed := false
 	removeAccount = func(context.Context) error {
+		removed = true
 		for _, p := range []string{dir, file.LockPath(), file.RunLockPath()} {
 			if gid := statGID(t, p); gid != 0 {
 				t.Errorf("%s has gid %d when the account is removed, want 0", p, gid)
@@ -207,6 +245,39 @@ func TestRootRemoveAgentAccountGivesTheRemainingFilesToGroupRoot(t *testing.T) {
 	}
 	if err := removeAgentAccount(t.Context(), file); err != nil {
 		t.Fatalf("removeAgentAccount = %v", err)
+	}
+	if !removed {
+		t.Fatal("the account of an install without the sysusers file was kept")
+	}
+}
+
+// An account the package created (its sysusers.d file is installed) stays,
+// and so does the group of the files that carry it.
+func TestRootRemoveAgentAccountKeepsAPackagedAccount(t *testing.T) {
+	if os.Geteuid() != 0 {
+		testroot.Require(t, "needs root")
+	}
+	dir := t.TempDir()
+	file := config.LocalConfigFile{Path: filepath.Join(dir, "agent.yaml")}
+	const agentGID = 4242
+	if err := os.Lchown(dir, 0, agentGID); err != nil {
+		t.Fatal(err)
+	}
+	saved, savedSysusers := removeAccount, sysusersFile
+	t.Cleanup(func() { removeAccount, sysusersFile = saved, savedSysusers })
+	sysusersFile = filepath.Join(t.TempDir(), "localport.conf")
+	if err := os.WriteFile(sysusersFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	removeAccount = func(context.Context) error {
+		t.Error("removed the account the package owns")
+		return nil
+	}
+	if err := removeAgentAccount(t.Context(), file); err != nil {
+		t.Fatalf("removeAgentAccount = %v", err)
+	}
+	if gid := statGID(t, dir); gid != agentGID {
+		t.Fatalf("device directory gid = %d, want the account's %d", gid, agentGID)
 	}
 }
 

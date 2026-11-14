@@ -3,13 +3,14 @@ package identity
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // OIDC workload identity. The agent obtains a token from the CI platform and
@@ -50,10 +51,13 @@ func FetchWorkloadToken(ctx context.Context, audience string) (string, error) {
 		return fetchGitHubActionsToken(ctx, audience)
 	}
 
-	return "", fmt.Errorf(
+	return "", errCIToken.With(nil, fmt.Sprintf(
 		"no CI workload identity found: set %s, or on GitHub Actions add `permissions: { id-token: write }` to the job",
-		TokenEnv)
+		TokenEnv))
 }
+
+// errCIToken is a failure to obtain the CI platform's OIDC token.
+var errCIToken = errcode.New(errcode.CITokenUnavailable)
 
 // fetchGitHubActionsToken calls the runner token service. The per-job request
 // token is not stored or logged.
@@ -61,18 +65,18 @@ func fetchGitHubActionsToken(ctx context.Context, audience string) (string, erro
 	rawURL := os.Getenv(githubTokenURLEnv)
 	requestToken := os.Getenv(githubRequestTokenEnv)
 	if requestToken == "" {
-		return "", fmt.Errorf("%s is set but %s is not; check `permissions: { id-token: write }` on the job",
-			githubTokenURLEnv, githubRequestTokenEnv)
+		return "", errCIToken.With(nil, fmt.Sprintf("%s is set but %s is not; check `permissions: { id-token: write }` on the job",
+			githubTokenURLEnv, githubRequestTokenEnv))
 	}
 
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("parse %s: %w", githubTokenURLEnv, err)
+		return "", errCIToken.With(err, githubTokenURLEnv+" is not a URL")
 	}
 	// The URL comes from the environment and receives the request token, so
 	// require https. The URL is not echoed in the error.
 	if u.Scheme != "https" {
-		return "", fmt.Errorf("%s must be an https URL", githubTokenURLEnv)
+		return "", errCIToken.With(nil, githubTokenURLEnv+" must be an https URL")
 	}
 	q := u.Query()
 	q.Set("audience", audience)
@@ -80,34 +84,36 @@ func fetchGitHubActionsToken(ctx context.Context, audience string) (string, erro
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return "", err
+		return "", errCIToken.With(err, "")
 	}
 	req.Header.Set("Authorization", "Bearer "+requestToken)
 	req.Header.Set("Accept", "application/json; api-version=2.0")
 
+	const service = "the GitHub Actions token service"
 	resp, err := newHTTPClient().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request GitHub Actions OIDC token: %w", err)
+		return "", errCIToken.With(err, service+" could not be reached")
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return "", err
+		return "", errCIToken.With(&responseReadError{path: "GitHub Actions OIDC token", err: err}, service+" could not be reached")
 	}
+	// The status stays in the cause (--verbose); the body can echo the
+	// request token and is never included.
 	if isRedirect(resp.StatusCode) {
-		return "", fmt.Errorf("GitHub Actions OIDC endpoint answered with a redirect (HTTP %d); refusing to follow it", resp.StatusCode)
+		return "", errCIToken.With(fmt.Errorf("HTTP %d", resp.StatusCode), service+" answered with a redirect; refusing to follow it")
 	}
 	if resp.StatusCode != http.StatusOK {
-		// The response can echo the request token. Do not include it.
-		return "", fmt.Errorf("GitHub Actions OIDC token request failed with status %d", resp.StatusCode)
+		return "", errCIToken.With(fmt.Errorf("HTTP %d", resp.StatusCode), service+" refused the request; check `permissions: { id-token: write }` on the job")
 	}
 
 	var payload struct {
 		Value string `json:"value"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil || payload.Value == "" {
-		return "", errors.New("GitHub Actions returned no token")
+		return "", errCIToken.With(nil, service+" returned no token")
 	}
 	return payload.Value, nil
 }
@@ -121,16 +127,17 @@ func (c *Client) ExchangeWorkloadToken(ctx context.Context, token string) (*Mate
 	}
 
 	var resp issueResponse
+	key := newIdempotencyKey()
 	if err := retry(ctx, DefaultRetryBudget, nil, func() error {
 		resp = issueResponse{}
-		return c.postWithHeader(ctx, "/v1/mtls/certs", workloadTokenHeader, token, map[string]string{
+		return c.postWithHeader(ctx, "/v1/mtls/certs", workloadTokenHeader, token, key, map[string]string{
 			"csr_pem": string(kp.csrPEM),
 		}, &resp)
 	}); err != nil {
 		return nil, err
 	}
 	if resp.CertPEM == "" {
-		return nil, errors.New("control plane returned no certificate for the CSR")
+		return nil, errAnswer.With(nil, "no certificate for the CSR")
 	}
 	return c.assemble(kp.key, issuedMaterial{
 		CertPEM:    resp.CertPEM,

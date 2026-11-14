@@ -101,7 +101,7 @@ func (s systemd) MainPID(ctx context.Context) (int, error) {
 			active = value == "active"
 		case "MainPID":
 			if pid, err = strconv.Atoi(value); err != nil {
-				return 0, fmt.Errorf("systemctl show %s: MainPID %q: %w", SystemdUnit, value, err)
+				return 0, errManager.With(err, fmt.Sprintf("systemctl show %s: MainPID %q", SystemdUnit, value))
 			}
 		}
 	}
@@ -133,20 +133,14 @@ func (s systemd) Install(ctx context.Context, exe string) error {
 		[]string{"enable", "--now", SystemdLauncherSocket},
 		[]string{"try-restart", SystemdLauncherService},
 		[]string{"enable", SystemdUnit},
-		// restart starts a stopped unit and restarts a running one, which a
-		// conversion and an upgrade need.
+		// restart starts a stopped unit and restarts a running one, so a
+		// reinstall or an upgrade runs the new definition and binary.
 		[]string{"restart", SystemdUnit},
 	)
 }
 
 func (s systemd) Restart(ctx context.Context) error {
 	_, err := s.run(ctx, s.systemctl, "restart", SystemdUnit)
-	return err
-}
-
-// Stop stops the agent unit; systemctl stop waits for the stop job.
-func (s systemd) Stop(ctx context.Context) error {
-	_, err := s.run(ctx, s.systemctl, "stop", SystemdUnit)
 	return err
 }
 
@@ -229,6 +223,7 @@ ExecStart=%[4]s run --service
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
+TimeoutStopSec=%[8]d
 UMask=0077
 
 # A core dump would contain the device's private keys.
@@ -239,11 +234,15 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 ProtectSystem=strict
-ReadWritePaths=%[3]s %[5]s
+# "-": a path that does not exist yet does not fail the start.
+ReadWritePaths=-%[3]s -%[5]s
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+PrivateIPC=yes
+RemoveIPC=yes
 ProtectProc=invisible
+ProcSubset=pid
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -257,11 +256,12 @@ RestrictNamespaces=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
 SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target
-`, Marker, systemdDeviceDir, identityDir, exe, runLock, SystemdLauncherSocket, AgentAccount),
+`, Marker, systemdDeviceDir, identityDir, exe, runLock, SystemdLauncherSocket, AgentAccount, stopBudgetSeconds),
 
 		SystemdLauncherSocket: fmt.Appendf(nil, `# %[1]s
 

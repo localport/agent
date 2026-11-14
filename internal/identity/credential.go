@@ -145,12 +145,12 @@ func (c *Credential) reload() error {
 		if c.onSwap != nil {
 			c.onSwap(fmt.Sprintf("refused reload: %s now holds %s, not %s", c.store.dir(c.ref), got, c.spiffeID))
 		}
-		return fmt.Errorf("credential at %s was replaced with a different identity (%s, expected %s)",
-			c.store.dir(c.ref), got, c.spiffeID)
+		return errUnreadable.With(nil, fmt.Sprintf("%s was replaced with a different identity (%s, expected %s)",
+			c.store.dir(c.ref), got, c.spiffeID))
 	}
 	cert, err := m.TLSCertificate()
 	if err != nil {
-		return fmt.Errorf("load credential %s: %w", c.ref, err)
+		return errUnreadable.With(err, c.ref.String())
 	}
 
 	c.mu.Lock()

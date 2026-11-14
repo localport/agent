@@ -50,6 +50,8 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
+PrivateIPC=true
+RemoveIPC=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictSUIDSGID=true
 LockPersonality=true
@@ -74,6 +76,7 @@ RestrictRealtime=true
 
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
 SystemCallErrorNumber=EPERM
 
 ; Make every file the agent creates owner-only, not just its credentials.

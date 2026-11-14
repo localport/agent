@@ -99,6 +99,12 @@ const (
 	// plus margin for the reap.
 	sessionShutdownTimeout = 15 * time.Second
 
+	// StopBound is the longest a tunnel takes to stop once its context is
+	// cancelled: the session drain, then the session handler's shutdown, then
+	// the final clipboard flush. Tunnels stop in parallel, so it bounds the
+	// agent's graceful stop too.
+	StopBound = sessionDrainTimeout + sessionShutdownTimeout + clipboardFinalFlush
+
 	sessionMuxBackoffBase = time.Second
 	sessionMuxBackoffCeil = 60 * time.Second
 	// sessionMuxStableAfter is how long a mux stays up before a failure

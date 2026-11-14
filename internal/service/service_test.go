@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/launcher"
+	"github.com/localport/agent/internal/tunnel"
 )
 
 // recorder is a runner that records each command. It answers from next,
@@ -75,13 +77,18 @@ func TestSystemdUnits(t *testing.T) {
 			"NoNewPrivileges=yes",
 			"CapabilityBoundingSet=",
 			"ProtectSystem=strict",
-			"ReadWritePaths=/etc/localport-device/identity /etc/localport-device/run.lock",
+			"ReadWritePaths=-/etc/localport-device/identity -/etc/localport-device/run.lock",
+			"TimeoutStopSec=30",
 			"ProtectHome=yes",
 			"PrivateTmp=yes",
 			"PrivateDevices=yes",
+			"PrivateIPC=yes",
+			"RemoveIPC=yes",
 			"ProtectProc=invisible",
+			"ProcSubset=pid",
 			"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
 			"SystemCallFilter=@system-service",
+			"SystemCallFilter=~@privileged @resources",
 			"SystemCallArchitectures=native",
 			"Wants=network-online.target " + SystemdLauncherSocket,
 			"WantedBy=multi-user.target",
@@ -115,6 +122,41 @@ func TestSystemdUnits(t *testing.T) {
 				t.Errorf("launcher unit sets %q, which confines the sessions it starts", line)
 			}
 		}
+	}
+}
+
+var updateGolden = flag.Bool("update", false, "rewrite testdata/localport-device.service")
+
+// testdata/localport-device.service is the generated agent unit, which CI
+// scores with systemd-analyze security.
+func TestSystemdAgentUnitMatchesGolden(t *testing.T) {
+	units, err := systemdUnits(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden := filepath.Join("testdata", "localport-device.service")
+	if *updateGolden {
+		if err := os.WriteFile(golden, units[SystemdUnit], 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(units[SystemdUnit], want) {
+		t.Fatalf("generated agent unit differs from %s; rerun with -update and review the diff", golden)
+	}
+}
+
+// Every service manager waits longer than the agent's longest graceful stop
+// before it kills the agent, and the launchd bootout wait outlasts that.
+func TestStopBudgetCoversTheAgentStop(t *testing.T) {
+	if StopBudget <= tunnel.StopBound {
+		t.Fatalf("StopBudget %v does not exceed tunnel.StopBound %v", StopBudget, tunnel.StopBound)
+	}
+	if bootoutWait <= StopBudget {
+		t.Fatalf("bootoutWait %v does not outlast StopBudget %v", bootoutWait, StopBudget)
 	}
 }
 
@@ -344,6 +386,15 @@ func TestLaunchdPlists(t *testing.T) {
 	}
 	if bytes.Contains(agent, []byte("StandardOutPath")) {
 		t.Error("agent plist sets StandardOutPath; the agent opens its own log")
+	}
+	for _, want := range []string{
+		"<key>ExitTimeOut</key>\n  <integer>30</integer>",
+		"<key>SoftResourceLimits</key>\n  <dict>\n    <key>Core</key>\n    <integer>0</integer>",
+		"<key>HardResourceLimits</key>\n  <dict>\n    <key>Core</key>\n    <integer>0</integer>",
+	} {
+		if !bytes.Contains(agent, []byte(want)) {
+			t.Errorf("agent plist lacks %q", want)
+		}
 	}
 
 	session, err := launchdLauncherPlist("/opt/a&b/localport-session", 401)

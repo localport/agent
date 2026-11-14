@@ -9,7 +9,7 @@ import (
 )
 
 // The OpenWrt procd services: init scripts in /etc/init.d through
-// /etc/rc.common with USE_PROCD (research.md X33). Their output goes to
+// /etc/rc.common with USE_PROCD. Their output goes to
 // logd (stdout and stderr), so no process opens a log file.
 const (
 	ProcdService         = "localport-device"
@@ -56,7 +56,7 @@ func (p procd) MainPID(ctx context.Context) (int, error) {
 	}
 	var list procdList
 	if err := json.Unmarshal([]byte(out), &list); err != nil {
-		return 0, fmt.Errorf("ubus call service list: %w", err)
+		return 0, errManager.With(err, "ubus call service list")
 	}
 	for _, in := range list[ProcdService].Instances {
 		if in.Running {
@@ -66,11 +66,12 @@ func (p procd) MainPID(ctx context.Context) (int, error) {
 	return 0, nil
 }
 
-// Install writes both scripts, enables them and starts them. A start of a
-// running service whose definition changed makes procd restart its
-// instance in place; procd then waits briefly for the instance cgroup to
-// drain and leaves the launcher's sessions running. A stop (Uninstall)
-// kills the cgroup and ends them.
+// Install writes both scripts, enables them and starts them. procd restarts a
+// running instance when a start brings a changed definition; the launcher's
+// definition names its binary as a file, so an upgrade changes its checksum
+// and restarts it, and a reinstall of the same binary leaves it running.
+// procd kills an instance's cgroup whenever the instance exits, so a launcher
+// restart or stop ends the sessions it started.
 func (p procd) Install(ctx context.Context, exe string) error {
 	if err := checkOwned(p.paths()...); err != nil {
 		return err
@@ -88,8 +89,8 @@ func (p procd) Install(ctx context.Context, exe string) error {
 		{p.script(ProcdLauncherService), "enable"},
 		{p.script(ProcdLauncherService), "start"},
 		{p.script(ProcdService), "enable"},
-		// restart starts a stopped agent and restarts a running one, which a
-		// conversion and an upgrade need.
+		// restart starts a stopped agent and restarts a running one, so a
+		// reinstall or an upgrade runs the new script and binary.
 		{p.script(ProcdService), "restart"},
 	} {
 		if _, err := p.run(ctx, args[0], args[1:]...); err != nil {
@@ -101,12 +102,6 @@ func (p procd) Install(ctx context.Context, exe string) error {
 
 func (p procd) Restart(ctx context.Context) error {
 	_, err := p.run(ctx, p.script(ProcdService), "restart")
-	return err
-}
-
-// Stop stops the agent's instance.
-func (p procd) Stop(ctx context.Context) error {
-	_, err := p.run(ctx, p.script(ProcdService), "stop")
 	return err
 }
 
@@ -169,6 +164,7 @@ start_service() {
 	# A core dump would contain the device's private keys.
 	procd_set_param limits core="0 0"
 	procd_set_param respawn 3600 5 0
+	procd_set_param term_timeout %[5]d
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
@@ -179,7 +175,7 @@ start_service() {
 reload_service() {
 	procd_send_signal %[4]s '*' HUP
 }
-`, Marker, exe, AgentAccount, ProcdService),
+`, Marker, exe, AgentAccount, ProcdService, stopBudgetSeconds),
 
 		ProcdLauncherService: fmt.Appendf(nil, `#!/bin/sh /etc/rc.common
 # %[1]s
@@ -193,6 +189,7 @@ STOP=11
 start_service() {
 	procd_open_instance
 	procd_set_param command %[2]s launcher
+	procd_set_param file %[2]s
 	procd_set_param respawn 3600 1 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1

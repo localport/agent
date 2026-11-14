@@ -1,10 +1,10 @@
 package config
 
 import (
-	"errors"
-	"fmt"
 	"os"
 	"strings"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // interpolate substitutes environment references in Compose syntax.
@@ -44,7 +44,7 @@ func interpolate(raw string) (string, []string, error) {
 		}
 		end := strings.IndexByte(raw[i:], '}')
 		if end < 0 {
-			return "", nil, errors.New("unterminated ${ in config")
+			return "", nil, errcode.Invalidf("unterminated ${ in config")
 		}
 		ref := raw[i+2 : i+end]
 		value, err := resolveRef(ref)
@@ -59,7 +59,7 @@ func interpolate(raw string) (string, []string, error) {
 	}
 
 	if len(missing) > 0 {
-		return "", nil, fmt.Errorf("%s", strings.Join(missing, "; "))
+		return "", nil, errcode.Invalidf("%s", strings.Join(missing, "; "))
 	}
 	return out.String(), resolved, nil
 }
@@ -76,12 +76,12 @@ func resolveRef(ref string) (string, error) {
 			return value, nil
 		}
 		if message == "" {
-			return "", fmt.Errorf("%s is not set", name)
+			return "", errcode.Invalidf("%s is not set", name)
 		}
-		return "", fmt.Errorf("%s: %s", name, message)
+		return "", errcode.Invalidf("%s: %s", name, message)
 	}
 	if value := os.Getenv(ref); value != "" {
 		return value, nil
 	}
-	return "", fmt.Errorf("%s is not set", ref)
+	return "", errcode.Invalidf("%s is not set", ref)
 }

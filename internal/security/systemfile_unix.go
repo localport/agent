@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 const (
@@ -30,11 +32,11 @@ func AgentGroupID() (int, error) {
 		if errors.As(err, &unknown) {
 			return 0, ErrAgentGroupMissing
 		}
-		return 0, fmt.Errorf("look up group %s: %w", AgentGroup, err)
+		return 0, errcode.New(errcode.AccountNotChanged).With(err, "look up group "+AgentGroup)
 	}
 	gid, err := strconv.Atoi(g.Gid)
 	if err != nil {
-		return 0, fmt.Errorf("group %s has a non-numeric gid %q", AgentGroup, g.Gid)
+		return 0, errcode.New(errcode.AccountNotChanged).With(nil, fmt.Sprintf("group %s has a non-numeric gid %q", AgentGroup, g.Gid))
 	}
 	return gid, nil
 }

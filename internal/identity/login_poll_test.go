@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,7 +17,17 @@ import (
 // refusal: one dropped packet would end a sign-in already approved.
 func TestLoginSurvivesATransportFailureMidPoll(t *testing.T) {
 	var polls atomic.Int32
+	var mu sync.Mutex
+	var startKey string
+	var pollKeys []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if strings.HasSuffix(r.URL.Path, "/device/start") {
+			startKey = r.Header.Get("Idempotency-Key")
+		} else {
+			pollKeys = append(pollKeys, r.Header.Get("Idempotency-Key"))
+		}
+		mu.Unlock()
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/device/start"):
 			writeJSON(t, w, map[string]any{
@@ -70,6 +81,16 @@ func TestLoginSurvivesATransportFailureMidPoll(t *testing.T) {
 	}
 	if polls.Load() < 3 {
 		t.Fatalf("polled %d times; the blip should have been ridden out", polls.Load())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !idempotencyKeySyntax.MatchString(startKey) {
+		t.Fatalf("start Idempotency-Key = %q, want a quoted base32 string", startKey)
+	}
+	// A pending answer ends one poll, so the next carries a new key; the poll
+	// lost to the blip is repeated under its own key.
+	if len(pollKeys) != 3 || pollKeys[1] == pollKeys[0] || pollKeys[2] != pollKeys[1] || pollKeys[0] == startKey {
+		t.Fatalf("poll keys = %q, want a new key after pending and the same key after the blip", pollKeys)
 	}
 	if mat.Meta.Source != SourceSSO {
 		t.Fatalf("source = %q, want %q", mat.Meta.Source, SourceSSO)

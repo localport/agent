@@ -33,7 +33,7 @@ func TestClientDoesNotFollowRedirect(t *testing.T) {
 	first, reached, sawCredential := redirectPair(t)
 	c := &Client{BaseURL: first.URL, HTTP: newHTTPClient()}
 
-	err := c.postWithHeader(context.Background(), "/v1/mtls/workload", "X-Workload-Token", "secret", map[string]string{}, nil)
+	err := c.postWithHeader(context.Background(), "/v1/mtls/workload", "X-Workload-Token", "secret", "", map[string]string{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "refusing to follow") {
 		t.Fatalf("err = %v, want the redirect refusal", err)
 	}

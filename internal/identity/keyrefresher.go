@@ -16,8 +16,9 @@ const (
 	keyRefreshInterval = 6 * time.Hour
 
 	// keyRefreshFloor is the least time between two fetch starts that
-	// RefreshNow allows. Tickets naming an unknown kid call RefreshNow, so the
-	// floor bounds what a stream of them costs the control plane.
+	// RefreshNow allows. A session certificate signed by an unknown CA key
+	// calls RefreshNow, so the floor bounds what a stream of them costs the
+	// control plane.
 	keyRefreshFloor = 5 * time.Minute
 
 	// A failed fetch retries after minKeyRetry, doubling to maxKeyRetry.
@@ -27,9 +28,9 @@ const (
 
 // ErrKeyRefresherStopped means RefreshNow was called while Run is not running,
 // before it starts or after it returns.
-var ErrKeyRefresherStopped = errors.New("ticket key refresher is not running")
+var ErrKeyRefresherStopped = errors.New("session CA key refresher is not running")
 
-// KeyRefresher keeps one device identity's ticket key set current from
+// KeyRefresher keeps one device identity's session CA key set current from
 // POST /v1/devices/keys. Run fetches at once when the stored set is empty,
 // then every keyRefreshInterval with ±10 % jitter; RefreshNow fetches on
 // demand, and Hint brings the next fetch forward to the earliest time
@@ -127,7 +128,7 @@ func (r *KeyRefresher) log(format string, args ...any) {
 func (r *KeyRefresher) Run(ctx context.Context) {
 	keys, err := r.Store.TicketKeys(r.Ref)
 	if err != nil {
-		r.log("identity: cannot refresh ticket keys: %v", err)
+		r.log("identity: cannot refresh session CA keys: %v", err)
 		return
 	}
 
@@ -281,7 +282,7 @@ func (r *KeyRefresher) startLocked(ctx context.Context) *keyFetch {
 		// Emitted last, without mu and after waiters are released, so OnEvent
 		// may call RefreshNow or wait for another caller's RefreshNow.
 		if err != nil && ctx.Err() == nil {
-			r.log("identity: ticket key fetch for %s failed, retrying in %s: %v", r.Ref, retryIn.Round(time.Second), err)
+			r.log("identity: session CA key fetch for %s failed, retrying in %s: %v", r.Ref, retryIn.Round(time.Second), err)
 		}
 	}()
 	return f

@@ -111,9 +111,9 @@ func (r *Renewer) renewLocked(ctx context.Context, client *Client, cur *Material
 	return next, nil
 }
 
-// keyGeneration is the hint generation of the identity's ticket keys, read
-// before a renewal request so the renewed set settles only earlier hints. It
-// is 0 for an identity that holds no ticket keys.
+// keyGeneration is the hint generation of the identity's session CA keys,
+// read before a renewal request so the renewed set settles only earlier
+// hints. It is 0 for an identity that holds no session CA keys.
 func (r *Renewer) keyGeneration() uint64 {
 	keys, err := r.Store.TicketKeys(r.Ref)
 	if err != nil {
@@ -138,9 +138,9 @@ func (r *Renewer) storeTicketKeys(ctx context.Context, ref Ref, generation uint6
 	}
 	switch {
 	case errors.Is(err, ErrTicketKeysUnreadable):
-		r.log("identity: renewed %s, but its ticket keys were not stored: %v; fix the mode of ticket_keys.json to owner-only, or remove it if it is malformed, owned by another user or not a regular file, and the next key fetch or renewal writes the set", ref, err)
+		r.log("identity: renewed %s, but its session CA keys were not stored: %v; fix the mode of ticket_keys.json to owner-only, or remove it if it is malformed, owned by another user or not a regular file, and the next key fetch or renewal writes the set", ref, err)
 	case err != nil:
-		r.log("identity: renewed %s, but its ticket keys were not stored: %v", ref, err)
+		r.log("identity: renewed %s, but its session CA keys were not stored: %v", ref, err)
 	}
 }
 

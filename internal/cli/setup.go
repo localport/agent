@@ -79,7 +79,7 @@ func runSetup(args []string) error {
 	if err != nil {
 		// The error may quote the request. Keep the token out of terminals and
 		// CI logs.
-		return security.SanitizeError(err, secret)
+		return security.RedactError(err, secret)
 	}
 	ref, err := store.SaveIssued(ctx, *material)
 	if err != nil {

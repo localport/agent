@@ -63,6 +63,19 @@ func setRequiredPrivileges(h windows.Handle, privileges []string) error {
 	return changeServiceConfig2(h, windows.SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, (*byte)(unsafe.Pointer(&info)))
 }
 
+// servicePreshutdownInfo is SERVICE_PRESHUTDOWN_INFO, which x/sys does not
+// define: the preshutdown timeout in milliseconds.
+type servicePreshutdownInfo struct {
+	preshutdownTimeout uint32
+}
+
+// setPreshutdownTimeout sets how long the service control manager waits for
+// service h to stop after SERVICE_CONTROL_PRESHUTDOWN.
+func setPreshutdownTimeout(h windows.Handle, timeout time.Duration) error {
+	info := servicePreshutdownInfo{preshutdownTimeout: uint32(timeout / time.Millisecond)}
+	return changeServiceConfig2(h, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO, (*byte)(unsafe.Pointer(&info)))
+}
+
 // windowsDescription carries Marker, the Windows form of a marker line.
 const windowsDescription = "Localport fleet device agent. " + Marker
 
@@ -78,7 +91,7 @@ func (scm) Name() string { return WindowsName }
 func (scm) open(fn func(*mgr.Mgr, *mgr.Service) error) error {
 	m, err := mgr.Connect()
 	if err != nil {
-		return fmt.Errorf("connect to the service control manager: %w", err)
+		return errManager.With(err, "connect to the service control manager")
 	}
 	defer func() { _ = m.Disconnect() }()
 	s, err := m.OpenService(WindowsName)
@@ -86,7 +99,7 @@ func (scm) open(fn func(*mgr.Mgr, *mgr.Service) error) error {
 		return fn(m, nil)
 	}
 	if err != nil {
-		return fmt.Errorf("open service %s: %w", WindowsName, err)
+		return errManager.With(err, "open service "+WindowsName)
 	}
 	defer s.Close()
 	return fn(m, s)
@@ -97,7 +110,7 @@ func (scm) open(fn func(*mgr.Mgr, *mgr.Service) error) error {
 func ownedService(name string, s interface{ Config() (mgr.Config, error) }) (mgr.Config, error) {
 	cfg, err := s.Config()
 	if err != nil {
-		return cfg, fmt.Errorf("read service %s: %w", name, err)
+		return cfg, errManager.With(err, "read service "+name)
 	}
 	if !strings.Contains(cfg.Description, Marker) {
 		return cfg, ErrForeignUnit.With(nil, fmt.Sprintf("Windows service %q; remove it (sc.exe delete %s), then run the command again", name, name))
@@ -168,7 +181,7 @@ func (s scmService) ChangeNothing() error {
 // that a handle still holds.
 func checkNotMarkedForDelete(name string, s interface{ ChangeNothing() error }) error {
 	if err := s.ChangeNothing(); err != nil {
-		return markedForDelete(fmt.Errorf("read service %s: %w", name, err))
+		return markedForDelete(errManager.With(err, "read service "+name))
 	}
 	return nil
 }
@@ -193,7 +206,7 @@ func (c scm) MainPID(context.Context) (int, error) {
 		}
 		status, err := s.Query()
 		if err != nil {
-			return fmt.Errorf("query service %s: %w", WindowsName, err)
+			return errManager.With(err, "query service "+WindowsName)
 		}
 		if status.State == svc.Running {
 			pid = int(status.ProcessId)
@@ -212,17 +225,17 @@ func registerEventSource(name string) error {
 		return nil
 	}
 	if !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
-		return fmt.Errorf("read event log source %s: %w", name, err)
+		return errManager.With(err, "read event log source "+name)
 	}
 	if err := eventlog.InstallAsEventCreate(name, eventlog.Error|eventlog.Warning|eventlog.Info); err != nil {
-		return fmt.Errorf("register event log source %s: %w", name, err)
+		return errManager.With(err, "register event log source "+name)
 	}
 	return nil
 }
 
 func removeEventSource(name string) error {
 	if err := eventlog.Remove(name); err != nil && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
-		return fmt.Errorf("remove event log source %s: %w", name, err)
+		return errManager.With(err, "remove event log source "+name)
 	}
 	return nil
 }
@@ -233,6 +246,7 @@ type winService interface {
 	Config() (mgr.Config, error)
 	UpdateConfig(mgr.Config) error
 	SetRequiredPrivileges(privileges []string) error
+	SetPreshutdownTimeout(timeout time.Duration) error
 	SetRecoveryActions(actions []mgr.RecoveryAction, resetPeriod uint32) error
 	SetRecoveryActionsOnNonCrashFailures(flag bool) error
 	Query() (svc.Status, error)
@@ -240,11 +254,16 @@ type winService interface {
 	Start(args ...string) error
 }
 
-// scmService adds the required privileges call x/sys lacks to *mgr.Service.
+// scmService adds the required privileges and preshutdown calls x/sys lacks
+// to *mgr.Service.
 type scmService struct{ *mgr.Service }
 
 func (s scmService) SetRequiredPrivileges(privileges []string) error {
 	return setRequiredPrivileges(s.Handle, privileges)
+}
+
+func (s scmService) SetPreshutdownTimeout(timeout time.Duration) error {
+	return setPreshutdownTimeout(s.Handle, timeout)
 }
 
 // LauncherName is the session launcher service: localport-session.exe
@@ -263,11 +282,15 @@ type serviceDef struct {
 	exe                                 string
 	args                                []string
 	privileges                          []string
+	// preshutdown, when non-zero, is the preshutdown timeout. Only the agent
+	// has one: it ends its sessions during preshutdown, before the launcher
+	// gets SERVICE_CONTROL_SHUTDOWN.
+	preshutdown time.Duration
 }
 
 func agentDef(exe string) serviceDef {
 	return serviceDef{name: WindowsName, display: "Localport device", description: windowsDescription, account: windowsAccount,
-		exe: exe, args: []string{"run", "--service"}, privileges: serviceRequiredPrivileges}
+		exe: exe, args: []string{"run", "--service"}, privileges: serviceRequiredPrivileges, preshutdown: StopBudget}
 }
 
 func launcherDef(exe string) serviceDef {
@@ -309,7 +332,7 @@ func (c scm) Install(ctx context.Context, exe string) error {
 func openService(name string, fn func(*mgr.Mgr, *mgr.Service) error) error {
 	m, err := mgr.Connect()
 	if err != nil {
-		return fmt.Errorf("connect to the service control manager: %w", err)
+		return errManager.With(err, "connect to the service control manager")
 	}
 	defer func() { _ = m.Disconnect() }()
 	s, err := m.OpenService(name)
@@ -317,7 +340,7 @@ func openService(name string, fn func(*mgr.Mgr, *mgr.Service) error) error {
 		return fn(m, nil)
 	}
 	if err != nil {
-		return fmt.Errorf("open service %s: %w", name, err)
+		return errManager.With(err, "open service "+name)
 	}
 	defer s.Close()
 	return fn(m, s)
@@ -343,7 +366,7 @@ func installDefinition(ctx context.Context, d serviceDef, existing winService, c
 	if s == nil {
 		created, closeCreated, err := create(want)
 		if err != nil {
-			return markedForDelete(fmt.Errorf("create service %s: %w", d.name, err))
+			return markedForDelete(errManager.With(err, "create service "+d.name))
 		}
 		defer closeCreated()
 		s = created
@@ -359,19 +382,24 @@ func installDefinition(ctx context.Context, d serviceDef, existing winService, c
 		cfg.DisplayName, cfg.Description = want.DisplayName, want.Description
 		cfg.StartType, cfg.ServiceStartName, cfg.SidType = want.StartType, want.ServiceStartName, want.SidType
 		if err := s.UpdateConfig(cfg); err != nil {
-			return markedForDelete(fmt.Errorf("update service %s: %w", d.name, err))
+			return markedForDelete(errManager.With(err, "update service "+d.name))
 		}
 	}
 	if err := s.SetRequiredPrivileges(d.privileges); err != nil {
-		return fmt.Errorf("set required privileges of service %s: %w", d.name, err)
+		return errManager.With(err, "set required privileges of service "+d.name)
+	}
+	if d.preshutdown > 0 {
+		if err := s.SetPreshutdownTimeout(d.preshutdown); err != nil {
+			return errManager.With(err, "set preshutdown timeout of service "+d.name)
+		}
 	}
 	// Restart on any exit, as systemd's Restart=always and launchd's
 	// KeepAlive do; reset the failure count after a day.
 	if err := s.SetRecoveryActions([]mgr.RecoveryAction{{Type: mgr.ServiceRestart, Delay: 5 * time.Second}}, 86400); err != nil {
-		return fmt.Errorf("set recovery of service %s: %w", d.name, err)
+		return errManager.With(err, "set recovery of service "+d.name)
 	}
 	if err := s.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
-		return fmt.Errorf("set recovery of service %s: %w", d.name, err)
+		return errManager.With(err, "set recovery of service "+d.name)
 	}
 	return restart(ctx, d.name, s)
 }
@@ -384,20 +412,9 @@ func (c scm) Reload(context.Context) error {
 			return ErrNotInstalled
 		}
 		if _, err := s.Control(svc.ParamChange); err != nil {
-			return fmt.Errorf("reload service %s: %w", WindowsName, err)
+			return errManager.With(err, "reload service "+WindowsName)
 		}
 		return nil
-	})
-}
-
-// Stop stops the device service and waits until it has stopped; the
-// launcher keeps running.
-func (c scm) Stop(ctx context.Context) error {
-	return c.open(func(_ *mgr.Mgr, s *mgr.Service) error {
-		if s == nil {
-			return ErrNotInstalled
-		}
-		return stop(ctx, WindowsName, scmService{s})
 	})
 }
 
@@ -430,7 +447,7 @@ func (c scm) Uninstall(ctx context.Context) error {
 				return err
 			}
 			if err := s.Delete(); err != nil {
-				return fmt.Errorf("delete service %s: %w", name, err)
+				return errManager.With(err, "delete service "+name)
 			}
 			return nil
 		})
@@ -449,7 +466,7 @@ func restart(ctx context.Context, name string, s winService) error {
 		return err
 	}
 	if err := s.Start(); err != nil {
-		return fmt.Errorf("start service %s: %w", name, err)
+		return errManager.With(err, "start service "+name)
 	}
 	return nil
 }
@@ -461,25 +478,25 @@ func stop(ctx context.Context, name string, s winService) error {
 	defer cancel()
 	status, err := s.Query()
 	if err != nil {
-		return fmt.Errorf("query service %s: %w", name, err)
+		return errManager.With(err, "query service "+name)
 	}
 	if status.State == svc.Stopped {
 		return nil
 	}
 	if _, err := s.Control(svc.Stop); err != nil && !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) {
-		return fmt.Errorf("stop service %s: %w", name, err)
+		return errManager.With(err, "stop service "+name)
 	}
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("stop service %s: %w", name, ctx.Err())
+			return errManager.With(ctx.Err(), "stop service "+name)
 		case <-tick.C:
 		}
 		status, err := s.Query()
 		if err != nil {
-			return fmt.Errorf("query service %s: %w", name, err)
+			return errManager.With(err, "query service "+name)
 		}
 		switch status.State {
 		case svc.Stopped:
@@ -487,7 +504,7 @@ func stop(ctx context.Context, name string, s winService) error {
 		case svc.Running:
 			// A recovery action restarted the service during the wait.
 			if _, err := s.Control(svc.Stop); err != nil && !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) {
-				return fmt.Errorf("stop service %s: %w", name, err)
+				return errManager.With(err, "stop service "+name)
 			}
 		}
 	}
@@ -512,7 +529,7 @@ func StopOwned(ctx context.Context) ([]string, error) {
 			}
 			status, err := s.Query()
 			if err != nil {
-				return fmt.Errorf("query service %s: %w", name, err)
+				return errManager.With(err, "query service "+name)
 			}
 			if status.State == svc.Stopped {
 				return nil
@@ -549,7 +566,7 @@ func StartOwned(names []string) error {
 				return err
 			}
 			if err := s.Start(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
-				return fmt.Errorf("start service %s: %w", name, err)
+				return errManager.With(err, "start service "+name)
 			}
 			return nil
 		}))
@@ -562,12 +579,12 @@ func StartOwned(names []string) error {
 func ForeignServicesIn(dir string) ([]string, error) {
 	m, err := mgr.Connect()
 	if err != nil {
-		return nil, fmt.Errorf("connect to the service control manager: %w", err)
+		return nil, errManager.With(err, "connect to the service control manager")
 	}
 	defer func() { _ = m.Disconnect() }()
 	names, err := m.ListServices()
 	if err != nil {
-		return nil, fmt.Errorf("list services: %w", err)
+		return nil, errManager.With(err, "list services")
 	}
 	var foreign []string
 	for _, name := range names {
@@ -658,12 +675,12 @@ func CrashDir(name string) (dir string, deviceService bool) {
 func runUnderSCM(name, version string, serve func(ctx context.Context, running func()) error, paramChange func()) (bool, error) {
 	isService, err := svc.IsWindowsService()
 	if err != nil {
-		return false, fmt.Errorf("detect the service control manager: %w", err)
+		return false, errManager.With(err, "detect the service control manager")
 	}
 	if !isService {
 		return false, nil
 	}
-	h := &scmHandler{name: name, serve: serve, paramChange: paramChange}
+	h := &scmHandler{name: name, serve: serve, paramChange: paramChange, preshutdown: name == WindowsName}
 	// Without the Event Log the service still runs; the manager records its
 	// exit code.
 	warn, report := func(string) {}, func(string) {}
@@ -682,7 +699,7 @@ func runUnderSCM(name, version string, serve func(ctx context.Context, running f
 		warn(name + ": crash capture is off: %ProgramData% is not set")
 	}
 	if err := svc.Run(name, h); err != nil {
-		return true, fmt.Errorf("run service %s: %w", name, err)
+		return true, errManager.With(err, "run service "+name)
 	}
 	return true, h.err
 }
@@ -752,6 +769,9 @@ type scmHandler struct {
 	// paramChange, when set, is called on SERVICE_CONTROL_PARAMCHANGE,
 	// which the service then accepts.
 	paramChange func()
+	// preshutdown makes the service accept SERVICE_CONTROL_PRESHUTDOWN and
+	// stop on it; install set its timeout (serviceDef.preshutdown).
+	preshutdown bool
 	log         *eventlog.Log
 	err         error
 }
@@ -761,9 +781,8 @@ type scmHandler struct {
 // in START_PENDING accepts no Stop.
 const startWaitHint = 15 * time.Second
 
-// stopWaitHint is the STOP_PENDING wait hint. It covers the session shutdown
-// bound (15 s) and the tunnel stop that follows.
-const stopWaitHint = 25 * time.Second
+// stopWaitHint is the STOP_PENDING wait hint: the agent's stop budget.
+const stopWaitHint = StopBudget
 
 func (h *scmHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
 	pending := svc.Status{State: svc.StartPending, WaitHint: uint32(startWaitHint / time.Millisecond)}
@@ -782,6 +801,9 @@ func (h *scmHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, stat
 			accepts := svc.AcceptStop | svc.AcceptShutdown
 			if h.paramChange != nil {
 				accepts |= svc.AcceptParamChange
+			}
+			if h.preshutdown {
+				accepts |= svc.AcceptPreShutdown
 			}
 			status <- svc.Status{State: svc.Running, Accepts: accepts}
 		case h.err = <-done:
@@ -803,7 +825,7 @@ func (h *scmHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, stat
 					h.paramChange()
 				}
 				status <- req.CurrentStatus
-			case svc.Stop, svc.Shutdown:
+			case svc.Stop, svc.Shutdown, svc.PreShutdown:
 				status <- svc.Status{State: svc.StopPending, WaitHint: uint32(stopWaitHint / time.Millisecond)}
 				cancel()
 				h.err = <-done

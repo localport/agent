@@ -102,6 +102,7 @@ type fakeService struct {
 	cfg                         mgr.Config
 	updateErr, changeNothingErr error
 	privileges                  []string
+	preshutdown                 time.Duration
 	updated                     bool
 	calls                       []string
 }
@@ -116,6 +117,11 @@ func (f *fakeService) SetRequiredPrivileges(p []string) error {
 	f.calls = append(f.calls, "privileges")
 	return nil
 }
+func (f *fakeService) SetPreshutdownTimeout(d time.Duration) error {
+	f.preshutdown = d
+	f.calls = append(f.calls, "preshutdown")
+	return nil
+}
 func (f *fakeService) SetRecoveryActions([]mgr.RecoveryAction, uint32) error { return nil }
 func (f *fakeService) SetRecoveryActionsOnNonCrashFailures(bool) error       { return nil }
 func (f *fakeService) Query() (svc.Status, error)                            { return svc.Status{State: svc.Stopped}, nil }
@@ -125,6 +131,86 @@ func (f *fakeService) Start(...string) error {
 	return nil
 }
 func (f *fakeService) ChangeNothing() error { return f.changeNothingErr }
+
+// Install sets the device service's preshutdown timeout to the stop budget on
+// create and on update, before it starts the service; the launcher gets none,
+// so it is still running while the agent ends its sessions.
+func TestInstallSetsThePreshutdownTimeout(t *testing.T) {
+	for name, d := range map[string]serviceDef{"agent": agentDef(`C:\l.exe`), "launcher": launcherDef(`C:\l.exe`)} {
+		for _, existing := range []*fakeService{nil, {cfg: mgr.Config{Description: d.description}}} {
+			created := &fakeService{}
+			create := func(mgr.Config) (winService, func(), error) { return created, func() {}, nil }
+			var current winService
+			got := created
+			if existing != nil {
+				current, got = existing, existing
+			}
+			if err := installDefinition(context.Background(), d, current, create); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			want, wantCalls := time.Duration(0), []string{"privileges", "start"}
+			if name == "agent" {
+				want, wantCalls = StopBudget, []string{"privileges", "preshutdown", "start"}
+			}
+			if got.preshutdown != want || !slices.Equal(got.calls, wantCalls) {
+				t.Fatalf("%s (existing %v): preshutdown %v, calls %q; want %v, %q", name, existing != nil, got.preshutdown, got.calls, want, wantCalls)
+			}
+		}
+	}
+}
+
+// The preshutdown timeout reaches ChangeServiceConfig2 as a
+// SERVICE_PRESHUTDOWN_INFO in milliseconds.
+func TestSetPreshutdownTimeoutPassesMilliseconds(t *testing.T) {
+	prev := changeServiceConfig2
+	t.Cleanup(func() { changeServiceConfig2 = prev })
+	var level, got uint32
+	changeServiceConfig2 = func(_ windows.Handle, infoLevel uint32, info *byte) error {
+		level, got = infoLevel, (*servicePreshutdownInfo)(unsafe.Pointer(info)).preshutdownTimeout
+		return nil
+	}
+	if err := setPreshutdownTimeout(0, StopBudget); err != nil {
+		t.Fatal(err)
+	}
+	if level != windows.SERVICE_CONFIG_PRESHUTDOWN_INFO || got != uint32(StopBudget/time.Millisecond) {
+		t.Fatalf("ChangeServiceConfig2(level %d, %d ms), want level %d with %d ms", level, got, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO, StopBudget/time.Millisecond)
+	}
+}
+
+// A handler with preshutdown accepts SERVICE_CONTROL_PRESHUTDOWN and stops on
+// it with the stop budget as its wait hint; one without does not accept it.
+func TestExecutePreShutdownStops(t *testing.T) {
+	for _, preshutdown := range []bool{true, false} {
+		h := &scmHandler{preshutdown: preshutdown, serve: func(ctx context.Context, running func()) error {
+			running()
+			<-ctx.Done()
+			return nil
+		}}
+		requests := make(chan svc.ChangeRequest, 1)
+		status := make(chan svc.Status, 4)
+		done := make(chan struct{})
+		go func() { h.Execute(nil, requests, status); close(done) }()
+		<-status
+		running := <-status
+		if got := running.Accepts&svc.AcceptPreShutdown != 0; got != preshutdown {
+			t.Fatalf("preshutdown %v: accepts PreShutdown = %v", preshutdown, got)
+		}
+		if !preshutdown {
+			requests <- svc.ChangeRequest{Cmd: svc.Stop}
+			<-done
+			continue
+		}
+		requests <- svc.ChangeRequest{Cmd: svc.PreShutdown}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("PreShutdown did not stop the service")
+		}
+		if got := <-status; got.State != svc.StopPending || got.WaitHint != uint32(StopBudget/time.Millisecond) {
+			t.Fatalf("status after PreShutdown = %+v, want STOP_PENDING with a %v wait hint", got, StopBudget)
+		}
+	}
+}
 
 // Install restricts the service's privileges to SeChangeNotifyPrivilege on
 // create and on update, before it starts the service.
@@ -139,7 +225,7 @@ func TestInstallSetsTheRequiredPrivileges(t *testing.T) {
 		if err := installService(context.Background(), `C:\Program Files\Localport\localport.exe`, tc.existing, create); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if !slices.Equal(tc.got.privileges, []string{"SeChangeNotifyPrivilege"}) || !slices.Equal(tc.got.calls, []string{"privileges", "start"}) {
+		if !slices.Equal(tc.got.privileges, []string{"SeChangeNotifyPrivilege"}) || !slices.Equal(tc.got.calls, []string{"privileges", "preshutdown", "start"}) {
 			t.Fatalf("%s: privileges %q, calls %q; want [SeChangeNotifyPrivilege] set before start", name, tc.got.privileges, tc.got.calls)
 		}
 	}

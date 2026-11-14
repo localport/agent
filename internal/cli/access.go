@@ -269,7 +269,7 @@ func workloadTLSConfig(ctx context.Context, audience, apiURL, remote, serverName
 	material, err := client.ExchangeWorkloadToken(ctx, token)
 	if err != nil {
 		// The platform token is a bearer credential. Keep it out of CI logs.
-		return nil, "", security.SanitizeError(err, token)
+		return nil, "", security.RedactError(err, token)
 	}
 
 	cert, err := material.TLSCertificate()

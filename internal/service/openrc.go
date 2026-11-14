@@ -12,7 +12,7 @@ import (
 )
 
 // The OpenRC services: the agent and the session launcher, init scripts in
-// /etc/init.d run by supervise-daemon (research.md X33).
+// /etc/init.d run by supervise-daemon.
 const (
 	OpenRCService         = "localport-device"
 	OpenRCLauncherService = "localport-session"
@@ -83,7 +83,7 @@ func (o openrc) MainPID(ctx context.Context) (int, error) {
 	}
 	pid, err := strconv.Atoi(value)
 	if err != nil {
-		return 0, fmt.Errorf("%s %s mainpid: %q: %w", o.rcService, OpenRCService, value, err)
+		return 0, errManager.With(err, fmt.Sprintf("%s %s mainpid: %q", o.rcService, OpenRCService, value))
 	}
 	return pid, nil
 }
@@ -128,12 +128,6 @@ func (o openrc) Install(ctx context.Context, exe string) error {
 
 func (o openrc) Restart(ctx context.Context) error {
 	_, err := o.run(ctx, o.rcService, OpenRCService, "restart")
-	return err
-}
-
-// Stop stops the agent; rc-service returns once supervise-daemon has stopped it.
-func (o openrc) Stop(ctx context.Context) error {
-	_, err := o.run(ctx, o.rcService, OpenRCService, "stop")
 	return err
 }
 
@@ -185,7 +179,7 @@ func (o openrc) runlevelsOf(name string) ([]string, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", o.runlevelDir, err)
+		return nil, errManager.With(err, "read "+o.runlevelDir)
 	}
 	var in []string
 	for _, level := range levels {
@@ -193,7 +187,7 @@ func (o openrc) runlevelsOf(name string) ([]string, error) {
 		case err == nil:
 			in = append(in, level.Name())
 		case !errors.Is(err, os.ErrNotExist):
-			return nil, fmt.Errorf("inspect runlevel %s: %w", level.Name(), err)
+			return nil, errManager.With(err, "inspect runlevel "+level.Name())
 		}
 	}
 	return in, nil
@@ -224,6 +218,8 @@ no_new_privs=yes
 rc_ulimit="-c 0"
 respawn_delay=5
 respawn_max=0
+# SIGTERM, then SIGKILL once the agent had its stop budget to end sessions.
+retry="TERM/%[6]d/KILL/5"
 extra_started_commands="reload mainpid"
 
 depend() {
@@ -242,7 +238,7 @@ reload() {
 mainpid() {
 	service_get_value child_pid
 }
-`, Marker, exe, openrcAgentLog, AgentAccount, OpenRCLauncherService),
+`, Marker, exe, openrcAgentLog, AgentAccount, OpenRCLauncherService, stopBudgetSeconds),
 
 		OpenRCLauncherService: fmt.Appendf(nil, `#!/sbin/openrc-run
 # %[1]s

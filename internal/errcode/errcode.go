@@ -166,6 +166,29 @@ const (
 	ForwardListenFailed Code = "AG123"
 	DeviceRefused       Code = "AG124"
 	DeviceUnreachable   Code = "AG125"
+
+	ControlPlaneUnreachable Code = "AG126"
+	ControlPlaneAnswer      Code = "AG127"
+	NoCredential            Code = "AG128"
+	NoMatchingCredential    Code = "AG129"
+	CredentialsAmbiguous    Code = "AG130"
+	CredentialUnreadable    Code = "AG131"
+	CredentialStoreUnusable Code = "AG132"
+	CITokenUnavailable      Code = "AG133"
+	SignInExpired           Code = "AG134"
+
+	ServiceManagerFailed    Code = "AG135"
+	ServiceDefinitionFailed Code = "AG136"
+	AccountMissing          Code = "AG137"
+	AccountNotChanged       Code = "AG138"
+	SystemNeedsRoot         Code = "AG139"
+	AgentGroupMissing       Code = "AG140"
+	LocalConfigUnusable     Code = "AG141"
+	LocalConfigBusy         Code = "AG142"
+	LocalConfigNotWritten   Code = "AG143"
+	TunnelConfigInvalid     Code = "AG144"
+	LogFileUnusable         Code = "AG145"
+	TokenFileUnreadable     Code = "AG146"
 )
 
 // NewJoinCommand is the remedy for every lost or unusable device credential.
@@ -174,9 +197,9 @@ const NewJoinCommand = "create a new join command in the dashboard"
 var registry = []Entry{
 	{PendingLost, "Renewed device certificate lost", "the renewed device certificate is missing from the credential store; " + NewJoinCommand},
 	{DeviceCredential, "Device credential used to reach devices", "this is a fleet device credential; it registers the device and cannot be used to reach devices"},
-	{NoTicketKeys, "No ticket key set", "control plane returned no ticket key set"},
-	{TicketKeysUnreadable, "Ticket keys unreadable", "ticket_keys.json cannot be read"},
-	{TicketKeysBusy, "Ticket keys busy", "another process is writing this identity's ticket keys"},
+	{NoTicketKeys, "No session key set", "the control plane returned no session CA key set"},
+	{TicketKeysUnreadable, "Session keys unreadable", "ticket_keys.json cannot be read"},
+	{TicketKeysBusy, "Session keys busy", "another process is writing this identity's session CA keys"},
 	{RenewalInProgress, "Renewal in progress", "another process is renewing this credential"},
 	{NotRenewable, "Credential does not renew", "a sign-in credential does not renew; run `localport login` again"},
 	{DesktopPinsUnreadable, "Desktop target keys unreadable", "desktop_pins.json cannot be read"},
@@ -184,7 +207,7 @@ var registry = []Entry{
 	{CredentialNotSaved, "Device credential not saved", "the issued device credential could not be saved in the credential store"},
 
 	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
-	{UntrustedPath, "Untrusted credential path", "untrusted credential path"},
+	{UntrustedPath, "Untrusted path", "a credential or system file path is a link, has the wrong owner, or is too open"},
 	{PackageManagerExecutable, "Package manager executable", "a localport installed by a package manager cannot run as the device service"},
 
 	{RunLocked, "Devices already running", "localport is already running the devices of this config"},
@@ -273,6 +296,29 @@ var registry = []Entry{
 	{ForwardListenFailed, "Local forward not opened", "the local forward could not listen"},
 	{DeviceRefused, "Device refused the connection", "the device or its edge refused the connection"},
 	{DeviceUnreachable, "Device unreachable", "the device could not be reached"},
+
+	{ControlPlaneUnreachable, "Control plane unreachable", "the control plane could not be reached"},
+	{ControlPlaneAnswer, "Control plane answer unusable", "the control plane's answer is not usable"},
+	{NoCredential, "No credential", "no credential on this machine; run localport login, or localport setup <TOKEN>"},
+	{NoMatchingCredential, "No matching credential", "no credential on this machine matches"},
+	{CredentialsAmbiguous, "Several credentials match", "several credentials match; narrow the choice with --identity"},
+	{CredentialUnreadable, "Credential unreadable", "the stored credential cannot be read"},
+	{CredentialStoreUnusable, "Credential store unusable", "the credential store cannot be used"},
+	{CITokenUnavailable, "CI token unavailable", "the CI platform's identity token could not be obtained"},
+	{SignInExpired, "Sign-in expired", "the sign-in expired before it was approved; run localport login again"},
+
+	{ServiceManagerFailed, "Service manager failed", "the service manager could not carry out the step"},
+	{ServiceDefinitionFailed, "Service definition not written", "the device service definition could not be read, written or removed"},
+	{AccountMissing, "Agent account missing", "the agent account localport does not exist; create it with: sudo localport service install"},
+	{AccountNotChanged, "Agent account not changed", "the agent account localport could not be created, looked up or removed"},
+	{SystemNeedsRoot, "Needs root", "only root or an elevated Administrator changes the device config directory"},
+	{AgentGroupMissing, "Agent group missing", "the localport group does not exist; create it with: sudo localport service install"},
+	{LocalConfigUnusable, "Local config unusable", "the local config cannot be located, read, secured or locked"},
+	{LocalConfigBusy, "Local config busy", "another localport command is still changing the local config"},
+	{LocalConfigNotWritten, "Local config not written", "the local config could not be written"},
+	{TunnelConfigInvalid, "Invalid tunnel config", "the tunnel config file cannot be read or holds an invalid entry"},
+	{LogFileUnusable, "Log file unusable", "the --log-file path cannot be opened as the agent's log"},
+	{TokenFileUnreadable, "Token file unreadable", "the token file named by the _FILE variable cannot be read"},
 }
 
 // New returns the sentinel of a registered code. An unregistered code is a

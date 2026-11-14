@@ -152,7 +152,7 @@ func systemLocalConfig(goos, programData string) (LocalConfigFile, error) {
 	case "windows":
 		programData = strings.TrimSpace(programData)
 		if programData == "" {
-			return LocalConfigFile{}, errors.New("locate the local config: %ProgramData% is not set")
+			return LocalConfigFile{}, errLocalUnusable.With(nil, "%ProgramData% is not set")
 		}
 		dir = filepath.Join(programData, security.DeviceDirName)
 	case "darwin":
@@ -171,7 +171,7 @@ func UserLocalConfig() (LocalConfigFile, error) {
 	if home == "" {
 		userHome, err := os.UserHomeDir()
 		if err != nil || userHome == "" {
-			return LocalConfigFile{}, fmt.Errorf("locate the local config: no home directory (set %s)", identity.HomeEnv)
+			return LocalConfigFile{}, errLocalUnusable.With(nil, "no home directory to hold it; set "+identity.HomeEnv)
 		}
 		home = filepath.Join(userHome, ".localport")
 	}
@@ -213,17 +213,17 @@ func LoadLocal(f LocalConfigFile) (*LocalConfig, error) {
 	var err error
 	if f.System {
 		if err := security.CheckSystemDir(filepath.Dir(f.Path)); err != nil {
-			return nil, fmt.Errorf("local config %s: %w", f.Path, err)
+			return nil, errLocalUnusable.With(err, f.Path)
 		}
 		raw, err = security.ReadSystemFile(f.Path)
 	} else {
 		if err := security.CheckPrivateDir(f.Base, filepath.Dir(f.Path), f.FollowBase); err != nil {
-			return nil, fmt.Errorf("local config %s: %w", f.Path, err)
+			return nil, errLocalUnusable.With(err, f.Path)
 		}
 		raw, err = security.ReadPrivateFile(f.Path)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("local config: %w", err)
+		return nil, errLocalUnusable.With(err, f.Path)
 	}
 	return parseLocal(raw, runtime.GOOS)
 }
@@ -309,15 +309,21 @@ func WriteLocal(f LocalConfigFile, cfg *LocalConfig, changed identity.Ref) error
 	}
 	if !f.System {
 		if err := security.EnsurePrivateDir(f.Base, filepath.Dir(f.Path), f.FollowBase); err != nil {
-			return fmt.Errorf("local config %s: %w", f.Path, err)
+			return errLocalUnusable.With(err, f.Path)
 		}
-		return security.WritePrivateFileAtomic(f.Path, raw)
+		if err := security.WritePrivateFileAtomic(f.Path, raw); err != nil {
+			return errLocalNotWritten.With(err, f.Path)
+		}
+		return nil
 	}
 	gid, err := ensureSystemDir(f)
 	if err != nil {
 		return err
 	}
-	return security.WriteSystemFileAtomic(f.Path, raw, gid)
+	if err := security.WriteSystemFileAtomic(f.Path, raw, gid); err != nil {
+		return errLocalNotWritten.With(err, f.Path)
+	}
+	return nil
 }
 
 // geteuid and agentGroupID are os.Geteuid and security.AgentGroupID; tests
@@ -329,31 +335,33 @@ var (
 
 // ErrSystemNotRoot refuses a change to the system config directory by any
 // account but root (an elevated Administrator on Windows).
-var ErrSystemNotRoot = errors.New("only root or an elevated Administrator changes the device config directory")
+var ErrSystemNotRoot = errcode.New(errcode.SystemNeedsRoot)
 
-// SystemInstallCommand creates the agent account and group.
-const SystemInstallCommand = "sudo localport service install"
+var (
+	// errLocalUnusable is a local config that cannot be located, read,
+	// secured or locked.
+	errLocalUnusable = errcode.New(errcode.LocalConfigUnusable)
+	// errLocalNotWritten is a failed write of the local config file.
+	errLocalNotWritten = errcode.New(errcode.LocalConfigNotWritten)
+)
 
 // systemWriter reports whether this process owns the system files: root, or
 // an elevated Administrator on Windows.
 func systemWriter() bool { return security.IsSystemWriter(geteuid()) }
 
 // ensureSystemDir creates or secures the system config directory as
-// root:localport 0750 and returns the group's gid. A missing group wraps
-// security.ErrAgentGroupMissing and names SystemInstallCommand.
+// root:localport 0750 and returns the group's gid. A missing group is
+// security.ErrAgentGroupMissing, whose message names the install command.
 func ensureSystemDir(f LocalConfigFile) (int, error) {
 	if !systemWriter() {
-		return 0, fmt.Errorf("local config %s: %w", f.Path, ErrSystemNotRoot)
+		return 0, ErrSystemNotRoot.With(nil, f.Path)
 	}
 	gid, err := agentGroupID()
-	if errors.Is(err, security.ErrAgentGroupMissing) {
-		return 0, errcode.WithRemedy(fmt.Errorf("local config %s: %w", f.Path, err), "the "+security.AgentGroup+" group does not exist; create it with: "+SystemInstallCommand)
-	}
 	if err != nil {
 		return 0, err
 	}
 	if err := security.EnsureSystemDir(filepath.Dir(f.Path), gid); err != nil {
-		return 0, fmt.Errorf("local config %s: %w", f.Path, err)
+		return 0, errLocalUnusable.With(err, f.Path)
 	}
 	return gid, nil
 }
@@ -613,10 +621,10 @@ const localLockWait = 2 * time.Minute
 func LockLocal(f LocalConfigFile) (release func(), err error) {
 	lock, held, err := lockBeside(context.Background(), f, f.LockPath(), localLockWait)
 	if err != nil {
-		return nil, fmt.Errorf("lock local config: %w", err)
+		return nil, errLocalUnusable.With(err, "lock "+f.Path)
 	}
 	if !held {
-		return nil, fmt.Errorf("local config %s: another localport command is still changing it", f.Path)
+		return nil, errcode.New(errcode.LocalConfigBusy).With(nil, f.Path)
 	}
 	return func() { _ = unlockAndClose(lock) }, nil
 }
@@ -650,13 +658,13 @@ func LockRunContext(ctx context.Context, f LocalConfigFile, wait time.Duration) 
 	path := f.RunLockPath()
 	lock, held, err := lockBeside(ctx, f, path, wait)
 	if err != nil {
-		return nil, fmt.Errorf("lock %s: %w", path, err)
+		return nil, errLocalUnusable.With(err, "lock "+path)
 	}
 	if !held {
 		return nil, ErrRunLocked.With(nil, path+" is held")
 	}
 	if err := recordHolder(lock); err != nil {
-		return nil, errors.Join(fmt.Errorf("record the holder of %s: %w", path, err), unlockAndClose(lock))
+		return nil, errors.Join(errLocalUnusable.With(err, "record the holder of "+path), unlockAndClose(lock))
 	}
 	// The record is cleared while the lock is still held, so the next holder
 	// never shows this PID before it records its own. A holder that dies
@@ -688,7 +696,7 @@ func RunLockHolder(f LocalConfigFile) (int, error) {
 	buf := make([]byte, 24)
 	n, err := file.ReadAt(buf, runLockPIDOffset)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return 0, fmt.Errorf("read %s: %w", f.RunLockPath(), err)
+		return 0, errLocalUnusable.With(err, "read "+f.RunLockPath())
 	}
 	text := strings.TrimSpace(string(buf[:n]))
 	if text == "" {
@@ -696,7 +704,7 @@ func RunLockHolder(f LocalConfigFile) (int, error) {
 	}
 	pid, err := strconv.Atoi(text)
 	if err != nil || pid <= 0 {
-		return 0, fmt.Errorf("%s records no valid PID: %q", f.RunLockPath(), text)
+		return 0, errLocalUnusable.With(nil, fmt.Sprintf("%s records no valid PID: %q", f.RunLockPath(), text))
 	}
 	return pid, nil
 }
@@ -745,7 +753,7 @@ func lockBeside(ctx context.Context, f LocalConfigFile, path string, wait time.D
 func openLock(f LocalConfigFile, path string) (*os.File, error) {
 	if !f.System {
 		if err := security.EnsurePrivateDir(f.Base, filepath.Dir(f.Path), f.FollowBase); err != nil {
-			return nil, fmt.Errorf("local config %s: %w", f.Path, err)
+			return nil, errLocalUnusable.With(err, f.Path)
 		}
 		return security.OpenLockFile(path)
 	}
@@ -762,10 +770,10 @@ func openLock(f LocalConfigFile, path string) (*os.File, error) {
 		return security.OpenSystemLock(path, gid, perm)
 	}
 	if !runLock {
-		return nil, fmt.Errorf("local config %s: %w", f.Path, ErrSystemNotRoot)
+		return nil, ErrSystemNotRoot.With(nil, f.Path)
 	}
 	if err := security.CheckSystemDir(filepath.Dir(f.Path)); err != nil {
-		return nil, fmt.Errorf("local config %s: %w", f.Path, err)
+		return nil, errLocalUnusable.With(err, f.Path)
 	}
 	return security.OpenSystemRunLock(path)
 }

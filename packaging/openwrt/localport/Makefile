@@ -41,6 +41,8 @@ define Package/localport
   TITLE:=Localport agent: secure tunnels and remote access
   URL:=https://localport.io
   DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle
+  # opkg creates the account with OpenWrt's default home and shell; the
+  # Linux packages use /nonexistent and nologin (packaging/nfpm/sysusers.conf).
   USERID:=localport:localport
 endef
 

@@ -151,8 +151,8 @@ never replace without a resume match.
 }
 ```
 
-`revoked_ticket_kids` is sent to devices only and omitted when empty: session
-ticket signing key ids the edge saw revoked. The agent acts on it only in a
+`revoked_ticket_kids` is sent to devices only and omitted when empty: ids of
+session CA keys the edge saw revoked. The agent acts on it only in a
 successful ack and treats it as a hint, since the edge relays and is not the key
 authority: a named kid the device holds is refused in memory, and the device
 fetches its key set from the control plane at the earliest time the fetch floor
@@ -1753,7 +1753,7 @@ spends a single-use join token at
 credential. A device identity is `<tunnelIdentifier>.<prefix>`; each half
 follows the component grammar above, and the credential lives in
 `<team>/device-<tunnelIdentifier>.<prefix>/`. Its `meta.json` adds `device`:
-the device host and its region. The session ticket keys and the recording key
+the device host and its region. The session CA keys and the recording key
 in the enrolment and renewal responses replace the set in `ticket_keys.json`;
 the control plane lists unrevoked keys only, so a kid absent from a set is
 revoked. The set is written after the credential is stored; a failure to write
@@ -1863,8 +1863,10 @@ because it was refused is not.
 | condition | behavior |
 |---|---|
 | transport failure (dial, DNS, TLS, timeout, reset, EOF) | retry |
+| failure reading the response body, after any status (reset, HTTP/2 stream reset or GOAWAY, truncated body) | retry |
 | `5xx` | retry |
 | `429` | retry, honoring `Retry-After` |
+| `409` with code `SE037` (a request under the same idempotency key is still running) | retry |
 | any other `4xx` | terminal, immediately |
 
 Waits carry full jitter, so many agents recovering from one outage do not retry
@@ -1876,6 +1878,34 @@ before its network is ready, and `--wait 0` makes exactly one attempt for CI.
 The sign-in poll keeps going through transport failures until its `expires_in`
 deadline. If it expires after a run of transport failures, the error reports
 the control plane as unreachable.
+
+#### Idempotency keys
+
+Every control-plane `POST` that creates state or spends a secret carries an
+`Idempotency-Key` header (draft-ietf-httpapi-idempotency-key-header): a
+Structured Field String holding 128 random bits as base32 text, for example
+`Idempotency-Key: "QJ7Z2XKCN4M6RT3VWYAB5DEFGH"`. The requests are
+`/v1/devices/enrol`, `/v1/mtls/certs` (setup or workload token),
+`/v1/mtls/certs/renew` and `/v1/devices/renew`, `/v1/mtls/device/start`,
+`/v1/mtls/device/token` and `/v1/sessions`. `/v1/devices/keys` is a read and
+carries none.
+
+- One key belongs to one logical request. Each retry in the table above resends
+  the same key, since those are the outcomes the agent cannot know or the
+  control plane did not record. After any other answer the next request gets a
+  new key.
+- The sign-in poll takes a new key after each `authorization_pending` (`SE021`)
+  or `slow_down` (`SE022`) answer, and repeats a poll whose outcome was lost under its key,
+  so a lost answer to the poll that consumed the device code returns the same
+  certificate.
+- Across attempts of one key the operation fields are byte-identical. The proof
+  of possession (the signature over a timestamp or minute bucket) is signed
+  again per attempt, since a
+  retry can cross the control plane's one-minute window.
+- The control plane answers a key whose request is still running with `409`
+  `SE037` (retried), a key reused with a different request with `422` `SE038`,
+  and a missing key with `400` `SE039`. Both are final and shown with the
+  server's code.
 
 ### A refused certificate is reported
 

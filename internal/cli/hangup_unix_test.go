@@ -46,7 +46,6 @@ func (hangupManagerProcess) run(ctx context.Context) error {
 func (m *hangupManagerProcess) Install(ctx context.Context, _ string) error { return m.run(ctx) }
 func (m *hangupManagerProcess) Restart(ctx context.Context) error           { return m.run(ctx) }
 func (m *hangupManagerProcess) Reload(ctx context.Context) error            { return m.run(ctx) }
-func (m *hangupManagerProcess) Stop(ctx context.Context) error              { return m.run(ctx) }
 func (m *hangupManagerProcess) Uninstall(ctx context.Context) error         { return m.run(ctx) }
 
 // TestHangupSafeHelper is the re-executed test binary. As the command it runs

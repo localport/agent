@@ -5,7 +5,6 @@ package service
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 )
@@ -15,7 +14,7 @@ import (
 func Default() (Manager, error) {
 	// sd_booted(3): this directory exists only when systemd booted the system.
 	if ok, err := exists("/run/systemd/system"); err != nil {
-		return nil, fmt.Errorf("detect systemd: %w", err)
+		return nil, errManager.With(err, "detect systemd")
 	} else if ok {
 		// Merged-/usr systems have both; older Debian ships only /bin/systemctl.
 		systemctl, ok := firstExisting("/usr/bin/systemctl", "/bin/systemctl")
@@ -26,7 +25,7 @@ func Default() (Manager, error) {
 	}
 	// openrc-run tests this file to decide that OpenRC booted the system.
 	if ok, err := exists("/run/openrc/softlevel"); err != nil {
-		return nil, fmt.Errorf("detect OpenRC: %w", err)
+		return nil, errManager.With(err, "detect OpenRC")
 	} else if ok {
 		rcService, ok1 := firstExisting("/sbin/rc-service", "/usr/sbin/rc-service")
 		rcUpdate, ok2 := firstExisting("/sbin/rc-update", "/usr/sbin/rc-update")

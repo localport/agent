@@ -152,11 +152,37 @@ func (e *APIError) RetryAfter() (time.Duration, bool) {
 	return e.retryAfter, e.retryAfter > 0
 }
 
+var (
+	// errUnreachable is a control-plane call that got no complete answer:
+	// a transport failure or a failure reading the response body.
+	errUnreachable = errcode.New(errcode.ControlPlaneUnreachable)
+	// errAnswer is a control-plane answer the agent cannot use.
+	errAnswer = errcode.New(errcode.ControlPlaneAnswer)
+)
+
+// codeIdempotencyInFlight is the control plane's 409 for a request whose
+// idempotency key belongs to a request it is still running.
+const codeIdempotencyInFlight = "SE037"
+
+// responseReadError is a failure reading a response body: a reset, an HTTP/2
+// stream reset or GOAWAY, or a truncated body. The request may have
+// completed, so only a retry under the same idempotency key is safe.
+type responseReadError struct {
+	path string
+	err  error
+}
+
+func (e *responseReadError) Error() string { return "read " + e.path + " response: " + e.err.Error() }
+func (e *responseReadError) Unwrap() error { return e.err }
+
 // Retryable reports whether a retry of a control-plane call could succeed:
-// a 429 or 5xx answer, a transport failure (DNS, dial, TLS, timeout, reset)
-// or a truncated response body. Other 4xx answers are refusals, and local
-// failures (signing, request encoding) and a malformed success body are
-// final, since repeating the call repeats them.
+// a 429 or 5xx answer, the 409 for a request still in flight under the same
+// idempotency key, a transport failure (DNS, dial, TLS, timeout, reset) or a
+// failure reading the response body. Other 4xx answers are refusals, and
+// local failures (signing, request encoding) and a malformed success body are
+// final, since repeating the call repeats them. These are also the outcomes
+// the control plane does not record under an idempotency key, so a retry
+// resends the same key.
 //
 // Cancellation is checked by retry on ctx. http.Client.Timeout also matches
 // context.DeadlineExceeded, so the error cannot tell the two apart.
@@ -166,12 +192,28 @@ func Retryable(err error) bool {
 	}
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
-		return apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= 500
+		return apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= 500 || apiErr.Code == codeIdempotencyInFlight
 	}
 	var transport *url.Error
 	var netErr net.Error
-	return errors.As(err, &transport) || errors.As(err, &netErr) || errors.Is(err, io.ErrUnexpectedEOF)
+	var readErr *responseReadError
+	return errors.As(err, &transport) || errors.As(err, &netErr) || errors.As(err, &readErr)
 }
+
+// redactCause is err, or a plain error with its text redacted when the text
+// holds one of secrets: encoding/json errors quote the values they reject,
+// which a server echoing the request can fill with a secret.
+func redactCause(err error, secrets []string) error {
+	text := err.Error()
+	if redacted := security.RedactString(text, secrets...); redacted != text {
+		return errors.New(redacted)
+	}
+	return err
+}
+
+// newIdempotencyKey is the Idempotency-Key value of one logical request: 128
+// random bits as a Structured Field String (draft-ietf-httpapi-idempotency-key-header).
+func newIdempotencyKey() string { return `"` + rand.Text() + `"` }
 
 const (
 	// retryBaseDelay and retryMaxDelay bound the exponential backoff.
@@ -286,19 +328,28 @@ func parseRetryAfter(v string) time.Duration {
 	return 0
 }
 
-func (c *Client) post(ctx context.Context, path, bearer string, body, out any) error {
+func (c *Client) post(ctx context.Context, path, bearer, idempotencyKey string, body, out any, secrets ...string) error {
 	header := ""
 	if bearer != "" {
 		header = "Authorization"
+		secrets = append(secrets, bearer)
 		bearer = "Bearer " + bearer
 	}
-	return c.postWithHeader(ctx, path, header, bearer, body, out)
+	return c.postWithHeader(ctx, path, header, bearer, idempotencyKey, body, out, secrets...)
 }
 
 // postWithHeader sends a request with the given credential header,
 // `Authorization: Bearer <secret>` for a setup token or `X-Workload-Token` for
-// a platform token.
-func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue string, body, out any) error {
+// a platform token. idempotencyKey (newIdempotencyKey) is set on every request
+// that creates state or spends a secret, and is the same on each retry of one
+// logical request; empty for a read. With it, net/http may also replay the
+// request on a reused connection that failed before any response.
+//
+// secrets are the request's secrets outside credValue (a join token in the
+// body). The server can echo what it was sent, so every error text built
+// from the response has them and credValue redacted.
+func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue, idempotencyKey string, body, out any, secrets ...string) error {
+	secrets = append(secrets, credValue)
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("encode request: %w", err)
@@ -311,16 +362,19 @@ func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue
 	if credHeader != "" && credValue != "" {
 		req.Header.Set(credHeader, credValue)
 	}
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("call %s: %w", path, err)
+		return errUnreachable.With(err, "")
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return fmt.Errorf("read %s response: %w", path, err)
+		return errUnreachable.With(&responseReadError{path: path, err: err}, "")
 	}
 	if isRedirect(resp.StatusCode) {
 		// an APIError with the 3xx status is terminal for Retryable, so the
@@ -341,9 +395,9 @@ func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue
 		if json.Unmarshal(raw, &env) == nil {
 			// Server text reaches terminals and logs: no control or bidi
 			// characters.
-			apiErr.Code = security.SanitizeDisplay(env.Code)
+			apiErr.Code = security.RedactString(security.SanitizeDisplay(env.Code), secrets...)
 			// Fall back to the type label when the response has no message.
-			apiErr.Message = security.SanitizeDisplay(firstNonEmpty(env.Message, env.Error))
+			apiErr.Message = security.RedactString(security.SanitizeDisplay(firstNonEmpty(env.Message, env.Error)), secrets...)
 		}
 		return apiErr
 	}
@@ -351,7 +405,7 @@ func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue
 		return nil
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("parse %s response: %w", path, err)
+		return errAnswer.With(fmt.Errorf("parse %s response: %w", path, redactCause(err, secrets)), "")
 	}
 	return nil
 }
@@ -370,7 +424,7 @@ type deviceKeysResponse struct {
 	Keys *DeviceKeys `json:"keys"`
 }
 
-// FetchDeviceKeys fetches the device's session ticket verification set and its
+// FetchDeviceKeys fetches the device's session CA key set and its
 // team's recording key from POST /v1/devices/keys. The request carries cur's
 // certificate and its key's signature over deviceKeysDigest, which the control
 // plane accepts within a minute of its clock. Transport failures, 5xx and 429
@@ -396,7 +450,7 @@ func (c *Client) FetchDeviceKeys(ctx context.Context, cur *Material) (*DeviceKey
 			return fmt.Errorf("sign key fetch: %w", signErr)
 		}
 		resp = deviceKeysResponse{}
-		return c.post(ctx, "/v1/devices/keys", "", map[string]string{
+		return c.post(ctx, "/v1/devices/keys", "", "", map[string]string{
 			"cert_pem":  certPEM,
 			"signature": base64.StdEncoding.EncodeToString(sig),
 		}, &resp)

@@ -1,10 +1,17 @@
 #!/bin/sh
-# Creates the system group and user "localport" that the agent runs as.
-# Idempotent. Package removal leaves both; `localport service uninstall`
-# removes the user.
+# Creates the system group and user "localport" that the agent runs as, from
+# /usr/lib/sysusers.d/localport.conf when systemd-sysusers is present and
+# otherwise with the same values. Idempotent. The package owns the account:
+# package removal leaves it, and `localport service uninstall --purge` keeps
+# it while the sysusers file is installed.
 set -e
 
 name=localport
+
+if command -v systemd-sysusers >/dev/null 2>&1; then
+	systemd-sysusers localport.conf
+	exit 0
+fi
 
 nologin=/bin/false
 for f in /usr/sbin/nologin /sbin/nologin; do
@@ -23,7 +30,7 @@ elif command -v adduser >/dev/null 2>&1; then
 	# BusyBox (Alpine without shadow).
 	grep -q "^$name:" /etc/group || addgroup -S "$name"
 	id -u "$name" >/dev/null 2>&1 ||
-		adduser -S -D -H -h /var/empty -s "$nologin" -G "$name" -g "Localport agent" "$name"
+		adduser -S -D -H -h /nonexistent -s "$nologin" -G "$name" -g "Localport agent" "$name"
 else
 	echo "localport: no useradd or adduser; create the system user and group $name" >&2
 	exit 1

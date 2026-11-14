@@ -45,9 +45,9 @@ const launchctlPath = "/bin/launchctl"
 
 // bootoutWait bounds the wait for launchd to finish a bootout, polled every
 // bootoutPoll: launchctl offers no completion event, and a bootstrap that
-// races the bootout fails.
+// races the bootout fails. It outlasts the agent's ExitTimeOut (StopBudget).
 const (
-	bootoutWait = 30 * time.Second
+	bootoutWait = StopBudget + 5*time.Second
 	bootoutPoll = 200 * time.Millisecond
 )
 
@@ -158,9 +158,6 @@ func (l launchd) Restart(ctx context.Context) error {
 	return err
 }
 
-// Stop boots the agent out and waits until launchd no longer knows it.
-func (l launchd) Stop(ctx context.Context) error { return l.bootoutIfLoaded(ctx, LaunchdLabel) }
-
 // Reload sends SIGHUP: the agent re-reads its config.
 func (l launchd) Reload(ctx context.Context) error {
 	_, err := l.run(ctx, launchctlPath, "kill", "HUP", target(LaunchdLabel))
@@ -211,7 +208,7 @@ func (l launchd) MainPID(ctx context.Context) (int, error) {
 			state = value
 		case key == "pid" && pid == 0:
 			if pid, err = strconv.Atoi(value); err != nil {
-				return 0, fmt.Errorf("launchctl print %s: pid %q: %w", target(LaunchdLabel), value, err)
+				return 0, errManager.With(err, fmt.Sprintf("launchctl print %s: pid %q", target(LaunchdLabel), value))
 			}
 		}
 	}
@@ -259,14 +256,14 @@ func (l launchd) bootoutIfLoaded(ctx context.Context, label string) error {
 	for {
 		loaded, err := l.loaded(ctx, label)
 		if err != nil {
-			return fmt.Errorf("wait for launchd to unload %s: %w", label, err)
+			return errManager.With(err, "wait for launchd to unload "+label)
 		}
 		if !loaded {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("wait for launchd to unload %s: %w", label, ctx.Err())
+			return errManager.With(ctx.Err(), "wait for launchd to unload "+label)
 		case <-time.After(bootoutPoll):
 		}
 	}
@@ -278,20 +275,20 @@ func (l launchd) bootoutIfLoaded(ctx context.Context, label string) error {
 // and the chown.
 func prepareLogDir(dir string, acct Account) error {
 	if err := os.Mkdir(dir, 0o750); err != nil && !errors.Is(err, fs.ErrExist) {
-		return fmt.Errorf("prepare %s: %w", dir, err)
+		return errDefinition.With(err, "prepare "+dir)
 	}
 	fi, err := os.Lstat(dir)
 	if err != nil {
-		return fmt.Errorf("prepare %s: %w", dir, err)
+		return errDefinition.With(err, "prepare "+dir)
 	}
 	if !fi.IsDir() {
-		return fmt.Errorf("prepare %s: not a directory", dir)
+		return errDefinition.With(nil, dir+" is not a directory")
 	}
 	if err := os.Lchown(dir, acct.UID, acct.GID); err != nil {
-		return fmt.Errorf("prepare %s: %w", dir, err)
+		return errDefinition.With(err, "prepare "+dir)
 	}
 	if err := os.Chmod(dir, 0o750); err != nil {
-		return fmt.Errorf("prepare %s: %w", dir, err)
+		return errDefinition.With(err, "prepare "+dir)
 	}
 	return nil
 }
@@ -345,9 +342,22 @@ func launchdAgentPlist(exe string) ([]byte, error) {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ExitTimeOut</key>
+  <integer>%d</integer>
+  <!-- A core dump would contain the device's private keys. -->
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>Core</key>
+    <integer>0</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>Core</key>
+    <integer>0</integer>
+  </dict>
 </dict>
 </plist>
-`, Marker, LaunchdLabel, program, launchdAgentLog, AgentAccount, AgentAccount), nil
+`, Marker, LaunchdLabel, program, launchdAgentLog, AgentAccount, AgentAccount, stopBudgetSeconds), nil
 }
 
 // launchdLauncherPlist is the launcher's daemon definition: root, with the
