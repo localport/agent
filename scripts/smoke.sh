@@ -8,7 +8,6 @@ echo "[smoke] help / version"
 go run ./cmd/localport --help >/dev/null
 go run ./cmd/localport version >/dev/null
 
-
 echo "[smoke] flat tunnel form rejects a missing --local"
 if go run ./cmd/localport --token tok_test >/dev/null 2>&1; then
   echo "expected the flat form to fail without --local" >&2

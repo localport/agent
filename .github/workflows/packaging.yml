@@ -1,9 +1,9 @@
 name: Packaging
 
 # Release dry run with throwaway keys: packages, signed repositories and
-# install tests. Every check here is required on main. The dry run runs on a
-# pull request only when it changes release files, and a skipped job counts
-# as passed.
+# install tests; an OpenWrt package build; ShellCheck. Every check here is
+# required on main. The dry run and the OpenWrt build run on a pull request
+# only when it changes release files, and a skipped job counts as passed.
 
 on:
   push:
@@ -47,9 +47,17 @@ jobs:
             echo "release=false" >>"$GITHUB_OUTPUT"
           fi
 
+  # The localport-session and signed darwin binaries `make dist` requires.
+  sessions:
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
+    uses: ./.github/workflows/session.yml
+    permissions:
+      contents: read
+
   dryrun:
     name: Release dry run
-    needs: changes
+    needs: [changes, sessions]
     if: needs.changes.outputs.release == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 40
@@ -62,8 +70,29 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - run: go install github.com/google/go-licenses/v2@v2.0.1
-      - run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+      - run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.49.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "{session-*,darwin}"
+          path: bin
+          merge-multiple: true
+      # Artifacts do not keep file modes.
+      - run: chmod 0755 bin/localport-*
       - run: make release-dryrun
+
+  # One arch of the release OpenWrt build, so a broken SDK pin, feed or
+  # package Makefile fails here instead of at a tag.
+  openwrt:
+    name: OpenWrt build (x86_64)
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: packaging/openwrt/sdk.sh build x86_64 0.0.0 out
 
   shellcheck:
     name: ShellCheck
@@ -73,4 +102,4 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: shellcheck -x scripts/*.sh scripts/release/*.sh
+      - run: git ls-files -z '*.sh' | xargs -0 shellcheck -x

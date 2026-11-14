@@ -18,6 +18,26 @@ env:
   IMAGE: ghcr.io/localport/agent
 
 jobs:
+  tag:
+    name: Check tag
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - name: Check tag
+        id: tag
+        run: |
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "prerelease=false" >>"$GITHUB_OUTPUT"
+          elif [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.]+$ ]]; then
+            echo "prerelease=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "::error::$TAG is not vMAJOR.MINOR.PATCH[-PRERELEASE]"
+            exit 1
+          fi
+
   # The cgo localport-session builds and the signed darwin binaries; the
   # build job ships them with the rest of the release set.
   sessions:
@@ -30,8 +50,11 @@ jobs:
 
   # OpenWrt packages, built with the OpenWrt SDK of each package arch. The
   # build job ships them in the release set; publish indexes the feed.
+  # OpenWrt versions are X.Y.Z only (sdk.sh), so a prerelease skips the steps.
+  # The job itself still runs: a skipped job would skip every job after it.
   openwrt:
     name: OpenWrt (${{ matrix.arch }})
+    needs: tag
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
@@ -50,13 +73,18 @@ jobs:
           - riscv64_generic
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.tag.outputs.prerelease == 'false'
         with:
           persist-credentials: false
 
       - name: Build
-        run: packaging/openwrt/sdk.sh build "${{ matrix.arch }}" "${TAG#v}" out
+        if: needs.tag.outputs.prerelease == 'false'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: packaging/openwrt/sdk.sh build "$ARCH" "${TAG#v}" out
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: needs.tag.outputs.prerelease == 'false'
         with:
           name: openwrt-${{ matrix.arch }}
           path: out/localport-openwrt-*.apk
@@ -65,26 +93,14 @@ jobs:
 
   build:
     name: Build draft
-    needs: [sessions, openwrt]
+    needs: [tag, sessions, openwrt]
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
       contents: read
     outputs:
-      prerelease: ${{ steps.tag.outputs.prerelease }}
+      prerelease: ${{ needs.tag.outputs.prerelease }}
     steps:
-      - name: Check tag
-        id: tag
-        run: |
-          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "prerelease=false" >>"$GITHUB_OUTPUT"
-          elif [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.]+$ ]]; then
-            echo "prerelease=true" >>"$GITHUB_OUTPUT"
-          else
-            echo "::error::$TAG is not vMAJOR.MINOR.PATCH[-PRERELEASE]"
-            exit 1
-          fi
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -104,6 +120,7 @@ jobs:
           merge-multiple: true
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.tag.outputs.prerelease == 'false'
         with:
           pattern: openwrt-*
           path: openwrt
@@ -118,10 +135,13 @@ jobs:
             VERSION="$TAG" \
             BUILDVCS=true \
             SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
-          cp openwrt/localport-openwrt-*.apk dist/
+
+      - name: OpenWrt packages
+        if: needs.tag.outputs.prerelease == 'false'
+        run: cp openwrt/localport-openwrt-*.apk dist/
 
       - name: SBOM
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: .
           format: spdx-json
@@ -308,9 +328,9 @@ jobs:
         with:
           subject-path: dist/*
 
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
-          cosign-release: v3.1.3
+          cosign-release: v3.1.4
 
       - name: Sign checksums (Sigstore)
         run: cosign sign-blob --yes --bundle dist/checksums.txt.sigstore.json dist/checksums.txt
@@ -361,7 +381,7 @@ jobs:
 
       - name: Install nfpm
         if: env.STABLE == 'true'
-        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.49.0
 
       - name: Load signing keys
         if: env.STABLE == 'true'
@@ -406,11 +426,12 @@ jobs:
           cp release/keys/localport-archive-keyring.gpg release/keys/RPM-GPG-KEY-localport release/keys/*.rsa.pub dist/repo/
           make repo REPO_GPG_KEY_FILE="$RUNNER_TEMP/keys/repo.asc"
           make repo-apk APK_KEY_FILE="$RUNNER_TEMP/keys/apk.rsa"
-          # OpenWrt feed: openwrt/<release>/<package arch>/, named as apk
-          # fetches it (name-version), with a signed packages.adb per arch.
+          # OpenWrt feed: openwrt/<release series>/<package arch>/, named as
+          # apk fetches it (name-version), with a signed packages.adb per arch.
+          series="$(packaging/openwrt/sdk.sh series)"
           for f in dist/localport-openwrt-*.apk; do
             arch="${f#dist/localport-openwrt-}"; arch="${arch%.apk}"
-            dir="dist/repo/openwrt/25.12/$arch"
+            dir="dist/repo/openwrt/$series/$arch"
             mkdir -p "$dir"
             cp "$f" "$dir/localport-${TAG#v}-r1.apk"
             packaging/openwrt/sdk.sh index "$dir" "$RUNNER_TEMP/keys/openwrt.pem"
@@ -435,8 +456,10 @@ jobs:
         run: rm -rf "$RUNNER_TEMP/keys"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=docker.io/moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
 
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -469,9 +492,9 @@ jobs:
           provenance: mode=max
           sbom: true
 
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
-          cosign-release: v3.1.3
+          cosign-release: v3.1.4
 
       - name: Sign image (Sigstore)
         env:
@@ -497,7 +520,7 @@ jobs:
       - name: Package manager token
         id: app
         if: env.STABLE == 'true'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

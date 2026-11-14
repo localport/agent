@@ -1,0 +1,5 @@
+# cargo-deny advisories check for the golden generator (`make cargo-deny`).
+# Every advisory fails; nothing is ignored.
+
+[advisories]
+ignore = []

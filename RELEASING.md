@@ -8,7 +8,9 @@ for installation and [SECURITY.md](SECURITY.md) for verification.
 
 | Artifact | Where | Verified by |
 |---|---|---|
-| Binaries for linux (amd64, arm64, armv6+), darwin (amd64, arm64), windows (amd64) | GitHub release | `checksums.txt` |
+| `localport` and `localport-session` binaries for linux (amd64, arm64, armv6+; glibc and musl session builds), darwin (amd64, arm64), windows (amd64) | GitHub release | `checksums.txt` |
+| Windows installer (`localport-setup-<version>-windows-amd64.exe`) and zip, Authenticode-signed when SignPath is configured | GitHub release | `checksums.txt` |
+| OpenWrt packages (`localport-openwrt-<package arch>.apk`) | GitHub release; feed `openwrt/<series>/<package arch>/` on `pkg.localport.io` | `checksums.txt`; the feed's `packages.adb` against the OpenWrt key |
 | `checksums.txt` | GitHub release | `checksums.txt.sig` (release key) and `checksums.txt.sigstore.json` (release workflow) |
 | SLSA build provenance for every file | GitHub attestations | `gh attestation verify` |
 | SPDX SBOM (`localport.spdx.json`) | GitHub release | `checksums.txt` |
@@ -17,7 +19,8 @@ for installation and [SECURITY.md](SECURITY.md) for verification.
 | Homebrew formula, Scoop manifest, winget manifest | their repositories | SHA-256 pinned from the signed `checksums.txt` |
 
 Prereleases (`vX.Y.Z-rc.N`) publish the GitHub release and a versioned image
-only. Package repositories and package managers carry stable releases.
+only, without OpenWrt packages (OpenWrt versions are `X.Y.Z` only). Package
+repositories, the OpenWrt feed and package managers carry stable releases.
 
 ## Keys
 
@@ -26,6 +29,8 @@ only. Package repositories and package managers carry stable releases.
 | Release key, `ecdsa-sha2-nistp256` | the maintainer's hardware (Secure Enclave), never exported | `checksums.txt`, by hand for each release |
 | Repository key, OpenPGP RSA 4096 | the `release` environment secret `REPO_GPG_PRIVATE_KEY` | apt `InRelease`/`Release.gpg`, rpm packages, `repomd.xml` |
 | apk key, RSA 4096 | the `release` environment secret `APK_PRIVATE_KEY` | apk packages, `APKINDEX.tar.gz` |
+| OpenWrt key, ECDSA P-256 | the `release` environment secret `OPENWRT_PRIVATE_KEY` | each OpenWrt feed's `packages.adb` (the packages themselves are unsigned, as in OpenWrt's own feeds) |
+| Authenticode certificate | SignPath Foundation; the repository secret `SIGNPATH_API_TOKEN` and the variables `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_SIGNING_POLICY_SLUG` | the Windows executables, uninstaller and installer |
 | Workflow identity (Sigstore, keyless) | GitHub OIDC, no stored key | `checksums.txt.sigstore.json`, the image, build provenance |
 
 Public halves are committed:
@@ -35,6 +40,9 @@ Public halves are committed:
   `release/keys/RPM-GPG-KEY-localport` (armored): the repository key.
 - `release/keys/<name>.rsa.pub`: the apk key. The file name is the name apk
   matches signatures against.
+- `release/keys/localport-openwrt.pem`: the OpenWrt key. Publish copies it to
+  `openwrt/` in the repository; routers install it in `/etc/apk/keys/`.
+  `.gitignore` ignores `*.pem` except under `release/keys/`.
 - `release/keys/VERSION`: the version of the `localport-archive-keyring`
   package, as `YYYY.MM.DD`.
 
@@ -50,9 +58,20 @@ scripts.
    git push origin vX.Y.Z
    ```
 
-2. The **Build draft** job builds the release set, generates the SBOM,
-   attests provenance, signs `checksums.txt` with Sigstore and creates a draft
-   release. It holds no secret.
+2. The tag starts the build jobs:
+   - **Check tag** accepts `vX.Y.Z` and `vX.Y.Z-PRERELEASE` only.
+   - **Session builds** build `localport-session` for every platform and the
+     signed darwin binaries; **OpenWrt** builds one package per package arch
+     with the pinned SDK (stable tags only).
+   - **Build draft** builds the rest of the release set and the SBOM.
+   - **Windows packages** builds the installer and zip. With
+     `SIGNPATH_PROJECT_SLUG` set, SignPath signs in two submissions, each
+     approved in SignPath: the executables and uninstaller, then the
+     installer.
+   - **Draft release** writes `checksums.txt`, attests provenance, signs
+     `checksums.txt` with Sigstore and creates the draft release.
+
+   Only **Windows packages** holds a secret (`SIGNPATH_API_TOKEN`).
 
 3. Sign the draft on the machine that holds the release key:
 
@@ -68,7 +87,8 @@ scripts.
 4. Approve the **Publish** job in the `release` environment. It verifies
    `checksums.txt.sig` before anything else, then:
    - builds and signs the packages, merges them into the published repository,
-     rebuilds and signs the indexes;
+     rebuilds and signs the indexes, and adds the OpenWrt packages to the feed
+     with a signed `packages.adb` per package arch;
    - installs from the new repository on Debian, Ubuntu, Rocky Linux, Amazon
      Linux, Fedora and Alpine, and stops if any install fails;
    - publishes the repository, then the image, then the GitHub release;
@@ -85,9 +105,12 @@ scripts.
 A failed publish or winget job can be re-run. Komac skips a version that
 already has an open pull request.
 
-`make release-dryrun` runs steps 2 and 4 locally with throwaway keys and
-publishes nothing. The **Packaging** workflow runs it on every change to the
-pipeline.
+`make release-dryrun` runs the Linux part of steps 2 and 4 with throwaway
+keys and publishes nothing. `make dist` needs the `localport-session` and
+darwin binaries in `bin/` first; only the session builds make them. The
+**Packaging** workflow runs the session builds and the dry run, and builds
+the x86_64 OpenWrt package, on every push to `main` and on every pull request
+that changes the pipeline.
 
 ## Key rotation
 
@@ -127,6 +150,17 @@ first. Then switch `APK_PRIVATE_KEY`, replace the file in `release/keys`, and
 release. Existing Alpine systems fetch the new public key
 as documented.
 
+### OpenWrt key
+
+The feed has no keyring package either. Publish the new public key beside the
+old one under `openwrt/` and document it first, then switch
+`OPENWRT_PRIVATE_KEY`, replace `release/keys/localport-openwrt.pem`, and
+release. Routers trust the new index once they install the new key in
+`/etc/apk/keys/`.
+
+Generate a key with `openssl ecparam -name prime256v1 -genkey -noout` and its
+public half with `openssl ec -pubout`.
+
 ## Maintenance
 
 - Actions are pinned by commit SHA and updated by Dependabot, as are Go
@@ -135,5 +169,42 @@ as documented.
   updates are not delayed.
 - Updated by hand: the Debian and Alpine images in the `Makefile`
   (`DEBIAN_IMAGE`, `ALPINE_IMAGE`, pinned by digest), the distributions in
-  `scripts/release/repo-test.sh`, the cosign version in `release.yml`, and
-  Komac (`KOMAC_VERSION`, `KOMAC_SHA256` in `release.yml`).
+  `scripts/release/repo-test.sh`, the cosign version in `release.yml`, Komac
+  (`KOMAC_VERSION`, `KOMAC_SHA256` in `release.yml`), NSIS (`NSIS_VERSION`,
+  `NSIS_ZIP_SHA256` in `release.yml`), the OpenWrt SDKs (`release` and the
+  per-arch SHA-256 list in `packaging/openwrt/sdk.sh`; the feed directory
+  follows the release series), the binfmt and BuildKit images the session and
+  image builds use (digests in `session.yml` and `release.yml`), and
+  cargo-deny (`CARGO_DENY_VERSION`, `CARGO_DENY_SHA256` in `ci.yml`).
+
+### Session builder images
+
+The Linux `localport-session` builds run on toolchain images built from
+`packaging/session/builder.Dockerfile`: gcc, the PAM headers, binutils and git
+at exact package versions, without Go. The **Session builder** workflow
+(`session-builder.yml`) builds each stage, pushes it to
+`ghcr.io/localport/session-builder:<stage>` with an SBOM and build provenance,
+and signs it with cosign (keyless, from `main`). It runs on `main` only: on a
+push that changes the builder file or the workflow, or by hand. The GHCR
+package is public, so release and pull request builds pull it without
+credentials.
+
+`packaging/session/Dockerfile` names each image by digest and copies Go from
+the official `golang` images. Before any build, `session.yml` runs
+`cosign verify` on every builder reference in that file against the identity
+`https://github.com/localport/agent/.github/workflows/session-builder.yml@refs/heads/main`;
+an unsigned or foreign image fails the session builds.
+
+To update a toolchain (a package version, or the AlmaLinux or Alpine base):
+
+1. Change `packaging/session/builder.Dockerfile` and merge it to `main`.
+   Alpine keeps one build per package, so a pinned `-rN` that Alpine has
+   replaced fails this build until it is updated; release builds keep using
+   the pinned image meanwhile.
+2. Wait for the **Session builder** run on `main`; its job summary lists the
+   new digest of each stage.
+3. Replace the digests in `packaging/session/Dockerfile` with those digests,
+   and run the session builds (the **Packaging** workflow) before a release.
+
+The cosign version in `session.yml` and `session-builder.yml` is updated by
+hand, with the one in `release.yml`.

@@ -5,7 +5,7 @@
 # SourceForge publishes no checksum for NSIS; NSIS_SRC_SHA256 is the SHA-256
 # of the official download, and the release workflow pins the Windows zip
 # the same way. Bump all pins together with a new NSIS release.
-FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
 ARG NSIS_VERSION=3.13
 ARG NSIS_SRC_SHA256=a8ffe024602d46b6d766f9e1ce30c324ad2a24daeacd3efc2642d436a0c157ac

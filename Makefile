@@ -53,7 +53,7 @@ DARWIN_NAMES = $(foreach a,$(SESSION_DARWIN),localport-darwin-$(a) localport-ses
 
 DIST = dist
 
-.PHONY: winres check-packaging build build-all build-session-linux build-session-armv6 build-session-darwin build-darwin sign-darwin dist release-sign release-dryrun packages repo repo-apk clean test test-root vet-all smoke lint errwrapcheck fmt vet notices notices-check
+.PHONY: winres check-packaging build build-all build-session-linux build-session-armv6 build-session-darwin build-darwin sign-darwin dist release-sign release-dryrun packages repo repo-apk clean test test-root vet-all smoke lint errwrapcheck fmt vet notices notices-check cargo-deny
 
 build:
 	$(GO_BUILD) -o bin/localport ./cmd/localport
@@ -80,13 +80,18 @@ check-packaging:
 	./scripts/release/check-packaging.sh
 
 # The Docker builds in SESSION_LINUX; CI runs one entry per job by setting
-# SESSION_LINUX.
+# SESSION_LINUX. The git directory is a separate build context (a submodule's
+# .git is a file pointing outside the module), mounted only while go build
+# stamps the VCS information, so BUILDVCS means the same as for the other
+# builds.
 build-session-linux:
-	@for e in $(SESSION_LINUX); do \
+	@gitdir="$$(git rev-parse --absolute-git-dir)" || { echo "build-session-linux needs a git checkout"; exit 1; }; \
+	for e in $(SESSION_LINUX); do \
 		IFS=:; set -- $$e; IFS=' '; \
 		echo "build localport-session_$$4"; \
 		docker buildx build --quiet --platform "$$1" -f packaging/session/Dockerfile \
-			--build-arg TOOLCHAIN="$$2" --build-arg TAGS="$$3" \
+			--build-context git="$$gitdir" \
+			--build-arg TOOLCHAIN="$$2" --build-arg TAGS="$$3" --build-arg BUILDVCS="$(BUILDVCS)" \
 			--build-arg NAME="localport-session_$$4" --build-arg "LDFLAGS=$(LDFLAGS)" \
 			--output type=local,dest=bin . || exit 1; \
 	done
@@ -160,8 +165,8 @@ packages:
 	./scripts/release/packages.sh $(DIST) $(DIST)/packages
 
 # Repository tools run in pinned images.
-DEBIAN_IMAGE = debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
-ALPINE_IMAGE = alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+DEBIAN_IMAGE = debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+ALPINE_IMAGE = alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 HOST_IDS := $(shell id -u):$(shell id -g)
 
 # apt and rpm repositories in $(DIST)/repo. Needs REPO_GPG_KEY_FILE.
@@ -222,6 +227,15 @@ vet-all:
 	@for p in $(PLATFORMS); do \
 		echo "vet $$p"; \
 		GOOS=$${p%/*} GOARCH=$${p#*/} GOARM=6 go vet ./... || exit 1; \
+	done
+
+# RustSec advisories for the Rust golden generators of the RDP tests, each
+# against its own deny.toml. Needs cargo-deny (RELEASING.md "Maintenance").
+CARGO_FIXTURES = internal/session/testdata/rdpfilter internal/session/testdata/rdcleanpath
+cargo-deny:
+	@for d in $(CARGO_FIXTURES); do \
+		echo "cargo deny $$d"; \
+		cargo deny --manifest-path $$d/Cargo.toml --config $$d/deny.toml check advisories || exit 1; \
 	done
 
 # Builds and runs the binary, so it is not part of `test`.

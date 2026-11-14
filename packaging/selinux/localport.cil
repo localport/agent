@@ -6,6 +6,8 @@
 ;                       helper (PAM, identity change, pty, utmp, user transition)
 ; localport_etc_t       the device dir /etc/localport-device (root-owned config)
 ; localport_state_t     the identity dir /etc/localport-device/identity (agent state)
+; localport_lock_t      /etc/localport-device/run.lock, the one file there the agent
+;                       locks and writes
 ; localport_var_run_t   /run/localport (the launcher socket)
 ;
 ; The agent domain has no transition rights and no access to user domains; only
@@ -18,6 +20,7 @@
 (type localport_session_exec_t)
 (type localport_etc_t)
 (type localport_state_t)
+(type localport_lock_t)
 (type localport_var_run_t)
 
 (roletype system_r localport_t)
@@ -26,14 +29,15 @@
 (roletype object_r localport_session_exec_t)
 (roletype object_r localport_etc_t)
 (roletype object_r localport_state_t)
+(roletype object_r localport_lock_t)
 (roletype object_r localport_var_run_t)
 
 (typeattributeset domain (localport_t localport_session_t))
 (typeattributeset daemon (localport_t localport_session_t))
 (typeattributeset nsswitch_domain (localport_t localport_session_t))
-(typeattributeset file_type (localport_exec_t localport_session_exec_t localport_etc_t localport_state_t localport_var_run_t))
-(typeattributeset non_security_file_type (localport_exec_t localport_session_exec_t localport_etc_t localport_state_t localport_var_run_t))
-(typeattributeset non_auth_file_type (localport_exec_t localport_session_exec_t localport_etc_t localport_state_t localport_var_run_t))
+(typeattributeset file_type (localport_exec_t localport_session_exec_t localport_etc_t localport_state_t localport_lock_t localport_var_run_t))
+(typeattributeset non_security_file_type (localport_exec_t localport_session_exec_t localport_etc_t localport_state_t localport_lock_t localport_var_run_t))
+(typeattributeset non_auth_file_type (localport_exec_t localport_session_exec_t localport_etc_t localport_state_t localport_lock_t localport_var_run_t))
 (typeattributeset exec_type (localport_exec_t localport_session_exec_t))
 (typeattributeset entry_type (localport_exec_t localport_session_exec_t))
 (typeattributeset configfile (localport_etc_t))
@@ -50,6 +54,19 @@
 (filecon "/opt/localport/bin/localport-session" file (system_u object_r localport_session_exec_t ((s0) (s0))))
 (filecon "/etc/localport-device(/.*)?" any (system_u object_r localport_etc_t ((s0) (s0))))
 (filecon "/etc/localport-device/identity(/.*)?" any (system_u object_r localport_state_t ((s0) (s0))))
+(filecon "/etc/localport-device/run\.lock" file (system_u object_r localport_lock_t ((s0) (s0))))
+
+; File contexts apply on relabel only. Root creates the device dir, identity/
+; and run.lock at run time (connect, service install), so a named transition
+; for each admin domain gives them their type at creation, as the
+; distribution's own *_filetrans_named_content interfaces do. Files inside
+; take the type of their directory.
+(macro localport_filetrans_named_content ((type creator))
+	(typetransition creator etc_t dir "localport-device" localport_etc_t)
+	(typetransition creator localport_etc_t dir "identity" localport_state_t)
+	(typetransition creator localport_etc_t file "run.lock" localport_lock_t))
+(call localport_filetrans_named_content (unconfined_t))
+(call localport_filetrans_named_content (sysadm_t))
 (filecon "/run/localport(/.*)?" any (system_u object_r localport_var_run_t ((s0) (s0))))
 (filecon "/var/run/localport(/.*)?" any (system_u object_r localport_var_run_t ((s0) (s0))))
 
@@ -135,6 +152,9 @@
 ; The agent's own state: credentials, keys, sessions lock, recording spool.
 (allow localport_t localport_state_t (dir (create getattr setattr search read open write add_name remove_name rename rmdir)))
 (allow localport_t localport_state_t (file (create getattr setattr read write open append lock rename unlink map)))
+; run.lock: the agent opens the existing file, locks it and records its PID
+; (truncate and write); root creates it.
+(allow localport_t localport_lock_t (file (getattr open read write lock)))
 ; Requests to the launcher; the session channel fd passes over the connection.
 (allow localport_t localport_var_run_t (dir (getattr search)))
 (allow localport_t localport_var_run_t (sock_file (getattr write)))

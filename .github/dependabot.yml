@@ -17,8 +17,28 @@ updates:
     cooldown:
       default-days: 7
 
+  - package-ecosystem: gomod
+    directory: /tools/errwrapcheck
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
   - package-ecosystem: docker
-    directory: /packaging
+    directories:
+      - /packaging
+      - /packaging/session
+      - /packaging/windows
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  # The golden generators of the RDP tests.
+  - package-ecosystem: cargo
+    directories:
+      - /internal/session/testdata/rdpfilter
+      - /internal/session/testdata/rdcleanpath
     schedule:
       interval: weekly
     cooldown:

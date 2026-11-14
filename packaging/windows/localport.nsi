@@ -34,7 +34,13 @@ SetCompressor /SOLID lzma
 !define APP "Localport"
 !define PUBLISHER "Localport"
 !define UNKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Localport"
-!define MUTEX "Global\LocalportSetup"
+; The setup mutex lives in the private namespace the Go side opens for the
+; service configuration mutex (internal/cli/serviceconfiglock_windows.go):
+; same alias, an Administrators boundary and a SYSTEM and Administrators DACL,
+; so no other account can create the name first and hold it.
+!define NAMESPACE "LocalportServiceConfig"
+!define NAMESPACE_SDDL "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+!define MUTEX "${NAMESPACE}\Setup"
 
 Name "${APP}"
 OutFile "${OUTFILE}"
@@ -75,12 +81,80 @@ Var LogFile
   ${EndIf}
 !macroend
 
+; SetupFailed stops setup when it cannot take its mutex, with Windows
+; Installer's ERROR_INSTALL_FAILURE.
+!macro SetupFailed WHAT
+  SetErrorLevel 1603
+  Abort "setup could not ${WHAT} (error $1)"
+!macroend
+
 ; RequireSingle refuses a second installer or uninstaller running at once,
-; exiting with Windows Installer's ERROR_INSTALL_ALREADY_RUNNING.
+; exiting with Windows Installer's ERROR_INSTALL_ALREADY_RUNNING. It creates
+; or opens the private namespace (repeating when the namespace closes between
+; the two calls, as the Go side does), then creates the mutex in it. The
+; namespace and mutex handles stay open until the process exits: the name
+; exists only while a handle to the namespace is open.
+; Registers: $1 last error, $2 boundary descriptor, $3 SID, $4 security
+; descriptor, $5 security attributes, $6 namespace, $0 mutex, $R1 counter.
 !macro RequireSingle
-  System::Call 'kernel32::CreateMutexW(p 0, i 0, w "${MUTEX}") p .r0 ?e'
+  System::Call 'kernel32::CreateBoundaryDescriptorW(w "${NAMESPACE}", i 0) p .r2 ?e'
   Pop $1
-  ${If} $1 == 183 ; ERROR_ALREADY_EXISTS
+  ${If} $2 = 0
+    !insertmacro SetupFailed "create the boundary descriptor"
+  ${EndIf}
+  ; SECURITY_MAX_SID_SIZE; WinBuiltinAdministratorsSid is 26.
+  System::Alloc 68
+  Pop $3
+  System::Call 'advapi32::CreateWellKnownSid(i 26, p 0, p r3, *i 68) i .r0 ?e'
+  Pop $1
+  ${If} $0 = 0
+    !insertmacro SetupFailed "build the Administrators SID"
+  ${EndIf}
+  System::Call 'kernel32::AddSIDToBoundaryDescriptor(*p r2 r2, p r3) i .r0 ?e'
+  Pop $1
+  ${If} $0 = 0
+    !insertmacro SetupFailed "add the Administrators SID to the boundary"
+  ${EndIf}
+  ; SDDL_REVISION_1
+  System::Call 'advapi32::ConvertStringSecurityDescriptorToSecurityDescriptorW(w "${NAMESPACE_SDDL}", i 1, *p .r4, p 0) i .r0 ?e'
+  Pop $1
+  ${If} $0 = 0
+    !insertmacro SetupFailed "build the namespace security descriptor"
+  ${EndIf}
+  ; SECURITY_ATTRIBUTES { nLength, lpSecurityDescriptor, bInheritHandle }
+  System::Call '*(&l4, p r4, i 0) p .r5'
+  StrCpy $6 0
+  ${For} $R1 1 8
+    System::Call 'kernel32::CreatePrivateNamespaceW(p r5, p r2, w "${NAMESPACE}") p .r6 ?e'
+    Pop $1
+    ${If} $6 <> 0
+      ${ExitFor}
+    ${EndIf}
+    ${If} $1 <> 183 ; ERROR_ALREADY_EXISTS
+      !insertmacro SetupFailed "create the setup namespace"
+    ${EndIf}
+    System::Call 'kernel32::OpenPrivateNamespaceW(p r2, w "${NAMESPACE}") p .r6 ?e'
+    Pop $1
+    ${If} $6 <> 0
+      ${ExitFor}
+    ${EndIf}
+    ${If} $1 <> 3 ; ERROR_PATH_NOT_FOUND: the namespace closed in between
+      !insertmacro SetupFailed "open the setup namespace"
+    ${EndIf}
+  ${Next}
+  ${If} $6 = 0
+    !insertmacro SetupFailed "keep the setup namespace open"
+  ${EndIf}
+  System::Call 'kernel32::CreateMutexW(p r5, i 0, w "${MUTEX}") p .r0 ?e'
+  Pop $1
+  System::Call 'kernel32::DeleteBoundaryDescriptor(p r2)'
+  System::Free $3
+  System::Free $5
+  System::Call 'kernel32::LocalFree(p r4)'
+  ${If} $0 = 0
+    !insertmacro SetupFailed "create the setup mutex"
+  ${EndIf}
+  ${If} $1 = 183 ; ERROR_ALREADY_EXISTS
     SetErrorLevel 1618
     Abort "another Localport installer or uninstaller is running"
   ${EndIf}

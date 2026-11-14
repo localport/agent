@@ -9,6 +9,8 @@ dist/
 *.key
 *.pem
 *.p12
+# Public halves of the release keys (RELEASING.md)
+!release/keys/*.pem
 
 # Generated VERSIONINFO resources (make winres)
 cmd/*/rsrc_windows_*.syso

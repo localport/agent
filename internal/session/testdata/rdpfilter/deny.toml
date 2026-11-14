@@ -1,0 +1,19 @@
+# cargo-deny advisories check for the golden generator (`make cargo-deny`).
+# Every advisory fails except the ones below, each triaged for this crate.
+# The generator is a test tool that is never shipped.
+
+[advisories]
+ignore = [
+    # rsa 0.10.0-rc.18 (Marvin timing side channel on RSA private-key
+    # operations), pinned exactly by picky and sspi. The generator holds no
+    # RSA private key: it uses password credentials and skips the security
+    # upgrade on both sides (src/main.rs), so no private-key operation runs.
+    { id = "RUSTSEC-2023-0071", reason = "no RSA private-key operation is reached: password credentials, no security upgrade" },
+    # atomic-polyfill (unmaintained), through heapless, iso7816 and winscard
+    # under sspi: the emulated smartcard path, reached only through smartcard
+    # credentials, which the generator never builds.
+    { id = "RUSTSEC-2023-0089", reason = "unmaintained, smartcard emulation path through sspi that the generator never reaches" },
+    # pin-utils (unmaintained), through async-dnssd under sspi. No advisory
+    # against its code; sspi has to drop it upstream.
+    { id = "RUSTSEC-2026-0441", reason = "unmaintained, transitive through sspi async-dnssd; no vulnerability" },
+]
