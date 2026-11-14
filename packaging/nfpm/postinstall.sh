@@ -1,9 +1,8 @@
 #!/bin/sh
 # Creates the system group and user "localport" that the agent runs as, from
 # /usr/lib/sysusers.d/localport.conf when systemd-sysusers is present and
-# otherwise with the same values. Idempotent. The package owns the account:
-# package removal leaves it, and `localport service uninstall --purge` keeps
-# it while the sysusers file is installed.
+# otherwise with the same values. Idempotent. Package removal and
+# `localport service uninstall --purge` both keep the account.
 set -e
 
 name=localport

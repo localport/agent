@@ -16,13 +16,25 @@ func wantCode(t *testing.T, err error, code errcode.Code) {
 	}
 }
 
-// A failed service manager command is AG135 and still a CommandError.
+// A failed service manager command is AG135 and still a CommandError; the
+// account tools' runner leaves the code to the account step (AG138).
 func TestFailedCommandIsCoded(t *testing.T) {
-	_, err := execRun(context.Background(), "false")
+	_, err := managerRun(context.Background(), "false")
 	wantCode(t, err, errcode.ServiceManagerFailed)
 	var cmdErr *CommandError
 	if !errors.As(err, &cmdErr) || cmdErr.ExitCode != 1 {
 		t.Fatalf("err = %v, want the CommandError with exit code 1", err)
+	}
+	if _, err := execRun(context.Background(), "false"); errors.Is(err, errcode.New(errcode.ServiceManagerFailed)) {
+		t.Fatalf("execRun = %v, want no service manager code", err)
+	}
+	run := func(context.Context, string, ...string) (string, error) {
+		return execRun(context.Background(), "false")
+	}
+	_, err = ensureAccount(context.Background(), run, &fakeAccounts{})
+	wantCode(t, err, errcode.AccountNotChanged)
+	if errors.Is(err, errcode.New(errcode.ServiceManagerFailed)) {
+		t.Fatalf("account create = %v, want AG138 only", err)
 	}
 }
 

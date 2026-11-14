@@ -164,6 +164,14 @@ var (
 // idempotency key belongs to a request it is still running.
 const codeIdempotencyInFlight = "SE037"
 
+// InFlight reports whether err is the control plane's answer that a request
+// under the same idempotency key is still running: that request may still
+// complete and spend what it carries.
+func InFlight(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Code == codeIdempotencyInFlight
+}
+
 // responseReadError is a failure reading a response body: a reset, an HTTP/2
 // stream reset or GOAWAY, or a truncated body. The request may have
 // completed, so only a retry under the same idempotency key is safe.
@@ -430,7 +438,7 @@ type deviceKeysResponse struct {
 // plane accepts within a minute of its clock. Transport failures, 5xx and 429
 // are retried within DefaultRetryBudget; other refusals return at once as an
 // *APIError. A material that is not a device returns ErrNotDeviceIdentity, and
-// a response without a ticket key set returns ErrNoTicketKeys.
+// a response without a session CA key set returns ErrNoTicketKeys.
 func (c *Client) FetchDeviceKeys(ctx context.Context, cur *Material) (*DeviceKeys, error) {
 	if cur.Meta.Kind != KindDevice {
 		return nil, fmt.Errorf("%w: %s", ErrNotDeviceIdentity, security.SanitizeDisplay(cur.Meta.Identity))

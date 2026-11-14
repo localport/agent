@@ -1827,7 +1827,7 @@ Rollover:
   certificate. `SE031` on it renews again from the pending key and retries; a
   definitive renewal refusal stops the device. `SE006` (expired) is retried
   while the renewal loop renews the certificate, and stops the device while
-  the loop reports a definitive renewal refusal (a `4xx` other than `429`);
+  the loop reports a definitive renewal refusal (a `4xx` other than `429` and the in-flight `409` `SE037`);
   a renewal that lands clears it.
 - A store read error is retried and never deletes a credential.
 

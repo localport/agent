@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -13,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"io/fs"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -121,15 +121,6 @@ func TestKeyFingerprint(t *testing.T) {
 	}
 }
 
-func statGID(t *testing.T, path string) int {
-	t.Helper()
-	fi, err := os.Lstat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return int(fi.Sys().(*syscall.Stat_t).Gid)
-}
-
 func self() service.Account { return service.Account{UID: os.Getuid(), GID: os.Getgid()} }
 
 func TestEnsureIdentityDir(t *testing.T) {
@@ -195,95 +186,66 @@ func TestRootEnsureIdentityDirAdoptsAnEmptyRootDir(t *testing.T) {
 	}
 }
 
-// The account stays while the identity directory still holds credentials,
-// so they keep their owner's uid.
-func TestRemoveAgentAccountKeepsAnAccountWithCredentials(t *testing.T) {
+// The identity directory and the log directory stay while the identity
+// directory still holds credentials, so they keep their owner's uid; an
+// empty one is removed with the log directory.
+func TestRemoveAgentDirsKeepsCredentials(t *testing.T) {
+	newLogDir := func() string {
+		logDir := filepath.Join(t.TempDir(), "log")
+		if err := os.Mkdir(logDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(logDir, "agent.log"), nil, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		return logDir
+	}
+
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "identity", "team", "client-a"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeAgentAccount(t.Context(), config.LocalConfigFile{Path: filepath.Join(dir, "agent.yaml")}); err != nil {
-		t.Fatalf("removeAgentAccount = %v", err)
+	logDir := newLogDir()
+	if err := removeAgentDirs(config.LocalConfigFile{Path: filepath.Join(dir, "agent.yaml")}, logDir); err != nil {
+		t.Fatalf("removeAgentDirs = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "identity", "team", "client-a")); err != nil {
 		t.Fatalf("the credentials went: %v", err)
 	}
-}
+	if _, err := os.Stat(filepath.Join(logDir, "agent.log")); err != nil {
+		t.Fatalf("the log went while credentials remain: %v", err)
+	}
 
-// Before the account goes, the device directory and the lock files that stay
-// are given to group root, so a group reusing the gid gains nothing. Root
-// only: chgrp to root needs it.
-func TestRootRemoveAgentAccountGivesTheRemainingFilesToGroupRoot(t *testing.T) {
-	if os.Geteuid() != 0 {
-		testroot.Require(t, "chgrp to root needs root")
+	empty := t.TempDir()
+	if err := os.Mkdir(filepath.Join(empty, "identity"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	dir := t.TempDir()
-	file := config.LocalConfigFile{Path: filepath.Join(dir, "agent.yaml")}
-	for _, p := range []string{file.LockPath(), file.RunLockPath()} {
-		if err := os.WriteFile(p, nil, 0o660); err != nil {
-			t.Fatal(err)
-		}
+	logDir = newLogDir()
+	if err := removeAgentDirs(config.LocalConfigFile{Path: filepath.Join(empty, "agent.yaml")}, logDir); err != nil {
+		t.Fatalf("removeAgentDirs = %v", err)
 	}
-	const agentGID = 4242
-	for _, p := range []string{dir, file.LockPath(), file.RunLockPath()} {
-		if err := os.Lchown(p, 0, agentGID); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := os.Stat(filepath.Join(empty, "identity")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("empty identity dir: %v, want it removed", err)
 	}
-	saved, savedSysusers := removeAccount, sysusersFile
-	t.Cleanup(func() { removeAccount, sysusersFile = saved, savedSysusers })
-	sysusersFile = filepath.Join(t.TempDir(), "localport.conf")
-	removed := false
-	removeAccount = func(context.Context) error {
-		removed = true
-		for _, p := range []string{dir, file.LockPath(), file.RunLockPath()} {
-			if gid := statGID(t, p); gid != 0 {
-				t.Errorf("%s has gid %d when the account is removed, want 0", p, gid)
-			}
-		}
-		return nil
-	}
-	if err := removeAgentAccount(t.Context(), file); err != nil {
-		t.Fatalf("removeAgentAccount = %v", err)
-	}
-	if !removed {
-		t.Fatal("the account of an install without the sysusers file was kept")
+	if _, err := os.Stat(logDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("log dir: %v, want it removed", err)
 	}
 }
 
-// An account the package created (its sysusers.d file is installed) stays,
-// and so does the group of the files that carry it.
-func TestRootRemoveAgentAccountKeepsAPackagedAccount(t *testing.T) {
-	if os.Geteuid() != 0 {
-		testroot.Require(t, "needs root")
+// Purge keeps the account and names the host's commands that remove it.
+func TestKeptAccountNoticeNamesTheRemoval(t *testing.T) {
+	got := keptAccountNotice([]string{"/usr/sbin/userdel", "localport"}, []string{"/usr/sbin/groupdel", "localport"})
+	if !strings.Contains(got, "kept the account localport") || !strings.Contains(got, "sudo /usr/sbin/userdel localport, then sudo /usr/sbin/groupdel localport") {
+		t.Fatalf("notice = %q", got)
 	}
-	dir := t.TempDir()
-	file := config.LocalConfigFile{Path: filepath.Join(dir, "agent.yaml")}
-	const agentGID = 4242
-	if err := os.Lchown(dir, 0, agentGID); err != nil {
-		t.Fatal(err)
-	}
-	saved, savedSysusers := removeAccount, sysusersFile
-	t.Cleanup(func() { removeAccount, sysusersFile = saved, savedSysusers })
-	sysusersFile = filepath.Join(t.TempDir(), "localport.conf")
-	if err := os.WriteFile(sysusersFile, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	removeAccount = func(context.Context) error {
-		t.Error("removed the account the package owns")
-		return nil
-	}
-	if err := removeAgentAccount(t.Context(), file); err != nil {
-		t.Fatalf("removeAgentAccount = %v", err)
-	}
-	if gid := statGID(t, dir); gid != agentGID {
-		t.Fatalf("device directory gid = %d, want the account's %d", gid, agentGID)
+	if got := keptAccountNotice(nil, nil); !strings.Contains(got, "package that created it owns it") {
+		t.Fatalf("notice without a tool = %q", got)
 	}
 }
 
 // Purge removes the device credentials, the spool and the team directories
 // they leave empty, so an identity directory that held only devices ends
-// empty and removeAgentAccount can take the account; another credential
+// empty and removeAgentDirs can remove it; another credential
 // keeps its team directory.
 func TestPurgeStoreLeavesNoEmptyTeamDirectory(t *testing.T) {
 	root := t.TempDir()

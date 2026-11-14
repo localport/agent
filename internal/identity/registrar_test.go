@@ -500,3 +500,24 @@ func TestPresentDuringAPromotionReturnsThePromotedCertificate(t *testing.T) {
 		t.Fatalf("Present = %s (promoted %v), want the promoted %s", p.Serial, promoted, next.Meta.Serial)
 	}
 }
+
+// A renewal still running under its idempotency key, or rate limited, may
+// yet succeed, so neither stops re-registration; other 4xx answers do.
+func TestDefinitiveRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"in flight", &APIError{Status: http.StatusConflict, Code: codeIdempotencyInFlight}, false},
+		{"rate limited", &APIError{Status: http.StatusTooManyRequests}, false},
+		{"server error", &APIError{Status: http.StatusBadGateway}, false},
+		{"forbidden", &APIError{Status: http.StatusForbidden}, true},
+		{"other conflict", &APIError{Status: http.StatusConflict, Code: "SE038"}, true},
+		{"not renewable", ErrNotRenewable, true},
+	} {
+		if got := definitiveRefusal(tc.err); got != tc.want {
+			t.Errorf("%s: definitiveRefusal = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

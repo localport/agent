@@ -15,7 +15,8 @@ import (
 	"time"
 )
 
-// A 4xx other than 429 is a refusal and is not retried.
+// A 4xx other than 429 and the in-flight 409 SE037 is a refusal and is not
+// retried.
 func TestRetryClassification(t *testing.T) {
 	cases := []struct {
 		name string

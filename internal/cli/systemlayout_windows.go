@@ -51,5 +51,5 @@ func prepareSystemLayout(_ context.Context, file config.LocalConfigFile) error {
 	return security.AdoptSystemFile(file.Path)
 }
 
-// removeAgentAccount is never reached on Windows, which has no agent account.
-func removeAgentAccount(context.Context, config.LocalConfigFile) error { return nil }
+// removeAgentDirs is never reached on Windows, which has no agent account.
+func removeAgentDirs(config.LocalConfigFile, string) error { return nil }

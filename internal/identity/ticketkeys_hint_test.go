@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// hintedKeys is a device's ticket keys holding set, with a settable clock.
+// hintedKeys is a device's session CA keys holding set, with a settable clock.
 func hintedKeys(t *testing.T, set ...TicketKey) (*TicketKeys, *time.Time) {
 	t.Helper()
 	keys := deviceTicketKeys(t).mustTicketKeys(deviceRef)

@@ -34,7 +34,8 @@ type Renewer struct {
 	OnEvent func(string)
 
 	// OnRefused, optional, receives a renewal the control plane refused for
-	// good (a 4xx other than 429, or ErrNotRenewable), and nil after a renewal
+	// good (a 4xx other than 429 and the in-flight 409 SE037, or
+	// ErrNotRenewable), and nil after a renewal
 	// lands. The loop keeps its schedule; a device stops retrying an expired
 	// certificate while a refusal stands.
 	OnRefused func(error)

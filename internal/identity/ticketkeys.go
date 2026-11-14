@@ -40,7 +40,7 @@ const keysLockWait = 10 * time.Second
 // ticketKIDPattern is the kid grammar of the control plane's session CA keys.
 var ticketKIDPattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 
-// ErrNotDeviceIdentity means a ticket key store was asked for a ref that is
+// ErrNotDeviceIdentity means a session CA key store was asked for a ref that is
 // not a valid device identity; only devices hold session CA keys.
 var ErrNotDeviceIdentity = errors.New("only a device identity holds session CA keys")
 
@@ -145,7 +145,7 @@ func (s *Store) TicketKeys(ref Ref) (*TicketKeys, error) {
 // Path is the identity's ticket_keys.json.
 func (t *TicketKeys) Path() string { return filepath.Join(t.dir, ticketKeysFile) }
 
-// forgetTicketKeys drops the ticket key and desktop pin instances of a
+// forgetTicketKeys drops the session CA key and desktop pin instances of a
 // removed identity directory, so a later enrolment into the same directory
 // starts from its files.
 func (s *Store) forgetTicketKeys(dir string) {
@@ -264,7 +264,7 @@ func (t *TicketKeys) Hint(kids []string) (added bool, err error) {
 // Replace makes set the identity's key set and recording key and settles the
 // hints given at or before generation, which the caller read before it
 // requested set. It never merges: a kid absent from set leaves. A set with an
-// unusable ticket key or recording key is refused whole and the held set and
+// unusable session CA key or recording key is refused whole and the held set and
 // key stay. ctx bounds the wait for another writer.
 func (t *TicketKeys) Replace(ctx context.Context, generation uint64, set DeviceKeys) error {
 	if _, err := parseTicketKeys(set.TicketKeys); err != nil {
@@ -370,14 +370,14 @@ func parseTicketKeys(keys []TicketKey) (map[string]ed25519.PublicKey, error) {
 	pubs := make(map[string]ed25519.PublicKey, len(keys))
 	for _, k := range keys {
 		if !ticketKIDPattern.MatchString(k.KID) {
-			return nil, fmt.Errorf("ticket key kid %q is not a kid", security.SanitizeDisplay(k.KID))
+			return nil, fmt.Errorf("session CA key kid %q is not a kid", security.SanitizeDisplay(k.KID))
 		}
 		if _, dup := pubs[k.KID]; dup {
-			return nil, fmt.Errorf("ticket key kid %q appears twice", k.KID)
+			return nil, fmt.Errorf("session CA key kid %q appears twice", k.KID)
 		}
 		raw, err := base64.RawURLEncoding.Strict().DecodeString(k.PublicKey)
 		if err != nil || len(raw) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("ticket key %q is not an Ed25519 public key", k.KID)
+			return nil, fmt.Errorf("session CA key %q is not an Ed25519 public key", k.KID)
 		}
 		pubs[k.KID] = ed25519.PublicKey(raw)
 	}

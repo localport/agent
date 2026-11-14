@@ -3,12 +3,14 @@ package identity
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"regexp"
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 )
 
 // idempotencyKeySyntax is a Structured Field String holding the base32 text
@@ -92,6 +94,73 @@ func TestIdempotencyKeyIsKeptAcrossRetriesAndNewPerCall(t *testing.T) {
 	}
 	if len(keys) != 4 || keys[3] == keys[0] || !idempotencyKeySyntax.MatchString(keys[3]) {
 		t.Fatalf("second call key = %q, want a new key different from %q", keys[len(keys)-1], keys[0])
+	}
+}
+
+// Every state-creating call sends a key and resends it after a 503; the next
+// answer, a refusal, ends the call.
+func TestEveryCreatingCallResendsItsKey(t *testing.T) {
+	renewable := func(t *testing.T, uri string, kind Kind) *Material {
+		leaf := selfSigned(t, uri)
+		return &Material{
+			CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}),
+			Key:     fileKey{testKey(t)},
+			Meta:    Meta{Identity: leaf.Subject.CommonName, Kind: kind, Source: SourceToken},
+		}
+	}
+	cases := []struct {
+		name, path string
+		call       func(t *testing.T, c *Client) error
+	}{
+		{"enrol", "/v1/devices/enrol", func(t *testing.T, c *Client) error {
+			_, err := c.EnrolDevice(context.Background(), "jt", time.Minute, nil)
+			return err
+		}},
+		{"setup token", "/v1/mtls/certs", func(t *testing.T, c *Client) error {
+			_, err := c.RedeemSetupToken(context.Background(), "st", time.Minute, nil)
+			return err
+		}},
+		{"workload token", "/v1/mtls/certs", func(t *testing.T, c *Client) error {
+			_, err := c.ExchangeWorkloadToken(context.Background(), "wt")
+			return err
+		}},
+		{"renew", "/v1/mtls/certs/renew", func(t *testing.T, c *Client) error {
+			_, err := c.Renew(context.Background(), renewable(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/deploy-prod", KindClient))
+			return err
+		}},
+		{"device renew", "/v1/devices/renew", func(t *testing.T, c *Client) error {
+			_, err := c.Renew(context.Background(), renewable(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/device/tun12345.gw-01", KindDevice))
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var keys []string
+			srv := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tc.path {
+					t.Errorf("path = %s, want %s", r.URL.Path, tc.path)
+				}
+				mu.Lock()
+				keys = append(keys, r.Header.Get("Idempotency-Key"))
+				n := len(keys)
+				mu.Unlock()
+				if n == 1 {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"code":"SE010","message":"refused"}`))
+			})
+			if err := tc.call(t, &Client{BaseURL: srv.URL, HTTP: srv.Client()}); err == nil {
+				t.Fatal("the call succeeded; want the refusal")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(keys) != 2 || !idempotencyKeySyntax.MatchString(keys[0]) || keys[1] != keys[0] {
+				t.Fatalf("keys = %q, want one valid key sent twice", keys)
+			}
+		})
 	}
 }
 

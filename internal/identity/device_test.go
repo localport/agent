@@ -122,7 +122,7 @@ var testKeys = DeviceKeys{
 	RecordingKey: testRecordingKey(1),
 }
 
-// testTicketKey is a valid ticket key whose Ed25519 seed is 32 copies of seed.
+// testTicketKey is a valid session CA key whose Ed25519 seed is 32 copies of seed.
 func testTicketKey(kid string, seed byte) TicketKey {
 	priv := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
 	return TicketKey{KID: kid, PublicKey: base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))}

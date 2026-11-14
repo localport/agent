@@ -421,10 +421,11 @@ func (s *deviceService) installLocked() error {
 
 // mayHaveSpent reports an enrolment failure after which the control plane may
 // have redeemed the token: anything but an APIError below 500 (a 4xx refusal
-// or a refused redirect), which it answers without redeeming.
+// or a refused redirect), which it answers without redeeming, except the 409
+// for a request still in flight under the same key, which may yet redeem it.
 func mayHaveSpent(err error) bool {
 	var apiErr *identity.APIError
-	return !errors.As(err, &apiErr) || apiErr.Status >= 500
+	return !errors.As(err, &apiErr) || apiErr.Status >= 500 || identity.InFlight(err)
 }
 
 // errMergeConflict means the flags of a re-enrolment conflict with the

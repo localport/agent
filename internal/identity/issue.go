@@ -205,8 +205,9 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 // a broken control plane, and storing it would replace a working credential.
 func checkIssued(m *Material, want Ref) error {
 	if got := (Ref{Team: m.Meta.Team, Kind: m.Meta.Kind, Identity: m.Meta.Identity}); got != want {
-		return errAnswer.With(nil, fmt.Sprintf("the certificate is for %s, but %s was requested",
-			security.SanitizeDisplay(got.String()), security.SanitizeDisplay(want.String())))
+		// The issued name is control-plane text: it stays in the cause.
+		return errAnswer.With(fmt.Errorf("the certificate is for %s, but %s was requested",
+			security.SanitizeDisplay(got.String()), security.SanitizeDisplay(want.String())), "the certificate names another credential than requested")
 	}
 	_, err := m.TLSCertificate()
 	return err

@@ -17,4 +17,7 @@ func TestMayHaveSpentSeesARedactedRefusal(t *testing.T) {
 	if !mayHaveSpent(security.RedactError(&identity.APIError{Status: http.StatusBadGateway}, "tok")) {
 		t.Fatal("a 502 must keep the spent-token remedy")
 	}
+	if !mayHaveSpent(security.RedactError(&identity.APIError{Status: http.StatusConflict, Code: "SE037"}, "tok")) {
+		t.Fatal("a request still in flight may yet redeem the token")
+	}
 }

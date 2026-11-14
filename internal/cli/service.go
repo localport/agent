@@ -204,7 +204,7 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 		return err
 	}
 	if viaChild {
-		if err := removeAgentAccount(context.Background(), file); err != nil {
+		if err := removeAgentDirs(file, service.AgentLogDir); err != nil {
 			return err
 		}
 	}
@@ -259,9 +259,12 @@ const serviceUsage = `Usage: localport service install
   the device credentials under identity/ and the recording spool
   recordings/, with the recordings not yet uploaded. Machine credentials
   from setup and sign-in credentials stay, as do the lock files
-  agent.yaml.lock and run.lock and the directory. --purge does not revoke
-  the devices: their certificates stay valid until the devices are removed
-  in the dashboard.
+  agent.yaml.lock and run.lock and the directory. On Linux and macOS, when
+  identity/ is then empty, it and the agent's log directory
+  /var/log/localport are removed too. The localport account and group
+  always stay, since files elsewhere may belong to them; --purge prints the
+  commands that remove them. --purge does not revoke the devices: their
+  certificates stay valid until the devices are removed in the dashboard.
 
 Flags (uninstall):
   --purge   also delete the machine-wide local config, the device credentials

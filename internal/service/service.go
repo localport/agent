@@ -1,8 +1,10 @@
 // Package service installs, restarts and removes the fleet device service and
 // the session launcher beside it: systemd units, OpenRC or OpenWrt procd init
 // scripts on Linux, launchd daemons on macOS and Windows services. It is the
-// single source of their definitions and of the Windows Event Log source. Every definition runs `<binary> run --service`. Service managers
-// run by absolute path, never through PATH.
+// single source of their definitions and of the Windows Event Log source. The
+// device service definitions run `<binary> run --service` and the launcher
+// definitions run `<session binary> launcher`. Service managers run by
+// absolute path, never through PATH.
 //
 // A definition this package writes carries Marker. An existing file or
 // Windows service under the same name without it belongs to someone else and
@@ -104,7 +106,8 @@ type ExitError struct {
 func (e *ExitError) Error() string { return e.Err.Error() }
 func (e *ExitError) Unwrap() error { return e.Err }
 
-// CommandError is a failed service manager command.
+// CommandError is a failed command: a service manager command or an account
+// tool (useradd, adduser, dscl).
 type CommandError struct {
 	Command string
 	// ExitCode is the command's exit status, or -1 when it did not exit
@@ -123,12 +126,12 @@ func (e *CommandError) Error() string {
 
 func (e *CommandError) Unwrap() error { return e.Err }
 
-// commandTimeout bounds each service manager command, so a hung systemctl or
-// launchctl never stalls connect, set or uninstall.
+// commandTimeout bounds each command, so a hung systemctl, launchctl or
+// useradd never stalls connect, set or uninstall.
 const commandTimeout = 60 * time.Second
 
-// runner runs one service manager command, given by absolute path, and
-// returns its standard output; tests replace it.
+// runner runs one service manager or account tool command, given by absolute
+// path, and returns its standard output; tests replace it.
 type runner func(ctx context.Context, name string, args ...string) (string, error)
 
 func execRun(ctx context.Context, name string, args ...string) (string, error) {
@@ -150,13 +153,23 @@ func execRun(ctx context.Context, name string, args ...string) (string, error) {
 	if output == "" {
 		output = strings.TrimSpace(stdout.String())
 	}
-	command := strings.Join(append([]string{name}, args...), " ")
-	return "", errManager.With(&CommandError{
-		Command:  command,
+	return "", &CommandError{
+		Command:  strings.Join(append([]string{name}, args...), " "),
 		ExitCode: code,
 		Output:   output,
 		Err:      err,
-	}, command)
+	}
+}
+
+// managerRun is execRun for the service managers: a failed command is AG135
+// with the command as detail. The account tools use execRun, under AG138.
+func managerRun(ctx context.Context, name string, args ...string) (string, error) {
+	out, err := execRun(ctx, name, args...)
+	var cmdErr *CommandError
+	if errors.As(err, &cmdErr) {
+		return out, errManager.With(err, cmdErr.Command)
+	}
+	return out, err
 }
 
 // Executable is the real path of the running binary, every symlink resolved:

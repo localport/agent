@@ -235,7 +235,7 @@ var registry = []Entry{
 	{NotInstalled, "Device service not installed", "no device service is installed"},
 	{Unsupported, "No supported service manager", "this system has no service manager localport can install into (systemd, OpenRC, OpenWrt procd, launchd or the Windows service manager)"},
 	{MarkedForDelete, "Windows service marked for deletion", "the device service is deleted, but Windows keeps it until every handle to it closes"},
-	{StoreNotPurged, "Device credentials not purged", "removing the device credentials and the recording spool failed"},
+	{StoreNotPurged, "Device credentials not purged", "removing the device credentials, the recording spool or the agent's directories failed"},
 
 	{SessionsLocked, "Device sessions locked", "another process serves this device's sessions"},
 	{LoginsDisabled, "Logins disabled", "/etc/nologin exists, so only root can log in"},
@@ -310,7 +310,7 @@ var registry = []Entry{
 	{ServiceManagerFailed, "Service manager failed", "the service manager could not carry out the step"},
 	{ServiceDefinitionFailed, "Service definition not written", "the device service definition could not be read, written or removed"},
 	{AccountMissing, "Agent account missing", "the agent account localport does not exist; create it with: sudo localport service install"},
-	{AccountNotChanged, "Agent account not changed", "the agent account localport could not be created, looked up or removed"},
+	{AccountNotChanged, "Agent account not changed", "the agent account localport could not be created or looked up"},
 	{SystemNeedsRoot, "Needs root", "only root or an elevated Administrator changes the device config directory"},
 	{AgentGroupMissing, "Agent group missing", "the localport group does not exist; create it with: sudo localport service install"},
 	{LocalConfigUnusable, "Local config unusable", "the local config cannot be located, read, secured or locked"},

@@ -11,7 +11,7 @@ import (
 	"github.com/localport/agent/internal/errcode"
 )
 
-// errAccount is a failure to create, look up or remove the agent account.
+// errAccount is a failure to create or look up the agent account.
 var errAccount = errcode.New(errcode.AccountNotChanged)
 
 // Account is the agent account's ids.
@@ -25,10 +25,6 @@ const accountDescription = "Localport agent"
 // accountHome is the Linux account's home, which does not exist.
 // packaging/nfpm/sysusers.conf and postinstall.sh create the same account.
 const accountHome = "/nonexistent"
-
-// SysusersFile is where the Linux packages install the account's sysusers.d
-// definition. Its presence marks an account the package created and owns.
-const SysusersFile = "/usr/lib/sysusers.d/localport.conf"
 
 // EnsureAccount creates the system group and user AgentAccount when missing
 // (no login shell, no home) and returns their ids. It is idempotent, as the
@@ -98,24 +94,13 @@ func ensureAccount(ctx context.Context, run runner, db accounts) (Account, error
 	return lookupAccount(db)
 }
 
-// ErrNoAccountTool means the host has no userdel or deluser (OpenWrt, whose
-// localport package creates and owns the account).
-var ErrNoAccountTool = errors.New("no userdel or deluser on this host")
-
-// RemoveAccount deletes the system user and group AgentAccount. A missing
-// account is no error; a host without the tools returns ErrNoAccountTool. The caller removes it only once it owns nothing the
-// device service left behind.
-func RemoveAccount(ctx context.Context) error {
-	if _, _, found, err := (hostAccounts{}).lookup(AgentAccount); err != nil {
-		return errAccount.With(err, "look up "+AgentAccount)
-	} else if !found {
-		return nil
-	}
-	if err := deleteAccount(ctx, execRun); err != nil {
-		return errAccount.With(err, "remove "+AgentAccount)
-	}
-	return nil
-}
+// AccountRemoval returns the commands that delete the user and the group
+// AgentAccount, for an administrator who wants them gone, or nil where the
+// host has no tool for it (OpenWrt's default BusyBox; its package owns the
+// account). localport never deletes the account, as distributions and
+// systemd-sysusers do not: a file it owns outside localport's directories
+// would pass to a later account that reuses the uid or gid.
+func AccountRemoval() (usr, group []string) { return accountRemoval() }
 
 // deleteCommandsFor are the commands that delete the user and its group,
 // the counterparts of commandsFor's.

@@ -27,7 +27,7 @@ type DeviceKeys struct {
 	RecordingKey string      `json:"recording_key"`
 }
 
-// TicketKey is one session ticket verification key.
+// TicketKey is one session CA key (an SSH user certificate signer).
 type TicketKey struct {
 	KID       string `json:"kid"`
 	PublicKey string `json:"public_key"`
@@ -83,10 +83,10 @@ func (c *Client) EnrolDevice(
 	host := resp.DeviceHost
 	resp.DeviceHost = lowerASCII(host)
 	if resp.DeviceHost != "" && !validDeviceHost(resp.DeviceHost) {
-		return nil, errAnswer.With(nil, fmt.Sprintf("invalid device host %q", security.RedactString(security.SanitizeDisplay(host), joinToken)))
+		return nil, errAnswer.With(fmt.Errorf("device host %q", security.RedactString(security.SanitizeDisplay(host), joinToken)), "invalid device host")
 	}
 	if resp.Region != "" && !ValidRegion(resp.Region) {
-		return nil, errAnswer.With(nil, fmt.Sprintf("invalid region %q", security.RedactString(security.SanitizeDisplay(resp.Region), joinToken)))
+		return nil, errAnswer.With(fmt.Errorf("region %q", security.RedactString(security.SanitizeDisplay(resp.Region), joinToken)), "invalid region")
 	}
 
 	m, err := c.assemble(kp.key, issuedMaterial{

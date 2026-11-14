@@ -32,7 +32,7 @@ const (
 	// registered with. meta.json keeps naming the current one until Promote.
 	pendingFile = "pending.json"
 	lockFile    = ".renew.lock"
-	// ticketKeysFile holds a device's session ticket keys and team recording
+	// ticketKeysFile holds a device's session CA keys and team recording
 	// key; ticketKeysLockFile serializes its writers across processes.
 	ticketKeysFile     = "ticket_keys.json"
 	ticketKeysLockFile = ".keys.lock"

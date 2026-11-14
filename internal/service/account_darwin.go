@@ -62,14 +62,9 @@ func createAccount(ctx context.Context, run runner) error {
 	return nil
 }
 
-// deleteAccount deletes the user, then the group, with dscl.
-func deleteAccount(ctx context.Context, run runner) error {
-	for _, path := range []string{"/Users/" + AgentAccount, "/Groups/" + AgentAccount} {
-		if _, err := run(ctx, dsclPath, ".", "-delete", path); err != nil {
-			return err
-		}
-	}
-	return nil
+// accountRemoval is the dscl commands that delete the user and the group.
+func accountRemoval() (usr, group []string) {
+	return []string{dsclPath, ".", "-delete", "/Users/" + AgentAccount}, []string{dsclPath, ".", "-delete", "/Groups/" + AgentAccount}
 }
 
 // dsclIDs parses a `dscl . -list <path> <id key>` output, one "name id" per

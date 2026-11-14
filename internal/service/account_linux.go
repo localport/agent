@@ -9,6 +9,9 @@ import (
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
+// lookupGroup is groupExists; tests replace it.
+var lookupGroup = groupExists
+
 // groupExists reports whether the agent account's group exists.
 func groupExists() (bool, error) {
 	_, err := user.LookupGroup(AgentAccount)
@@ -19,22 +22,14 @@ func groupExists() (bool, error) {
 	return err == nil, err
 }
 
-// deleteAccount deletes the user and then its group with the host's tool:
-// userdel and groupdel, or BusyBox deluser and delgroup.
-func deleteAccount(ctx context.Context, run runner) error {
+// accountRemoval is the host tool's delete commands: userdel and groupdel, or
+// BusyBox deluser and delgroup.
+func accountRemoval() (usr, group []string) {
 	tool, shadow := accountTool(fileExists)
 	if tool == "" {
-		return ErrNoAccountTool
+		return nil, nil
 	}
-	usr, group := deleteCommandsFor(tool, shadow)
-	if _, err := run(ctx, usr[0], usr[1:]...); err != nil {
-		return err
-	}
-	if exists, err := groupExists(); err != nil || !exists {
-		return err
-	}
-	_, err := run(ctx, group[0], group[1:]...)
-	return err
+	return deleteCommandsFor(tool, shadow)
 }
 
 // createAccount creates the group, when missing, and the user with the
@@ -45,14 +40,18 @@ func createAccount(ctx context.Context, run runner) error {
 		// OpenWrt has neither; its localport package creates the account.
 		return errors.New("no useradd or adduser on this host; install the localport package, which creates the account")
 	}
-	hasGroup, err := groupExists()
+	hasGroup, err := lookupGroup()
 	if err != nil {
 		return err
 	}
 	group, usr := commandsFor(tool, shadow, hasGroup, nologin(fileExists))
 	if group != nil {
 		if _, err := run(ctx, group[0], group[1:]...); err != nil {
-			return err
+			// A concurrent install or package postinstall may have created
+			// the group since the check; the user is still to be created.
+			if exists, lookupErr := lookupGroup(); lookupErr != nil || !exists {
+				return err
+			}
 		}
 	}
 	_, err = run(ctx, usr[0], usr[1:]...)

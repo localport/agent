@@ -29,7 +29,7 @@ func (t *TicketKeys) loaded(tb testing.TB) ticketKeysRecord {
 	}
 	rec, _, _, err := t.read()
 	if err != nil {
-		tb.Fatalf("read ticket keys: %v", err)
+		tb.Fatalf("read session CA keys: %v", err)
 	}
 	return rec
 }
@@ -43,7 +43,7 @@ func (s *Store) mustTicketKeys(ref Ref) *TicketKeys {
 	return keys
 }
 
-// Only a valid device identity has a ticket key store.
+// Only a valid device identity has a session CA key store.
 func TestTicketKeysRefusesARefThatIsNotADevice(t *testing.T) {
 	store := deviceTicketKeys(t)
 	for name, ref := range map[string]Ref{
@@ -57,7 +57,7 @@ func TestTicketKeysRefusesARefThatIsNotADevice(t *testing.T) {
 	}
 }
 
-// assertNoKeysIn fails when a credential metadata file carries ticket keys.
+// assertNoKeysIn fails when a credential metadata file carries session CA keys.
 func assertNoKeysIn(tb testing.TB, path string) {
 	tb.Helper()
 	raw, err := os.ReadFile(path)
@@ -65,7 +65,7 @@ func assertNoKeysIn(tb testing.TB, path string) {
 		tb.Fatal(err)
 	}
 	if bytes.Contains(raw, []byte(`"keys"`)) || bytes.Contains(raw, []byte("ticket_keys")) {
-		tb.Fatalf("%s carries ticket keys:\n%s", filepath.Base(path), raw)
+		tb.Fatalf("%s carries session CA keys:\n%s", filepath.Base(path), raw)
 	}
 }
 
@@ -115,7 +115,7 @@ func TestReplaceValidatesTheRecordingKey(t *testing.T) {
 }
 
 // A ticket_keys.json whose recording key does not parse still loads its
-// ticket keys: the recording key is dropped (reported by ErrRecordingKeyDropped),
+// session CA keys: the recording key is dropped (reported by ErrRecordingKeyDropped),
 // memory keeps the key held before, a fresh process holds none, and the next
 // Replace repairs the file.
 func TestTicketKeysLoadDropsACorruptRecordingKey(t *testing.T) {

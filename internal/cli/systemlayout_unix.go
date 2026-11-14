@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -83,9 +84,10 @@ func ensureIdentityDir(path string, acct service.Account) error {
 }
 
 // dirEmpty reports whether the directory open as fd has no entries. It reads
-// through a duplicate descriptor, so fd stays open for the caller.
+// through a duplicate close-on-exec descriptor, so fd stays open for the
+// caller and a concurrent exec does not inherit the copy.
 func dirEmpty(fd int, path string) (bool, error) {
-	dup, err := unix.Dup(fd)
+	dup, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		return false, errcode.New(errcode.CredentialStoreUnusable).With(err, "inspect "+path)
 	}
@@ -100,55 +102,38 @@ func dirEmpty(fd int, path string) (bool, error) {
 	return false, nil
 }
 
-// removeAgentAccount runs after `service uninstall --purge` emptied the
-// store: when the identity directory holds nothing more it removes it, the
-// agent's log directory and the account. While the directory still holds
-// credentials (machine credentials from setup) the account keeps them, so a
-// reinstall finds them under the same uid. An account a Linux package created
-// (its sysusers.d file is installed) belongs to the package and stays, with
-// the files that carry its group. Otherwise the device directory and the lock
-// files that stay carry the account's group; they move to group root before
-// the group goes, so a group that later reuses the gid gains nothing.
-func removeAgentAccount(ctx context.Context, file config.LocalConfigFile) error {
-	dir := filepath.Dir(file.Path)
-	idDir := filepath.Join(dir, "identity")
+// removeAgentDirs runs after `service uninstall --purge` emptied the store:
+// when the identity directory holds nothing more it removes it and the
+// agent's log directory logDir (service.AgentLogDir). While the directory
+// still holds credentials (machine credentials from setup) both stay. The
+// account and its group always stay (service.AccountRemoval says why); the
+// message names the commands that remove them.
+func removeAgentDirs(file config.LocalConfigFile, logDir string) error {
+	idDir := filepath.Join(filepath.Dir(file.Path), "identity")
 	switch err := os.Remove(idDir); {
 	case err == nil, errors.Is(err, fs.ErrNotExist):
 	case errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.EEXIST):
-		fmt.Fprintf(os.Stderr, "  kept the account %s: it owns the credentials left in %s\n", service.AgentAccount, idDir)
+		fmt.Fprintf(os.Stderr, "  kept %s: it holds credentials that are not device credentials\n", idDir)
 		return nil
 	default:
-		return errcode.New(errcode.AccountNotChanged).With(err, "remove "+idDir)
+		return errcode.New(errcode.StoreNotPurged).With(err, "remove "+idDir)
 	}
 	// Its parent, /var/log, is writable by root only; RemoveAll unlinks a
 	// link instead of following it.
-	if err := os.RemoveAll(service.AgentLogDir); err != nil {
-		return errcode.New(errcode.AccountNotChanged).With(err, "remove "+service.AgentLogDir)
+	if err := os.RemoveAll(logDir); err != nil {
+		return errcode.New(errcode.StoreNotPurged).With(err, "remove "+logDir)
 	}
-	switch _, err := os.Lstat(sysusersFile); {
-	case err == nil:
-		fmt.Fprintf(os.Stderr, "  kept the account %s: the localport package created it (%s)\n", service.AgentAccount, sysusersFile)
-		return nil
-	case !errors.Is(err, fs.ErrNotExist):
-		return errcode.New(errcode.AccountNotChanged).With(err, "inspect "+sysusersFile)
-	}
-	for _, path := range []string{dir, file.LockPath(), file.RunLockPath()} {
-		if err := os.Lchown(path, -1, 0); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return errcode.New(errcode.AccountNotChanged).With(err, fmt.Sprintf("give %s to group root before removing the account %s", path, service.AgentAccount))
-		}
-	}
-	if err := removeAccount(ctx); errors.Is(err, service.ErrNoAccountTool) {
-		fmt.Fprintf(os.Stderr, "  kept the account %s: this host has no userdel or deluser; the package that created it removes it\n", service.AgentAccount)
-		return nil
-	} else if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "  removed the account %s\n", service.AgentAccount)
+	fmt.Fprintf(os.Stderr, "  %s\n", keptAccountNotice(service.AccountRemoval()))
 	return nil
 }
 
-// removeAccount deletes the agent account; tests replace it.
-var removeAccount = service.RemoveAccount
-
-// sysusersFile is service.SysusersFile; tests replace it.
-var sysusersFile = service.SysusersFile
+// keptAccountNotice tells the administrator that the account stays and how
+// to remove it: usr and group are service.AccountRemoval's commands, nil
+// where the host's package owns the account.
+func keptAccountNotice(usr, group []string) string {
+	if usr == nil {
+		return fmt.Sprintf("kept the account %s: the package that created it owns it", service.AgentAccount)
+	}
+	return fmt.Sprintf("kept the account %s (it may own files elsewhere); to remove it: sudo %s, then sudo %s if the group remains",
+		service.AgentAccount, strings.Join(usr, " "), strings.Join(group, " "))
+}
