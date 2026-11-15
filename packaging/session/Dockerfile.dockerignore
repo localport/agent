@@ -1,4 +1,5 @@
-# Build context is the agent module root.
+# The build context holds the tracked files only
+# (scripts/release/tracked-context.sh); these entries are a second guard.
 .git
 bin
 dist

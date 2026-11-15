@@ -833,6 +833,10 @@ func TestBadFileEventEndsTheSFTPChannel(t *testing.T) {
 				t.Fatal(err)
 			}
 			stderr, _ := sess.StderrPipe()
+			// An open stdin, so the helper never exits on eof before the event.
+			if _, err := sess.StdinPipe(); err != nil {
+				t.Fatal(err)
+			}
 			if err := sess.RequestSubsystem("sftp"); err != nil {
 				t.Fatal(err)
 			}
@@ -865,6 +869,10 @@ func TestFileEventsOnlyFromTheFileServer(t *testing.T) {
 
 	sess, _ = client.NewSession()
 	stderr, _ := sess.StderrPipe()
+	// An open stdin, so the helper never exits on eof before the event.
+	if _, err := sess.StdinPipe(); err != nil {
+		t.Fatal(err)
+	}
 	if err := sess.Start("event"); err != nil {
 		t.Fatal(err)
 	}
@@ -1004,6 +1012,11 @@ func TestShutdownEndsConnections(t *testing.T) {
 	sess, _ := client.NewSession()
 	_ = sess.RequestPty("xterm", 24, 80, nil)
 	stderr, _ := sess.StderrPipe()
+	// An open stdin: a nil one sends eof, and the shell exiting on it would
+	// end the channel before Shutdown does, without the notice.
+	if _, err := sess.StdinPipe(); err != nil {
+		t.Fatal(err)
+	}
 	if err := sess.Shell(); err != nil {
 		t.Fatal(err)
 	}

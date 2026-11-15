@@ -1663,8 +1663,11 @@ person holding credentials in two teams can tell them apart, and nothing else
 reads it. It is omitted when the control plane could not resolve it, and a
 record without it still loads. A renewal refreshes it but never blanks it.
 
-`source` is `token`, `oidc` or `sso`. Only `token` and `oidc` renew, and any
-other value is treated as non-renewing. A renewal carries the source forward
+`source` is `token`, `oidc` or `sso`. Only `token` and `oidc` count as
+renewing sources in the store, and any other value is treated as
+non-renewing. A workload (`oidc`) certificate is held in memory for one run
+and never renewed: the control plane refuses its renewal, and the job requests
+a new certificate with a new workload token. A renewal carries the source forward
 unchanged.
 
 `meta.json` is validated on read and on write. A record naming an unknown kind
@@ -1906,6 +1909,11 @@ carries none.
   `SE037` (retried), a key reused with a different request with `422` `SE038`,
   and a missing key with `400` `SE039`. Both are final and shown with the
   server's code.
+- A response the control plane answers from its record of the key, a stored
+  certificate or a stored refusal, carries `Idempotent-Replayed: true`. A body
+  refused before its credential is checked (`400`) is not recorded, so the key
+  then serves a corrected body; a refusal after the credential is accepted is
+  recorded, and a corrected request takes a new key.
 
 ### A refused certificate is reported
 

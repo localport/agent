@@ -156,10 +156,12 @@ func TestForwardServerConcurrentDials(t *testing.T) {
 
 // TestForwardServerConcurrentAccepts checks that connections accepted at
 // once by several listeners reach the client with increasing ids: an id
-// received out of order ends the client.
+// received out of order ends the client. The accepts stay within
+// maxForwardConns: past it an accept is closed at the limit, which
+// TestUnixPeerHeldSocketsCountAgainstTheAcceptLimit covers.
 func TestForwardServerConcurrentAccepts(t *testing.T) {
 	client := forwardPair(t)
-	const listeners, perListener = 4, 16
+	const listeners, perListener = 4, maxForwardConns / 4
 	accepted := make(chan struct{}, listeners*perListener)
 	var ports []uint16
 	for range listeners {
@@ -177,10 +179,12 @@ func TestForwardServerConcurrentAccepts(t *testing.T) {
 		for range perListener {
 			wg.Go(func() {
 				c, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
-				if err == nil {
-					_, _ = c.Read(make([]byte, 1))
-					_ = c.Close()
+				if err != nil {
+					t.Errorf("dial listener %d: %v", port, err)
+					return
 				}
+				_, _ = c.Read(make([]byte, 1))
+				_ = c.Close()
 			})
 		}
 	}

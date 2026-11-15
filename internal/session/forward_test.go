@@ -359,17 +359,27 @@ func TestForwardTrafficIsActivity(t *testing.T) {
 	}
 }
 
-// A recorded connection's forwards go to one forwards recording: an open and
-// a close with the bytes each way, never the bytes themselves.
-// stalledHandoff blocks every segment handoff until release is closed.
+// stalledHandoff blocks every segment handoff until release is closed and
+// counts the terminal handoff calls (End or Abort) that returned.
 type stalledHandoff struct {
 	recordingHandoff
 	release <-chan struct{}
+	ended   *atomic.Int32
 }
 
 func (h stalledHandoff) Segment(seg recording.Segment) error {
 	<-h.release
 	return h.recordingHandoff.Segment(seg)
+}
+
+func (h stalledHandoff) End(done recording.Completion) error {
+	defer h.ended.Add(1)
+	return h.recordingHandoff.End(done)
+}
+
+func (h stalledHandoff) Abort() error {
+	defer h.ended.Add(1)
+	return h.recordingHandoff.Abort()
 }
 
 // pausedReads is a client conn whose reads block once pause is set, as a
@@ -404,15 +414,30 @@ func TestShutdownWorstCaseIsTheSumOfTheEndBounds(t *testing.T) {
 	f.srv = NewServer(*f.cfg)
 	serveForwards(t, f.launcher)
 	release := make(chan struct{})
-	wrap := func(h recordingHandoff) recordingHandoff { return stalledHandoff{h, release} }
+	var stalled, ended atomic.Int32
+	wrap := func(h recordingHandoff) recordingHandoff {
+		stalled.Add(1)
+		return stalledHandoff{h, release, &ended}
+	}
 	wrapRecordingHandoff.Store(&wrap)
 	var paused atomic.Bool
 	f.clientConn = func(c net.Conn) net.Conn { return pausedReads{c, &paused, release} }
 	t.Cleanup(func() { wrapRecordingHandoff.Store(nil) })
 	// Deferred, so it runs before every cleanup (the client closes, the
 	// fixture's Shutdown and uploader stop): the stalled recorders and
-	// client reads continue.
-	defer close(release)
+	// client reads continue. Shutdown abandoned the recorders, so the test
+	// waits for their terminal handoffs before the cleanups remove the spool.
+	defer func() {
+		close(release)
+		deadline := time.Now().Add(5 * time.Second)
+		for ended.Load() < stalled.Load() {
+			if time.Now().After(deadline) {
+				t.Errorf("%d of %d stalled recordings made no terminal handoff within 5s", stalled.Load()-ended.Load(), stalled.Load())
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
 
 	tcp := echoServer(t, "tcp", "127.0.0.1:0")
 	o := f.forwardOpts(true, false)
@@ -454,6 +479,8 @@ func TestShutdownWorstCaseIsTheSumOfTheEndBounds(t *testing.T) {
 	}
 }
 
+// A recorded connection's forwards go to one forwards recording: an open and
+// a close with the bytes each way, never the bytes themselves.
 func TestForwardRecordingEvents(t *testing.T) {
 	client := &captureClient{opens: make(chan capturedOpen, 2)}
 	f, keySum, _ := recordingFixture(t, client)

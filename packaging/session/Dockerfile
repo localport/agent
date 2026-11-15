@@ -1,13 +1,15 @@
 # syntax=docker/dockerfile:1.29.0@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
 # Builds localport-session (cgo) for one Linux platform. Build context: the
-# agent module root. Driven by `make build-session-linux` in CI:
+# module's tracked files staged by scripts/release/tracked-context.sh into
+# <ctx>/src, with the "git" build context <ctx>/git. Driven by
+# `make build-session-linux` in CI:
 #
-#   docker buildx build --platform linux/<arch> -f packaging/session/Dockerfile \
-#     --build-context git="$(git rev-parse --absolute-git-dir)" \
-#     --build-context gitcommon="$(git rev-parse --path-format=absolute --git-common-dir)" \
+#   scripts/release/tracked-context.sh --git <ctx>
+#   docker buildx build --platform linux/<arch> -f <ctx>/src/packaging/session/Dockerfile \
+#     --build-context git=<ctx>/git \
 #     --build-arg TOOLCHAIN=<stage> --build-arg TAGS=<tags> --build-arg BUILDVCS=<auto|true|false> \
 #     --build-arg NAME=<output name> --build-arg LDFLAGS=<flags> \
-#     --output type=local,dest=bin .
+#     --output type=local,dest=bin <ctx>/src
 #
 # Toolchain stages, each a signed builder image (packaging/session/builder.Dockerfile)
 # plus Go from the official image:
@@ -39,18 +41,11 @@ COPY . .
 ARG TAGS
 ARG LDFLAGS
 ARG BUILDVCS=auto
-# The git directory (build context "git") and the common directory (build
-# context "gitcommon", the same directory outside a git worktree) are mounted
+# The git directory of a fresh clone of HEAD (build context "git") is mounted
 # for the build only, so the binary carries the same VCS stamp as the other
-# release builds and no layer holds the repository. The common directory is
-# mounted outside the work tree, so git status does not list it.
-# GIT_COMMON_DIR replaces a worktree's relative commondir, which does not
-# resolve at the mount point;
-# GIT_WORK_TREE overrides a submodule's core.worktree; the files belong to the
+# release builds and no layer holds the repository. The files belong to the
 # host user, hence safe.directory.
 RUN --mount=type=bind,from=git,target=/src/.git \
-	--mount=type=bind,from=gitcommon,target=/git-common \
-	GIT_COMMON_DIR=/git-common GIT_WORK_TREE=/src \
 	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/src \
 	go build -trimpath -buildvcs="$BUILDVCS" -tags "$TAGS" -ldflags "$LDFLAGS" \
 	-o /out/localport-session ./cmd/localport-session

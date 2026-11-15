@@ -2,10 +2,10 @@ package access
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"syscall"
 
@@ -197,29 +197,72 @@ func isNormalClose(err error) bool {
 	return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
 }
 
-// streamError maps a mid-stream TLS alert to an actionable error.
-//
-// Matching is by message text. A post-handshake alert arrives as a net.OpError
-// wrapping the unexported crypto/tls alert type, and tls.AlertError exists only
-// during the handshake. The strings come from crypto/tls alertText.
-func streamError(device string, err error) error {
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "tls: bad certificate"),
-		strings.Contains(msg, "tls: unknown certificate"),
-		strings.Contains(msg, "tls: certificate required"),
-		strings.Contains(msg, "tls: unknown certificate authority"):
-		return errcode.New(errcode.DeviceRefused).With(err, device+" refused this certificate: check that the identity has access to the device, and run `localport identity list`")
-	case strings.Contains(msg, "tls: revoked certificate"):
-		return errcode.New(errcode.DeviceRefused).With(err, device+" reports this certificate as revoked: it cannot be renewed, so obtain a new one with `localport setup <TOKEN>` or `localport login`")
-	case strings.Contains(msg, "tls: access denied"):
-		return errcode.New(errcode.DeviceRefused).With(err, device+" denied this identity: its access to the device was withdrawn or narrowed, check the grants in the dashboard")
-	case strings.Contains(msg, "tls: certificate expired"),
-		strings.Contains(msg, "tls: expired certificate"):
-		return errcode.New(errcode.DeviceRefused).With(err, device+" rejected the certificate as expired: for a sign-in, run `localport login` again; for a machine credential, run `localport identity renew`")
-	default:
-		return errcode.New(errcode.DeviceUnreachable).With(err, "the connection to "+device+" ended")
+// RFC 8446 alert codes the edge sends to refuse a client certificate.
+const (
+	alertBadCertificate      tls.AlertError = 42
+	alertRevokedCertificate  tls.AlertError = 44
+	alertExpiredCertificate  tls.AlertError = 45
+	alertUnknownCertificate  tls.AlertError = 46
+	alertUnknownCA           tls.AlertError = 48
+	alertAccessDenied        tls.AlertError = 49
+	alertCertificateRequired tls.AlertError = 116
+)
+
+var refusalAlerts = []tls.AlertError{
+	alertBadCertificate, alertRevokedCertificate, alertExpiredCertificate, alertUnknownCertificate,
+	alertUnknownCA, alertAccessDenied, alertCertificateRequired,
+}
+
+// receivedAlert returns the refusal alert the peer sent, if err carries one.
+// crypto/tls reports a received alert as a *net.OpError with Op "remote
+// error" around its unexported alert type, whose Error text is the same table
+// as tls.AlertError's; only the codes in refusalAlerts are recognised. An
+// outer *net.OpError, such as the "readfrom" of a copy into a TCP socket, is
+// passed through to the one it wraps.
+func receivedAlert(err error) (tls.AlertError, bool) {
+	var op *net.OpError
+	for errors.As(err, &op) {
+		if op.Op != "remote error" {
+			err = op.Err
+			continue
+		}
+		if op.Err == nil {
+			return 0, false
+		}
+		got := op.Err.Error()
+		for _, code := range refusalAlerts {
+			if got == code.Error() {
+				return code, true
+			}
+		}
+		return 0, false
 	}
+	return 0, false
+}
+
+// refusalError maps a refusal alert to an actionable error.
+func refusalError(device string, code tls.AlertError, err error) error {
+	var msg string
+	switch code {
+	case alertRevokedCertificate:
+		msg = device + " reports this certificate as revoked: it cannot be renewed, so obtain a new one with `localport setup <TOKEN>` or `localport login`"
+	case alertAccessDenied:
+		msg = device + " denied this identity: its access to the device was withdrawn or narrowed, check the grants in the dashboard"
+	case alertExpiredCertificate:
+		msg = device + " rejected the certificate as expired: for a sign-in, run `localport login` again; for a machine credential, run `localport identity renew`"
+	default:
+		msg = device + " refused this certificate: check that the identity has access to the device, and run `localport identity list`"
+	}
+	return errcode.New(errcode.DeviceRefused).With(err, msg)
+}
+
+// streamError maps a failure after the handshake, such as a refusal alert, to
+// an actionable error.
+func streamError(device string, err error) error {
+	if code, ok := receivedAlert(err); ok {
+		return refusalError(device, code, err)
+	}
+	return errcode.New(errcode.DeviceUnreachable).With(err, "the connection to "+device+" ended")
 }
 
 // dialError reports an unreachable device.
@@ -227,10 +270,15 @@ func dialError(device string, err error) error {
 	return errcode.New(errcode.DeviceUnreachable).With(err, device+": device offline or unknown address")
 }
 
-// handshakeError reports a refusal during the handshake.
+// handshakeError maps a failed handshake: a refusal alert, a peer that does
+// not speak TLS, or an unreachable device.
 func handshakeError(device string, err error) error {
-	msg := err.Error()
-	if strings.Contains(msg, "first record does not look like a TLS handshake") {
+	if code, ok := receivedAlert(err); ok {
+		return refusalError(device, code, err)
+	}
+	// Conn is set only when the first record from the peer was not TLS.
+	var rhe tls.RecordHeaderError
+	if errors.As(err, &rhe) && rhe.Conn != nil {
 		return errcode.New(errcode.DeviceUnreachable).With(err, device+" is not answering with TLS on this port")
 	}
 	return errcode.New(errcode.DeviceUnreachable).With(err, device+": device offline or unknown address")

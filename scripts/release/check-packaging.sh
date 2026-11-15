@@ -27,8 +27,14 @@ SOURCE_DATE_EPOCH=0 go run ./scripts/release/zipdist "$work/dist/localport-windo
 	"$work/stage/LICENSE" "$work/stage/NOTICE" "$work/stage/THIRD_PARTY_NOTICES"
 cp "$work/stage/localport.exe" "$work/dist/localport-windows-amd64.exe"
 
-docker build --quiet -t "$image" -f packaging/windows/Dockerfile packaging/windows >/dev/null
-docker run --rm --user "$(id -u):$(id -g)" -v "$root:/src" -w /src -e VERSION="$version" "$image" bash -euc '
+docker build --quiet -t "$image" - <packaging/windows/Dockerfile >/dev/null
+# The container sees the tracked files and the work directory only.
+ctx="$(mktemp -d)"
+trap 'rm -rf "$ctx"' EXIT
+scripts/release/tracked-context.sh "$ctx"
+mkdir -p "$ctx/src/$work"
+docker run --rm --user "$(id -u):$(id -g)" -v "$ctx/src:/src:ro" -v "$root/$work:/src/$work" -w /src \
+	-e VERSION="$version" "$image" bash -euc '
 	scripts/release/windows-package.sh check '"$work"'/stage '"$work"'/dist
 	# Manifests render from checksums.txt; the other platforms are not built
 	# here, so their names carry the hash of an empty file.

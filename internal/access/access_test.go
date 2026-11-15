@@ -1,10 +1,19 @@
 package access
 
 import (
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -13,10 +22,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/chacha20poly1305"
 
 	"github.com/localport/agent/internal/errcode"
 )
@@ -169,27 +182,6 @@ func TestLoadAccessConfigRefusesIncompleteEntries(t *testing.T) {
 				t.Fatalf("Render = %q, %v; want the reason %q shown", text, hidden, c.reason)
 			}
 		})
-	}
-}
-
-// A certificate alert carries no reason. The message names the next step
-// without guessing one.
-func TestStreamErrorNamesTheNextStep(t *testing.T) {
-	cases := map[string]string{
-		"remote error: tls: bad certificate":     "identity list",
-		"remote error: tls: certificate expired": "localport login",
-	}
-	for alert, want := range cases {
-		got := streamError("gw-01.eu.localport.dev", errors.New(alert)).Error()
-		if !strings.Contains(got, want) {
-			t.Fatalf("%q -> %q, want it to mention %q", alert, got, want)
-		}
-		if !strings.Contains(got, "gw-01.eu.localport.dev") {
-			t.Fatalf("%q -> %q, want the device named", alert, got)
-		}
-	}
-	if msg := streamError("gw-01", io.ErrUnexpectedEOF).Error(); !strings.Contains(msg, "ended") {
-		t.Fatalf("an unmapped failure reads as %q", msg)
 	}
 }
 
@@ -431,34 +423,316 @@ func TestBuildTLSConfigNamesFileErrors(t *testing.T) {
 	}
 }
 
-// Revoked certificates and withdrawn grants get specific messages.
-func TestStreamErrorExplainsEveryCertificateAlert(t *testing.T) {
-	// crypto/tls alertText strings, wrapped in net.OpError as for a
-	// post-handshake alert.
-	cases := []struct{ alert, want string }{
-		{"tls: bad certificate", "refused this certificate"},
-		{"tls: unknown certificate", "refused this certificate"},
-		{"tls: certificate required", "refused this certificate"},
-		{"tls: unknown certificate authority", "refused this certificate"},
-		{"tls: revoked certificate", "cannot be renewed"},
-		{"tls: access denied", "denied this identity"},
-		{"tls: expired certificate", "run `localport login` again"},
-	}
-	for _, tc := range cases {
-		err := streamError("gw-01.eu.localport.dev", errors.New("remote error: "+tc.alert))
-		if !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("%q produced %q, want it to mention %q", tc.alert, err, tc.want)
-		}
-		if !strings.Contains(err.Error(), "gw-01.eu.localport.dev") {
-			t.Errorf("%q: error should name the device, got %q", tc.alert, err)
-		}
-	}
+// refusalCases are the refusal alerts with the next step each one names.
+var refusalCases = []struct {
+	code tls.AlertError
+	want string
+}{
+	{42, "refused this certificate"},
+	{46, "refused this certificate"},
+	{116, "refused this certificate"},
+	{48, "refused this certificate"},
+	{44, "cannot be renewed"},
+	{49, "denied this identity"},
+	{45, "run `localport login` again"},
+}
 
-	// Other alerts keep the generic message.
-	other := streamError("gw-01.eu.localport.dev", errors.New("connection reset by peer"))
-	if !strings.Contains(other.Error(), "ended") {
-		t.Fatalf("unrecognised failure = %q", other)
+// assertRefusal checks that err is a refusal of the device naming want.
+func assertRefusal(t *testing.T, err error, want string) {
+	t.Helper()
+	if !errors.Is(err, errcode.New(errcode.DeviceRefused)) {
+		t.Fatalf("error %v, want %s", err, errcode.DeviceRefused)
 	}
+	for _, s := range []string{want, "gw-01.eu.localport.dev"} {
+		if !strings.Contains(err.Error(), s) {
+			t.Fatalf("error %q, want it to mention %q", err, s)
+		}
+	}
+}
+
+// replyPeer is a TCP peer that reads the first record it gets, the
+// ClientHello, and answers with reply.
+func replyPeer(t *testing.T, reply []byte) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				hdr := make([]byte, 5)
+				if _, err := io.ReadFull(c, hdr); err != nil {
+					return
+				}
+				if _, err := io.CopyN(io.Discard, c, int64(binary.BigEndian.Uint16(hdr[3:]))); err != nil {
+					return
+				}
+				_, _ = c.Write(reply)
+				_, _ = io.Copy(io.Discard, c)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// A refusal alert in answer to the ClientHello is a refusal with the next
+// step for its code, not an unreachable device.
+func TestHandshakeAlertsAreRefusals(t *testing.T) {
+	for _, tc := range refusalCases {
+		t.Run(strconv.Itoa(int(tc.code)), func(t *testing.T) {
+			s := echoSession(t, nil)
+			s.Addr = replyPeer(t, []byte{21, 3, 3, 0, 2, 2, byte(tc.code)})
+			defer s.Close()
+			_, err := s.Open(context.Background(), 22)
+			assertRefusal(t, err, tc.want)
+		})
+	}
+	t.Run("other alert", func(t *testing.T) {
+		s := echoSession(t, nil)
+		s.Addr = replyPeer(t, []byte{21, 3, 3, 0, 2, 2, 40}) // handshake_failure
+		defer s.Close()
+		_, err := s.Open(context.Background(), 22)
+		if !errors.Is(err, errcode.New(errcode.DeviceUnreachable)) || !strings.Contains(err.Error(), "offline") {
+			t.Fatalf("error %v, want %s offline", err, errcode.DeviceUnreachable)
+		}
+	})
+}
+
+// A peer that answers the ClientHello with something other than TLS is named
+// as such.
+func TestHandshakeWithANonTLSPeer(t *testing.T) {
+	s := echoSession(t, nil)
+	s.Addr = replyPeer(t, []byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
+	defer s.Close()
+	_, err := s.Open(context.Background(), 22)
+	if !errors.Is(err, errcode.New(errcode.DeviceUnreachable)) || !strings.Contains(err.Error(), "not answering with TLS") {
+		t.Fatalf("error %v, want %s not answering with TLS", err, errcode.DeviceUnreachable)
+	}
+}
+
+// An open stream whose edge sends a refusal alert ends with the refusal, read
+// through the HTTP/2 stream; any other end reads as an ended connection.
+func TestMidStreamAlertsAreRefusals(t *testing.T) {
+	for _, tc := range refusalCases {
+		t.Run(strconv.Itoa(int(tc.code)), func(t *testing.T) {
+			s := echoSession(t, alertingEdge(t, byte(tc.code)))
+			defer s.Close()
+			p := &Proxy{Session: s}
+			err := p.ServeStdio(context.Background(), strings.NewReader("ping"), io.Discard, 22)
+			assertRefusal(t, err, tc.want)
+		})
+	}
+	if msg := streamError("gw-01", io.ErrUnexpectedEOF); !errors.Is(msg, errcode.New(errcode.DeviceUnreachable)) || !strings.Contains(msg.Error(), "ended") {
+		t.Fatalf("an unmapped failure reads as %q", msg)
+	}
+}
+
+// A forward's stream ended by a refusal alert reports the refusal.
+func TestMidStreamAlertOnAForwardIsReported(t *testing.T) {
+	reported := make(chan error, 1)
+	p := &Proxy{
+		Session:  echoSession(t, alertingEdge(t, byte(alertAccessDenied))),
+		Forwards: []Forward{{LocalAddr: "127.0.0.1:0", RemotePort: 22}},
+		OnError:  func(err error) { reported <- err },
+	}
+	defer p.Session.Close()
+	bound := make(chan string, 1)
+	p.OnListen = func(_ Forward, addr string) { bound <- addr }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = p.Run(ctx) }()
+
+	c, err := net.Dial("tcp", <-bound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	// A client that closes once the forward ends, as ssh does.
+	go func() { _, _ = io.Copy(io.Discard, c); _ = c.Close() }()
+	select {
+	case err := <-reported:
+		assertRefusal(t, err, "denied this identity")
+	case <-time.After(5 * time.Second):
+		t.Fatal("a mid-stream refusal produced no error")
+	}
+}
+
+// alertingEdge is a TLS 1.3 HTTP/2 edge that answers a CONNECT, echoes the
+// first four bytes and then sends the fatal alert code on the connection,
+// encrypted with the server's application traffic key as crypto/tls would.
+func alertingEdge(t *testing.T, code byte) *httptest.Server {
+	t.Helper()
+	keys := &keyLog{}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		rc := http.NewResponseController(w)
+		_ = rc.Flush()
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(r.Body, buf); err != nil {
+			return
+		}
+		_, _ = w.Write(buf)
+		_ = rc.Flush()
+		raw := r.Context().Value(rawConnKey{}).(*recordedConn)
+		if err := raw.sendAlert(r.TLS.CipherSuite, keys.serverSecret(t), code); err != nil {
+			t.Errorf("send alert: %v", err)
+		}
+		<-r.Context().Done()
+	}))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Listener = recordingListener{ln}
+	srv.Config.ConnContext = func(ctx context.Context, c net.Conn) context.Context {
+		return context.WithValue(ctx, rawConnKey{}, c.(*tls.Conn).NetConn())
+	}
+	srv.EnableHTTP2 = true
+	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13, KeyLogWriter: keys, SessionTicketsDisabled: true}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+type rawConnKey struct{}
+
+// keyLog keeps the server application traffic secret from the key log.
+type keyLog struct {
+	mu     sync.Mutex
+	secret []byte
+}
+
+func (k *keyLog) Write(line []byte) (int, error) {
+	f := strings.Fields(string(line))
+	if len(f) == 3 && f[0] == "SERVER_TRAFFIC_SECRET_0" {
+		s, err := hex.DecodeString(f[2])
+		if err != nil {
+			return 0, err
+		}
+		k.mu.Lock()
+		k.secret = s
+		k.mu.Unlock()
+	}
+	return len(line), nil
+}
+
+func (k *keyLog) serverSecret(t *testing.T) []byte {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.secret == nil {
+		t.Error("no server traffic secret in the key log")
+	}
+	return k.secret
+}
+
+type recordingListener struct{ net.Listener }
+
+func (l recordingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &recordedConn{Conn: c}, nil
+}
+
+// recordedConn keeps every byte the server wrote, so sendAlert can count the
+// records sealed with the application key and take the next sequence number.
+type recordedConn struct {
+	net.Conn
+	mu  sync.Mutex
+	out []byte
+}
+
+func (c *recordedConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.out = append(c.out, p...)
+	return c.Conn.Write(p)
+}
+
+// sendAlert writes a fatal TLS 1.3 alert record (RFC 8446 section 5.2)
+// sealed with the server application traffic secret.
+func (c *recordedConn) sendAlert(suite uint16, secret []byte, code byte) error {
+	aead, iv, err := trafficAEAD(suite, secret)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	nonce := func(seq uint64) []byte {
+		n := bytes.Clone(iv)
+		for i := range 8 {
+			n[len(n)-1-i] ^= byte(seq >> (8 * i))
+		}
+		return n
+	}
+	// Records sealed with the handshake key fail to open with this one.
+	var seq uint64
+	for rest := c.out; len(rest) >= 5; {
+		n := 5 + int(binary.BigEndian.Uint16(rest[3:5]))
+		if n > len(rest) {
+			break
+		}
+		rec := rest[:n]
+		rest = rest[n:]
+		if rec[0] == 23 {
+			if _, err := aead.Open(nil, nonce(seq), rec[5:], rec[:5]); err == nil {
+				seq++
+			}
+		}
+	}
+	inner := []byte{2, code, 21} // fatal, code, content type alert
+	hdr := []byte{23, 3, 3, 0, 0}
+	binary.BigEndian.PutUint16(hdr[3:], uint16(len(inner)+aead.Overhead()))
+	_, err = c.Conn.Write(aead.Seal(bytes.Clone(hdr), nonce(seq), inner, hdr))
+	return err
+}
+
+// trafficAEAD derives the record key and IV of a TLS 1.3 traffic secret
+// (RFC 8446 section 7.3).
+func trafficAEAD(suite uint16, secret []byte) (cipher.AEAD, []byte, error) {
+	h, keyLen := sha256.New, 16
+	switch suite {
+	case tls.TLS_AES_128_GCM_SHA256:
+	case tls.TLS_AES_256_GCM_SHA384:
+		h, keyLen = sha512.New384, 32
+	case tls.TLS_CHACHA20_POLY1305_SHA256:
+		keyLen = chacha20poly1305.KeySize
+	default:
+		return nil, nil, fmt.Errorf("cipher suite %#x", suite)
+	}
+	expand := func(label string, n int) ([]byte, error) {
+		full := "tls13 " + label
+		info := append([]byte{byte(n >> 8), byte(n), byte(len(full))}, full...)
+		return hkdf.Expand(h, secret, string(append(info, 0)), n)
+	}
+	key, err := expand("key", keyLen)
+	if err != nil {
+		return nil, nil, err
+	}
+	iv, err := expand("iv", 12)
+	if err != nil {
+		return nil, nil, err
+	}
+	if suite == tls.TLS_CHACHA20_POLY1305_SHA256 {
+		aead, err := chacha20poly1305.New(key)
+		return aead, iv, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	return aead, iv, err
 }
 
 // The TLS 1.3 minimum is enforced at the handshake.
@@ -538,11 +812,7 @@ func TestRefusedClientCertificateIsReported(t *testing.T) {
 
 	select {
 	case err := <-reported:
-		for _, want := range []string{"gw-01.eu.localport.dev", "refused this certificate", "localport identity list"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Fatalf("the refusal must mention %q, got %q", want, err)
-			}
-		}
+		assertRefusal(t, err, "localport identity list")
 	case <-time.After(5 * time.Second):
 		t.Fatal("a refused client certificate produced no error")
 	}

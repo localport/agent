@@ -53,7 +53,7 @@ DARWIN_NAMES = $(foreach a,$(SESSION_DARWIN),localport-darwin-$(a) localport-ses
 
 DIST = dist
 
-.PHONY: winres check-packaging build build-all build-session-linux build-session-armv6 build-session-darwin build-darwin sign-darwin dist release-sign release-dryrun packages repo repo-apk clean test test-root vet-all smoke lint errwrapcheck fmt vet notices notices-check cargo-deny
+.PHONY: winres check-packaging check-build-context build build-all build-session-linux build-session-armv6 build-session-darwin build-darwin sign-darwin dist release-sign release-dryrun packages repo repo-apk clean test test-root vet-all smoke lint errwrapcheck fmt vet notices notices-check cargo-deny
 
 build:
 	$(GO_BUILD) -o bin/localport ./cmd/localport
@@ -80,23 +80,29 @@ check-packaging:
 	./scripts/release/check-packaging.sh
 
 # The Docker builds in SESSION_LINUX; CI runs one entry per job by setting
-# SESSION_LINUX. The git directory and the common directory are separate build
-# contexts (a submodule's .git is a file pointing outside the module; a
-# worktree's git directory holds only its own HEAD and index), mounted only
-# while go build stamps the VCS information, so BUILDVCS means the same as for
-# the other builds. In a plain checkout both are the same directory.
+# SESSION_LINUX. The build context is a staged copy of the tracked files and
+# the "git" build context the .git of a fresh clone of HEAD
+# (scripts/release/tracked-context.sh), mounted only while go build stamps the
+# VCS information, so BUILDVCS means the same as for the other builds and no
+# untracked file or host git config reaches the builder.
 build-session-linux:
-	@gitdir="$$(git rev-parse --absolute-git-dir)" && \
-	commondir="$$(git rev-parse --path-format=absolute --git-common-dir)" || { echo "build-session-linux needs a git checkout"; exit 1; }; \
+	@ctx="$$(mktemp -d)" || exit 1; \
+	trap 'rm -rf "$$ctx"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; \
+	scripts/release/tracked-context.sh --git "$$ctx" || exit 1; \
 	for e in $(SESSION_LINUX); do \
 		IFS=:; set -- $$e; IFS=' '; \
 		echo "build localport-session_$$4"; \
-		docker buildx build --quiet --platform "$$1" -f packaging/session/Dockerfile \
-			--build-context git="$$gitdir" --build-context gitcommon="$$commondir" \
+		docker buildx build --quiet --platform "$$1" -f "$$ctx/src/packaging/session/Dockerfile" \
+			--build-context git="$$ctx/git" \
 			--build-arg TOOLCHAIN="$$2" --build-arg TAGS="$$3" --build-arg BUILDVCS="$(BUILDVCS)" \
 			--build-arg NAME="localport-session_$$4" --build-arg "LDFLAGS=$(LDFLAGS)" \
-			--output type=local,dest=bin . || exit 1; \
+			--output type=local,dest=bin "$$ctx/src" || exit 1; \
 	done
+
+# Checks that the session build context holds tracked files only and its git
+# context no host remote or hook (scripts/release/check-build-context.sh).
+check-build-context:
+	./scripts/release/check-build-context.sh
 
 # 32-bit ARM glibc build for ARMv6 hard float (Raspberry Pi OS on Pi Zero and
 # Pi 1). Debian's armhf compiler emits ARMv7 code, so this uses its own toolchain.
