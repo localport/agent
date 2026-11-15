@@ -143,8 +143,11 @@ func (p *Proxy) handle(ctx context.Context, local net.Conn, f Forward) {
 	}
 }
 
-// ServeStdio forwards stdin and stdout to a device port, for `ssh -o
-// ProxyCommand`.
+// ServeStdio forwards in and out to a device port, for `ssh -o
+// ProxyCommand`. It returns once the device-to-out direction ends (EOF, reset
+// or alert), as `ssh -W` ends with its channel, and closes the stream. The
+// copy from in is not waited for: the caller owns in and ends a read still
+// blocked on it, as process exit does for stdin.
 func (p *Proxy) ServeStdio(ctx context.Context, in io.Reader, out io.Writer, port uint16) error {
 	stream, err := p.Session.Open(ctx, port)
 	if err != nil {
@@ -152,25 +155,15 @@ func (p *Proxy) ServeStdio(ctx context.Context, in io.Reader, out io.Writer, por
 	}
 	defer stream.Close()
 
-	var wg sync.WaitGroup
-	var remoteErr error
-	wg.Go(func() {
-		_, err := io.Copy(out, stream)
-		if !isNormalClose(err) {
-			remoteErr = err
-		}
-	})
-	wg.Go(func() {
+	go func() {
 		_, _ = io.Copy(stream, in)
 		// Half-close only when the stream supports it, as in halfCopy.
 		if cw, ok := stream.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
-	})
-	wg.Wait()
-
-	if remoteErr != nil {
-		return streamError(p.Session.Device, remoteErr)
+	}()
+	if _, err := io.Copy(out, stream); !isNormalClose(err) {
+		return streamError(p.Session.Device, err)
 	}
 	return nil
 }
@@ -250,7 +243,7 @@ func refusalError(device string, code tls.AlertError, err error) error {
 	case alertAccessDenied:
 		msg = device + " denied this identity: its access to the device was withdrawn or narrowed, check the grants in the dashboard"
 	case alertExpiredCertificate:
-		msg = device + " rejected the certificate as expired: for a sign-in, run `localport login` again; for a machine credential, run `localport identity renew`"
+		msg = device + " rejected the certificate as expired: an expired credential cannot be renewed, so run `localport login` again for a sign-in, or `localport setup` with a new setup token for a machine credential"
 	default:
 		msg = device + " refused this certificate: check that the identity has access to the device, and run `localport identity list`"
 	}

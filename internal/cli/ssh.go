@@ -78,7 +78,7 @@ func (t sshTarget) mintWithAPI(ctx context.Context, req identity.SessionRequest)
 		return nil, err
 	}
 	if time.Now().After(cur.Meta.NotAfter) {
-		return nil, errcode.New(errcode.CredentialExpired).With(nil, fmt.Sprintf("%s expired at %s; renew it with: localport identity renew, or sign in again with: localport login",
+		return nil, errcode.New(errcode.CredentialExpired).With(nil, fmt.Sprintf("%s expired at %s; an expired credential cannot be renewed: sign in again with: localport login, or for a setup-token credential run: localport setup with a new setup token",
 			t.ref, cur.Meta.NotAfter.Format(time.RFC3339)))
 	}
 	client, err := identity.NewClient(firstNonEmpty(cur.Meta.APIURL, resolveAPIURL("")))

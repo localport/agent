@@ -38,13 +38,9 @@ func forwardFixture(t *testing.T, edit func(*ServerConfig)) *sshFixture {
 }
 
 func serveForwards(t *testing.T, l *fakeLauncher) {
-	var wg sync.WaitGroup
-	t.Cleanup(wg.Wait)
 	l.forward = func(conn net.Conn) {
-		wg.Go(func() {
-			defer conn.Close()
-			_ = sessionhelper.ServeForwardSocket(conn.(*net.UnixConn), t.Logf)
-		})
+		defer conn.Close()
+		_ = sessionhelper.ServeForwardSocket(conn.(*net.UnixConn), t.Logf)
 	}
 }
 

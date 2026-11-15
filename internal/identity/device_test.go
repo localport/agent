@@ -26,9 +26,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/security"
 )
 
@@ -256,6 +258,7 @@ func enrolWith(t *testing.T, override map[string]any) (*Material, error) {
 			"prefix":            "gw-01",
 			"device_host":       "gw-01.factory.eu.localport.dev",
 			"region":            "eu",
+			"renew_after":       time.Now().Add(40 * time.Minute).UTC().Format(time.RFC3339),
 			"keys":              testKeys,
 		}
 		for k, v := range override {
@@ -340,6 +343,13 @@ func savedDevice(t *testing.T, ca *testCA, notBefore, notAfter time.Time) (*Stor
 // other path. before, when given, runs first in every request.
 func renewServer(t *testing.T, ca *testCA, oldKey *ecdsa.PrivateKey, before ...func()) (*httptest.Server, *[]string) {
 	t.Helper()
+	return renewServerWith(t, ca, oldKey, nil, before...)
+}
+
+// renewServerWith is renewServer answering with the fields of override
+// replaced (a nil value removes the field).
+func renewServerWith(t *testing.T, ca *testCA, oldKey *ecdsa.PrivateKey, override map[string]any, before ...func()) (*httptest.Server, *[]string) {
+	t.Helper()
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for _, f := range before {
@@ -375,11 +385,19 @@ func renewServer(t *testing.T, ca *testCA, oldKey *ecdsa.PrivateKey, before ...f
 		if oldKey != nil && !ecdsa.VerifyASN1(&oldKey.PublicKey, digest, sig) {
 			t.Error("renewal proof does not verify with the old key")
 		}
-		writeJSON(t, w, map[string]any{
+		resp := map[string]any{
 			"cert_pem":    string(ca.signCSR(t, body.CSRPEM, time.Now().Add(-time.Minute), time.Now().Add(30*24*time.Hour))),
 			"renew_after": time.Now().Add(20 * 24 * time.Hour).UTC().Format(time.RFC3339),
 			"keys":        testKeys,
-		})
+		}
+		for k, v := range override {
+			if v == nil {
+				delete(resp, k)
+			} else {
+				resp[k] = v
+			}
+		}
+		writeJSON(t, w, resp)
 	}))
 	t.Cleanup(srv.Close)
 	return srv, &paths
@@ -439,6 +457,68 @@ func TestExpiredDeviceCertificateRenewsAtTheDeviceRoute(t *testing.T) {
 	}
 }
 
+// A device always renews: an enrolment or renewal answer that names no
+// renewal time is refused rather than stored, so a device never silently
+// stops renewing.
+func TestDeviceAnswerWithoutRenewalTimeIsRefused(t *testing.T) {
+	if _, err := enrolWith(t, map[string]any{"renew_after": nil}); !errors.Is(err, errcode.New(errcode.ControlPlaneAnswer)) {
+		t.Fatalf("enrolment without renew_after = %v, want %s", err, errcode.ControlPlaneAnswer)
+	}
+	ca := newTestCA(t)
+	store, oldKey := savedDevice(t, ca, time.Now().Add(-40*24*time.Hour), time.Now().Add(time.Hour))
+	srv, _ := renewServerWith(t, ca, oldKey, map[string]any{"renew_after": nil})
+	cur, err := store.Load(deviceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Renewer{Store: store, Ref: deviceRef}
+	if _, err := r.renewLocked(context.Background(), &Client{BaseURL: srv.URL, HTTP: srv.Client()}, cur); !errors.Is(err, errcode.New(errcode.ControlPlaneAnswer)) {
+		t.Fatalf("renewal without renew_after = %v, want %s", err, errcode.ControlPlaneAnswer)
+	}
+	if _, err := store.LoadPending(deviceRef); err == nil {
+		t.Fatal("a renewal without renew_after was stored as pending")
+	}
+}
+
+// A token credential the control plane gave no renew_after (its setup token's
+// renewal stop comes first) is never sent for renewal: the loop says once
+// that it does not renew and ends.
+func TestRenewerEndsForACredentialThatDoesNotRenew(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	ca := newTestCA(t)
+	ca.uri = "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/ci-runner"
+	key := testKey(t)
+	store := &Store{Root: t.TempDir()}
+	ref, err := store.Save(context.Background(), Material{
+		CertPEM: ca.sign(t, &key.PublicKey, time.Now().Add(-time.Hour), time.Now().Add(time.Hour)),
+		Key:     fileKey{key},
+		Meta:    Meta{APIURL: srv.URL, Source: SourceToken},
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	var lines []string
+	r := &Renewer{Store: store, Ref: ref, OnEvent: func(l string) { lines = append(lines, l) }, client: &Client{BaseURL: srv.URL, HTTP: srv.Client()}}
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(context.Background()) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the renewal loop still runs for a credential that does not renew")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("the loop sent %d renewal request(s)", calls.Load())
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "does not renew") || !strings.Contains(lines[0], ref.String()) {
+		t.Fatalf("log = %q, want one line naming %s and that it does not renew", lines, ref)
+	}
+}
+
 // The Material a renewal returns names the certificate and key files it was
 // stored under, for the pending (device) and the direct (user) branch.
 func TestRenewalReturnsTheMaterialAsStored(t *testing.T) {
@@ -451,7 +531,7 @@ func TestRenewalReturnsTheMaterialAsStored(t *testing.T) {
 			ca.uri = uri
 			key := testKey(t)
 			store := &Store{Root: t.TempDir()}
-			meta := Meta{APIURL: "https://api.localport.io", Source: SourceToken}
+			meta := Meta{APIURL: "https://api.localport.io", Source: SourceToken, RenewAfter: ptr(time.Now().Add(20 * 24 * time.Hour))}
 			if name == "device" {
 				meta.Device = &DeviceInfo{Host: "gw-01.factory.eu.localport.dev", Region: "eu"}
 			}

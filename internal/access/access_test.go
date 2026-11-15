@@ -534,6 +534,50 @@ func TestMidStreamAlertsAreRefusals(t *testing.T) {
 	}
 }
 
+// ServeStdio ends with the device's direction, as `ssh -W` ends with its
+// channel, while stdin stays open and unread: nil on the device's EOF, the
+// mapped refusal on an alert.
+func TestServeStdioEndsWithTheDevice(t *testing.T) {
+	serve := func(t *testing.T, s *Session, in io.Reader, out io.Writer) error {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- (&Proxy{Session: s}).ServeStdio(context.Background(), in, out, 22) }()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Fatal("ServeStdio still waits on stdin after the device ended")
+			return nil
+		}
+	}
+	t.Run("eof", func(t *testing.T) {
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("bye"))
+		}))
+		srv.EnableHTTP2 = true
+		srv.StartTLS()
+		t.Cleanup(srv.Close)
+		s := echoSession(t, srv)
+		defer s.Close()
+		in, stdin := io.Pipe()
+		t.Cleanup(func() { _ = stdin.Close() })
+		var out bytes.Buffer
+		if err := serve(t, s, in, &out); err != nil || out.String() != "bye" {
+			t.Fatalf("ServeStdio = %v, output %q; want nil and %q", err, out.String(), "bye")
+		}
+	})
+	t.Run("alert", func(t *testing.T) {
+		tc := refusalCases[0]
+		s := echoSession(t, alertingEdge(t, byte(tc.code)))
+		defer s.Close()
+		in, stdin := io.Pipe()
+		t.Cleanup(func() { _ = stdin.Close() })
+		go func() { _, _ = stdin.Write([]byte("ping")) }()
+		assertRefusal(t, serve(t, s, in, io.Discard), tc.want)
+	})
+}
+
 // A forward's stream ended by a refusal alert reports the refusal.
 func TestMidStreamAlertOnAForwardIsReported(t *testing.T) {
 	reported := make(chan error, 1)

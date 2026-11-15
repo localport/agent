@@ -106,7 +106,7 @@ func TestEveryCreatingCallResendsItsKey(t *testing.T) {
 		return &Material{
 			CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}),
 			Key:     fileKey{testKey(t)},
-			Meta:    Meta{Identity: leaf.Subject.CommonName, Kind: kind, Source: SourceToken},
+			Meta:    Meta{Identity: leaf.Subject.CommonName, Kind: kind, Source: SourceToken, RenewAfter: ptr(time.Now())},
 		}
 	}
 	cases := []struct {

@@ -96,9 +96,9 @@ func TestAppConnectNeedsAToken(t *testing.T) {
 	}
 }
 
-func TestAppLegacyTunnelInvocation(t *testing.T) {
+func TestAppFlatTunnelForm(t *testing.T) {
 	app := New("1.2.3", "abc123", "2026-04-13")
 	if err := app.Run([]string{"--token", "tok_123"}); err == nil {
-		t.Fatal("legacy tunnel call without --local must error")
+		t.Fatal("the flat tunnel form without --local must error")
 	}
 }

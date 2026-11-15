@@ -65,6 +65,9 @@ func TestMain(m *testing.M) {
 		_ = os.WriteFile(os.Getenv("LOCALPORT_RELAY_RESULT"), []byte(got), 0o600)
 		os.Exit(0)
 	}
+	// Commands run in-process whatever the euid; the tests of the root
+	// dispatch set agentChildRoot themselves.
+	agentChildRoot = func() bool { return false }
 	os.Exit(m.Run())
 }
 

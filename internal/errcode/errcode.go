@@ -201,7 +201,7 @@ var registry = []Entry{
 	{TicketKeysUnreadable, "Session keys unreadable", "ticket_keys.json cannot be read"},
 	{TicketKeysBusy, "Session keys busy", "another process is writing this identity's session CA keys"},
 	{RenewalInProgress, "Renewal in progress", "another process is renewing this credential"},
-	{NotRenewable, "Credential does not renew", "a sign-in credential does not renew; run `localport login` again"},
+	{NotRenewable, "Credential does not renew", "this credential does not renew: run `localport login` again for a sign-in, or `localport setup` with a new setup token once a setup-token credential expires"},
 	{DesktopPinsUnreadable, "Desktop target keys unreadable", "desktop_pins.json cannot be read"},
 	{DesktopPinsBusy, "Desktop target keys busy", "another process is changing this device's desktop target keys"},
 	{CredentialNotSaved, "Device credential not saved", "the issued device credential could not be saved in the credential store"},

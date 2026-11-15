@@ -291,20 +291,8 @@ func TestNewClientRefusesPlaintext(t *testing.T) {
 	}
 }
 
-func TestDefaultRenewAfterLeavesARetryBudget(t *testing.T) {
-	start := time.Now()
-	end := start.Add(30 * 24 * time.Hour)
-	got := defaultRenewAfter(start, end)
-	if !got.After(start) || !got.Before(end) {
-		t.Fatalf("renew_after %s is outside the certificate lifetime", got)
-	}
-	if remaining := end.Sub(got); remaining < 9*24*time.Hour {
-		t.Fatalf("retry budget %s is under a third of the lifetime", remaining)
-	}
-}
-
-// A sign-in must never reach the renewal endpoint. The server refuses it; this
-// is what stops the agent from asking.
+// A sign-in or a CI workload credential must never reach the renewal
+// endpoint. The server refuses it; this is what stops the agent from asking.
 func TestRenewNeverCallsTheServerForASignInCredential(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -317,20 +305,29 @@ func TestRenewNeverCallsTheServerForASignInCredential(t *testing.T) {
 	// test is about the refusal, not transport policy.
 	client := &Client{BaseURL: srv.URL, HTTP: srv.Client()}
 
-	signIn := &Material{
-		CertPEM: []byte("unused: the refusal happens before anything is parsed"),
-		Meta:    Meta{Identity: "jane@acme.com", Source: SourceSSO},
-	}
-	_, err := client.Renew(context.Background(), signIn)
-	if !errors.Is(err, ErrNotRenewable) {
-		t.Fatalf("Renew(sso) = %v, want ErrNotRenewable", err)
+	for _, source := range []Source{SourceSSO, SourceOIDC} {
+		cred := &Material{
+			CertPEM: []byte("unused: the refusal happens before anything is parsed"),
+			Meta:    Meta{Identity: "jane@acme.com", Source: source},
+		}
+		if _, err := client.Renew(context.Background(), cred); !errors.Is(err, ErrNotRenewable) {
+			t.Fatalf("Renew(%s) = %v, want ErrNotRenewable", source, err)
+		}
 	}
 	if calls != 0 {
-		t.Fatalf("the agent made %d request(s) to renew a sign-in; it must make none", calls)
+		t.Fatalf("the agent made %d request(s) to renew a sign-in or workload credential; it must make none", calls)
 	}
 
-	// The refusal depends on the source: a token credential still renews.
-	machine := &Material{Meta: Meta{Source: SourceToken}}
+	// A token credential the control plane gave no renew_after (its setup
+	// token's renewal stop comes first) is refused the same way, so
+	// `localport identity renew` sends nothing either.
+	stopped := &Material{CertPEM: []byte("unused"), Meta: Meta{Identity: "deploy-prod", Kind: KindClient, Source: SourceToken}}
+	if _, err := client.Renew(context.Background(), stopped); !errors.Is(err, ErrNotRenewable) || calls != 0 {
+		t.Fatalf("Renew(token without renew_after) = %v after %d request(s), want ErrNotRenewable and none", err, calls)
+	}
+
+	// A token credential with a renewal time still renews.
+	machine := &Material{Meta: Meta{Kind: KindClient, Source: SourceToken, RenewAfter: ptr(time.Now())}}
 	if _, err := client.Renew(context.Background(), machine); errors.Is(err, ErrNotRenewable) {
 		t.Fatal("a token credential must still renew")
 	}
@@ -358,13 +355,41 @@ func TestSignInMaterialCarriesNoRenewalDeadline(t *testing.T) {
 		t.Fatal("a sign-in must report that it does not renew, not a timestamp")
 	}
 
-	// A setup token credential still gets the fallback deadline.
-	machine, err := client.assemble(fileKey{testKey(t)}, issuedMaterial{CertPEM: certPEM, Source: SourceToken})
-	if err != nil {
-		t.Fatalf("assemble: %v", err)
+}
+
+// The control plane's renew_after decides whether a credential renews: a
+// token credential without one does not, a workload credential never does,
+// and a value that does not parse is a broken answer.
+func TestRenewalTimeComesOnlyFromTheControlPlane(t *testing.T) {
+	leaf := selfSigned(t, "spiffe://01kpq7x2abcd34.mtls.localport.dev/client/ci-runner")
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))
+	client := &Client{BaseURL: "https://api.localport.io"}
+	assemble := func(source Source, renewAfter string) (*Material, error) {
+		return client.assemble(fileKey{testKey(t)}, issuedMaterial{CertPEM: certPEM, Source: source, RenewAfter: renewAfter})
 	}
-	if _, renews := machine.Meta.NextRenewal(); !renews {
-		t.Fatal("a machine credential lost its renewal fallback")
+
+	for _, source := range []Source{SourceToken, SourceOIDC} {
+		m, err := assemble(source, "")
+		if err != nil {
+			t.Fatalf("assemble(%s, absent): %v", source, err)
+		}
+		if _, renews := m.Meta.NextRenewal(); renews || m.Meta.RenewAfter != nil {
+			t.Fatalf("a %s credential without renew_after renews at %v", source, m.Meta.RenewAfter)
+		}
+	}
+	const at = "2026-12-01T10:00:00Z"
+	m, err := assemble(SourceToken, at)
+	if err != nil {
+		t.Fatalf("assemble(token, %s): %v", at, err)
+	}
+	if due, renews := m.Meta.NextRenewal(); !renews || due.Format(time.RFC3339) != at {
+		t.Fatalf("token renewal = %v %v, want %s", due, renews, at)
+	}
+	if m, err := assemble(SourceOIDC, at); err != nil || m.Meta.RenewAfter != nil {
+		t.Fatalf("a workload credential stored renew_after %v (%v)", m.Meta.RenewAfter, err)
+	}
+	if _, err := assemble(SourceToken, "next tuesday"); !errors.Is(err, errcode.New(errcode.ControlPlaneAnswer)) {
+		t.Fatalf("an unparsable renew_after = %v, want %s", err, errcode.ControlPlaneAnswer)
 	}
 }
 
@@ -705,7 +730,7 @@ func TestAPIErrorDropsControlCharacters(t *testing.T) {
 	cur := &Material{
 		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}),
 		Key:     fileKey{testKey(t)},
-		Meta:    Meta{Identity: "deploy-prod", Source: SourceToken},
+		Meta:    Meta{Identity: "deploy-prod", Source: SourceToken, RenewAfter: ptr(time.Now())},
 	}
 	_, err := client.Renew(context.Background(), cur)
 	var apiErr *APIError
@@ -754,7 +779,7 @@ func TestRenewRefusalSaysToRunSetupAgain(t *testing.T) {
 	cur := &Material{
 		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}),
 		Key:     fileKey{testKey(t)},
-		Meta:    Meta{Identity: "deploy-prod", Source: SourceToken},
+		Meta:    Meta{Identity: "deploy-prod", Source: SourceToken, RenewAfter: ptr(time.Now())},
 	}
 	_, err := client.Renew(context.Background(), cur)
 	if err == nil {

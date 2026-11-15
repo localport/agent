@@ -1602,8 +1602,8 @@ gates on either.
   immutable username, so removing them from the team ends it. The control plane
   refuses `/v1/mtls/certs/renew` for a sign-in certificate, and the agent does
   not ask: the credential records `source: sso`, and `Renew` refuses before
-  building a request. A sign-in carries no `renew_after`, and the field is
-  omitted from `meta.json`. `localport access` prints the expiry and that
+  building a request. The control plane sends no `renew_after` for a sign-in,
+  and the field is omitted from `meta.json`. `localport access` prints the expiry and that
   `localport login` is how it comes back.
 
 ### Stored identity (`localport identity`)
@@ -1682,11 +1682,10 @@ person holding credentials in two teams can tell them apart, and nothing else
 reads it. It is omitted when the control plane could not resolve it, and a
 record without it still loads. A renewal refreshes it but never blanks it.
 
-`source` is `token`, `oidc` or `sso`. Only `token` and `oidc` count as renewing
-sources in the store, and any other value is treated as non-renewing. A workload
-(`oidc`) certificate is held in memory for one run and never renewed: the
-control plane refuses its renewal, and the job requests a new certificate with a
-new workload token. A renewal carries the source forward unchanged.
+`source` is `token`, `oidc` or `sso`. Only `token` is a renewing source, and
+any other value is treated as non-renewing. A workload (`oidc`) certificate is
+held in memory for one run and never renewed: the control plane refuses its
+renewal, and the job requests a new certificate with a new workload token. A renewal carries the source forward unchanged.
 
 `meta.json` is validated on read and on write. A record naming an unknown kind
 or source, missing an expiry, or pairing a non-renewing source with a renewal
@@ -1760,9 +1759,20 @@ with the same test vector; do not change one without the other.
 The signature is recomputed on every attempt, because a retry that crosses a
 minute boundary would otherwise send a signature the server no longer accepts.
 
-Renewal is due at `renew_after`, which the server sets two thirds through the
-lifetime; the agent uses the same point when the server sends none. The loop
-runs inside `localport access`; a machine that is not permanently connected
+Renewal is due at `renew_after`, which the server sets about two thirds through
+the lifetime. For a setup-token certificate it is at least an hour before
+expiry. For a device certificate it is capped at expiry and can equal it, for
+example under a team CA that expires soon; an expired device certificate still
+renews at the device route. The server's value is
+authoritative: only setup-token and device certificates renew, and a sign-in,
+dashboard or workload certificate carries no `renew_after` on the wire. A
+setup-token certificate whose renewal would fall past its token's expiry or
+renewal stop, or within an hour of its own expiry, carries none either and is
+not renewed: the agent stores no deadline and never sends a renewal for it.
+The loop logs once that it does not renew and when it expires, and
+`localport identity renew` refuses it with `AG007`. A device
+certificate always carries one; an enrolment or device renewal answer without
+a parseable `renew_after` is refused. The loop runs inside `localport access`; a machine that is not permanently connected
 should run `localport identity renew` from a daily timer instead. The previous
 certificate stays valid until its own expiry, so rollover overlaps.
 

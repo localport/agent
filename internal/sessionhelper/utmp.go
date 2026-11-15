@@ -3,6 +3,8 @@
 package sessionhelper
 
 /*
+// glibc declares updwtmpx only under _GNU_SOURCE; musl and macOS ignore it.
+#define _GNU_SOURCE
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>

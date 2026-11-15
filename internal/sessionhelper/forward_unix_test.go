@@ -174,7 +174,10 @@ func TestForwardServerConcurrentAccepts(t *testing.T) {
 		}
 		ports = append(ports, port)
 	}
+	// Joined on every return, a Fatalf included, so no dialer reports after
+	// the test ends; the read deadline bounds that join.
 	var wg sync.WaitGroup
+	defer wg.Wait()
 	for _, port := range ports {
 		for range perListener {
 			wg.Go(func() {
@@ -183,6 +186,7 @@ func TestForwardServerConcurrentAccepts(t *testing.T) {
 					t.Errorf("dial listener %d: %v", port, err)
 					return
 				}
+				_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
 				_, _ = c.Read(make([]byte, 1))
 				_ = c.Close()
 			})
@@ -197,7 +201,6 @@ func TestForwardServerConcurrentAccepts(t *testing.T) {
 			t.Fatalf("%d of %d connections accepted", i, listeners*perListener)
 		}
 	}
-	wg.Wait()
 }
 
 // shortTempDir is a directory whose socket paths fit sun_path on macOS.

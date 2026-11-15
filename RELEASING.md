@@ -107,8 +107,10 @@ already has an open pull request.
 
 `make release-dryrun` runs the Linux part of steps 2 and 4 with throwaway
 keys and publishes nothing. `make dist` needs the `localport-session` and
-darwin binaries in `bin/` first; only the session builds make them. The
-**CI** workflow runs the session builds and the dry run on every push to
+darwin binaries in `bin/` first; only the session builds make them. A local
+`make build-session-linux` sends only tracked files to Docker
+(`scripts/release/tracked-context.sh`), so `git add` a new file before a
+local session build. The **CI** workflow runs the session builds and the dry run on every push to
 `main` and every pull request. The **Packaging** workflow builds the x86_64
 OpenWrt package on every push to `main` and on every pull request that
 changes the pipeline.

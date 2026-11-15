@@ -51,7 +51,8 @@ type fakeLauncher struct {
 	// messages are the PAM messages every started session carries.
 	messages []string
 	// hold, when set, makes Start wait for it to close after announcing the
-	// request on starting; helperDone receives when a helper's channel ends.
+	// request on starting; helperDone receives, when it has room, when a
+	// helper's channel ends.
 	hold       chan struct{}
 	starting   chan struct{}
 	helperDone chan struct{}
@@ -61,6 +62,10 @@ type fakeLauncher struct {
 	// forward, when set, serves a forward request's channel (the real
 	// forward server, in-process).
 	forward func(conn net.Conn)
+	// goroutines counts every helper and forward server Start runs. Start
+	// adds to it before returning, and the fixture waits for it only after
+	// Shutdown has joined every caller of Start, so no Add follows the Wait.
+	goroutines sync.WaitGroup
 }
 
 func newFakeLauncher() *fakeLauncher { return &fakeLauncher{resizes: make(chan [2]uint16, 8)} }
@@ -84,15 +89,18 @@ func (l *fakeLauncher) Start(_ context.Context, req launcher.Request, channel *o
 		<-hold
 	}
 	if req.Kind == launcher.KindForward && l.forward != nil {
-		go l.forward(conn)
+		l.goroutines.Go(func() { l.forward(conn) })
 		return &launcher.Session{Messages: l.messages}, nil
 	}
-	go func() {
+	l.goroutines.Go(func() {
 		l.helper(conn, req)
 		if l.helperDone != nil {
-			l.helperDone <- struct{}{}
+			select {
+			case l.helperDone <- struct{}{}:
+			default:
+			}
 		}
-	}()
+	})
 	return &launcher.Session{Messages: l.messages}, nil
 }
 
@@ -221,13 +229,18 @@ func newSSHFixture(t *testing.T, edit func(*ServerConfig)) *sshFixture {
 	f.cfg = &cfg
 	f.srv = NewServer(cfg)
 	// A connection outlives its Serve call; every one ends before the test's
-	// directories and fakes go away (registered after edit's TempDir).
+	// directories and fakes go away (registered after edit's TempDir). The
+	// launcher's goroutines are joined after Shutdown, which returns nil only
+	// once every connection has joined its channel and forward goroutines,
+	// the only callers of Start.
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := f.srv.Shutdown(ctx); err != nil {
 			t.Errorf("connections still running at the end of the test: %v", err)
+			return
 		}
+		f.launcher.goroutines.Wait()
 	})
 	return f
 }

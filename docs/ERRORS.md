@@ -34,7 +34,7 @@ or uninstaller is running (wait for it to finish, then run it again), and exit
 | AG004 | Session keys unreadable | `ticket_keys.json` (the device's session CA keys) beside the device's credential is unreadable or not owner-only. Make it a regular file owned by the account running the agent, mode 0600. |
 | AG005 | Session keys busy | Another localport process held the device's key lock. Stop the other process, or retry. |
 | AG006 | Renewal in progress | Another localport process is renewing this credential. Wait for it to finish, then retry. |
-| AG007 | Credential does not renew | A sign-in credential expires instead of renewing. Run `localport login` again. |
+| AG007 | Credential does not renew | The credential expires instead of renewing: a sign-in, a CI workload credential, or a setup-token credential the control plane gave no renewal time because its setup token's expiry or renewal stop comes first, or because too little of its own life would remain. Run `localport login` again for a sign-in; a CI job requests a new workload credential with a fresh identity token; for a setup-token credential, run `localport setup` with a new setup token once it expires. |
 | AG008 | Desktop target keys unreadable | `desktop_pins.json` beside the device's credential is unreadable, not owner-only, or not valid. Make it a regular file owned by the account running the agent, mode 0600, or run `localport set <device> --rdp-reset-pin` (or `--vnc-reset-pin`), which removes the file with every key it held; the next browser connection asks to trust the key again. In an untrusted credential directory the reset fails too: fix the directory's owner and mode first. |
 | AG009 | Desktop target keys busy | Another localport process held the device's desktop key lock. Retry. |
 | AG010 | Device credential not saved | The control plane issued the device credential, but writing it to the credential store failed; the message names why. The join token is spent: fix the cause, then create a new join command in the dashboard and run it. |
@@ -103,7 +103,7 @@ or uninstaller is running (wait for it to finish, then run it again), and exit
 | AG108 | Session connection failed | The connection to the device's edge broke or could not open. Check this machine's network; run with `--verbose` for the cause. |
 | AG109 | Session ended | The edge ended the session; the reason it gave follows the message. Connect again; when the reason persists, contact support with it. |
 | AG110 | Device enrolled, config not written | The join token is spent and the device holds its credential, but `agent.yaml` was not written; the message names the cause and what to run. Fix the cause, then create a new join command in the dashboard. |
-| AG111 | Credential expired | The credential's certificate expired. Renew it with `localport identity renew`, or sign in again with `localport login`. |
+| AG111 | Credential expired | The credential's certificate expired and an expired certificate cannot be renewed. Sign in again with `localport login`, or run `localport setup` with a new setup token for a setup-token credential. |
 | AG112 | localport path unknown | The operating system did not report where this localport executable is. Run localport by its full path. |
 | AG113 | Current user unknown | The account running the command cannot be looked up, so no default login exists. Name the login (`login@host`, or `--logins`). |
 | AG114 | OpenSSH client unavailable | `ssh` is not installed, not on `PATH`, or could not start. Install the OpenSSH client. |

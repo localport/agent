@@ -14,8 +14,10 @@ const (
 	// credential another process renewed, re-evaluates on a bounded schedule.
 	maxSleep = 6 * time.Hour
 
-	// The last third of a certificate's life is the retry budget: the server
-	// puts renew_after two thirds through, so a failure backs off in minutes.
+	// The life left after renew_after is the retry budget: the control plane
+	// names it at least an hour before expiry for a setup-token certificate,
+	// and an expired device certificate still renews, so a failure backs off
+	// in minutes.
 	minRetry = time.Minute
 	maxRetry = time.Hour
 
@@ -230,9 +232,10 @@ func (r *Renewer) Run(ctx context.Context) {
 			continue
 		}
 
-		// Callers only start this loop for a renewable source, so an absent
-		// deadline is a record disagreeing with itself. Stop rather than renew
-		// on a missing field.
+		// An absent renew_after means the control plane will not renew this
+		// certificate (its setup token's stop, or its own expiry, leaves no
+		// room for one): the loop says so once and ends, and the certificate
+		// serves until it expires.
 		due, ok, err := r.due(cur.Meta)
 		if err != nil {
 			r.log("identity: cannot read credential: %v", err)
@@ -243,6 +246,7 @@ func (r *Renewer) Run(ctx context.Context) {
 			continue
 		}
 		if !ok {
+			r.log("identity: %s does not renew; it expires %s", r.Ref, cur.Meta.NotAfter.Format(time.RFC3339))
 			return
 		}
 		if wait := time.Until(due); wait > 0 {
@@ -284,12 +288,12 @@ func (r *Renewer) Run(ctx context.Context) {
 			if r.OnRefused != nil && definitiveRefusal(err) {
 				r.OnRefused(err)
 			}
-			// A failure is retried and the certificate stays in use:
-			// renew_after is two thirds through its life, and an expired device
-			// certificate still renews at the device route. A Retry-After
-			// longer than the backoff is waited out, up to maxRetry. Either
-			// wait is jittered so devices behind one address do not return in
-			// step.
+			// A failure is retried and the certificate stays in use: the
+			// control plane names a setup-token certificate's renew_after at
+			// least an hour before expiry, and an expired device certificate
+			// still renews at the device route. A Retry-After longer than the
+			// backoff is waited out, up to maxRetry. Either wait is jittered
+			// so devices behind one address do not return in step.
 			base := backoff
 			if asked, ok := serverRetryAfter(err); ok && asked > base {
 				base = min(asked, maxRetry)

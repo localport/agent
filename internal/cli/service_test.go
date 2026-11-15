@@ -276,7 +276,7 @@ func TestConnectWritesTheEnrolledTicketKeysAndWarnsWhenItCannot(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, ok := keys.Lookup("k1"); !ok {
-				t.Fatal("the enrolled ticket key was not stored")
+				t.Fatal("the enrolled session CA key was not stored")
 			}
 		})
 	}

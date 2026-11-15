@@ -115,8 +115,11 @@ var ErrNotRenewable = errcode.New(errcode.NotRenewable)
 // The new certificate must name the same credential and carry the key
 // generated here, or nothing is returned to store.
 func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
-	// All renewal paths call Renew, so the check lives here.
-	if !cur.Meta.Source.Renewable() {
+	// All renewal paths call Renew, so the check lives here. A consumer
+	// credential the control plane gave no renew_after does not renew (its
+	// setup token's stop, or its own expiry, leaves no room for one); a device
+	// always has one.
+	if !cur.Meta.Source.Renewable() || (cur.Meta.Kind != KindDevice && cur.Meta.RenewAfter == nil) {
 		return nil, ErrNotRenewable
 	}
 
@@ -195,6 +198,9 @@ func (c *Client) Renew(ctx context.Context, cur *Material) (*Material, error) {
 	if err := checkIssued(next, Ref{Team: cur.Meta.Team, Kind: cur.Meta.Kind, Identity: cur.Meta.Identity}); err != nil {
 		return nil, err
 	}
+	if err := deviceRenews(next); err != nil {
+		return nil, err
+	}
 	if cur.Meta.Kind == KindDevice {
 		next.DeviceKeys = issuedKeys(resp.Keys)
 	}
@@ -246,18 +252,28 @@ func (c *Client) assemble(key Key, in issuedMaterial) (*Material, error) {
 		NotAfter: leaf.NotAfter.UTC(),
 		Device:   in.Device,
 	}
-	// Stored only for a source that renews, so the field's presence and meaning
-	// never disagree. The server's value wins; the fallback covers a renewable
-	// source whose response omitted one.
-	if in.Source.Renewable() {
-		t := parseTimeOr(in.RenewAfter, time.Time{})
-		if t.IsZero() {
-			t = defaultRenewAfter(leaf.NotBefore, leaf.NotAfter)
+	// The control plane's renew_after is authoritative: absent means the
+	// certificate does not renew. It is stored only for a source that renews,
+	// so the field's presence and meaning never disagree.
+	if raw := strings.TrimSpace(in.RenewAfter); raw != "" && in.Source.Renewable() {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return nil, errAnswer.With(fmt.Errorf("renew_after %q", security.SanitizeDisplay(raw)), "invalid renewal time")
 		}
 		t = t.UTC()
 		meta.RenewAfter = &t
 	}
 	return &Material{CertPEM: bundle, Key: key, Meta: meta}, nil
+}
+
+// deviceRenews refuses a device credential the control plane gave no renewal
+// time: a device always renews, so the answer is broken, and storing it would
+// silently stop the device's renewals.
+func deviceRenews(m *Material) error {
+	if m.Meta.Kind == KindDevice && m.Meta.RenewAfter == nil {
+		return errAnswer.With(nil, "no renewal time for a device certificate")
+	}
+	return nil
 }
 
 func renewalDigest(csrDER []byte, bucket int64, serial string) []byte {
@@ -268,24 +284,6 @@ func renewalDigest(csrDER []byte, bucket int64, serial string) []byte {
 	h.Write(b[:])
 	h.Write([]byte(serial))
 	return h.Sum(nil)
-}
-
-// defaultRenewAfter is the fallback when the control plane names no time for a
-// renewable credential: two thirds through the lifetime, leaving the last third
-// as retry budget, so a missing field cannot mean "never renew".
-func defaultRenewAfter(notBefore, notAfter time.Time) time.Time {
-	life := notAfter.Sub(notBefore)
-	if life <= 0 {
-		return notAfter
-	}
-	return notBefore.Add(life * 2 / 3).UTC()
-}
-
-func parseTimeOr(raw string, fallback time.Time) time.Time {
-	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(raw)); err == nil {
-		return t.UTC()
-	}
-	return fallback
 }
 
 func leafOf(certPEM []byte) (*x509.Certificate, error) {

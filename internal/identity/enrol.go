@@ -107,6 +107,9 @@ func (c *Client) EnrolDevice(
 	if err := checkIssued(m, want); err != nil {
 		return nil, err
 	}
+	if err := deviceRenews(m); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 

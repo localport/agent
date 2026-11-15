@@ -54,9 +54,12 @@ func needsAgentChild(file config.LocalConfigFile) bool {
 	return file.System && agentChildRoot()
 }
 
-// agentChildRoot is euid 0; tests run unprivileged and keep the in-process
-// path.
+// agentChildRoot is euid 0. The package's tests pin it to false, so they keep
+// the in-process path under any euid.
 var agentChildRoot = func() bool { return os.Geteuid() == 0 }
+
+// currentEUID is os.Geteuid; tests set the euid runAgentChild sees.
+var currentEUID = os.Geteuid
 
 // lookupAgentAccount is service.LookupAccount; tests name their own uid.
 var lookupAgentAccount = service.LookupAccount
@@ -79,7 +82,7 @@ func runAgentChild(app *App, args []string) error {
 	if err != nil {
 		return err
 	}
-	if euid := os.Geteuid(); euid != acct.UID || euid == 0 {
+	if euid := currentEUID(); euid != acct.UID || euid == 0 {
 		return errcode.New(errcode.AgentChildOnly).With(nil, fmt.Sprintf("run as uid %d", euid))
 	}
 	if len(args) == 0 || !slices.Contains(agentChildCommands, args[0]) {

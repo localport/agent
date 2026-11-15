@@ -49,16 +49,10 @@ const (
 )
 
 // Renewable reports whether a credential from this source can be reissued.
-// Unknown sources are not renewable. A sign-in does not renew, the user signs
-// in again.
-func (s Source) Renewable() bool {
-	switch s {
-	case SourceToken, SourceOIDC:
-		return true
-	default:
-		return false
-	}
-}
+// Only a token credential renews. A sign-in does not, the user signs in
+// again; a workload credential does not, the job mints a fresh identity
+// token. Unknown sources are not renewable.
+func (s Source) Renewable() bool { return s == SourceToken }
 
 // Valid reports whether s is a source this build knows how to act on.
 func (s Source) Valid() bool {

@@ -60,16 +60,29 @@ func TestAgentChildCmdCarriesVerbose(t *testing.T) {
 	}
 }
 
-// The hidden command runs only as the agent account.
+// The hidden command runs only as the agent account, and never as root even
+// when the agent account resolves to uid 0.
 func TestAgentChildRefusesAnyOtherAccount(t *testing.T) {
-	restore := lookupAgentAccount
-	t.Cleanup(func() { lookupAgentAccount = restore; asAgentChild = false })
-	lookupAgentAccount = func() (service.Account, error) { return service.Account{UID: os.Geteuid() + 1}, nil }
-	err := runAgentChild(New("test", "", ""), []string{"status"})
-	if !errors.Is(err, errcode.New(errcode.AgentChildOnly)) || asAgentChild {
-		t.Fatalf("runAgentChild as another account = %v (asAgentChild %v), want a refusal", err, asAgentChild)
+	restoreLookup, restoreEUID := lookupAgentAccount, currentEUID
+	t.Cleanup(func() { lookupAgentAccount, currentEUID = restoreLookup, restoreEUID; asAgentChild = false })
+	as := func(euid, agentUID int) {
+		currentEUID = func() int { return euid }
+		lookupAgentAccount = func() (service.Account, error) { return service.Account{UID: agentUID}, nil }
 	}
-	lookupAgentAccount = func() (service.Account, error) { return service.Account{UID: os.Geteuid()}, nil }
+	for _, c := range []struct {
+		name           string
+		euid, agentUID int
+	}{
+		{"another account", 1001, 990},
+		{"root with the agent account at uid 0", 0, 0},
+	} {
+		as(c.euid, c.agentUID)
+		err := runAgentChild(New("test", "", ""), []string{"status"})
+		if !errors.Is(err, errcode.New(errcode.AgentChildOnly)) || asAgentChild {
+			t.Fatalf("runAgentChild as %s = %v (asAgentChild %v), want a refusal", c.name, err, asAgentChild)
+		}
+	}
+	as(990, 990)
 	if err := runAgentChild(New("test", "", ""), []string{"connect"}); !errors.Is(err, errcode.New(errcode.AgentChildOnly)) || !strings.Contains(err.Error(), "unknown command") {
 		t.Fatalf("runAgentChild connect = %v, want unknown command", err)
 	}

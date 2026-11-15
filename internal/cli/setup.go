@@ -89,6 +89,8 @@ func runSetup(args []string) error {
 	printCredential(store, ref, material.Meta)
 	if due, renews := material.Meta.NextRenewal(); renews {
 		fmt.Fprintf(os.Stderr, "  renews     %s\n", due.Format(time.RFC3339))
+	} else {
+		fmt.Fprintf(os.Stderr, "  renews     never\n")
 	}
 	fmt.Fprintf(os.Stderr, "\n  next: localport access <device>-<fleet>.<region>.localport.dev -L 5020:502\n")
 	fmt.Fprintf(os.Stderr, "        one -L per port, <local>:<device>. The device's allowed ports are in the dashboard.\n")
