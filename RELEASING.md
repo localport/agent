@@ -108,9 +108,10 @@ already has an open pull request.
 `make release-dryrun` runs the Linux part of steps 2 and 4 with throwaway
 keys and publishes nothing. `make dist` needs the `localport-session` and
 darwin binaries in `bin/` first; only the session builds make them. The
-**Packaging** workflow runs the session builds and the dry run, and builds
-the x86_64 OpenWrt package, on every push to `main` and on every pull request
-that changes the pipeline.
+**CI** workflow runs the session builds and the dry run on every push to
+`main` and every pull request. The **Packaging** workflow builds the x86_64
+OpenWrt package on every push to `main` and on every pull request that
+changes the pipeline.
 
 ## Key rotation
 
@@ -174,7 +175,8 @@ public half with `openssl ec -pubout`.
   `NSIS_ZIP_SHA256` in `release.yml`), the OpenWrt SDKs (`release` and the
   per-arch SHA-256 list in `packaging/openwrt/sdk.sh`; the feed directory
   follows the release series), the binfmt and BuildKit images the session and
-  image builds use (digests in `session.yml` and `release.yml`), and
+  image builds use (digests in `session.yml`, `session-builder.yml` and
+  `release.yml`), and
   cargo-deny (`CARGO_DENY_VERSION`, `CARGO_DENY_SHA256` in `ci.yml`).
 
 ### Session builder images
@@ -204,7 +206,8 @@ To update a toolchain (a package version, or the AlmaLinux or Alpine base):
 2. Wait for the **Session builder** run on `main`; its job summary lists the
    new digest of each stage.
 3. Replace the digests in `packaging/session/Dockerfile` with those digests,
-   and run the session builds (the **Packaging** workflow) before a release.
+   and let the **CI** workflow's session builds and dry run pass before a
+   release.
 
 The cosign version in `session.yml` and `session-builder.yml` is updated by
 hand, with the one in `release.yml`.

@@ -1,8 +1,8 @@
 name: Session builds
 
 # cgo builds of localport-session for every release platform, and the signed
-# darwin binaries. Called by the CI and packaging workflows (cache on) and the
-# release workflow (cache off). Artifacts: one session-* per Linux build and
+# darwin binaries. Called by the CI workflow (cache on) and the release
+# workflow (cache off). Artifacts: one session-* per Linux build and
 # darwin; download them into bin/ with the pattern "{session-*,darwin}" and
 # merge-multiple.
 

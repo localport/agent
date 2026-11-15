@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"unsafe"
@@ -54,17 +55,24 @@ const (
 
 // systemSDDL is the security descriptor of a system object: owner
 // Administrators, full access for SYSTEM and Administrators, and service, an
-// SDDL rights string, for the device service's SID when not empty.
-func systemSDDL(service string) string {
-	sddl := "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"
+// SDDL rights string, for the device service's SID when not empty. A
+// directory's entries are inherited by its children (OICI), as in
+// privateSecurityDescriptor: setting it on a directory that already holds
+// unprotected children would otherwise leave each of them an empty DACL.
+func systemSDDL(service string, dir bool) string {
+	inherit := ""
+	if dir {
+		inherit = "OICI"
+	}
+	sddl := fmt.Sprintf("O:BAD:P(A;%[1]s;FA;;;SY)(A;%[1]s;FA;;;BA)", inherit)
 	if service == "" {
 		return sddl
 	}
-	return sddl + fmt.Sprintf("(A;;%s;;;%s)", service, ServiceSID(WindowsServiceName))
+	return sddl + fmt.Sprintf("(A;%s;%s;;;%s)", inherit, service, ServiceSID(WindowsServiceName))
 }
 
-func systemSecurityAttributes(service string) (*windows.SecurityAttributes, *windows.SECURITY_DESCRIPTOR, error) {
-	sd, err := windows.SecurityDescriptorFromString(systemSDDL(service))
+func systemSecurityAttributes(service string, dir bool) (*windows.SecurityAttributes, *windows.SECURITY_DESCRIPTOR, error) {
+	sd, err := windows.SecurityDescriptorFromString(systemSDDL(service, dir))
 	if err != nil {
 		return nil, nil, fmt.Errorf("build security descriptor: %w", err)
 	}
@@ -102,7 +110,7 @@ func crashSDDL(deviceService bool) string {
 // directory owned by anyone but SYSTEM or Administrators is refused.
 func EnsureCrashDir(dir string, deviceService bool) error {
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", filepath.Dir(dir), err)
+		return err
 	}
 	sd, err := windows.SecurityDescriptorFromString(crashSDDL(deviceService))
 	if err != nil {
@@ -110,11 +118,11 @@ func EnsureCrashDir(dir string, deviceService bool) error {
 	}
 	p, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
+		return &fs.PathError{Op: "create", Path: dir, Err: err}
 	}
 	sa := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
 	if err := windows.CreateDirectory(p, sa); err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-		return fmt.Errorf("create %s: %w", dir, err)
+		return &fs.PathError{Op: "create", Path: dir, Err: err}
 	}
 	h, err := openSystemHandle(dir, windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES, windows.OPEN_EXISTING, nil, true)
 	if err != nil {
@@ -162,16 +170,16 @@ func CheckSystemDir(dir string) error {
 // directory owned by anyone but SYSTEM or Administrators is refused, not
 // taken over: its owner could have placed links in it.
 func EnsureSystemDir(dir string, _ int) error {
-	sa, sd, err := systemSecurityAttributes("FRFX")
+	sa, sd, err := systemSecurityAttributes("FRFX", true)
 	if err != nil {
 		return err
 	}
 	p, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
+		return &fs.PathError{Op: "create", Path: dir, Err: err}
 	}
 	if err := windows.CreateDirectory(p, sa); err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-		return fmt.Errorf("create %s: %w", dir, err)
+		return &fs.PathError{Op: "create", Path: dir, Err: err}
 	}
 	h, err := openSystemHandle(dir, windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES, windows.OPEN_EXISTING, nil, true)
 	if err != nil {
@@ -207,7 +215,7 @@ func ReadSystemFile(path string) ([]byte, error) {
 // WriteSystemFileAtomic writes data to a new file beside path, created with
 // the system file DACL, flushes it and renames it over path.
 func WriteSystemFileAtomic(path string, data []byte, _ int) error {
-	sa, _, err := systemSecurityAttributes("FR")
+	sa, _, err := systemSecurityAttributes("FR", false)
 	if err != nil {
 		return err
 	}
@@ -228,19 +236,20 @@ func WriteSystemFileAtomic(path string, data []byte, _ int) error {
 			_ = os.Remove(tmp)
 		}
 	}()
+	// The *os.File and os.Rename errors carry their paths.
 	if _, err := f.Write(data); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
+		return err
 	}
 	if err := f.Sync(); err != nil {
-		return fmt.Errorf("flush %s: %w", tmp, err)
+		return err
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", tmp, err)
+		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		committed = true
-		return fmt.Errorf("replace %s: %w", path, err)
+		return err
 	}
 	committed = true
 	SyncDir(filepath.Dir(path))
@@ -252,7 +261,7 @@ func WriteSystemFileAtomic(path string, data []byte, _ int) error {
 // write it becomes read-only to the service. One owned by anyone but SYSTEM
 // or Administrators is refused: its owner could have written it.
 func AdoptSystemFile(path string) error {
-	_, sd, err := systemSecurityAttributes("FR")
+	_, sd, err := systemSecurityAttributes("FR", false)
 	if err != nil {
 		return err
 	}
@@ -276,7 +285,7 @@ func AdoptSystemFile(path string) error {
 // is taken over.
 func OpenSystemLock(path string, _ int, perm os.FileMode) (*os.File, error) {
 	rights, _ := lockRights(perm)
-	sa, sd, err := systemSecurityAttributes(rights)
+	sa, sd, err := systemSecurityAttributes(rights, false)
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +328,7 @@ func OpenSystemRunLock(path string) (*os.File, error) {
 func openSystemHandle(path string, access uint32, disposition uint32, sa *windows.SecurityAttributes, dir bool) (windows.Handle, error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return 0, fmt.Errorf("open %s: %w", path, err)
+		return 0, &fs.PathError{Op: "open", Path: path, Err: err}
 	}
 	flags := uint32(windows.FILE_ATTRIBUTE_NORMAL | windows.FILE_FLAG_OPEN_REPARSE_POINT)
 	if dir {
@@ -327,12 +336,12 @@ func openSystemHandle(path string, access uint32, disposition uint32, sa *window
 	}
 	h, err := windows.CreateFile(p, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, sa, disposition, flags, 0)
 	if err != nil {
-		return 0, fmt.Errorf("open %s: %w", path, err)
+		return 0, &fs.PathError{Op: "open", Path: path, Err: err}
 	}
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
 		_ = windows.CloseHandle(h)
-		return 0, fmt.Errorf("inspect %s: %w", path, err)
+		return 0, &fs.PathError{Op: "inspect", Path: path, Err: err}
 	}
 	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || isDir != dir {
@@ -371,11 +380,11 @@ func systemTrustees() ([]*windows.SID, error) {
 func checkSystemOwner(h windows.Handle, path string) error {
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
-		return fmt.Errorf("read security descriptor of %s: %w", path, err)
+		return &fs.PathError{Op: "read security descriptor of", Path: path, Err: err}
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {
-		return fmt.Errorf("read owner of %s: %w", path, err)
+		return &fs.PathError{Op: "read owner of", Path: path, Err: err}
 	}
 	trusted, err := systemTrustees()
 	if err != nil {
@@ -397,11 +406,11 @@ func checkSystemObject(h windows.Handle, path string, serviceAccess windows.ACCE
 	}
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
-		return fmt.Errorf("read security descriptor of %s: %w", path, err)
+		return &fs.PathError{Op: "read security descriptor of", Path: path, Err: err}
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
-		return fmt.Errorf("read DACL of %s: %w", path, err)
+		return &fs.PathError{Op: "read DACL of", Path: path, Err: err}
 	}
 	if dacl == nil {
 		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s has no DACL, which grants full access to everyone", path))
@@ -417,7 +426,7 @@ func checkSystemObject(h windows.Handle, path string, serviceAccess windows.ACCE
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
-			return fmt.Errorf("read ACE %d of %s: %w", i, path, err)
+			return &fs.PathError{Op: fmt.Sprintf("read ACE %d of", i), Path: path, Err: err}
 		}
 		if ace.Header.AceFlags&inheritOnlyACE != 0 {
 			continue
@@ -449,16 +458,16 @@ func checkSystemObject(h windows.Handle, path string, serviceAccess windows.ACCE
 func applySystemDescriptor(h windows.Handle, path string, sd *windows.SECURITY_DESCRIPTOR) error {
 	owner, _, err := sd.Owner()
 	if err != nil {
-		return fmt.Errorf("read owner for %s: %w", path, err)
+		return &fs.PathError{Op: "read owner for", Path: path, Err: err}
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
-		return fmt.Errorf("read DACL for %s: %w", path, err)
+		return &fs.PathError{Op: "read DACL for", Path: path, Err: err}
 	}
 	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		owner, nil, dacl, nil); err != nil {
-		return fmt.Errorf("secure %s: %w", path, err)
+		return &fs.PathError{Op: "secure", Path: path, Err: err}
 	}
 	return nil
 }

@@ -51,7 +51,13 @@ var (
 
 // productFiles are the files the installer puts in the install directory,
 // replaced together so every one comes from one release.
-var productFiles = []string{"localport.exe", "localport-session.exe", "uninstall.exe", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES"}
+var productFiles = []string{"localport.exe", "localport-session.exe", uninstallerFile, "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES"}
+
+// uninstallerFile is the NSIS uninstaller, the process that runs
+// `system uninstall`. Under `_?=` it runs from this file and holds it open,
+// so the uninstall transaction leaves it and the install directory to the
+// uninstaller, which deletes both once this step succeeds.
+const uninstallerFile = "uninstall.exe"
 
 const (
 	// txnRoot holds one directory per transaction inside the install
@@ -295,8 +301,10 @@ func applyInstall(ctx context.Context, host installHost, dir, txn, version strin
 }
 
 // runUninstall removes the owned services, the Path entry, the uninstall
-// entry and every product file as one transaction, then, past its commit
-// point, purges the device state when asked.
+// entry and every product file but the running uninstaller as one
+// transaction, then, past its commit point, purges the device state when
+// asked. The uninstaller deletes itself and dir after this step, also when
+// only the purge failed (AG093).
 func runUninstall(ctx context.Context, host installHost, dir string, purge bool) error {
 	return withServiceLock(ctx, host, dir, func() error {
 		if err := refuseOtherOpenTransaction(host, dir); err != nil {
@@ -341,6 +349,9 @@ func runUninstall(ctx context.Context, host installHost, dir string, purge bool)
 		}
 		for _, name := range productFiles {
 			current := filepath.Join(dir, name)
+			if name == uninstallerFile {
+				continue
+			}
 			if _, err := os.Lstat(current); err == nil {
 				if err := t.do(ctx, txnAction{Kind: actMove, From: current, To: filepath.Join(t.backupDir(), name)}, errUninstallNotPrepared); err != nil {
 					return err
@@ -350,9 +361,9 @@ func runUninstall(ctx context.Context, host installHost, dir string, purge bool)
 		if err := t.commit(); err != nil {
 			return t.fail(ctx, err)
 		}
-		// Only when empty: anything else in them is not ours to remove.
+		// Only when empty: anything else in it is not ours to remove. dir
+		// itself goes with the uninstaller (uninstallerFile).
 		removeEmptyOrQueue(host, filepath.Join(dir, txnRoot))
-		removeEmptyOrQueue(host, dir)
 		if purge {
 			// Irreversible, so after the commit point; the uninstall stands.
 			if err := host.purge(ctx); err != nil {

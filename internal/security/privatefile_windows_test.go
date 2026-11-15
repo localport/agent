@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // junction creates a directory junction at link. It needs only write access to
@@ -27,6 +29,45 @@ func TestEnsurePrivateDirCreatesAndAcceptsItsOwnTree(t *testing.T) {
 	}
 	if err := CheckPrivateDir(root, dir, true); err != nil {
 		t.Fatalf("CheckPrivateDir on a tree just created: %v", err)
+	}
+}
+
+// Securing a directory that already holds files and directories leaves them
+// readable by this account and grants nobody else write on them: the
+// protected DACL's entries are inherited, so the propagation SetSecurityInfo
+// runs replaces the children's inherited entries rather than emptying them.
+func TestEnsurePrivateDirKeepsExistingChildrenReachable(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "store")
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := []string{filepath.Join(root, "child.txt"), filepath.Join(sub, "nested.txt")}
+	for _, f := range files {
+		if err := os.WriteFile(f, []byte("kept"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := EnsurePrivateDir(root, root, true); err != nil {
+		t.Fatalf("EnsurePrivateDir: %v", err)
+	}
+	for _, f := range files {
+		if got, err := os.ReadFile(f); err != nil || string(got) != "kept" {
+			t.Fatalf("read %s after securing its parent = %q, %v", f, got, err)
+		}
+	}
+	for _, p := range append([]string{sub}, files...) {
+		sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := assertNoForeignWriter(dacl, p); err != nil {
+			t.Fatalf("%s after securing its parent: %v", p, err)
+		}
 	}
 }
 

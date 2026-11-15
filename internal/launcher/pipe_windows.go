@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"runtime"
@@ -57,7 +58,7 @@ func createPipeInstance(name, sddl string, first bool, maxInstances uint32) (win
 		windows.PIPE_TYPE_BYTE|windows.PIPE_READMODE_BYTE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS,
 		maxInstances, pipeBufferSize, pipeBufferSize, 0, sa)
 	if err != nil {
-		return 0, fmt.Errorf("create pipe %s: %w", name, err)
+		return 0, &fs.PathError{Op: "create pipe", Path: name, Err: err}
 	}
 	return h, nil
 }
@@ -290,7 +291,7 @@ func dialPipe(ctx context.Context, name string, owner *windows.SID) (*os.File, e
 			break
 		}
 		if !errors.Is(err, windows.ERROR_PIPE_BUSY) {
-			return nil, fmt.Errorf("open %s: %w", name, err)
+			return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 		}
 		select {
 		case <-ctx.Done():

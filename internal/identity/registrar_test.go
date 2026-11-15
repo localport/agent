@@ -8,9 +8,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/localport/agent/internal/securitytest"
 )
 
 func fileExists(t *testing.T, path string) bool {
@@ -224,16 +227,12 @@ func TestTickReportsARolloverAndItsDeadline(t *testing.T) {
 func TestAStoreReadErrorIsRetriedAndKeepsTheCredential(t *testing.T) {
 	store, old, next := renewedDevice(t)
 	dir := store.Dir(deviceRef)
-	if err := os.Chmod(dir, 0o770); err != nil {
-		t.Fatal(err)
-	}
+	restore := untrustDir(t, dir)
 	reg := NewDeviceRegistrar(store, deviceRef, nil)
 	if _, err := reg.Present(); err == nil {
 		t.Fatal("Present succeeded on an untrusted credential directory")
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	restore()
 	for _, f := range []string{old.Meta.Key.File, next.Meta.Key.File, metaFile, pendingFile} {
 		if !fileExists(t, filepath.Join(dir, f)) {
 			t.Fatalf("%s was deleted after a read error", f)
@@ -424,7 +423,11 @@ func TestSystemStoreRootsBesideTheConfigDirectory(t *testing.T) {
 	if err := s.EnsureRoot(); err != nil {
 		t.Fatal(err)
 	}
-	if info, err := os.Stat(s.Root); err != nil || info.Mode().Perm() != 0o700 {
+	// Go derives no mode bits from a DACL: on Windows the DACL is read
+	// instead.
+	if runtime.GOOS == "windows" {
+		securitytest.RequireOwnerOnly(t, s.Root)
+	} else if info, err := os.Stat(s.Root); err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("store root = %v, %v; want a 0700 directory", info, err)
 	}
 	if _, err := SystemStore("relative"); err == nil {

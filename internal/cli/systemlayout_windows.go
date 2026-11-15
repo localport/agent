@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 
@@ -41,7 +40,7 @@ func prepareSystemLayout(_ context.Context, file config.LocalConfigFile) error {
 	if _, err := os.Lstat(file.Path); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	} else if err != nil {
-		return fmt.Errorf("inspect %s: %w", file.Path, err)
+		return err
 	}
 	unlock, err := config.LockLocal(file)
 	if err != nil {

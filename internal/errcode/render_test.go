@@ -36,14 +36,17 @@ func TestRenderKeepsALocalPathError(t *testing.T) {
 	dir := t.TempDir()
 	_, cause := os.ReadFile(filepath.Join(dir, "missing.json"))
 	err := errcode.New(errcode.InvalidLocalConfig).With(cause, "")
-	text, hidden := errcode.Render(err)
-	want := "invalid local config: open " + filepath.Join(dir, "missing.json") + ": no such file or directory [AG028]"
-	if text != want || hidden {
-		t.Fatalf("Render = %q, %v; want %q", text, hidden, want)
-	}
 	var pathErr *fs.PathError
 	if !errors.As(err, &pathErr) {
 		t.Fatal("the cause is not in the chain")
+	}
+	// The reason is the OS's own text for the errno ("no such file or
+	// directory" on Unix, "The system cannot find the file specified." on
+	// Windows).
+	text, hidden := errcode.Render(err)
+	want := "invalid local config: open " + filepath.Join(dir, "missing.json") + ": " + pathErr.Err.Error() + " [AG028]"
+	if text != want || hidden {
+		t.Fatalf("Render = %q, %v; want %q", text, hidden, want)
 	}
 	denied := errcode.New(errcode.InvalidLocalConfig).With(&fs.PathError{Op: "open", Path: "/etc/localport/agent.yaml", Err: syscall.EACCES}, "")
 	want = "invalid local config: open /etc/localport/agent.yaml: " + syscall.EACCES.Error() + " [AG028]"

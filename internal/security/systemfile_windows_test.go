@@ -37,6 +37,27 @@ func setDACL(t *testing.T, path, sddl string) {
 	}
 }
 
+// Securing an existing system directory leaves the files already in it
+// readable by Administrators: the directory's entries are inherited, so the
+// propagation does not leave the children an empty DACL.
+func TestEnsureSystemDirKeepsExistingChildrenReachable(t *testing.T) {
+	requireElevated(t)
+	dir := filepath.Join(t.TempDir(), "system")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(dir, "child.txt")
+	if err := os.WriteFile(child, []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureSystemDir(dir, 0); err != nil {
+		t.Fatalf("EnsureSystemDir: %v", err)
+	}
+	if got, err := os.ReadFile(child); err != nil || string(got) != "kept" {
+		t.Fatalf("read %s after securing its directory = %q, %v", child, got, err)
+	}
+}
+
 // The device crash directory admits the device service with modify; the
 // launcher's admits it with nothing; any other trustee, or more access,
 // refuses either.

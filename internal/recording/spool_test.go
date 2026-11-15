@@ -8,9 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/localport/agent/internal/security"
+	"github.com/localport/agent/internal/securitytest"
 )
 
 const (
@@ -95,8 +99,19 @@ func TestSpoolLayoutAndModes(t *testing.T) {
 		filepath.Join(entry, "0.seg"):     0o600,
 		filepath.Join(entry, "1.seg"):     0o600,
 	} {
-		if got := mode(t, path); got != want {
-			t.Errorf("mode %s = %o, want %o", path, got, want)
+		// Go derives no mode bits from a DACL: on Windows the private
+		// checks read the DACL instead.
+		switch {
+		case runtime.GOOS != "windows":
+			if got := mode(t, path); got != want {
+				t.Errorf("mode %s = %o, want %o", path, got, want)
+			}
+		case want == 0o700:
+			securitytest.RequireOwnerOnly(t, path)
+		default:
+			if _, err := security.ReadPrivateFile(path); err != nil {
+				t.Errorf("%s: %v", path, err)
+			}
 		}
 	}
 	names, err := os.ReadDir(entry)

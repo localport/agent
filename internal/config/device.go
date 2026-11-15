@@ -511,7 +511,7 @@ func (d LocalDevice) validateSettings(name, goos string) error {
 	// Existence is checked on write and at session time, not here, so an
 	// unmounted volume never stops the devices from loading.
 	if d.FilesRoot != "" && !filepath.IsAbs(d.FilesRoot) {
-		return errcode.Invalidf("%s: files_root: %q is not an absolute path", device, security.SanitizeDisplay(d.FilesRoot))
+		return errcode.Invalidf("%s: files_root: \"%s\" is not an absolute path", device, security.SanitizeDisplay(d.FilesRoot))
 	}
 	return nil
 }
@@ -787,11 +787,11 @@ func unlockAndClose(lock *os.File) error {
 func CheckFilesRoot(path string) error {
 	shown := security.SanitizeDisplay(path)
 	if !filepath.IsAbs(path) {
-		return errcode.Invalidf("%q is not an absolute path", shown)
+		return errcode.Invalidf("\"%s\" is not an absolute path", shown)
 	}
 	info, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return ErrFilesRootMissing.With(nil, fmt.Sprintf("%q does not exist", shown))
+		return ErrFilesRootMissing.With(nil, fmt.Sprintf("\"%s\" does not exist", shown))
 	}
 	if err != nil {
 		// The PathError would repeat the unsanitized path.
@@ -799,10 +799,10 @@ func CheckFilesRoot(path string) error {
 		if errors.As(err, &pathErr) {
 			err = pathErr.Err
 		}
-		return ErrFilesRootMissing.With(err, fmt.Sprintf("inspect %q", shown))
+		return ErrFilesRootMissing.With(err, fmt.Sprintf("inspect \"%s\"", shown))
 	}
 	if !info.IsDir() {
-		return ErrFilesRootMissing.With(nil, fmt.Sprintf("%q is not a directory", shown))
+		return ErrFilesRootMissing.With(nil, fmt.Sprintf("\"%s\" is not a directory", shown))
 	}
 	return nil
 }

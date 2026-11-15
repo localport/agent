@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/localport/agent/internal/security"
 )
 
 func pinKey(s string) [32]byte { return sha256.Sum256([]byte(s)) }
@@ -80,7 +82,16 @@ func TestDesktopPins(t *testing.T) {
 	if r, _ := pins.Pin(context.Background(), "rdp", "127.0.0.1:3389", pinKey("c")); r != PinMatch {
 		t.Fatalf("Reset of vnc touched rdp: %v", r)
 	}
-	info, err := os.Stat(filepath.Join(store.Dir(deviceRef), desktopPinsFile))
+	pinPath := filepath.Join(store.Dir(deviceRef), desktopPinsFile)
+	// Go derives no mode bits from a DACL: on Windows the private-file
+	// check reads the DACL instead.
+	if runtime.GOOS == "windows" {
+		if _, err := security.ReadPrivateFile(pinPath); err != nil {
+			t.Fatalf("pin file: %v", err)
+		}
+		return
+	}
+	info, err := os.Stat(pinPath)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("pin file mode %v, %v; want 0600", info.Mode(), err)
 	}

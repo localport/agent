@@ -175,7 +175,7 @@ func DefaultStore() (*Store, error) {
 // is its own walk base and the recording spool lands in it.
 func SystemStore(dir string) (*Store, error) {
 	if !filepath.IsAbs(dir) {
-		return nil, fmt.Errorf("system credential directory %q is not absolute", dir)
+		return nil, fmt.Errorf("system credential directory \"%s\" is not absolute", security.SanitizeDisplay(dir))
 	}
 	root := filepath.Join(dir, "identity")
 	return &Store{Root: root, Base: root}, nil

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/proto"
 	"github.com/localport/agent/internal/recording"
+	"github.com/localport/agent/internal/securitytest"
 	"github.com/localport/agent/internal/tunnel"
 )
 
@@ -50,7 +52,19 @@ func TestOpenUploaderSpoolsUnderRootWhenBaseIsEmpty(t *testing.T) {
 	if u := openUploader(store, func(string) bool { return false }, func(string) (recording.Client, error) { return nil, recording.ErrNoSessionMux }); u == nil {
 		t.Fatal("openUploader returned nil")
 	}
-	fi, err := os.Stat(filepath.Join(real, "recordings"))
+	requirePrivateSpool(t, filepath.Join(real, "recordings"))
+}
+
+// requirePrivateSpool fails unless dir is a directory only its owner can
+// reach: mode 0700 on Unix, a DACL granting only this account, SYSTEM and
+// Administrators on Windows, where Go derives no mode bits from the DACL.
+func requirePrivateSpool(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		securitytest.RequireOwnerOnly(t, dir)
+		return
+	}
+	fi, err := os.Stat(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,13 +111,7 @@ func TestOpenUploaderResumesTheSpoolOfConfiguredDevices(t *testing.T) {
 	if u == nil {
 		t.Fatal("openUploader returned nil")
 	}
-	fi, err := os.Stat(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0o700 {
-		t.Fatalf("spool directory mode %#o, want 0700", perm)
-	}
+	requirePrivateSpool(t, dir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

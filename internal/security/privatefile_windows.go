@@ -4,6 +4,7 @@ package security
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +26,7 @@ import (
 func openNoFollow(path string) (*os.File, error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
 	}
 	// FILE_SHARE_DELETE lets WritePrivateFileAtomic rename over this path
 	// while it is open. Without it the rename fails with "Access is denied".
@@ -38,13 +39,13 @@ func openNoFollow(path string) (*os.File, error) {
 		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
 		0)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
 	}
 	return os.NewFile(uintptr(h), path), nil
 }
 
 func createPrivate(path string) (*os.File, error) {
-	sa, err := privateSecurityAttributes(path)
+	sa, err := privateSecurityAttributes(path, false)
 	if err != nil {
 		return nil, err
 	}
@@ -74,16 +75,16 @@ func createPrivate(path string) (*os.File, error) {
 func inspectPrivateDir(path string, follow, secure bool) error {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return fmt.Errorf("inspect %s: %w", path, err)
+		return &fs.PathError{Op: "inspect", Path: path, Err: err}
 	}
 	access := uint32(windows.READ_CONTROL | windows.FILE_READ_ATTRIBUTES)
 	if secure {
-		sa, err := privateSecurityAttributes(path)
+		sa, err := privateSecurityAttributes(path, true)
 		if err != nil {
 			return err
 		}
 		if err := windows.CreateDirectory(p, sa); err != nil && err != windows.ERROR_ALREADY_EXISTS {
-			return fmt.Errorf("create %s: %w", path, err)
+			return &fs.PathError{Op: "create", Path: path, Err: err}
 		}
 		access |= windows.WRITE_DAC
 	}
@@ -102,13 +103,13 @@ func inspectPrivateDir(path string, follow, secure bool) error {
 		flags,
 		0)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+		return &fs.PathError{Op: "open", Path: path, Err: err}
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
-		return fmt.Errorf("inspect %s: %w", path, err)
+		return &fs.PathError{Op: "inspect", Path: path, Err: err}
 	}
 	if !follow && info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is a reparse point; credential paths must not be redirected", path))
@@ -120,11 +121,11 @@ func inspectPrivateDir(path string, follow, secure bool) error {
 	current, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
-		return fmt.Errorf("read security descriptor of %s: %w", path, err)
+		return &fs.PathError{Op: "read security descriptor of", Path: path, Err: err}
 	}
 	owner, _, err := current.Owner()
 	if err != nil {
-		return fmt.Errorf("read owner of %s: %w", path, err)
+		return &fs.PathError{Op: "read owner of", Path: path, Err: err}
 	}
 	if err := assertOwnerIsTrusted(owner, path); err != nil {
 		return err
@@ -132,23 +133,23 @@ func inspectPrivateDir(path string, follow, secure bool) error {
 	if !secure {
 		dacl, _, err := current.DACL()
 		if err != nil {
-			return fmt.Errorf("read DACL of %s: %w", path, err)
+			return &fs.PathError{Op: "read DACL of", Path: path, Err: err}
 		}
 		return assertNoForeignWriter(dacl, path)
 	}
 
-	sd, err := privateSecurityDescriptor(path)
+	sd, err := privateSecurityDescriptor(path, true)
 	if err != nil {
 		return err
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
-		return fmt.Errorf("read DACL for %s: %w", path, err)
+		return &fs.PathError{Op: "read DACL for", Path: path, Err: err}
 	}
 	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		nil, nil, dacl, nil); err != nil {
-		return fmt.Errorf("secure %s: %w", path, err)
+		return &fs.PathError{Op: "secure", Path: path, Err: err}
 	}
 	return nil
 }
@@ -157,13 +158,13 @@ func inspectPrivateDir(path string, follow, secure bool) error {
 // refuses a reparse point or directory from the handle attributes, so there is
 // no window between check and use.
 func openLockNoFollow(path string) (*os.File, error) {
-	sa, err := privateSecurityAttributes(path)
+	sa, err := privateSecurityAttributes(path, false)
 	if err != nil {
 		return nil, err
 	}
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
 	}
 	h, err := windows.CreateFile(p,
 		windows.GENERIC_READ|windows.GENERIC_WRITE,
@@ -179,12 +180,12 @@ func openLockNoFollow(path string) (*os.File, error) {
 		if fi, lErr := os.Lstat(path); lErr == nil && (fi.IsDir() || fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0) {
 			return nil, ErrUntrustedPath.With(nil, fmt.Sprintf("%s is not a regular file of its own", path))
 		}
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
 	}
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
 		_ = windows.CloseHandle(h)
-		return nil, fmt.Errorf("inspect %s: %w", path, err)
+		return nil, &fs.PathError{Op: "inspect", Path: path, Err: err}
 	}
 	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
 		_ = windows.CloseHandle(h)
@@ -198,7 +199,7 @@ func verifyPrivate(f *os.File, path string) error {
 
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
-		return fmt.Errorf("inspect %s: %w", path, err)
+		return &fs.PathError{Op: "inspect", Path: path, Err: err}
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is a reparse point; credential paths must not be redirected", path))
@@ -220,15 +221,15 @@ func verifyPrivate(f *os.File, path string) error {
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
-		return fmt.Errorf("read security descriptor of %s: %w", path, err)
+		return &fs.PathError{Op: "read security descriptor of", Path: path, Err: err}
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {
-		return fmt.Errorf("read owner of %s: %w", path, err)
+		return &fs.PathError{Op: "read owner of", Path: path, Err: err}
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
-		return fmt.Errorf("read DACL of %s: %w", path, err)
+		return &fs.PathError{Op: "read DACL of", Path: path, Err: err}
 	}
 	// A NULL DACL grants everyone full control.
 	if dacl == nil {
@@ -248,7 +249,7 @@ func verifyPrivate(f *os.File, path string) error {
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
-			return fmt.Errorf("read ACE %d of %s: %w", i, path, err)
+			return &fs.PathError{Op: fmt.Sprintf("read ACE %d of", i), Path: path, Err: err}
 		}
 		// Deny, audit and alarm ACEs grant nothing. Any other type may grant
 		// access and is refused, including unrecognized ones.
@@ -296,7 +297,7 @@ func assertNoForeignWriter(dacl *windows.ACL, path string) error {
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
-			return fmt.Errorf("read ACE %d of %s: %w", i, path, err)
+			return &fs.PathError{Op: fmt.Sprintf("read ACE %d of", i), Path: path, Err: err}
 		}
 		// An inherit-only ACE applies to children, not to this directory.
 		if ace.Header.AceFlags&inheritOnlyACE != 0 {
@@ -346,8 +347,8 @@ func assertOwnerIsTrusted(owner *windows.SID, path string) error {
 	return nil
 }
 
-func privateSecurityAttributes(path string) (*windows.SecurityAttributes, error) {
-	sd, err := privateSecurityDescriptor(path)
+func privateSecurityAttributes(path string, dir bool) (*windows.SecurityAttributes, error) {
+	sd, err := privateSecurityDescriptor(path, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -361,24 +362,34 @@ func privateSecurityAttributes(path string) (*windows.SecurityAttributes, error)
 // the current user, LocalSystem and Administrators, and to nobody else. `P`
 // marks it protected, so nothing is inherited from the parent directory.
 //
+// A directory's entries are inherited by its files and subdirectories (OICI).
+// Setting the DACL propagates to existing children that are not protected,
+// and without inheritable entries that would leave each of them an empty
+// DACL, reachable by nobody.
+//
 // For a path under the device identity directory, a privileged process grants
 // the device service's virtual account instead of its own user, so the
 // elevated Administrator that runs connect and the service that runs the
 // renewer can each read and replace what the other wrote. An elevated process
 // also names Administrators as the owner there, which the service accepts;
 // the service cannot assign an owner but itself.
-func privateSecurityDescriptor(path string) (*windows.SECURITY_DESCRIPTOR, error) {
+func privateSecurityDescriptor(path string, dir bool) (*windows.SECURITY_DESCRIPTOR, error) {
 	t, err := currentTrust()
 	if err != nil {
 		return nil, err
 	}
-	sddl := fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)", t.user)
+	inherit := ""
+	if dir {
+		inherit = "OICI"
+	}
+	grantee, owner := t.user, ""
 	if t.servesIdentityDir(path) {
-		sddl = fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)", t.service)
+		grantee = t.service
 		if t.elevated {
-			sddl = "O:BA" + sddl
+			owner = "O:BA"
 		}
 	}
+	sddl := fmt.Sprintf("%[1]sD:P(A;%[2]s;FA;;;%[3]s)(A;%[2]s;FA;;;SY)(A;%[2]s;FA;;;BA)", owner, inherit, grantee)
 	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		return nil, fmt.Errorf("build security descriptor: %w", err)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"slices"
 	"time"
@@ -355,18 +356,18 @@ func removeEmptyKey(path string) error {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+		return &fs.PathError{Op: "open", Path: path, Err: err}
 	}
 	info, err := k.Stat()
 	k.Close()
 	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
+		return &fs.PathError{Op: "read", Path: path, Err: err}
 	}
 	if info.SubKeyCount > 0 || info.ValueCount > 0 {
 		return nil
 	}
 	if err := registry.DeleteKey(registry.LOCAL_MACHINE, path); err != nil && !errors.Is(err, registry.ErrNotExist) {
-		return fmt.Errorf("remove %s: %w", path, err)
+		return &fs.PathError{Op: "remove", Path: path, Err: err}
 	}
 	return nil
 }

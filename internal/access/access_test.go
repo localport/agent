@@ -403,7 +403,11 @@ func TestBuildTLSConfigNamesFileErrors(t *testing.T) {
 	if !errors.Is(err, errcode.New(errcode.ClientCertUnusable)) || !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("missing PEM file: %v, want AG121 with the not-exist cause", err)
 	}
-	if text, _ := errcode.Render(err); !strings.Contains(text, missing+": no such file or directory") {
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) {
+		t.Fatalf("missing PEM file: %v, want a *fs.PathError in the chain", err)
+	}
+	if text, _ := errcode.Render(err); !strings.Contains(text, "open "+missing+": "+pathErr.Err.Error()) {
 		t.Fatalf("rendered %q, want the path and reason", text)
 	}
 

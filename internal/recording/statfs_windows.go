@@ -4,7 +4,7 @@ package recording
 
 import (
 	"errors"
-	"fmt"
+	"io/fs"
 
 	"golang.org/x/sys/windows"
 )
@@ -19,7 +19,7 @@ func availableBytes(path string) (uint64, error) {
 	}
 	var avail, total, free uint64
 	if err := windows.GetDiskFreeSpaceEx(p, &avail, &total, &free); err != nil {
-		return 0, fmt.Errorf("free space of %s: %w", path, err)
+		return 0, &fs.PathError{Op: "free space of", Path: path, Err: err}
 	}
 	return avail, nil
 }

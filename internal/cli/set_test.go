@@ -134,6 +134,9 @@ func TestSetPinsChildResetsThePin(t *testing.T) {
 // set-pins agent child. A reset after a setting takes the same resetPins
 // path; writing the system config here would need the localport group.
 func TestSetRootResetsPinsInTheAgentChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent child runs under Unix root only (agentChildRoot)")
+	}
 	file := asRoot(t, &fakeManager{installed: true})
 	writeDevices(t, file)
 	file.System = true

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -14,7 +15,11 @@ func TestStatusPrintsServiceAndDevices(t *testing.T) {
 	if err := printStatus(context.Background(), &out); err != nil {
 		t.Fatalf("status = %v", err)
 	}
-	for _, want := range []string{"running, pid 42", "config     " + file.Path, "device     " + deviceRef("factory.gw-01").String(), "run_as_agent false", "launcher   session auth"} {
+	launcher := "launcher   session auth"
+	if runtime.GOOS == "windows" {
+		launcher = "launcher   session logon state: see the device in the dashboard"
+	}
+	for _, want := range []string{"running, pid 42", "config     " + file.Path, "device     " + deviceRef("factory.gw-01").String(), "run_as_agent false", launcher} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("status output lacks %q:\n%s", want, out.String())
 		}

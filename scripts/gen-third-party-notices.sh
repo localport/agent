@@ -17,7 +17,8 @@ out="THIRD_PARTY_NOTICES"
 pkgs=(./cmd/localport ./cmd/localport-session)
 
 # go-licenses tells standard library packages apart by its GOROOT, which is
-# the Go that built it unless set. The toolchain go.mod selects decides.
+# the Go that built it unless set. It is set to the GOROOT of the go command
+# on PATH (`go env GOROOT`).
 GOROOT="$(go env GOROOT)"
 export GOROOT
 

@@ -11,12 +11,15 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// A binary under the user's temp directory is owned by the user and refused.
+// A binary that BUILTIN\Users may write is refused. The DACL is set here: the
+// test's temp directory may be user-writable (a user profile) or not (an
+// admin-only work directory).
 func TestCheckServiceBinaryRefusesAUserBinary(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "localport.exe")
 	if err := os.WriteFile(path, []byte("x"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	setDACL(t, path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;BU)")
 	if err := CheckServiceBinary(path); !errors.Is(err, ErrUnsafeExecutable) {
 		t.Fatalf("CheckServiceBinary(%s) = %v, want ErrUnsafeExecutable", path, err)
 	}

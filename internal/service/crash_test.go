@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -54,10 +55,22 @@ func writeCrash(t *testing.T, dir, name, body string, at time.Time) {
 	}
 }
 
+// disarmCrashOutput hands the runtime no crash file once the test ends. The
+// runtime keeps the armed file open, which on Windows blocks removing the
+// test's directory.
+func disarmCrashOutput(t *testing.T) {
+	t.Cleanup(func() {
+		if err := debug.SetCrashOutput(nil, debug.CrashOptions{}); err != nil {
+			t.Errorf("disarm crash output: %v", err)
+		}
+	})
+}
+
 // A start after a crash keeps it under its UTC time, reports it once without
 // its text, keeps the five newest, and arms an empty current.crash.
 func TestCaptureCrashesRotatesReportsAndKeepsFive(t *testing.T) {
 	dir := t.TempDir()
+	disarmCrashOutput(t)
 	at := time.Date(2026, 11, 12, 15, 30, 0, 0, time.UTC)
 	for i := range 5 {
 		writeCrash(t, dir, at.Add(-time.Duration(i+1)*time.Hour).Format(crashTimeLayout)+".crash", "old", at.Add(-time.Duration(i+1)*time.Hour))

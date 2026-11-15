@@ -60,7 +60,18 @@ func readFile(t *testing.T, path string) string {
 
 func lines(b []byte) []string { return strings.Split(string(b), "\n") }
 
+// unixInitOnly skips a test of a Unix init system's files or install
+// sequence on Windows: they are generated and installed only on that system,
+// with its path separator and executable checks.
+func unixInitOnly(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix init system files are generated on Unix only")
+	}
+}
+
 func TestSystemdUnits(t *testing.T) {
+	unixInitOnly(t)
 	units, err := systemdUnits(exe)
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +141,7 @@ var updateGolden = flag.Bool("update", false, "rewrite testdata/localport-device
 // testdata/localport-device.service is the generated agent unit, which CI
 // scores with systemd-analyze security.
 func TestSystemdAgentUnitMatchesGolden(t *testing.T) {
+	unixInitOnly(t)
 	units, err := systemdUnits(exe)
 	if err != nil {
 		t.Fatal(err)
@@ -184,6 +196,7 @@ func newSystemd(t *testing.T, r *recorder) systemd {
 }
 
 func TestSystemdInstallSequence(t *testing.T) {
+	unixInitOnly(t)
 	r := &recorder{}
 	s := newSystemd(t, r)
 	if err := s.Install(context.Background(), exe); err != nil {
@@ -368,6 +381,7 @@ func plistStrings(t *testing.T, plist []byte) []string {
 }
 
 func TestLaunchdPlists(t *testing.T) {
+	unixInitOnly(t)
 	agent, err := launchdAgentPlist("/opt/a&b/localport")
 	if err != nil {
 		t.Fatal(err)
@@ -430,6 +444,7 @@ func notLoaded(labels ...string) map[string]error {
 }
 
 func TestLaunchdInstallSequence(t *testing.T) {
+	unixInitOnly(t)
 	r := &recorder{fail: notLoaded(LaunchdLabel, LaunchdLauncherLabel)}
 	l := newLaunchd(t, r)
 	launcherPlist := filepath.Join(filepath.Dir(l.plistPath), LaunchdLauncherLabel+".plist")
@@ -477,6 +492,7 @@ func TestLaunchdInstallSequence(t *testing.T) {
 // The log directory is taken over only as a directory: a symlink in its
 // place stops the install before any daemon is touched.
 func TestLaunchdInstallRefusesASymlinkedLogDir(t *testing.T) {
+	unixInitOnly(t)
 	r := &recorder{fail: notLoaded(LaunchdLabel, LaunchdLauncherLabel)}
 	l := newLaunchd(t, r)
 	if err := os.Symlink(t.TempDir(), l.logDir); err != nil {
@@ -491,6 +507,7 @@ func TestLaunchdInstallRefusesASymlinkedLogDir(t *testing.T) {
 }
 
 func TestLaunchdPrintFailureThatIsNotAnExitIsSurfaced(t *testing.T) {
+	unixInitOnly(t)
 	timedOut := &CommandError{ExitCode: -1, Err: context.DeadlineExceeded}
 	r := &recorder{fail: map[string]error{printCmd(LaunchdLauncherLabel): timedOut}}
 	l := newLaunchd(t, r)
@@ -503,6 +520,7 @@ func TestLaunchdPrintFailureThatIsNotAnExitIsSurfaced(t *testing.T) {
 }
 
 func TestLaunchdUninstall(t *testing.T) {
+	unixInitOnly(t)
 	r := &recorder{fail: notLoaded(LaunchdLabel, LaunchdLauncherLabel)}
 	l := newLaunchd(t, r)
 	if err := l.Uninstall(context.Background()); !errors.Is(err, ErrNotInstalled) {

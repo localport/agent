@@ -503,8 +503,14 @@ func TestSystemUninstall(t *testing.T) {
 		if h.deleted != 1 || h.key != nil || h.path != `C:\Windows` || h.purges != 1 || h.broadcasts != 1 {
 			t.Fatalf("deleted %d, key %s, path %q, purges %d, broadcasts %d", h.deleted, h.key, h.path, h.purges, h.broadcasts)
 		}
-		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("install directory after uninstall: %v", err)
+		// The running uninstaller is left in place: it deletes itself and the
+		// install directory after this step (localport.nsi Uninstall).
+		left, err := os.ReadDir(dir)
+		if err != nil || len(left) != 1 || left[0].Name() != uninstallerFile {
+			t.Fatalf("install directory after uninstall = %v, %v; want only %s", left, err, uninstallerFile)
+		}
+		if slices.ContainsFunc(h.queued, func(p string) bool { return p == dir }) {
+			t.Fatalf("install directory queued for reboot deletion by the step: %v", h.queued)
 		}
 	})
 	t.Run("foreign", func(t *testing.T) {
@@ -716,6 +722,10 @@ func TestSystemExitStatusIsTheCodeNumber(t *testing.T) {
 	var exitErr *service.ExitError
 	if err := systemExitError(fmt.Errorf("%w: held", errServiceConfigBusy)); !errors.As(err, &exitErr) || exitErr.Code != 91 || !errors.Is(err, errServiceConfigBusy) {
 		t.Fatalf("AG091 = %v", err)
+	}
+	// localport.nsi (EXIT_PURGE_FAILED) reads 93 as a committed uninstall.
+	if err := systemExitError(errPurgeFailed.With(errors.New("held"), "")); !errors.As(err, &exitErr) || exitErr.Code != 93 {
+		t.Fatalf("AG093 = %v, want exit status 93", err)
 	}
 	plain := errors.New("plain")
 	if err := systemExitError(plain); err != plain {

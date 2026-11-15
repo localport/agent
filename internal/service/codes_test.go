@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/localport/agent/internal/errcode"
@@ -19,17 +20,22 @@ func wantCode(t *testing.T, err error, code errcode.Code) {
 // A failed service manager command is AG135 and still a CommandError; the
 // account tools' runner leaves the code to the account step (AG138).
 func TestFailedCommandIsCoded(t *testing.T) {
-	_, err := managerRun(context.Background(), "false")
+	// A command that exits 1 on each platform.
+	fail := []string{"false"}
+	if runtime.GOOS == "windows" {
+		fail = []string{"cmd", "/c", "exit 1"}
+	}
+	_, err := managerRun(context.Background(), fail[0], fail[1:]...)
 	wantCode(t, err, errcode.ServiceManagerFailed)
 	var cmdErr *CommandError
 	if !errors.As(err, &cmdErr) || cmdErr.ExitCode != 1 {
 		t.Fatalf("err = %v, want the CommandError with exit code 1", err)
 	}
-	if _, err := execRun(context.Background(), "false"); errors.Is(err, errcode.New(errcode.ServiceManagerFailed)) {
+	if _, err := execRun(context.Background(), fail[0], fail[1:]...); errors.Is(err, errcode.New(errcode.ServiceManagerFailed)) {
 		t.Fatalf("execRun = %v, want no service manager code", err)
 	}
 	run := func(context.Context, string, ...string) (string, error) {
-		return execRun(context.Background(), "false")
+		return execRun(context.Background(), fail[0], fail[1:]...)
 	}
 	_, err = ensureAccount(context.Background(), run, &fakeAccounts{})
 	wantCode(t, err, errcode.AccountNotChanged)

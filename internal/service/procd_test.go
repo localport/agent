@@ -18,6 +18,7 @@ func newProcd(t *testing.T, r *recorder) procd {
 }
 
 func TestProcdScripts(t *testing.T) {
+	unixInitOnly(t)
 	scripts, err := procdScripts(exe)
 	if err != nil {
 		t.Fatal(err)

@@ -41,6 +41,8 @@ SetCompressor /SOLID lzma
 !define NAMESPACE "LocalportServiceConfig"
 !define NAMESPACE_SDDL "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
 !define MUTEX "${NAMESPACE}\Setup"
+; AG093: the uninstall committed and only the purge it was asked for failed.
+!define EXIT_PURGE_FAILED 93
 
 Name "${APP}"
 OutFile "${OUTFILE}"
@@ -60,13 +62,20 @@ VIAddVersionKey "LegalCopyright" "Copyright Localport"
 
 Var LogFile
 
-; Step runs `localport system <args>` from EXE and stops the install on a
-; non-zero exit, with the step's output in the details and the log. ARGS
+; RunStep runs `localport system <args>` from EXE, leaves its exit status in
+; $0 and its output in $1, and writes both to the details and the log. ARGS
 ; quotes paths with double quotes, so the messages use backticks.
-!macro Step EXE ARGS
+!macro RunStep EXE ARGS
   nsExec::ExecToStack '"${EXE}" system ${ARGS}'
   Pop $0
   Pop $1
+  ; nsExec reports a process it could not start as text ("error",
+  ; "timeout"), which LogicLib's numeric tests read as 0: count it as
+  ; Windows Installer's ERROR_INSTALL_FAILURE.
+  IntOp $2 $0 + 0
+  ${If} "$2" != "$0"
+    StrCpy $0 1603
+  ${EndIf}
   DetailPrint `localport system ${ARGS}: exit $0`
   DetailPrint "$1"
   ${If} $LogFile != ""
@@ -75,6 +84,11 @@ Var LogFile
     FileWrite $2 `localport system ${ARGS}: exit $0$\r$\n$1$\r$\n`
     FileClose $2
   ${EndIf}
+!macroend
+
+; Step is RunStep that stops setup on a non-zero exit, with that exit status.
+!macro Step EXE ARGS
+  !insertmacro RunStep "${EXE}" `${ARGS}`
   ${If} $0 != 0
     SetErrorLevel $0
     Abort `localport system ${ARGS} failed (exit $0)`
@@ -245,23 +259,79 @@ Function un.onInit
   !insertmacro ReadLogOption
 FunctionEnd
 
+; RemoveSelf deletes this uninstaller and the emptied install directory,
+; which the uninstall step leaves to it. From its temp copy both go now; run
+; in place (_?=) its own image is in use, so Windows deletes it, then the
+; directory, at the next restart.
+!macro RemoveSelf
+  Delete /REBOOTOK "$INSTDIR\uninstall.exe"
+  RMDir /REBOOTOK "$INSTDIR"
+!macroend
+
+; RefuseIfTransactionOpen stops the uninstaller, with AG089's status and
+; nothing changed, while a transaction in $INSTDIR has a journal: the commit
+; removes the transaction's directory (internal/cli/system.go finish).
+!macro RefuseIfTransactionOpen
+  FindFirst $R2 $R3 "$INSTDIR\.localport-txn\*"
+  ${DoWhile} $R3 != ""
+    ${If} ${FileExists} "$INSTDIR\.localport-txn\$R3\journal.json"
+      FindClose $R2
+      SetErrorLevel 89
+      Abort "$INSTDIR\localport.exe is missing but transaction $R3 is still open; run the installer to recover it"
+    ${EndIf}
+    FindNext $R2 $R3
+  ${Loop}
+  FindClose $R2
+!macroend
+
+; RefuseIfRegistered stops the uninstaller, with AG089's status and nothing
+; changed, while KEY exists and holds a value.
+!macro RefuseIfRegistered KEY WHY
+  ClearErrors
+  EnumRegValue $0 HKLM "${KEY}" 0
+  ${IfNot} ${Errors}
+  ${AndIf} $0 != ""
+    SetErrorLevel 89
+    Abort "$INSTDIR\localport.exe is missing but ${WHY}; nothing was changed"
+  ${EndIf}
+!macroend
+
 Section "Uninstall"
-  ; Runs from a copy, so the transaction can move $INSTDIR\localport.exe.
   InitPluginsDir
+  ${IfNot} ${FileExists} "$INSTDIR\localport.exe"
+    ; Only this uninstaller is left when an uninstall committed and stopped
+    ; before RemoveSelf (a power loss): finish it. Not while Localport is
+    ; still registered or a transaction in $INSTDIR is open, which the
+    ; installer recovers.
+    !insertmacro RefuseIfRegistered "${UNKEY}" "Localport is still registered"
+    !insertmacro RefuseIfTransactionOpen
+    !insertmacro RemoveSelf
+    Return
+  ${EndIf}
+  ; Runs from a copy, so the transaction can move $INSTDIR\localport.exe.
   ClearErrors
   CopyFiles /SILENT "$INSTDIR\localport.exe" "$PLUGINSDIR\localport.exe"
   ${If} ${Errors}
     SetErrorLevel 89
-    Abort "$INSTDIR\localport.exe is missing; nothing was changed"
+    Abort "$INSTDIR\localport.exe could not be copied; nothing was changed"
   ${EndIf}
   SetOutPath "$PLUGINSDIR"
   ${GetParameters} $R0
   ClearErrors
   ${GetOptions} $R0 "/PURGE" $R1
   ${If} ${Errors}
-    !insertmacro Step "$PLUGINSDIR\localport.exe" 'uninstall "$INSTDIR"'
+    !insertmacro RunStep "$PLUGINSDIR\localport.exe" 'uninstall "$INSTDIR"'
   ${Else}
-    !insertmacro Step "$PLUGINSDIR\localport.exe" 'uninstall "$INSTDIR" --purge'
+    !insertmacro RunStep "$PLUGINSDIR\localport.exe" 'uninstall "$INSTDIR" --purge'
+  ${EndIf}
+  ; Past the commit point only the purge can fail: the uninstall stands.
+  ${If} $0 == 0
+  ${OrIf} $0 == ${EXIT_PURGE_FAILED}
+    !insertmacro RemoveSelf
+  ${EndIf}
+  ${If} $0 != 0
+    SetErrorLevel $0
+    Abort `localport system uninstall failed (exit $0)`
   ${EndIf}
 SectionEnd
 

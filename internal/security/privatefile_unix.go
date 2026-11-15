@@ -10,11 +10,7 @@ import (
 )
 
 func openNoFollow(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
-	}
-	return f, nil
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }
 
 func createPrivate(path string) (*os.File, error) {

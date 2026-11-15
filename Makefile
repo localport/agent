@@ -80,17 +80,19 @@ check-packaging:
 	./scripts/release/check-packaging.sh
 
 # The Docker builds in SESSION_LINUX; CI runs one entry per job by setting
-# SESSION_LINUX. The git directory is a separate build context (a submodule's
-# .git is a file pointing outside the module), mounted only while go build
-# stamps the VCS information, so BUILDVCS means the same as for the other
-# builds.
+# SESSION_LINUX. The git directory and the common directory are separate build
+# contexts (a submodule's .git is a file pointing outside the module; a
+# worktree's git directory holds only its own HEAD and index), mounted only
+# while go build stamps the VCS information, so BUILDVCS means the same as for
+# the other builds. In a plain checkout both are the same directory.
 build-session-linux:
-	@gitdir="$$(git rev-parse --absolute-git-dir)" || { echo "build-session-linux needs a git checkout"; exit 1; }; \
+	@gitdir="$$(git rev-parse --absolute-git-dir)" && \
+	commondir="$$(git rev-parse --path-format=absolute --git-common-dir)" || { echo "build-session-linux needs a git checkout"; exit 1; }; \
 	for e in $(SESSION_LINUX); do \
 		IFS=:; set -- $$e; IFS=' '; \
 		echo "build localport-session_$$4"; \
 		docker buildx build --quiet --platform "$$1" -f packaging/session/Dockerfile \
-			--build-context git="$$gitdir" \
+			--build-context git="$$gitdir" --build-context gitcommon="$$commondir" \
 			--build-arg TOOLCHAIN="$$2" --build-arg TAGS="$$3" --build-arg BUILDVCS="$(BUILDVCS)" \
 			--build-arg NAME="localport-session_$$4" --build-arg "LDFLAGS=$(LDFLAGS)" \
 			--output type=local,dest=bin . || exit 1; \

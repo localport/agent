@@ -42,6 +42,10 @@ func listen(t *testing.T, name string, me *windows.SID) *PipeListener {
 	}
 	l := &PipeListener{name: name, sddl: "O:" + me.String() + "D:P(A;;GA;;;" + me.String() + ")", first: true, stop: stop}
 	t.Cleanup(func() { _ = l.Close() })
+	// As ListenPipe does: the first instance exists before any Accept.
+	if err := l.prepare(); err != nil {
+		t.Fatal(err)
+	}
 	return l
 }
 

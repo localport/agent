@@ -9,8 +9,8 @@
 #       writes <feed dir>/packages.adb over every .apk in <feed dir>, signed
 #       with the ECDSA P-256 key (PEM), using the SDK's apk-tools 3
 #   packaging/openwrt/sdk.sh series
-#       prints the OpenWrt release series of the pinned SDKs (25.12), the
-#       feed directory name under openwrt/
+#       prints the OpenWrt release series of the pinned SDKs, the feed
+#       directory name under openwrt/
 #
 # <version> is X.Y.Z (the tag without "v"). Each SDK is pinned by the SHA-256
 # in the release's sha256sums. SDK_DIR names a directory for downloads and

@@ -3,7 +3,8 @@
 #
 #   make release-dryrun
 #
-# Needs Docker, nfpm, gpg and openssl.
+# Needs Docker, nfpm, gpg and openssl, and the localport-session and darwin
+# binaries in bin/ that `make dist` packages (the session builds make them).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"

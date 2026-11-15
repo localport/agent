@@ -55,15 +55,15 @@ var (
 // journals recovers them under the lock, and lockServiceDefinitions refuses
 // while one is open. The mutex belongs to the OS thread, so the calling
 // goroutine stays on its thread until unlock. Every failure carries AG091.
-func lockServiceConfig(ctx context.Context) (unlock func(), err error) {
+func lockServiceConfig(ctx context.Context) (func(), error) {
 	runtime.LockOSThread()
-	unlock, err = takeServiceConfigMutex(ctx)
+	release, err := takeServiceConfigMutex(ctx)
 	if err != nil {
 		runtime.UnlockOSThread()
 		return nil, errServiceConfigBusy.With(err, "")
 	}
 	return func() {
-		unlock()
+		release()
 		runtime.UnlockOSThread()
 	}, nil
 }

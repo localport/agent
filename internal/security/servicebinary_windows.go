@@ -5,6 +5,7 @@ package security
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"unsafe"
@@ -121,11 +122,11 @@ func EnsureInstallDir(dir string) error {
 	}
 	p, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
+		return &fs.PathError{Op: "create", Path: dir, Err: err}
 	}
 	sa := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
 	if err := windows.CreateDirectory(p, sa); err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-		return fmt.Errorf("create %s: %w", dir, err)
+		return &fs.PathError{Op: "create", Path: dir, Err: err}
 	}
 	return nil
 }
@@ -151,7 +152,7 @@ func binaryTrustees() ([]*windows.SID, error) {
 func checkBinaryEntry(path string, leaf bool, rights windows.ACCESS_MASK, trusted []*windows.SID) error {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return fmt.Errorf("inspect %s: %w", path, err)
+		return &fs.PathError{Op: "inspect", Path: path, Err: err}
 	}
 	h, err := windows.CreateFile(p,
 		windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES,
@@ -161,13 +162,13 @@ func checkBinaryEntry(path string, leaf bool, rights windows.ACCESS_MASK, truste
 		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
 		0)
 	if err != nil {
-		return fmt.Errorf("inspect %s: %w", path, err)
+		return &fs.PathError{Op: "inspect", Path: path, Err: err}
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
-		return fmt.Errorf("inspect %s: %w", path, err)
+		return &fs.PathError{Op: "inspect", Path: path, Err: err}
 	}
 	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 	switch {
@@ -182,18 +183,18 @@ func checkBinaryEntry(path string, leaf bool, rights windows.ACCESS_MASK, truste
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
-		return fmt.Errorf("read security descriptor of %s: %w", path, err)
+		return &fs.PathError{Op: "read security descriptor of", Path: path, Err: err}
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {
-		return fmt.Errorf("read owner of %s: %w", path, err)
+		return &fs.PathError{Op: "read owner of", Path: path, Err: err}
 	}
 	if !sidIn(owner, trusted) {
 		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s is owned by %s, not by SYSTEM, Administrators or TrustedInstaller", path, owner))
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
-		return fmt.Errorf("read DACL of %s: %w", path, err)
+		return &fs.PathError{Op: "read DACL of", Path: path, Err: err}
 	}
 	if dacl == nil {
 		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s has no DACL, which grants full access to everyone", path))
@@ -201,7 +202,7 @@ func checkBinaryEntry(path string, leaf bool, rights windows.ACCESS_MASK, truste
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
-			return fmt.Errorf("read ACE %d of %s: %w", i, path, err)
+			return &fs.PathError{Op: fmt.Sprintf("read ACE %d of", i), Path: path, Err: err}
 		}
 		if ace.Header.AceFlags&inheritOnlyACE != 0 {
 			continue

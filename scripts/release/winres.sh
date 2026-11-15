@@ -24,6 +24,8 @@ for c in "localport:Localport agent" "localport-session:Localport session launch
 	sed -e "s|@VERSION@|$version|g" -e "s|@VERSION4@|$version4|g" \
 		-e "s|@NAME@|$name|g" -e "s|@DESCRIPTION@|$desc|g" \
 		packaging/windows/winres.json.in >"bin/winres-$name.json"
+	# No --file-version or --product-version: they also overwrite the string
+	# ProductVersion in every language, which the template sets to $version.
 	go run github.com/tc-hib/go-winres@v0.3.3 make --in "bin/winres-$name.json" --arch amd64 \
-		--out "cmd/$name/rsrc" --file-version "$version4" --product-version "$version4"
+		--out "cmd/$name/rsrc"
 done

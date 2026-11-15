@@ -306,6 +306,9 @@ func TestConnectRefusesInspectFlagsBesideAJoinToken(t *testing.T) {
 
 // --no-mux reaches the device a foreground connect serves.
 func TestConnectNoMuxReachesTheDevice(t *testing.T) {
+	// A foreground connect is the unprivileged one; a privileged run would
+	// install the service instead.
+	asUnprivileged(t)
 	stored := config.LocalDevice{Identity: deviceRef("factory.gw-01")}
 	storedConfig(t, stored)
 	fakeEnrol(t, stored.Identity)

@@ -24,6 +24,7 @@ func newOpenRC(t *testing.T, r *recorder) openrc {
 }
 
 func TestOpenRCScripts(t *testing.T) {
+	unixInitOnly(t)
 	scripts, err := openrcScripts(exe)
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +87,7 @@ func linkRunlevel(t *testing.T, o openrc, runlevel, name string) {
 }
 
 func TestOpenRCInstallSequence(t *testing.T) {
+	unixInitOnly(t)
 	r := &recorder{}
 	o := newOpenRC(t, r)
 	if err := os.Mkdir(o.initDir, 0o755); err != nil {

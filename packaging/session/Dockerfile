@@ -3,7 +3,9 @@
 # agent module root. Driven by `make build-session-linux` in CI:
 #
 #   docker buildx build --platform linux/<arch> -f packaging/session/Dockerfile \
-#     --build-arg TOOLCHAIN=<stage> --build-arg TAGS=<tags> \
+#     --build-context git="$(git rev-parse --absolute-git-dir)" \
+#     --build-context gitcommon="$(git rev-parse --path-format=absolute --git-common-dir)" \
+#     --build-arg TOOLCHAIN=<stage> --build-arg TAGS=<tags> --build-arg BUILDVCS=<auto|true|false> \
 #     --build-arg NAME=<output name> --build-arg LDFLAGS=<flags> \
 #     --output type=local,dest=bin .
 #
@@ -37,12 +39,19 @@ COPY . .
 ARG TAGS
 ARG LDFLAGS
 ARG BUILDVCS=auto
-# The git directory (build context "git") is mounted for the build only, so
-# the binary carries the same VCS stamp as the other release builds and no
-# layer holds the repository. GIT_WORK_TREE overrides a submodule's
-# core.worktree; the files belong to the host user, hence safe.directory.
+# The git directory (build context "git") and the common directory (build
+# context "gitcommon", the same directory outside a git worktree) are mounted
+# for the build only, so the binary carries the same VCS stamp as the other
+# release builds and no layer holds the repository. The common directory is
+# mounted outside the work tree, so git status does not list it.
+# GIT_COMMON_DIR replaces a worktree's relative commondir, which does not
+# resolve at the mount point;
+# GIT_WORK_TREE overrides a submodule's core.worktree; the files belong to the
+# host user, hence safe.directory.
 RUN --mount=type=bind,from=git,target=/src/.git \
-	GIT_WORK_TREE=/src GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/src \
+	--mount=type=bind,from=gitcommon,target=/git-common \
+	GIT_COMMON_DIR=/git-common GIT_WORK_TREE=/src \
+	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/src \
 	go build -trimpath -buildvcs="$BUILDVCS" -tags "$TAGS" -ldflags "$LDFLAGS" \
 	-o /out/localport-session ./cmd/localport-session
 RUN packaging/session/check.sh /out/localport-session "$TAGS" "${GLIBC_FLOOR:-}"
