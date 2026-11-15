@@ -14,14 +14,14 @@ const (
 	// credential another process renewed, re-evaluates on a bounded schedule.
 	maxSleep = 6 * time.Hour
 
-	// The last third of a certificate's life is the retry budget: the server puts
-	// renew_after two thirds through, so a failure backs off in minutes.
+	// The last third of a certificate's life is the retry budget: the server
+	// puts renew_after two thirds through, so a failure backs off in minutes.
 	minRetry = time.Minute
 	maxRetry = time.Hour
 
-	// minInterval floors the gap between two renewal ATTEMPTS, successful or not.
-	// The loop otherwise sleeps only while renew_after is in the future, so a
-	// certificate issued already past it would renew with no pause at all.
+	// minInterval floors the gap between two renewal attempts, successful or
+	// not. The loop otherwise sleeps only while renew_after is in the future,
+	// so a certificate issued already past it would renew with no pause at all.
 	minInterval = time.Minute
 )
 
@@ -35,9 +35,9 @@ type Renewer struct {
 
 	// OnRefused, optional, receives a renewal the control plane refused for
 	// good (a 4xx other than 429 and the in-flight 409 SE037, or
-	// ErrNotRenewable), and nil after a renewal
-	// lands. The loop keeps its schedule; a device stops retrying an expired
-	// certificate while a refusal stands.
+	// ErrNotRenewable), and nil after a renewal lands. The loop keeps its
+	// schedule; a device stops retrying an expired certificate while a refusal
+	// stands.
 	OnRefused func(error)
 
 	// client replaces NewClient(APIURL) in RenewPending. Tests set it to reach
@@ -231,8 +231,8 @@ func (r *Renewer) Run(ctx context.Context) {
 		}
 
 		// Callers only start this loop for a renewable source, so an absent
-		// deadline is a record disagreeing with itself. Stop rather than renew on
-		// a missing field.
+		// deadline is a record disagreeing with itself. Stop rather than renew
+		// on a missing field.
 		due, ok, err := r.due(cur.Meta)
 		if err != nil {
 			r.log("identity: cannot read credential: %v", err)
@@ -252,7 +252,7 @@ func (r *Renewer) Run(ctx context.Context) {
 			continue
 		}
 
-		// Between ATTEMPTS, not before the first: a certificate issued already
+		// Between attempts, not before the first: a certificate issued already
 		// past its renew_after would otherwise renew in a tight loop.
 		if since := time.Since(lastAttempt); !lastAttempt.IsZero() && since < minInterval {
 			if !sleepCtx(ctx, minInterval-since) {
@@ -286,9 +286,10 @@ func (r *Renewer) Run(ctx context.Context) {
 			}
 			// A failure is retried and the certificate stays in use:
 			// renew_after is two thirds through its life, and an expired device
-			// certificate still renews at the device route. A Retry-After longer
-			// than the backoff is waited out, up to maxRetry. Either wait is
-			// jittered so devices behind one address do not return in step.
+			// certificate still renews at the device route. A Retry-After
+			// longer than the backoff is waited out, up to maxRetry. Either
+			// wait is jittered so devices behind one address do not return in
+			// step.
 			base := backoff
 			if asked, ok := serverRetryAfter(err); ok && asked > base {
 				base = min(asked, maxRetry)

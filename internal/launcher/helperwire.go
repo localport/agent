@@ -27,8 +27,8 @@ const (
 	// requestTimeout bounds reading the one request after accept.
 	requestTimeout = 5 * time.Second
 	// helperStartTimeout bounds a helper's account lookup, logon and session
-	// setup and process start (A10); the launcher kills a helper still
-	// starting after it.
+	// setup and process start; the launcher kills a helper still starting after
+	// it.
 	helperStartTimeout = 30 * time.Second
 	// profileStartTimeout replaces helperStartTimeout once a Windows helper
 	// reports it is loading the login's profile, which can take minutes on
@@ -63,8 +63,8 @@ type HelperRequest struct {
 	// (Request.FilesDownload, Request.FilesUpload).
 	FilesDownload bool `json:"files_download,omitempty"`
 	FilesUpload   bool `json:"files_upload,omitempty"`
-	// AgentAccount runs the session as the agent's own account without PAM
-	// (tier 3 opt-in). Login is then the agent account's name. Unix only.
+	// AgentAccount runs the session as the agent's own account without PAM (the
+	// run_as_agent opt-in). Login is then the agent account's name. Unix only.
 	AgentAccount bool `json:"agent_account,omitempty"`
 	// ClientAddr is the session client's `ip:port` (Request.ClientAddr),
 	// empty when unknown.
@@ -110,8 +110,8 @@ func authorize(load func() (*config.LocalConfig, error), agentAccount string, re
 		return HelperRequest{}, Refusal(CodeDeviceUnknown)
 	}
 	d := cfg.Devices[i]
-	// A file session needs files enabled, a networking helper forwarding,
-	// every other session terminal.
+	// A file session needs files, a forward helper needs forwarding, and every
+	// other session needs terminal.
 	need := config.CapabilityTerminal
 	switch req.Kind {
 	case KindSFTP:

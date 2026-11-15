@@ -26,12 +26,11 @@ import (
 // (system_windows.go); the transaction logic here is platform-neutral so it
 // is tested on every platform.
 //
-// An install or uninstall is one transaction, after Windows Installer's
-// model: a journal records each change before it is made, any failure undoes
-// every recorded change in reverse, an interrupted transaction is undone by
-// the next installer or uninstaller run, and backups of replaced files are
-// kept until the transaction commits (docs/agents/agent/cli.md "Windows
-// installer steps").
+// An install or uninstall is one transaction, after Windows Installer's model:
+// a journal records each change before it is made, any failure undoes every
+// recorded change in reverse, an interrupted transaction is undone by the next
+// installer or uninstaller run, and backups of replaced files are kept until
+// the transaction commits.
 
 var (
 	errInstallerNotElevated = errcode.New(errcode.InstallerNotElevated)

@@ -9,7 +9,7 @@ import (
 )
 
 // App is the top-level CLI router. It dispatches `localport <command> …`
-// invocations and also tolerates the legacy flat form for tunnel mode.
+// invocations and also accepts the flat tunnel form (`localport http 8080`).
 type App struct {
 	version string
 	commit  string

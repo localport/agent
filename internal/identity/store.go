@@ -136,8 +136,8 @@ type Material struct {
 type Store struct {
 	Root string
 	// Base is where the security.EnsurePrivateDir walk starts, "" means Root.
-	// BaseChosen allows Base to be a symlink. True for LOCALPORT_HOME and $HOME,
-	// false for the system-wide default.
+	// BaseChosen allows Base to be a symlink. True for LOCALPORT_HOME and
+	// $HOME, false for the system-wide default.
 	Base       string
 	BaseChosen bool
 
@@ -282,7 +282,7 @@ func (s *Store) ListWithSkipped() ([]Ref, []Skipped, error) {
 	return refs, skipped, nil
 }
 
-// Remove deletes a credential's directory. LOCAL ONLY: the certificate stays
+// Remove deletes a credential's directory. Local only: the certificate stays
 // valid until it is revoked. Callers must say so, or an operator reads the
 // deletion as a withdrawal of access.
 func (s *Store) Remove(ctx context.Context, ref Ref) error {

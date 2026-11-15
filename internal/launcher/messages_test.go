@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// Messages made of the characters JSON escapes most (`<` becomes <)
-// are cut until the largest reply on both hops still encodes.
+// Messages made of the characters JSON escapes most (`<` becomes \u003c) are
+// cut until the largest reply on both hops still encodes.
 func TestFitMessagesBoundsTheEncodedReply(t *testing.T) {
 	worst := strings.Repeat("<\"\n", MaxMessage)
 	msgs := FitMessages([]string{worst, worst, worst})

@@ -317,9 +317,8 @@ func (ch *channel) start(kind, command string) bool {
 
 // openRecording opens this channel's own recording when the certificate the
 // connection runs under names one: a fresh recording id and that admission's
-// session id.
-// A Strict channel whose recording cannot open is refused (false), so no
-// helper runs unrecorded; a Best effort one runs unrecorded (nil, true).
+// session id. A Strict channel whose recording cannot open is refused (false),
+// so no helper runs unrecorded; a Best effort one runs unrecorded (nil, true).
 func (ch *channel) openRecording() (*sessionRecorder, bool) {
 	c := ch.c
 	a := c.adm.Load()

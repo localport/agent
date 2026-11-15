@@ -360,7 +360,7 @@ func protoTarget(ts *tState) string {
 
 // renderConnections lays out the bottom panel, using at most `capacity` lines.
 // An http tunnel shows one row per HTTP request; every other protocol shows one
-// row per live connection, as before.
+// row per live connection.
 func renderConnections(s snap, capacity int) []string {
 	if capacity <= 0 {
 		return nil

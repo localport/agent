@@ -257,8 +257,8 @@ func TestForwardServerListenLoopback(t *testing.T) {
 
 func TestForwardServerUnixListenMaskAndExistingPath(t *testing.T) {
 	path := filepath.Join(shortTempDir(t), "r.sock")
-	// The mask RunForwardServer sets; after the directory, which it would
-	// strip of its search bit.
+	// The umask RunForwardServer sets, applied after the directory exists:
+	// the mask would strip its search bit.
 	old := syscall.Umask(forwardSocketMask)
 	defer syscall.Umask(old)
 	client := forwardPair(t)
@@ -273,7 +273,8 @@ func TestForwardServerUnixListenMaskAndExistingPath(t *testing.T) {
 	if perm := fi.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("socket mode %o, want 600", perm)
 	}
-	// The same path again is refused path_exists, as StreamLocalBindUnlink no.
+	// The same path again is refused path_exists, as OpenSSH refuses it with
+	// StreamLocalBindUnlink no.
 	_, _, err = client.Listen(ctx(t), launcher.FwdUnix, 0, false, path, func(a launcher.Accepted) { _ = a.Conn.Close() }, nil)
 	var r *launcher.ForwardRefusal
 	if !errors.As(err, &r) || r.Code != launcher.FwdCodePathExists {

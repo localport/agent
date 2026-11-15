@@ -10,8 +10,8 @@ import (
 	"unicode/utf8"
 )
 
-// File operations a FileEvent names (the SFTP operation set Teleport audits,
-// plus exec for a command line).
+// File operations a FileEvent names: the SFTP operations, plus exec for a
+// command line.
 const (
 	OpExec    = "exec"
 	OpRead    = "read"

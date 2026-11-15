@@ -31,7 +31,7 @@ type Agent struct {
 	// ctx and handler are Run's, for the tunnels Apply starts.
 	ctx     context.Context
 	handler tunnel.EventHandler
-	// started is closed once Run holds ctx, so Apply no longer refuses.
+	// started is closed once Run holds ctx; Apply refuses before that.
 	started chan struct{}
 }
 

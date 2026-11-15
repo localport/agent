@@ -262,7 +262,7 @@ type resumable struct {
 
 	// running counts the Serve calls working on the connection: a first
 	// connect's stream and each resume from its claim to its end. The detach
-	// timer runs only while it is zero (the Teleport connEntry model).
+	// timer runs only while it is zero.
 	running int
 	// resuming is one resume's claim, held from beginResume until its stream
 	// is installed or it failed: positions are in the signed prelude, so a
@@ -354,13 +354,14 @@ func (s *Server) log(format string, args ...any) {
 
 // Serve runs one session stream to its end: a first connect starts an SSH
 // connection on a ResumableConn, a resume attaches the stream to a detached
-// one. id is the stream's session id (the access row id; a first connect's
-// recordings name it) and serial the certificate serial the edge admitted.
-// clientAddr is the client's `ip:port` from the edge's notice, empty when
-// unknown. Serve returns when the stream ends; the connection outlives it
-// while it waits detached for a resume. The caller closes stream after Serve
-// returns. With maxHandshakes streams before their handshake decision, Serve
-// returns at once without reading the stream and reports refusedUnread.
+// one. id is the session id the edge assigned to the stream (a first
+// connect's recordings name it) and serial the certificate serial the
+// edge admitted. clientAddr is the client's `ip:port` from the edge's notice,
+// empty when unknown. Serve returns when the stream ends; the connection
+// outlives it while it waits detached for a resume. The caller closes stream
+// after Serve returns. With maxHandshakes streams before their handshake
+// decision, Serve returns at once without reading the stream and reports
+// refusedUnread.
 func (s *Server) Serve(stream net.Conn, id [16]byte, serial uint64, clientAddr string) (refusedUnread bool) {
 	h := &handler{stop: make(chan struct{}), handshaking: true, abort: func() { _ = stream.SetDeadline(time.Now()) }}
 	if ok, logIt := s.register(h); !ok {
@@ -1304,8 +1305,8 @@ type conn struct {
 	channels map[*channel]struct{}
 	// desktop is a desktop connection's one channel once its open began.
 	desktop *desktopChannel
-	// allClosed receives once when a terminal or files connection's last channel closed,
-	// or a desktop connection's channel ended or was refused.
+	// allClosed receives once when a terminal or files connection's last
+	// channel closed, or a desktop connection's channel ended or was refused.
 	allClosed chan struct{}
 }
 
@@ -1375,12 +1376,11 @@ func (c *conn) fail(reason string) {
 // run serves an admitted connection until its first recorded end: the client
 // closing it, the idle timeout, a Shutdown, the last channel of a terminal or
 // files connection or a desktop connection's channel closing (a failed Strict
-// recording ends its own channel), or a
-// failed Strict forwards recording, or an end e queues (detach timeout, a
-// resume refused or lost). It then ends the forwards, writes the reason to
-// every open channel's stderr (a detached conn is dropped first, so nothing
-// waits for a stream; the writes are bounded by endWriteTimeout), closes the
-// connection and joins the channels and forwards.
+// recording ends its own channel), or a failed Strict forwards recording, or an
+// end e queues (detach timeout, a resume refused or lost). It then ends the
+// forwards, writes the reason to every open channel's stderr (a detached conn
+// is dropped first, so nothing waits for a stream; the writes are bounded by
+// endWriteTimeout), closes the connection and joins the channels and forwards.
 func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request, adm *connAdmission, password []byte, e *resumable) {
 	c := &conn{s: s, login: sc.User(), password: password,
 		channels: map[*channel]struct{}{}, allClosed: make(chan struct{}, 1), failed: make(chan string, 1)}

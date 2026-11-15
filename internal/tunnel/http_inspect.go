@@ -351,7 +351,8 @@ func firstLine(hdr []byte) []byte {
 }
 
 // scanFraming reads the body-framing headers. Transfer-Encoding: chunked wins
-// over Content-Length per the spec, so it is reported and the caller prefers it.
+// over Content-Length (RFC 9112 section 6.3), so it is reported and the caller
+// prefers it.
 func scanFraming(hdr []byte) (contentLen int64, hasCL, chunked bool) {
 	if i := bytes.Index(hdr, []byte("\r\n")); i >= 0 { // past the start line
 		hdr = hdr[i+2:]

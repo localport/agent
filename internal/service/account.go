@@ -103,7 +103,7 @@ func ensureAccount(ctx context.Context, run runner, db accounts) (Account, error
 func AccountRemoval() (usr, group []string) { return accountRemoval() }
 
 // deleteCommandsFor are the commands that delete the user and its group,
-// the counterparts of commandsFor's.
+// the counterparts of commandsFor.
 func deleteCommandsFor(tool string, shadow bool) (usr, group []string) {
 	if shadow {
 		dir := strings.TrimSuffix(tool, "useradd")

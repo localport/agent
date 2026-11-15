@@ -20,8 +20,8 @@ type DeviceInfo struct {
 }
 
 // DeviceKeys mirrors the control plane's DeviceKeys: the session CA keys
-// and the team's recording public key. The device keeps
-// them in its TicketKeys, never in meta.json.
+// and the team's recording public key. The device keeps them in its
+// TicketKeys, never in meta.json.
 type DeviceKeys struct {
 	TicketKeys   []TicketKey `json:"ticket_keys"`
 	RecordingKey string      `json:"recording_key"`
@@ -78,8 +78,8 @@ func (c *Client) EnrolDevice(
 		return nil, errAnswer.With(nil, "no certificate for the CSR")
 	}
 	// DNS names compare without case; the host is stored lowercase. A fleet
-	// without a public domain has no device host.
-	// The shown value is the one received, so redaction matches an echo.
+	// without a public domain has no device host. The shown value is the one
+	// received, so redaction matches an echo.
 	host := resp.DeviceHost
 	resp.DeviceHost = lowerASCII(host)
 	if resp.DeviceHost != "" && !validDeviceHost(resp.DeviceHost) {

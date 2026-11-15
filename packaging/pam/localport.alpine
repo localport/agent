@@ -1,10 +1,10 @@
 #%PAM-1.0
 # PAM service "localport" for Alpine Linux with linux-pam, installed as
 # /etc/pam.d/localport by the localport-pam package. localport-session runs
-# account, setcred and the session stack. The user is authenticated upstream by a
-# Localport certificate, so pam_authenticate is never called; the auth rule is
-# present for pam_setcred. The stack names modules directly, so it depends on no
-# include file from another package.
+# account, setcred and the session stack. The user is authenticated upstream
+# by a Localport certificate, so pam_authenticate is never called; the auth
+# rule is present for pam_setcred. The stack names modules directly, so it
+# depends on no include file from another package.
 auth       required     pam_unix.so
 account    required     pam_nologin.so
 account    required     pam_unix.so

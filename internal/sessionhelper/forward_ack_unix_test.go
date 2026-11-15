@@ -35,10 +35,10 @@ func unixConnPair(t *testing.T) (*net.UnixConn, *net.UnixConn) {
 	return ca.(*net.UnixConn), cb.(*net.UnixConn)
 }
 
-// The forward server keeps its copy of each passed socket until the agent
-// acks that id, so the socket never has only in-flight references (macOS
-// tears such a socket down, research R5); an ack of no held socket ends the
-// server; closeAll releases what is still held.
+// The forward server keeps its copy of each passed socket until the agent acks
+// that id, so the socket never has only in-flight references (macOS tears such
+// a socket down); an ack of no held socket ends the server; closeAll releases
+// what is still held.
 func TestUnixPeerHoldsAPassedSocketUntilItsAck(t *testing.T) {
 	agent, server := unixConnPair(t)
 	p := &unixForwardPeer{conn: server}

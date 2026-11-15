@@ -512,7 +512,8 @@ func TestKeyRefresherRunJoinsItsFetchOnCancel(t *testing.T) {
 		})
 		f := newRefresherFixture(t, &Client{BaseURL: "https://control.invalid", HTTP: &http.Client{Transport: held}}, tk1)
 		f.run(t)
-		// Runs before f.run's cleanup, so a failed test leaves no goroutine held.
+		// Runs before f.run's cleanup, so a failed test leaves no goroutine
+		// held.
 		releaseFetch := sync.OnceFunc(func() { close(release) })
 		t.Cleanup(releaseFetch)
 		<-f.clock.armed

@@ -72,10 +72,8 @@ func WritePrivateFileAtomic(path string, data []byte) error {
 		os.Remove(tmp)
 		return fmt.Errorf("write %s: %w", tmp, err)
 	}
-	// Flushed before the rename, not after. A rename is ordered but the DATA is
-	// not, so a power loss here can leave a present-but-empty key. Recovering
-	// from that costs a fresh setup token, and the old one is single-use and
-	// already spent.
+	// Flushed before the rename: a rename is ordered but the data is not, so a
+	// power loss could leave the file present but empty.
 	if err := f.Sync(); err != nil {
 		f.Close()
 		os.Remove(tmp)

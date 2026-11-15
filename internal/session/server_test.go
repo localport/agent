@@ -114,7 +114,8 @@ func (l *fakeLauncher) helper(conn net.Conn, req launcher.Request) {
 		return
 	}
 	if req.Command == "hold" {
-		// Ignores every frame, eof included, until the agent closes the channel.
+		// Ignores every frame, eof included, until the agent closes the
+		// channel.
 		_, _ = io.Copy(io.Discard, conn)
 		return
 	}
@@ -1111,8 +1112,8 @@ func TestShutdownIsBoundedByAClientThatStopsReading(t *testing.T) {
 	if err := sess.Start("flood"); err != nil {
 		t.Fatal(err)
 	}
-	// The 2 MiB window fills in milliseconds; the guard proof of the bound
-	// shows Shutdown blocks after this wait without it.
+	// The 2 MiB window fills in milliseconds; without the write bound,
+	// Shutdown blocks past this wait.
 	time.Sleep(500 * time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

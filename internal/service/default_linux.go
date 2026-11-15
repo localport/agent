@@ -16,7 +16,8 @@ func Default() (Manager, error) {
 	if ok, err := exists("/run/systemd/system"); err != nil {
 		return nil, errManager.With(err, "detect systemd")
 	} else if ok {
-		// Merged-/usr systems have both; older Debian ships only /bin/systemctl.
+		// Merged-/usr systems have both; older Debian ships only
+		// /bin/systemctl.
 		systemctl, ok := firstExisting("/usr/bin/systemctl", "/bin/systemctl")
 		if !ok {
 			return nil, ErrUnsupported.With(nil, "systemd runs, but neither /usr/bin/systemctl nor /bin/systemctl exists")

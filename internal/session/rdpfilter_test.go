@@ -479,11 +479,10 @@ func TestRDPFilterChannelNames(t *testing.T) {
 	}
 }
 
-// The IronRDP client the web page runs asks for no compression: its Client
-// Info PDU sets no INFO_COMPRESSION or compression type (MS-RDPBCGR
-// 2.2.1.11.1.1) and its Virtual Channel Capability Set is VCCAPS_NO_COMPR
-// (2.2.7.1.10), as recorded from ironrdp-connector, whose code the fork
-// carries unchanged.
+// The IronRDP client the web page runs asks for no compression: its Client Info
+// PDU sets no INFO_COMPRESSION or compression type (MS-RDPBCGR 2.2.1.11.1.1)
+// and its Virtual Channel Capability Set is VCCAPS_NO_COMPR (2.2.7.1.10), as
+// recorded from ironrdp-connector.
 func TestRDPClientAsksNoCompression(t *testing.T) {
 	steps := rdpTranscript(t, "base")
 	info := steps[5].pdu // Client Info: TPKT 4, X.224 3, MCS 6 and a 2-byte PER length
@@ -533,7 +532,8 @@ func TestRDPFilterCompressedChunk(t *testing.T) {
 				r := newRDPRun(t, rdpProtocolSSL, allClipboard)
 				r.connect("base")
 				pdu := rdpPDU(t, name)
-				// TPKT 4, X.224 3, MCS 6, PER length 1, then CHANNEL_PDU_HEADER.
+				// TPKT 4, X.224 3, MCS 6, PER length 1, then
+				// CHANNEL_PDU_HEADER.
 				binary.LittleEndian.PutUint32(pdu[18:], binary.LittleEndian.Uint32(pdu[18:])|v)
 				r.send(rdpServer, pdu)
 				r.wantEnd(CloseDesktopProtocolViolation)
@@ -774,7 +774,8 @@ func TestRDPFilterDynamicChannels(t *testing.T) {
 		r := open(t)
 		r.pass(rdpServer, rdpPDU(t, "s.dvc_create_display"))
 		r.pass(rdpClient, rdpPDU(t, "c.dvc_create_ok"))
-		// Data First: cmd 2, Len form 1 (two bytes), channel 3, length 10, 20 bytes.
+		// Data First: cmd 2, Len form 1 (two bytes), channel 3, length 10, 20
+		// bytes.
 		pdu := append([]byte{dvcDataFirst<<4 | 1<<2, 3, 10, 0}, make([]byte, 20)...)
 		r.send(rdpClient, r.svc(rdpClient, rdpDrdynvc, pdu, 0))
 		r.wantEnd(CloseDesktopProtocolViolation)

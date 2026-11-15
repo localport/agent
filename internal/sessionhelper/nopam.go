@@ -16,8 +16,8 @@ import (
 	"unsafe"
 )
 
-// pamAvailable reports that this build opens no PAM session: tier 2 hosts
-// (no libpam) get the account checks sshd applies without PAM instead.
+// pamAvailable reports that this build opens no PAM session: hosts without
+// libpam get the account checks sshd applies without PAM instead.
 const pamAvailable = false
 
 // pamSession is empty without PAM.

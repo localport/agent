@@ -12,11 +12,11 @@ import (
 )
 
 // The resumable connection layer runs below SSH, so every channel survives a
-// stream that drops (agent/docs/PROTOCOL.md "Resumable connections"). Each
-// side sends frames `uvarint ack | uvarint len | data`: ack is the count of
-// bytes received since the last ack it sent, data at most resumeMaxFrame
-// bytes. A side keeps every byte it wrote until the peer acks it, so a resume
-// on a new stream resends from the peer's received position.
+// stream that drops (docs/PROTOCOL.md "Resumable connections"). Each side sends
+// frames `uvarint ack | uvarint len | data`: ack is the count of bytes received
+// since the last ack it sent, data at most resumeMaxFrame bytes. A side keeps
+// every byte it wrote until the peer acks it, so a resume on a new stream
+// resends from the peer's received position.
 const (
 	resumeMaxFrame   = 128 << 10
 	resumeSendBuffer = 2 << 20
@@ -135,14 +135,14 @@ func (c *ResumableConn) Attach(stream net.Conn, peerReceived uint64) AttachEnd {
 }
 
 // Install makes stream the conn's stream in one critical section: a stream
-// still attached is detached first, and Install waits under the conn lock
-// until its run is done, so the newest stream always takes over and no two
-// run at once. peerReceived is the position the peer reported in the
-// prelude, and the peer was told Received(). A position outside the send
-// buffer ends the conn with ErrResumeLost and sends closeTag; an ended conn,
-// or one whose peer closed it, refuses the stream; both close stream and return a nil run and Ended. The
-// caller must call a non-nil run, once: it serves the stream until it ends
-// (see Attach).
+// still attached is detached first, and Install waits under the conn lock until
+// its run is done, so the newest stream always takes over and no two run at
+// once. peerReceived is the position the peer reported in the prelude, and the
+// peer was told Received(). A position outside the send buffer ends the conn
+// with ErrResumeLost and sends closeTag; an ended conn, or one whose peer
+// closed it, refuses the stream; both close stream and return a nil run and
+// Ended. The caller must call a non-nil run, once: it serves the stream until
+// it ends (see Attach).
 func (c *ResumableConn) Install(stream net.Conn, peerReceived uint64) (run func() AttachEnd, end AttachEnd) {
 	c.mu.Lock()
 	for c.att != nil && c.ended == nil {

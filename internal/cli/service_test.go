@@ -210,7 +210,7 @@ func testRecordingKey(t *testing.T) string {
 	return base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes())
 }
 
-// Connect writes the enrolled ticket keys after the credential is saved. A
+// Connect writes the enrolled session CA keys after the credential is saved. A
 // key store failure only warns: the credential stays saved and enrolment
 // completes. Only a ticket_keys.json it cannot read gets the file remedy.
 func TestConnectWritesTheEnrolledTicketKeysAndWarnsWhenItCannot(t *testing.T) {

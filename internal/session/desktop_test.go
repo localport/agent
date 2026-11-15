@@ -547,7 +547,8 @@ func TestDesktopEndDuringTheDial(t *testing.T) {
 	}
 	select {
 	case err := <-opened:
-		// The refusal races the connection's close, so only the failure is certain.
+		// The refusal races the connection's close, so only the failure is
+		// certain.
 		if err == nil {
 			t.Fatal("the channel opened after the end")
 		}

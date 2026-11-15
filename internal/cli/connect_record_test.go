@@ -158,7 +158,8 @@ func TestANewIdentityAppends(t *testing.T) {
 }
 
 // setup and login check the store directory before spending their one-time
-// secret: a store path that is not a directory fails here, never at the unroutable API.
+// secret: a store path that is not a directory fails here, never at the
+// unroutable API.
 func TestSetupAndLoginCheckTheStoreBeforeTheSpend(t *testing.T) {
 	asUnprivileged(t)
 	for name, run := range map[string]func() error{

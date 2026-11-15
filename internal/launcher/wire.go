@@ -237,10 +237,10 @@ func (r Request) validateCommon() error {
 	return nil
 }
 
-// OriginEnv is the SSH_CLIENT and SSH_CONNECTION a session with client
-// address addr gets, as sshd sets them, none for an empty or invalid addr.
-// A relayed session has no local socket, so the server end is
-// 127.0.0.1 port 22; the fields are there because parsers expect four.
+// OriginEnv is the SSH_CLIENT and SSH_CONNECTION a session with client address
+// addr gets, as sshd sets them, none for an empty or invalid addr. A relayed
+// session has no local socket, so the server end is 127.0.0.1 port 22; the
+// fields are there because parsers expect four.
 func OriginEnv(addr string) []string {
 	ip, port, ok := SplitClientAddr(addr)
 	if !ok {

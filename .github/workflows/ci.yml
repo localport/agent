@@ -257,9 +257,9 @@ jobs:
           if [ -n "$denied" ]; then echo "localport_t can modify localport_etc_t files:"; echo "$denied"; exit 1; fi
 
   # systemd's exposure score of the generated device unit (the golden file
-  # TestSystemdAgentUnitMatchesGolden pins) and of the documented example unit. Each
-  # threshold is the unit's score, 0 to 100, measured with systemd 259, so a
-  # weaker unit fails.
+  # TestSystemdAgentUnitMatchesGolden pins) and of the documented example
+  # unit. Each threshold is the unit's score, 0 to 100, measured with
+  # systemd 259, so a weaker unit fails.
   unit-hardening:
     name: systemd unit hardening
     runs-on: ubuntu-26.04

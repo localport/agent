@@ -2,8 +2,8 @@
 # OpenWrt package for the Localport agent and the no-PAM localport-session.
 # Built per package architecture with the OpenWrt SDK by
 # packaging/openwrt/sdk.sh, which fills in @VERSION@ and @HASH@ from the
-# source tarball it makes of the checked-out tree. Follows the golang feed's
-# packages (net/tailscale, net/netbird in openwrt/packages).
+# source tarball it makes of the checked-out tree. Follows the layout of the
+# golang feed's Go packages in openwrt/packages.
 #
 # No init scripts: `localport connect` writes the procd scripts for both
 # services. The package creates the system user and group localport (USERID).

@@ -56,9 +56,9 @@ func TestServerEchoOfTheSecretIsRedactedAtTheSource(t *testing.T) {
 			secret: joinToken,
 		},
 		{
-			// encoding/json quotes a number that overflows its field. No
-			// answer that follows a secret has a numeric field today; the
-			// redaction holds for one added later.
+			// encoding/json quotes a number that overflows its field, so
+			// any numeric answer field can echo a secret; this case pins
+			// the redaction for that path.
 			name: "secret echoed in a malformed answer",
 			call: func(c *Client) error {
 				var out struct {

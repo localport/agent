@@ -52,7 +52,7 @@ func contractNonceAAD(index uint32, final bool, codec byte) (nonce, aad []byte) 
 	return nonce, append(aad, f, 2, codec)
 }
 
-// sealRaw seals padded, a padded payload as given, as a version 2 object.
+// sealRaw seals padded as given, adding no padding, as a version 2 object.
 func sealRaw(t *testing.T, dek []byte, index uint32, final bool, codec byte, padded []byte) []byte {
 	t.Helper()
 	aead, err := chacha20poly1305.New(dek)

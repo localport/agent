@@ -17,8 +17,8 @@ import (
 )
 
 // Critical option and extension names of a session certificate, and the one
-// principal of a desktop certificate. The API mints them; structured values are
-// compact JSON.
+// principal of a desktop certificate. The control plane mints them; structured
+// values are compact JSON.
 const (
 	optionDevice     = "device@localport.io"
 	optionResume     = "resume@localport.io"
@@ -152,14 +152,14 @@ func refuseCert(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", errCertRefused, fmt.Sprintf(format, args...))
 }
 
-// verifyCert checks a user certificate whose key possession userauth proved:
-// a user certificate signed by one of cas, with exactly the serial the edge
-// admitted, valid at now within certSkew, for principal user, with exactly
-// the critical options the device option (which must name device), for a
-// files or ssh certificate optionFiles, and for a vnc or rdp certificate
-// optionClipboard. A resume certificate is refused (its
-// resume option is unknown here). It returns the certificate's claims; the
-// caller applies the local config.
+// verifyCert checks a user certificate whose key possession userauth proved: a
+// user certificate signed by one of cas, with exactly the serial the edge
+// admitted, valid at now within certSkew, for principal user, with exactly the
+// critical options the device option (which must name device), for a files or
+// ssh certificate optionFiles, and for a vnc or rdp certificate
+// optionClipboard. A resume certificate is refused (its resume option is
+// unknown here). It returns the certificate's claims; the caller applies the
+// local config.
 func verifyCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, device Device, serial uint64, now time.Time) (*admission, error) {
 	return checkCert(cert, user, cas, device, serial, now, []string{optionDevice})
 }
@@ -201,8 +201,8 @@ func checkCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, devi
 	if !signedByCA(cert, cas) {
 		return nil, refuseCert("not signed by a session CA key")
 	}
-	// The control plane mints short-lived certificates; an open-ended or empty window
-	// is malformed, and the bound keeps both ends inside int64 seconds.
+	// The control plane mints short-lived certificates; an open-ended or empty
+	// window is malformed, and the bound keeps both ends inside int64 seconds.
 	if cert.ValidBefore > 1<<62 || cert.ValidAfter >= cert.ValidBefore {
 		return nil, refuseCert("validity window malformed")
 	}

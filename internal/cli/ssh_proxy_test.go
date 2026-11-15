@@ -288,8 +288,7 @@ func TestSSHProxyEndsOnATerminalCloseReason(t *testing.T) {
 	}
 }
 
-// sshResumableEnds is the list agent/docs/PROTOCOL.md names (the browser
-// pins its RESUMABLE_ENDS to docs/COMMUNICATION.md the same way).
+// sshResumableEnds is the list docs/PROTOCOL.md names.
 func TestSSHResumableEndsMatchTheProtocolDoc(t *testing.T) {
 	doc, err := os.ReadFile("../../docs/PROTOCOL.md")
 	if err != nil {
@@ -334,7 +333,8 @@ func TestResumeMintRetryable(t *testing.T) {
 }
 
 // A retryable refusal of the presented certificate before the connection runs
-// gets one new certificate and one more try (docs/COMMUNICATION.md).
+// gets one new certificate and one more try (docs/PROTOCOL.md, "Native SSH
+// clients").
 func TestSSHProxyRetriesARetryableRefusalOnce(t *testing.T) {
 	for _, reason := range []string{"edge_full", "no_session_mux", "wrong_edge", "edge_shutdown"} {
 		t.Run(reason, func(t *testing.T) {

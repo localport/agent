@@ -50,7 +50,7 @@ const (
 	// dvcClientClosed: the client closed the channel or declined it, or the
 	// agent refused its Create for the client. Data the server sent before it
 	// saw that is dropped; the server does not answer it. IronRDP's client
-	// treats a declined channel the same way (ironrdp-dvc client.rs:609-617).
+	// treats a declined channel the same way (ironrdp-dvc client.rs).
 	dvcClientClosed
 )
 

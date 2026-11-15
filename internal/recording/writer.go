@@ -13,11 +13,10 @@ import (
 // never exceeds MaxPlaintext.
 const MaxLine = MaxPlaintext - 128
 
-// Writer encodes a session channel as asciicast v3 lines. It records
-// output, resize, exit, marker, files-log ("f") and port forward ("p") events only;
-// input has no entry point. Event
-// times come from the caller, so tests drive it with a fake clock. A Writer
-// is not safe for concurrent use.
+// Writer encodes a session channel as asciicast v3 lines. It records output,
+// resize, exit, marker, files-log ("f") and port forward ("p") events only;
+// input has no entry point. Event times come from the caller, so tests drive it
+// with a fake clock. A Writer is not safe for concurrent use.
 type Writer struct {
 	start      time.Time
 	cols, rows uint16

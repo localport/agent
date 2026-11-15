@@ -130,7 +130,7 @@ type enrolResult struct {
 }
 
 // enrolInStore readies the store, spends the join token, saves the issued
-// credential and its ticket keys, and prints the credential. connect runs
+// credential and its session CA keys, and prints the credential. connect runs
 // it in-process or, as root, in the enrol child.
 func enrolInStore(store *identity.Store, req enrolRequest) (enrolResult, error) {
 	if err := store.EnsureRoot(); err != nil {

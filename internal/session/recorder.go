@@ -89,7 +89,7 @@ var newRecordingSealer = recording.NewSealer
 
 // startRecording creates the entry of recording id, one session channel of
 // connection sessionID, and hands it to the uploader with the admitting
-// certificate, from which the first open creates the row, and sends that
+// certificate, from which the first open creates the recording, and sends that
 // open, bounded by strictOpenTimeout. channels is the stream's cumulative
 // recorded start count, which the open carries. The entry exists only when it
 // returns a recorder. A start that fails with an uploader present queues one
@@ -105,8 +105,9 @@ func (s *Server) startRecording(id, sessionID string, adm *admission, start time
 		return nil, errRecordingUnavailable.With(nil, "the held recording key changed")
 	}
 	// Both policies open before the channel's helper starts; the edge attests
-	// the live connection, so the control plane checks the certificate at its admission
-	// however late the channel starts. strictOpenTimeout bounds the wait.
+	// the live connection, so the control plane checks the certificate at its
+	// admission however late the channel starts. strictOpenTimeout bounds the
+	// wait.
 	strict := adm.Rec.Policy == RecPolicyStrict
 	ctx, cancel := context.WithTimeout(context.Background(), strictOpenTimeout)
 	defer cancel()

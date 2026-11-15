@@ -82,8 +82,8 @@ type RegisterPayload struct {
 	Nonce        string      `json:"nonce"`
 	Subdomain    string      `json:"subdomain,omitempty"`
 
-	// AgentVersion and AgentOS identify the build and platform in the audit record.
-	// They are self-reported and not used for access decisions.
+	// AgentVersion and AgentOS identify the build and platform in the audit
+	// record. They are self-reported and not used for access decisions.
 	AgentVersion string `json:"agent_version,omitempty"`
 	AgentOS      string `json:"agent_os,omitempty"`
 
@@ -91,19 +91,19 @@ type RegisterPayload struct {
 	// RegisterAck so the edge can replace the stale session on reconnect.
 	ResumeSessionID string `json:"resume_session_id,omitempty"`
 
-	// Capabilities (terminal, files, desktop, forwarding), Logins and Desktop (rdp, vnc)
-	// are what a device enabled in its local config. The agent enforces them;
-	// the control plane also issues no session certificate for a kind whose
-	// capability or desktop protocol is not listed.
+	// Capabilities (terminal, files, desktop, forwarding), Logins and Desktop
+	// (rdp, vnc) are what a device enabled in its local config. The agent
+	// enforces them; the control plane also issues no session certificate for a
+	// kind whose capability or desktop protocol is not listed.
 	Capabilities []string `json:"capabilities,omitempty"`
 	Logins       []string `json:"logins,omitempty"`
 	Desktop      []string `json:"desktop,omitempty"`
 
 	// SessionAuth (pam, no_pam; on Windows s4u, s4u_domain_unreachable) and
-	// FullDiskAccess (granted, denied, unknown;
-	// omitted off macOS) are the session launcher's probe; RunAsAgent is the
-	// device config's opt-in to run sessions as the agent account. Display
-	// only: the control plane shows them and decides nothing on them.
+	// FullDiskAccess (granted, denied, unknown; omitted off macOS) are the
+	// session launcher's probe; RunAsAgent is the device config's opt-in to
+	// run sessions as the agent account. Display only: the control plane
+	// shows them and decides nothing on them.
 	SessionAuth    string `json:"session_auth,omitempty"`
 	RunAsAgent     bool   `json:"run_as_agent,omitempty"`
 	FullDiskAccess string `json:"full_disk_access,omitempty"`
@@ -130,13 +130,13 @@ type RegisterAckPayload struct {
 	// next Register to reclaim the slot.
 	SessionID string `json:"session_id,omitempty"`
 
-	// Ports lists the device's allowed ports as set in the dashboard, with their
-	// version.
+	// Ports lists the device's allowed ports as set in the dashboard, with
+	// their version.
 	PortsVersion uint64       `json:"ports_version,omitempty"`
 	Ports        []DevicePort `json:"ports,omitempty"`
 
-	// RevokedTicketKids lists session ticket signing key ids the device must
-	// stop trusting. Only a device receives it.
+	// RevokedTicketKids lists the session CA key ids the device must stop
+	// trusting. Only a device receives it.
 	RevokedTicketKids []string `json:"revoked_ticket_kids,omitempty"`
 }
 
@@ -210,8 +210,8 @@ type RedirectPayload struct {
 }
 
 // MuxBindPayload binds a multiplexed data connection to a session registered on
-// the control connection. It is authenticated separately and has the same replay
-// protection as Register. A tunnel sends its token, a device none: its
+// the control connection. It is authenticated separately and has the same
+// replay protection as Register. A tunnel sends its token, a device none: its
 // connection presents the client certificate its session registered with. The
 // session id is always required.
 type MuxBindPayload struct {

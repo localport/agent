@@ -52,9 +52,9 @@ func CheckPackageManagerBinary(path string) error {
 // runs, unless the file and every directory above it are owned by SYSTEM,
 // Administrators or TrustedInstaller and no other trustee holds a right that
 // replaces an entry, on the file itself one that writes its data, or on its
-// directory one that adds an entry.
-// Inherit-only ACEs are ignored. The invoking user and the service's own
-// account are never trusted here, unlike the private file checks.
+// directory one that adds an entry. Inherit-only ACEs are ignored. The invoking
+// user and the service's own account are never trusted here, unlike the private
+// file checks.
 func CheckServiceBinary(path string) error {
 	if !filepath.IsAbs(path) {
 		return ErrUnsafeExecutable.With(nil, fmt.Sprintf("%s is not an absolute path", path))

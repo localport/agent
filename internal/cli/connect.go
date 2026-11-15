@@ -199,9 +199,8 @@ func runConnect(version string, args []string) (retErr error) {
 // storeEnrolledKeys writes the enrolment's key set (session CA keys and
 // recording key). The credential is already stored, so a failure warns and
 // enrolment goes on: the device accepts no session until ticket_keys.json
-// loads, and an identity.KeyRefresher
-// fetch (run for every device that serves sessions) or a renewal after the
-// file is readable again writes the set. Only
+// loads, and an identity.KeyRefresher fetch (run for every device that serves
+// sessions) or a renewal after the file is readable again writes the set. Only
 // identity.ErrTicketKeysUnreadable gets the file remedy.
 func storeEnrolledKeys(store *identity.Store, ref identity.Ref, set *identity.DeviceKeys) {
 	if set == nil {

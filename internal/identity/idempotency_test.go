@@ -14,7 +14,7 @@ import (
 )
 
 // idempotencyKeySyntax is a Structured Field String holding the base32 text
-// of crypto/rand.Text (research R12).
+// of crypto/rand.Text.
 var idempotencyKeySyntax = regexp.MustCompile(`^"[A-Z2-7]{26}"$`)
 
 // One MintSession call keeps its key across a body read failure after a 2xx
@@ -54,7 +54,8 @@ func TestIdempotencyKeyIsKeptAcrossRetriesAndNewPerCall(t *testing.T) {
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(map[string]string{"code": codeIdempotencyInFlight, "message": "in flight"})
 		default:
-			// Attempt 3 is the stored-result replay; attempt 4 is the next call.
+			// Attempt 3 is the stored-result replay; attempt 4 is the next
+			// call.
 			_, _ = w.Write(full)
 		}
 	})

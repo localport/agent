@@ -15,10 +15,10 @@ import (
 const errcodePath = "github.com/localport/agent/internal/errcode"
 
 // Analyzer reports fmt.Errorf and errcode.Invalidf calls that wrap a coded
-// error, an operand of static type *errcode.Error, with other format text. errcode.Render prints
-// typed parts only, so that text never reaches the user: such a site passes
-// the text to (*errcode.Error).With or errcode.WithRemedy. Test files are
-// not checked.
+// error, an operand of static type *errcode.Error, with other format text.
+// errcode.Render prints typed parts only, so that text never reaches the
+// user: such a site passes the text to (*errcode.Error).With or
+// errcode.WithRemedy. Test files are not checked.
 var Analyzer = &analysis.Analyzer{
 	Name:     "errwrapcheck",
 	Doc:      "report fmt.Errorf and errcode.Invalidf text around a coded error, which errcode.Render does not print",

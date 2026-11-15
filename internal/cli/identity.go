@@ -180,7 +180,8 @@ func runIdentityRemove(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "  removed %s\n", ref)
 	fmt.Fprintf(os.Stderr, "  deleted %s\n", dir)
-	// Removing the file does not revoke. Say so, or the operator assumes it did.
+	// Removing the file does not revoke. Say so, or the operator assumes it
+	// did.
 	fmt.Fprintf(os.Stderr, "\n  the certificate is still valid until it is revoked in the dashboard\n")
 	return nil
 }

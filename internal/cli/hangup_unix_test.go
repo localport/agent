@@ -20,7 +20,8 @@ import (
 	"github.com/localport/agent/internal/service"
 )
 
-// The roles of the test binary re-executed by TestHangupSafeCommandsRunToTheEnd.
+// The roles of the test binary re-executed by
+// TestHangupSafeCommandsRunToTheEnd.
 const (
 	hangupRoleEnv    = "LOCALPORT_TEST_HANGUP_ROLE"
 	hangupOutcomeEnv = "LOCALPORT_TEST_HANGUP_OUTCOME"

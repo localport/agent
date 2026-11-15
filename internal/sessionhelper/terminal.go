@@ -64,8 +64,8 @@ func (fw *frameWriter) write(f launcher.Frame) error {
 // terminal is one terminal session: the shell in a PTY, a reader goroutine
 // copying the master's output to data frames, and a waiter goroutine that
 // observes the shell's exit and, when it exited by itself, sends the exit
-// frame. The helper is the shell's parent and holds it unreaped until the
-// end path ran (A6), so no signal names a reused pid.
+// frame. The helper is the shell's parent and holds it unreaped until the end
+// path ran, so no signal names a reused pid.
 type terminal struct {
 	out    *frameWriter
 	master *os.File
@@ -104,7 +104,7 @@ type terminal struct {
 	// killDone is closed once the SIGKILL step ran or became unnecessary.
 	killDone chan struct{}
 
-	// exitCode is the shell's exit frame code once reaped (exitCode).
+	// exitCode is the code of the shell's exit frame, set once it is reaped.
 	exitCode int
 
 	// observeExit blocks until the shell exited, without reaping it.

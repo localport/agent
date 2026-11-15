@@ -74,8 +74,9 @@ func loadPEM(path string) (tls.Certificate, error) {
 	}
 	cert, err := tls.X509KeyPair(data, data)
 	if err != nil {
-		// The identity store's certificate file has no key. crypto/tls reports that as
-		// a PEM block type error, so replace it with a specific message.
+		// The identity store's certificate file has no key. crypto/tls reports
+		// that as a PEM block type error, so replace it with a specific
+		// message.
 		if bytes.Contains(data, []byte("BEGIN CERTIFICATE")) && !bytes.Contains(data, []byte("PRIVATE KEY")) {
 			return tls.Certificate{}, errcode.New(errcode.ClientCertUnusable).With(nil,
 				path+" holds certificates but no private key\n"+
@@ -103,7 +104,8 @@ func loadPEM(path string) (tls.Certificate, error) {
 		if block.Type != "CERTIFICATE" {
 			continue
 		}
-		// Compare DER. A serial is unique only within its CA (RFC 5280 4.1.2.2).
+		// Compare DER. A serial is unique only within its CA (RFC 5280
+		// 4.1.2.2).
 		if bytes.Equal(block.Bytes, cert.Certificate[0]) {
 			continue
 		}

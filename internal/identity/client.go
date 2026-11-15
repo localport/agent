@@ -28,7 +28,8 @@ import (
 	"github.com/localport/agent/internal/security"
 )
 
-// DefaultAPIURL is the control plane. `--api` and LOCALPORT_API_URL override it.
+// DefaultAPIURL is the control plane. `--api` and LOCALPORT_API_URL override
+// it.
 const DefaultAPIURL = "https://api.localport.io"
 
 // APIURLEnv is the environment override for DefaultAPIURL.
@@ -220,7 +221,8 @@ func redactCause(err error, secrets []string) error {
 }
 
 // newIdempotencyKey is the Idempotency-Key value of one logical request: 128
-// random bits as a Structured Field String (draft-ietf-httpapi-idempotency-key-header).
+// random bits as a Structured Field String
+// (draft-ietf-httpapi-idempotency-key-header).
 func newIdempotencyKey() string { return `"` + rand.Text() + `"` }
 
 const (
@@ -300,8 +302,7 @@ func serverRetryAfter(err error) (time.Duration, bool) {
 }
 
 // withJitter adds up to min(d, retryMaxDelay) to d. It spreads agents behind
-// one address that were refused together, without waking any of
-// them before d.
+// one address that were refused together, without waking any of them before d.
 func withJitter(d time.Duration) time.Duration {
 	return d + jitter(min(d, retryMaxDelay))
 }
@@ -385,7 +386,7 @@ func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue
 		return errUnreachable.With(&responseReadError{path: path, err: err}, "")
 	}
 	if isRedirect(resp.StatusCode) {
-		// an APIError with the 3xx status is terminal for Retryable, so the
+		// An APIError with the 3xx status is terminal for Retryable, so the
 		// credential is not resent.
 		return &APIError{
 			Path:    path,

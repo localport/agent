@@ -205,10 +205,8 @@ func TestPEMBundleWithoutACARefuses(t *testing.T) {
 	}
 }
 
-// writePEMBundle creates a self-signed CA, signs a leaf with it, and
-// writes [leaf, key, ca] into a single PEM file with 0600 perms.
-// ---------------------------------------------------------------------------
-
+// testCA returns a self-signed P-256 CA with the given serial, valid for an
+// hour either side of now, and its DER.
 func testCA(t *testing.T, serial int64) (*ecdsa.PrivateKey, []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

@@ -427,9 +427,9 @@ func (c scm) Restart(ctx context.Context) error {
 	})
 }
 
-// Uninstall stops and deletes the device service and then the launcher
-// service, and removes their Event Log sources, also when a service is
-// already gone. It returns ErrNotInstalled when the device service was.
+// Uninstall stops and deletes the device service and then the launcher service,
+// and removes their Event Log sources, also when a service is already gone. It
+// returns ErrNotInstalled when the device service was already gone.
 func (c scm) Uninstall(ctx context.Context) error {
 	var result error
 	for _, name := range []string{WindowsName, LauncherName} {

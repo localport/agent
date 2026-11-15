@@ -34,7 +34,8 @@ type Credential struct {
 	onSwap func(string)
 }
 
-// Open resolves a selector to one credential and returns a reloading view of it.
+// Open resolves a selector to one credential and returns a reloading view of
+// it.
 func Open(store *Store, sel Selector) (*Credential, error) {
 	ref, err := store.Resolve(sel)
 	if err != nil {
@@ -123,9 +124,9 @@ func (c *Credential) staleLocked() bool {
 }
 
 func (c *Credential) reload() error {
-	// Stamped before the read. Stamping after would record a renewal that landed
-	// mid-read as already loaded, and this view would keep serving the superseded
-	// certificate. The older stamp costs one redundant reload.
+	// Stamped before the read. Stamping after would record a renewal that
+	// landed mid-read as already loaded, and this view would keep serving the
+	// superseded certificate. The older stamp costs one redundant reload.
 	var modTime time.Time
 	if info, statErr := os.Stat(c.commitPoint()); statErr == nil {
 		modTime = info.ModTime()

@@ -18,13 +18,13 @@ import (
 //
 // The agent allocates even ids (dial, listen) and the helper odd ids
 // (accepted); each side's ids strictly increase, so none is reused within a
-// connection. On Linux and macOS an ok for a dial and every accepted carry
-// the connected socket as SCM_RIGHTS on the same channel, which the agent
-// answers with an ack of that id once it holds the socket; the helper keeps
-// its own copy until then, as a macOS socket whose only reference is in
-// flight can arrive dead. On Windows no
-// descriptor crosses and each forward's bytes ride the channel as data, eof,
-// window and close messages under a credit window (ForwardMux).
+// connection. On Linux and macOS an ok for a dial and every accepted carry the
+// connected socket as SCM_RIGHTS on the same channel, which the agent answers
+// with an ack of that id once it holds the socket; the helper keeps its own
+// copy until then, as a macOS socket whose only reference is in flight can
+// arrive dead. On Windows no descriptor crosses and each forward's bytes ride
+// the channel as data, eof, window and close messages under a credit window
+// (ForwardMux).
 const (
 	FwdDial     byte = 1
 	FwdListen   byte = 2

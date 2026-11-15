@@ -335,8 +335,8 @@ func (c *ForwardClient) handle(m FwdMsg) error {
 	return fmt.Errorf("%w: type %d from the helper", errBadForward, m.Type)
 }
 
-// conn is the connection of an ok dial or an accepted: the next received
-// descriptor, or a new stream.
+// conn is the connection of an ok answer to a dial or of an accepted message:
+// the next received descriptor, or a new stream.
 func (c *ForwardClient) conn(id uint32) (ForwardConn, error) {
 	if c.mux != nil {
 		return c.mux.Open(id)

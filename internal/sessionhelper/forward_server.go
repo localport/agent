@@ -31,10 +31,10 @@ const (
 // forwardPeer is the forward server's end of its channel to the agent.
 type forwardPeer interface {
 	io.Reader
-	// send writes m. With conn (an ok for a dial, an accepted) the
-	// connection goes with it: as a descriptor whose copy here is held until
-	// the agent's ack of m.ID (Linux and macOS), or as a new stream of m.ID
-	// that send pumps (Windows).
+	// send writes m. With conn (an ok answer to a dial, or an accepted
+	// message) the connection goes with it: as a descriptor whose copy here
+	// is held until the agent's ack of m.ID (Linux and macOS), or as a new
+	// stream of m.ID that send pumps (Windows).
 	send(m launcher.FwdMsg, conn net.Conn) error
 	// deliver applies a message for a carried forward: data, eof, window or
 	// a close of no listener (Windows streams), an ack or a close of no

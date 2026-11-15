@@ -11,20 +11,20 @@ Commands leave out causes from the network, the service or agent internals
 (endpoint paths, HTTP status, TLS and connection errors) and say so; run the
 command again with the global flag `--verbose` (`localport --verbose
 <command>`) to print the full cause. A local cause you act on, such as a
-file path with its permission error, a port already in use or a config or
-flag value the agent refused, is always shown. Several failures at once
-print one per line. The agent that runs tunnels and devices (`run`, `connect`, the tunnel
+file path with its permission error, a port already in use or a config or flag
+value the agent refused, is always shown. Several failures at once print one per
+line. The agent that runs tunnels and devices (`run`, `connect`, the tunnel
 form) prints full causes in its log.
 
 Codes are grouped by area: AG00x credentials and keys, AG01x file and binary
 checks, AG02x local config, AG03x commands, AG04x the device service, AG05x
-terminal sessions, AG06x recordings, AG07x network, AG08x and AG09x the
-Windows installer, AG10x SSH clients, AG11x commands (enrolment, settings,
-credentials), AG12x `localport access`. The Windows installer and uninstaller exit with the
-number of their code (`AG084` exits 84). Two refusals of the installer
-itself use the Windows Installer codes instead: exit 1618, another
-Localport installer or uninstaller is running (wait for it to finish, then
-run it again), and exit 1633, the machine is not running 64-bit Windows.
+terminal sessions, AG06x recordings, AG07x network, AG08x and AG09x the Windows
+installer, AG10x SSH clients, AG11x commands (enrolment, settings, credentials),
+AG12x `localport access`. The Windows installer and uninstaller exit with the
+number of their code (`AG084` exits 84). Two refusals of the installer itself
+use the Windows Installer codes instead: exit 1618, another Localport installer
+or uninstaller is running (wait for it to finish, then run it again), and exit
+1633, the machine is not running 64-bit Windows.
 
 | Code | Title | What to do |
 |---|---|---|
@@ -70,7 +70,7 @@ run it again), and exit 1633, the machine is not running 64-bit Windows.
 | AG055 | Session launcher from another release | The agent and the session launcher service (`localport-session`) come from different localport releases, usually right after an upgrade. Restart the launcher service: `sudo systemctl restart localport-session` (Linux), `sudo launchctl kickstart -k system/io.localport.session` (macOS), or restart the `localport-session` service (Windows). |
 | AG061 | Recording spool full | The recording spool reached its size limit, so recordings stop until uploads catch up. Check the device's connection to the control plane. |
 | AG062 | Disk space low for recordings | The disk holding the recording spool is nearly full. Free disk space. |
-| AG063 | Recording unavailable | A recording could not start; the message names the cause. Causes: no recording uploader, a recording key that is not held or does not match the ticket, a key that cannot seal the recording's key (malformed, or the wrap fails), too little time before the session's deadline, a spool that cannot store the entry, no session mux, or the control plane refusing, not answering or answering the open with segments already stored. A strict session is refused and a best-effort session runs unrecorded. Retry the session; when it persists, act on the named cause. |
+| AG063 | Recording unavailable | A recording could not start; the message names the cause. Causes: no recording uploader, a recording key that is not held or does not match the session certificate, a key that cannot seal the recording's key (malformed, or the wrap fails), too little time before the session's deadline, a spool that cannot store the entry, no session mux, or the control plane refusing, not answering or answering the open with segments already stored. A strict session is refused and a best-effort session runs unrecorded. Retry the session; when it persists, act on the named cause. |
 | AG071 | No transport | No connection to the edge worked. Check that this machine reaches the edge on TCP 443 and that no firewall or proxy blocks it. |
 | AG072 | Registration failed | The connection to the edge broke or carried an unexpected answer while the tunnel or device registered. localport retries on its own; when it persists, contact support with the agent log. |
 | AG073 | Redirect to an untrusted host | The edge sent this agent to a host outside the Localport service, so the agent refused to follow. localport retries on its own; contact support. |

@@ -11,9 +11,9 @@ import (
 	"syscall"
 )
 
-// Remote is a refusal the control plane or the edge sent. The agent shows
-// its message and code exactly as received, never re-coded. Implementers
-// sanitize both at decode (security.SanitizeDisplay).
+// Remote is a refusal the control plane or the edge sent. The agent shows its
+// message and code exactly as received, never re-coded. The decoder sanitizes
+// both (security.SanitizeDisplay).
 type Remote interface {
 	error
 	// RemoteMessage is the server's message, or a text naming the HTTP
@@ -54,15 +54,15 @@ func (e *Invalid) Error() string { return e.err.Error() }
 
 func (e *Invalid) Unwrap() error { return e.err }
 
-// Render is the user text of err, built from typed parts of its chain and
-// never from a node's Error(): each *Error's message and detail, a local
-// cause the user acts on (*fs.PathError, *os.LinkError, a listen address in
-// use, an *Invalid) and a Remote's message, followed by every code,
-// innermost first. Each error of a join prints on its own line.
-// Other causes (network, TLS, server internals, plain wrappers) are left
-// out; hidden reports that one was, so the caller can point at --verbose,
-// which prints Error(). A chain with no *Error and no Remote is plain local
-// text and prints as Error(), unless it holds a network error.
+// Render is the user text of err, built from typed parts of its chain and never
+// from a node's Error(): each *Error's message and detail, a local cause the
+// user acts on (*fs.PathError, *os.LinkError, a listen address in use, an
+// *Invalid) and a Remote's message, followed by every code, innermost first.
+// Each error of a join prints on its own line. Other causes (network, TLS,
+// server internals, plain wrappers) are left out; hidden reports that one was,
+// so the caller can point at --verbose, which prints Error(). A chain with no
+// *Error and no Remote is plain local text and prints as Error(), unless it
+// holds a network error.
 func Render(err error) (text string, hidden bool) {
 	if err == nil {
 		return "", false
@@ -195,9 +195,8 @@ func (r *renderer) walk(err error) {
 		r.hidden = true
 		return
 	}
-	// A wrapper's own words are context, not a cause: it is passed through,
-	// and only a cause at the end of the chain that is not shown marks the
-	// text as incomplete.
+	// A plain wrapper's own text is skipped, not counted as hidden. Only an
+	// unshown cause at the end of the chain sets hidden.
 	switch u := err.(type) {
 	case interface{ Unwrap() []error }:
 		for _, inner := range u.Unwrap() {

@@ -209,9 +209,9 @@ func (l *stringList) Set(value string) error {
 }
 
 // identityTLSConfig presents the stored credential and keeps it fresh. The
-// certificate comes through a callback rather than being copied into the config,
-// so a renewal by this process or by `localport identity renew` is picked up on
-// the next handshake without a restart.
+// certificate comes through a callback rather than being copied into the
+// config, so a renewal by this process or by `localport identity renew` is
+// picked up on the next handshake without a restart.
 func identityTLSConfig(ctx context.Context, ref identity.Ref, remote, serverName string) (*tls.Config, string, error) {
 	store, err := currentInvoker(false).store()
 	if err != nil {
@@ -223,8 +223,9 @@ func identityTLSConfig(ctx context.Context, ref identity.Ref, remote, serverName
 	if err != nil {
 		return nil, "", errcode.WithRemedy(err, "or pass a credential file with --pem / --p12")
 	}
-	// A refused reload means the file now holds a different principal. The process
-	// keeps presenting what it opened with, so the refusal must be visible.
+	// A refused reload means the file now holds a different principal. The
+	// process keeps presenting what it opened with, so the refusal must be
+	// visible.
 	cred.OnSwap(func(line string) { fmt.Fprintf(os.Stderr, "  [identity] %s\n", line) })
 
 	cfg := access.BaseTLSConfig(remote, serverName)
@@ -232,8 +233,9 @@ func identityTLSConfig(ctx context.Context, ref identity.Ref, remote, serverName
 
 	meta := cred.Meta()
 	if !meta.Source.Renewable() {
-		// No renewal loop, so say when it ends. Otherwise it stops being accepted
-		// mid-session and the far side answers with an opaque TLS refusal.
+		// No renewal loop, so say when it ends. Otherwise it stops being
+		// accepted mid-session and the far side answers with an opaque TLS
+		// refusal.
 		noteSignInExpiry(cred.Ref(), meta)
 		return cfg, "sign-in " + meta.Identity, nil
 	}

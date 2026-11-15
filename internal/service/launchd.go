@@ -28,9 +28,9 @@ const LaunchdLauncherLabel = "io.localport.session"
 const LaunchdPlistPath = "/Library/LaunchDaemons/" + LaunchdLabel + ".plist"
 
 // The service logs. Each process opens and rotates its own (internal/logfile),
-// since launchd opens a StandardOutPath once and never reopens it.
-// The agent's log is in a directory of its own account, since rotating
-// renames files in the directory; the root launcher's is in /var/log.
+// since launchd opens a StandardOutPath once and never reopens it. The agent's
+// log is in a directory of its own account, since rotating renames files in the
+// directory; the root launcher's is in /var/log.
 const (
 	launchdAgentLogDir = AgentLogDir
 	launchdAgentLog    = launchdAgentLogDir + "/device.log"

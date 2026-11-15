@@ -243,10 +243,9 @@ func TestKeptAccountNoticeNamesTheRemoval(t *testing.T) {
 	}
 }
 
-// Purge removes the device credentials, the spool and the team directories
-// they leave empty, so an identity directory that held only devices ends
-// empty and removeAgentDirs can remove it; another credential
-// keeps its team directory.
+// Purge removes the device credentials, the spool and the team directories they
+// leave empty, so an identity directory that held only devices ends empty and
+// removeAgentDirs can remove it; another credential keeps its team directory.
 func TestPurgeStoreLeavesNoEmptyTeamDirectory(t *testing.T) {
 	root := t.TempDir()
 	for _, d := range []string{"t1/device-a.gw", "t2/device-b.gw", "t2/client-c", "recordings/0b6f"} {

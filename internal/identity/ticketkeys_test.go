@@ -114,8 +114,8 @@ func TestReplaceValidatesTheRecordingKey(t *testing.T) {
 	}
 }
 
-// A ticket_keys.json whose recording key does not parse still loads its
-// session CA keys: the recording key is dropped (reported by ErrRecordingKeyDropped),
+// A ticket_keys.json whose recording key does not parse still loads its session
+// CA keys: the recording key is dropped (reported by ErrRecordingKeyDropped),
 // memory keeps the key held before, a fresh process holds none, and the next
 // Replace repairs the file.
 func TestTicketKeysLoadDropsACorruptRecordingKey(t *testing.T) {

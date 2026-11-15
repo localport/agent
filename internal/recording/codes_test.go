@@ -6,7 +6,7 @@ import (
 )
 
 // The statuses are the HTTP statuses the edge answers for each recording
-// error code.
+// error code (docs/PROTOCOL.md, "Session recording").
 func TestStatus(t *testing.T) {
 	want := map[string]int{
 		"recording_not_found":     http.StatusNotFound,

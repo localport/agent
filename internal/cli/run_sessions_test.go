@@ -31,9 +31,10 @@ import (
 
 // A renewed certificate acknowledged while its promotion is refused (the
 // renewal lock is held, so Store.Load does not return it) serves sessions:
-// the wired server checks tickets against its SPKI and signs the accept
-// frame with its key. A terminal ticket for the current user bound to it is
-// accepted; a ticket bound to another key is refused as for another device.
+// the wired server checks session certificates against its SPKI and signs
+// the accept frame with its key. A terminal certificate for the current user
+// bound to it is accepted; one bound to another key is refused as for
+// another device.
 func TestDeviceSessionsUseTheRegisteredCertificate(t *testing.T) {
 	sessionLauncher = probingLauncher{}
 	t.Cleanup(func() { sessionLauncher = nil })
@@ -229,8 +230,8 @@ func TestDeviceSessionsNeedACapability(t *testing.T) {
 	}
 }
 
-// probingLauncher answers the probe that precedes a terminal ticket's spend
-// and starts nothing.
+// probingLauncher answers the probe that precedes a terminal session and
+// starts nothing.
 type probingLauncher struct{}
 
 func (probingLauncher) Probe(context.Context) (launcher.Probe, error) {

@@ -3,11 +3,11 @@
 ; The installer only extracts files into a transaction's staging directory
 ; and runs the `localport system` steps (internal/cli/system.go) from a copy
 ; of the new localport.exe, checking each exit status; the steps make every
-; change to the machine as one transaction. It never enrols a
-; device: services are registered by an elevated `localport connect` or
-; `localport service install`, and re-registered here on upgrade.
+; change to the machine as one transaction. It never enrols a device:
+; services are registered by an elevated `localport connect` or `localport
+; service install`, and re-registered here on upgrade.
 ;
-; makensis defines (agent/Makefile):
+; makensis defines (scripts/release/windows-package.sh):
 ;   VERSION    release version, e.g. 1.4.0
 ;   VERSION4   four-part file version, e.g. 1.4.0.0
 ;   SRCDIR     directory holding localport.exe, localport-session.exe,

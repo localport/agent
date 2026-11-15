@@ -161,7 +161,8 @@ func TestWriterExitFullUint32(t *testing.T) {
 
 func TestWriterSplitsLongOutput(t *testing.T) {
 	w := NewWriter(testStart, 80, 24)
-	// Control bytes expand sixfold in JSON, so 150 Ki of them needs many events.
+	// Control bytes expand sixfold in JSON, so 150 Ki of them needs many
+	// events.
 	data := bytes.Repeat([]byte("\x01é"), 150<<10)
 	lines := w.Output(testStart.Add(time.Second), data)
 	if len(lines) < 2 {

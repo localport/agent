@@ -176,8 +176,8 @@ public half with `openssl ec -pubout`.
   per-arch SHA-256 list in `packaging/openwrt/sdk.sh`; the feed directory
   follows the release series), the binfmt and BuildKit images the session and
   image builds use (digests in `session.yml`, `session-builder.yml` and
-  `release.yml`), and
-  cargo-deny (`CARGO_DENY_VERSION`, `CARGO_DENY_SHA256` in `ci.yml`).
+  `release.yml`), and cargo-deny (`CARGO_DENY_VERSION`, `CARGO_DENY_SHA256` in
+  `ci.yml`).
 
 ### Session builder images
 

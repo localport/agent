@@ -29,7 +29,7 @@ import (
 )
 
 // The renewal digest is the one value the agent and the control plane must
-// compute identically. A mismatch is silent, renewal simply never succeeds and
+// compute identically. A mismatch is silent: renewal never succeeds and
 // the credential expires weeks later, so this vector is pinned here and checked
 // against the same one on the far side.
 const goldenDigest = "bb21b93bb7ddd5f72c67c1a2b127f99322456fd06b00242a65791b6b9cbe80ff"
@@ -107,7 +107,7 @@ func TestSaveWritesKeyMaterialUnreadableByOthers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// on windows Go derives mode bits from FILE_ATTRIBUTE_READONLY only. The
+	// On Windows Go derives mode bits from FILE_ATTRIBUTE_READONLY only. The
 	// DACL is checked by Load below.
 	if runtime.GOOS != "windows" {
 		for _, name := range []string{meta.Key.File, meta.Cert, metaFile} {
@@ -329,7 +329,7 @@ func TestRenewNeverCallsTheServerForASignInCredential(t *testing.T) {
 		t.Fatalf("the agent made %d request(s) to renew a sign-in; it must make none", calls)
 	}
 
-	// A property of the source, not of a caller remembering to check.
+	// The refusal depends on the source: a token credential still renews.
 	machine := &Material{Meta: Meta{Source: SourceToken}}
 	if _, err := client.Renew(context.Background(), machine); errors.Is(err, ErrNotRenewable) {
 		t.Fatal("a token credential must still renew")
@@ -663,9 +663,8 @@ func TestStoredMetadataNeverCarriesAZeroTimestamp(t *testing.T) {
 	}
 }
 
-// Parsing is not validation. A record that survives json.Unmarshal but names an
-// enum this build does not know describes a credential that cannot work, and it
-// fails later, at a handshake, far from the file that caused it.
+// A record json.Unmarshal accepts but that names an enum value this build does
+// not know is refused when read, not at a later handshake.
 func TestUnusableMetadataIsRefusedOnRead(t *testing.T) {
 	for name, meta := range map[string]Meta{
 		"unknown kind":        {Identity: "a", Team: "t", Kind: "sideways", Source: SourceToken, NotAfter: time.Now()},

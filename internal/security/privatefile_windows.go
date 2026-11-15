@@ -20,7 +20,8 @@ import (
 //
 // Permitted trustees are the owner, LocalSystem and Administrators, the set
 // Win32 OpenSSH enforces, plus the device service SID under the device
-// identity directory (allowedTrustees). Administrators can take ownership of any object.
+// identity directory (allowedTrustees). Administrators can take ownership of
+// any object.
 
 // openNoFollow opens path without traversing a junction or symlink.
 func openNoFollow(path string) (*os.File, error) {
@@ -322,9 +323,8 @@ func assertNoForeignWriter(dacl *windows.ACL, path string) error {
 	return nil
 }
 
-// x/sys/windows exports only the ALLOWED and DENIED types. These two are from
-// winnt.h and are named here so the switch above can pass over them explicitly
-// rather than through a default that would also swallow the granting types.
+// winnt.h ACE types x/sys/windows does not export, named so the switch above
+// skips them explicitly; its default refuses every other type.
 const (
 	systemAuditACEType = 2
 	systemAlarmACEType = 3
@@ -332,10 +332,8 @@ const (
 
 // assertOwnerIsTrusted refuses a file owned by another account.
 //
-// Administrators and SYSTEM are accepted because a service credential is
-// legitimately installed by one of them, and because an administrator can take
-// ownership of any object regardless, so excluding them would deny nothing and
-// would break every service deployment.
+// Administrators and SYSTEM are accepted: they install service credentials,
+// and an administrator can take ownership of any object anyway.
 func assertOwnerIsTrusted(owner *windows.SID, path string) error {
 	trusted, err := allowedTrustees(path)
 	if err != nil {

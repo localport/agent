@@ -533,10 +533,9 @@ func TestRDPGatewayNegotiation(t *testing.T) {
 	}
 }
 
-// A target that answers TLS with something else ends rdp_tls_failed.
-// A connection end while the gateway waits, for the target's TLS handshake
-// or for the client's answer to the key question, closes the target and
-// pins nothing.
+// A target that answers TLS with something else ends rdp_tls_failed. A
+// connection end while the gateway waits, for the target's TLS handshake or for
+// the client's answer to the key question, closes the target and pins nothing.
 func TestRDPGatewayEndDuringEachWait(t *testing.T) {
 	cert := testCert(t, "desktop.test")
 	for name, tc := range map[string]struct {

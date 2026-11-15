@@ -41,8 +41,8 @@ const (
 	// sshCertMinRemaining is the validity a cached certificate must still
 	// have to be reused; below it ssh-cert mints a new one.
 	sshCertMinRemaining = 60 * time.Second
-	// sshLockWait bounds how long ssh-cert waits for a concurrent one. The
-	// lock holder's mint ends sooner (sshMintTimeout).
+	// sshLockWait bounds the wait for the client-files lock another process
+	// holds.
 	sshLockWait = 30 * time.Second
 	// sshDialTimeout bounds the WebSocket dial and the certificate write.
 	sshDialTimeout = 30 * time.Second
@@ -55,9 +55,9 @@ const (
 	sshNameFilterMajor, sshNameFilterMinor = 9, 6
 )
 
-// sshMintTimeout bounds the mint ssh-cert makes under the shared lock, below
-// sshLockWait so a concurrent ssh-cert waiting for the lock outlasts it. A
-// variable so tests can shorten it.
+// sshMintTimeout bounds one certificate mint. It is shorter than sshLockWait,
+// so a process waiting for the client-files lock outlasts the holder's mint.
+// Tests shorten it.
 var sshMintTimeout = sshLockWait - 5*time.Second
 
 // sessionMinter asks the control plane for a session certificate.
@@ -176,7 +176,7 @@ func resolveSSHTarget(identityArg, rawHost string, interactive bool) (sshTarget,
 // ensureCert makes sure the target has a client key and a certificate for
 // login with at least sshCertMinRemaining left, minting one otherwise. The
 // mint writes the device host key into known_hosts, then the edge URL, then
-// the certificate, each atomically and all under the shared lock, so
+// the certificate, each atomically and all under the client-files lock, so
 // concurrent connections mint once and never see the key change.
 func (t sshTarget) ensureCert(ctx context.Context, login string, mint sessionMinter, now time.Time) error {
 	if err := checkSSHLogin(login, runtime.GOOS); err != nil {
@@ -229,8 +229,8 @@ func (t sshTarget) ensureCert(ctx context.Context, login string, mint sessionMin
 }
 
 var (
-	// errSSHFilesBusy: another ssh-cert held the client files' lock for all
-	// of sshLockWait.
+	// errSSHFilesBusy: another process held the client-files lock for all of
+	// sshLockWait.
 	errSSHFilesBusy = errcode.New(errcode.SSHFilesBusy)
 	// errNoSessionCert: ssh-proxy found no certificate, edge URL or client
 	// key; ssh-cert writes them.
@@ -465,13 +465,13 @@ func knownHostKey(path, alias string) (ssh.PublicKey, error) {
 }
 
 // proxy carries one SSH connection between in and out and the device over a
-// resumable connection (agent/docs/PROTOCOL.md "Resumable connections"). It
-// dials the edge URL of the last mint with that certificate, runs the
-// prelude against the host key known_hosts holds now (kept in memory, so a
-// later mint cannot change the pin), then relays. When the stream drops for
-// a resumable reason it mints a resume certificate (never written to the
-// certificate file, which OpenSSH and later runs keep using) and resumes on a
-// new stream within sshResumeWindow. The end of in is a deliberate close.
+// resumable connection (docs/PROTOCOL.md "Resumable connections"). It dials the
+// edge URL of the last mint with that certificate, runs the prelude against the
+// host key known_hosts holds now (kept in memory, so a later mint cannot change
+// the pin), then relays. When the stream drops for a resumable reason it mints
+// a resume certificate (never written to the certificate file, which OpenSSH
+// and later runs keep using) and resumes on a new stream within
+// sshResumeWindow. The end of in is a deliberate close.
 func (t sshTarget) proxy(ctx context.Context, login string, in io.Reader, out io.Writer, opts *websocket.DialOptions, mint sessionMinter) error {
 	if err := checkSSHLogin(login, runtime.GOOS); err != nil {
 		return err
@@ -573,9 +573,9 @@ func endedByEdge(reason string) error {
 	return errcode.New(errcode.SessionEnded).With(edgeEnd{security.SanitizeDisplay(reason)}, "")
 }
 
-// sshRetryEnds are the edge close reasons of a refused first stream after
-// which ssh-proxy mints one new certificate and tries once more
-// (docs/COMMUNICATION.md, end reasons).
+// sshRetryEnds are the edge close reasons of a refused first stream after which
+// ssh-proxy mints one new certificate and tries once more (docs/PROTOCOL.md
+// "Native SSH clients").
 var sshRetryEnds = []string{"edge_full", "no_session_mux", "wrong_edge", "edge_shutdown"}
 
 // openSession dials edgeURL with cert and runs the prelude against the pinned
@@ -947,8 +947,9 @@ device through Localport. Add them to ~/.ssh/config:
 	return err
 }
 
-// opensshNameFilterWarning tells the user of OpenSSH version, older than
-// 9.6, that ssh passes command-line names to these lines unfiltered.
+// opensshNameFilterWarning returns the warning for an OpenSSH version older
+// than 9.6, which passes command-line user and host names to ProxyCommand and
+// Match exec unfiltered.
 func opensshNameFilterWarning(version string) string {
 	return fmt.Sprintf("localport: OpenSSH %s passes a user or host name given on its command line to ProxyCommand and Match exec unfiltered, "+
 		"so a program that runs ssh with an untrusted name (such as git) can run shell commands through these lines; "+

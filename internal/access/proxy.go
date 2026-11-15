@@ -143,8 +143,8 @@ func (p *Proxy) handle(ctx context.Context, local net.Conn, f Forward) {
 	}
 }
 
-// ServeStdio forwards stdin and stdout to a device port, for
-// `ssh -o ProxyCommand`.
+// ServeStdio forwards stdin and stdout to a device port, for `ssh -o
+// ProxyCommand`.
 func (p *Proxy) ServeStdio(ctx context.Context, in io.Reader, out io.Writer, port uint16) error {
 	stream, err := p.Session.Open(ctx, port)
 	if err != nil {
@@ -175,7 +175,8 @@ func (p *Proxy) ServeStdio(ctx context.Context, in io.Reader, out io.Writer, por
 	return nil
 }
 
-// halfCopy copies until EOF and reports anything that was not an ordinary close.
+// halfCopy copies until EOF and reports anything that was not an ordinary
+// close.
 func halfCopy(dst, src net.Conn) error {
 	_, err := io.Copy(dst, src)
 	if cw, ok := dst.(interface{ CloseWrite() error }); ok {

@@ -53,8 +53,8 @@ type plainStats struct {
 	dirtySinceTick    bool
 }
 
-// reqLogLine is queued off the forwarding path so a slow log sink cannot stall a
-// tunnel.
+// reqLogLine is queued off the forwarding path so a slow log sink cannot stall
+// a tunnel.
 type reqLogLine struct {
 	label  string
 	detail string

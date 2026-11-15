@@ -9,8 +9,8 @@ import (
 )
 
 // The OpenWrt procd services: init scripts in /etc/init.d through
-// /etc/rc.common with USE_PROCD. Their output goes to
-// logd (stdout and stderr), so no process opens a log file.
+// /etc/rc.common with USE_PROCD. Their output goes to logd (stdout and stderr),
+// so no process opens a log file.
 const (
 	ProcdService         = "localport-device"
 	ProcdLauncherService = "localport-session"

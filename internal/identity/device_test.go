@@ -122,7 +122,8 @@ var testKeys = DeviceKeys{
 	RecordingKey: testRecordingKey(1),
 }
 
-// testTicketKey is a valid session CA key whose Ed25519 seed is 32 copies of seed.
+// testTicketKey is a valid session CA key whose Ed25519 seed is 32 copies of
+// seed.
 func testTicketKey(kid string, seed byte) TicketKey {
 	priv := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
 	return TicketKey{KID: kid, PublicKey: base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))}
@@ -336,8 +337,7 @@ func savedDevice(t *testing.T, ca *testCA, notBefore, notAfter time.Time) (*Stor
 // renewServer answers the renewal route of ca's identity kind
 // (/v1/devices/renew for a device, /v1/mtls/certs/renew otherwise) after
 // checking the old-key proof (skipped when oldKey is nil), and refuses every
-// other path.
-// before, when given, runs first in every request.
+// other path. before, when given, runs first in every request.
 func renewServer(t *testing.T, ca *testCA, oldKey *ecdsa.PrivateKey, before ...func()) (*httptest.Server, *[]string) {
 	t.Helper()
 	var paths []string

@@ -11,8 +11,8 @@
 #     --build-arg NAME=<output name> --build-arg LDFLAGS=<flags> \
 #     --output type=local,dest=bin <ctx>/src
 #
-# Toolchain stages, each a signed builder image (packaging/session/builder.Dockerfile)
-# plus Go from the official image:
+# Toolchain stages, each a signed builder image
+# (packaging/session/builder.Dockerfile) plus Go from the official image:
 #   glibc-el8   AlmaLinux 8: glibc 2.28 floor (RHEL/Rocky 8, Debian 10, Ubuntu 20.04), amd64 and arm64
 #   musl        Alpine 3.24: musl, with or without linux-pam (TAGS=pam or empty)
 # The 32-bit ARM glibc build uses the ARMv6 cross toolchain instead

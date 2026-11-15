@@ -98,6 +98,22 @@ capability or desktop protocol is not reported:
 { "capabilities": ["terminal", "files", "desktop"], "logins": ["pi"], "desktop": ["rdp", "vnc"] }
 ```
 
+`capabilities` lists any of `terminal`, `files`, `desktop` and `forwarding`
+(SSH port forwarding, which requires `terminal`).
+
+A device also reports how it starts sessions. These fields are display only:
+the control plane shows them and decides nothing on them.
+
+- `session_auth`: the session launcher's answer to its probe. `pam` or
+  `no_pam` on Linux and macOS; `s4u`, or `s4u_domain_unreachable` when a
+  domain-joined Windows device found no domain controller. Absent when the
+  launcher did not answer or, on Windows, could not tell.
+- `run_as_agent`: `true` when the device config runs its sessions as the
+  agent account (`run_as_agent` in `agent.yaml`).
+- `full_disk_access`: macOS only. `granted` or `denied` when the session
+  launcher holds or lacks Full Disk Access, `unknown` when its check was
+  inconclusive.
+
 `allowed_ports` is a device's optional port ceiling (`--allow-ports`): up to 64
 inclusive ranges of ports 1 to 65535. Absent means no ceiling. The edge refuses
 a stream to an open port outside it and logs `blocked_by_device`; the agent
@@ -587,7 +603,7 @@ response open for the life of the mux. Each session is one notice on it:
 | Bytes | Meaning                                                        |
 | ----- | -------------------------------------------------------------- |
 | 4     | `uint32` big-endian length of the rest, 25 to 89               |
-| 16    | session id: the bytes of the UUID the stream's access row carries, which each recording of a channel opened while the stream carries the connection names |
+| 16    | session id: the bytes of the stream's session UUID, which each recording of a channel opened while the stream carries the connection names |
 | 8     | `uint64` big-endian serial of the SSH user certificate the edge admitted |
 | 1     | address length, 0 to 64                                        |
 | n     | the client's address as the edge saw it, ASCII `ip:port` (`[ipv6]:port` for IPv6): an IP literal without a zone and a port from 1 to 65535; absent when the length is 0 |
@@ -645,63 +661,60 @@ stream:
    | a `rec@localport.io`, when present, naming the held team recording key; a mismatch triggers one key fetch, under the same floor, and one retry |
 
    On Windows, a user name listed in the device's `password_logins` then needs
-   `keyboard-interactive` with one prompt, `Windows password: `, without echo: the
-   certificate step answers partial success and names only that method, so a
-   keyboard-interactive attempt never stands alone. An empty answer, or one
-   over 256 bytes, fails userauth. The agent holds the answer for the
-   connection's life, passes it to each channel's launcher request, which logs
-   the login on with it, and clears it when the connection ends.
+   `keyboard-interactive` with one prompt, `Windows password: `, without echo:
+   the certificate step answers partial success and names only that method, so a
+   keyboard-interactive attempt never stands alone. An empty answer, or one over
+   256 bytes, fails userauth. The agent holds the answer for the connection's
+   life, passes it to each channel's launcher request, which logs the login on
+   with it, and clears it when the connection ends.
 
    At most 8 connections run at once, detached ones included; a first connect
    past that, or one arriving while the agent shuts down, is refused in the
    prelude.
-3. Channels: `session` channels, and on an `ssh` connection the port
-   forwarding channels below (others are refused `prohibited`); a `terminal`
-   connection has one session channel, an `ssh` or `files` connection at
-   most 4 open at once. On a session channel of a `terminal` or `ssh` connection the
-   agent accepts `pty-req` (cols and rows 1 to 1000, term matching
-   `^[a-zA-Z0-9.+-]{1,32}$`), `window-change`, `shell` (with a PTY: the login
-   shell on a terminal; without one, on `ssh` only: the login shell on pipes)
-   and, on `ssh` only, `exec` (a command of at most 2 KiB, run by the login
-   shell with `-c`, on Windows as `"%SystemRoot%\System32\cmd.exe" /c
-   "<command>"`, on a PTY when one was requested, else on pipes with stdout
-   and stderr apart). `subsystem` `sftp` is accepted on `ssh` and is the only
-   request a `files` connection accepts. `env` is accepted before `shell`,
-   `exec` or `subsystem` for `LANG` and `LC_[A-Z]{1,24}` only: at most 16 per
-   channel, each value at most 256 bytes of UTF-8 without control characters,
-   names and values together at most 1 KiB; the helper sets them after the
-   login's environment. It refuses every other `env`, other subsystems,
-   `x11-req`, `auth-agent-req@openssh.com`, `signal`, and every global request
-   other than the port forwarding requests below. Each `shell`, `exec` or `subsystem` is one
-   launcher request of kind `terminal`, `exec` or `sftp`; an `sftp` request
-   serves the SFTP protocol (version 3) as the login, confined to the
-   device's `files_root` or the login's home, opening only regular files and
-   directories and writing in place at the requested offsets. The request
-   carries the certificate's `files@localport.io` access (`files_download`,
-   `files_upload`; only an `sftp` request may): without download an open for
-   reading is refused `SSH_FX_PERMISSION_DENIED`, a read-write open needs both
-   directions, and without upload every change (open for writing,
-   setstat, rename, posix-rename, remove, mkdir, rmdir, symlink, link) is, as
-   OpenSSH `sftp-server -R`; listing, stat, readlink and realpath are always
-   served, and each refusal is a file event with result `permission_denied`.
-   A shell or exec on an `ssh` connection is not restricted by it. A refusal fails
-   the request and writes
-   `localport: <code>` to the channel's stderr (`login_not_allowed`,
-   `kind_disabled`, `agent_busy`, `kind_unavailable`, `launcher_unavailable`,
-   `recording_unavailable` for a Strict channel whose recording did not open).
-   The messages PAM gives the login's session setup (an expiry warning, the
-   `/etc/nologin` text) are written to the channel's stderr, one line each
-   ending in CRLF, before the session's output or the refusal line; a port
-   forward has no stderr, so the agent logs them.
-   Shell and exec run through the login's shell, so an account whose shell is
-   `nologin` or `false` refuses them itself, as under sshd; SFTP and port
-   forwarding run the agent's own file and forward servers as the login and
-   follow the device config, not the login shell.
-   The helper's exit becomes `exit-status`, or for a Unix helper killed by a
-   signal `exit-signal` (the RFC 4254 name without `SIG`, `<name>@localport.io`
-   outside its list, core-dumped false), then the channel closes; a Strict
-   channel whose recording fails ends with
-   `localport: session ended: recording_failed`.
+3. Channels: `session` channels, and on an `ssh` connection the port forwarding
+   channels below (others are refused `prohibited`); a `terminal` connection has
+   one session channel, an `ssh` or `files` connection at most 4 open at once.
+   On a session channel of a `terminal` or `ssh` connection the agent accepts
+   `pty-req` (cols and rows 1 to 1000, term matching `^[a-zA-Z0-9.+-]{1,32}$`),
+   `window-change`, `shell` (with a PTY: the login shell on a terminal; without
+   one, on `ssh` only: the login shell on pipes) and, on `ssh` only, `exec` (a
+   command of at most 2 KiB, run by the login shell with `-c`, on Windows as
+   `"%SystemRoot%\System32\cmd.exe" /c "<command>"`, on a PTY when one was
+   requested, else on pipes with stdout and stderr apart). `subsystem` `sftp` is
+   accepted on `ssh` and is the only request a `files` connection accepts. `env`
+   is accepted before `shell`, `exec` or `subsystem` for `LANG` and
+   `LC_[A-Z]{1,24}` only: at most 16 per channel, each value at most 256 bytes
+   of UTF-8 without control characters, names and values together at most 1 KiB;
+   the helper sets them after the login's environment. It refuses every other
+   `env`, other subsystems, `x11-req`, `auth-agent-req@openssh.com`, `signal`,
+   and every global request other than the port forwarding requests below. Each
+   `shell`, `exec` or `subsystem` is one launcher request of kind `terminal`,
+   `exec` or `sftp`; an `sftp` request serves the SFTP protocol (version 3) as
+   the login, confined to the device's `files_root` or the login's home, opening
+   only regular files and directories and writing in place at the requested
+   offsets. The request carries the certificate's `files@localport.io` access
+   (`files_download`, `files_upload`; only an `sftp` request may): without
+   download an open for reading is refused `SSH_FX_PERMISSION_DENIED`, a
+   read-write open needs both directions, and without upload every change (open
+   for writing, setstat, rename, posix-rename, remove, mkdir, rmdir, symlink,
+   link) is, as OpenSSH `sftp-server -R`; listing, stat, readlink and realpath
+   are always served, and each refusal is a file event with result
+   `permission_denied`. A shell or exec on an `ssh` connection is not restricted
+   by it. A refusal fails the request and writes `localport: <code>` to the
+   channel's stderr (`login_not_allowed`, `kind_disabled`, `agent_busy`,
+   `kind_unavailable`, `launcher_unavailable`, `recording_unavailable` for a
+   Strict channel whose recording did not open). The messages PAM gives the
+   login's session setup (an expiry warning, the `/etc/nologin` text) are
+   written to the channel's stderr, one line each ending in CRLF, before the
+   session's output or the refusal line; a port forward has no stderr, so the
+   agent logs them. Shell and exec run through the login's shell, so an account
+   whose shell is `nologin` or `false` refuses them itself, as under sshd; SFTP
+   and port forwarding run the agent's own file and forward servers as the login
+   and follow the device config, not the login shell. The helper's exit becomes
+   `exit-status`, or for a Unix helper killed by a signal `exit-signal` (the RFC
+   4254 name without `SIG`, `<name>@localport.io` outside its list, core-dumped
+   false), then the channel closes; a Strict channel whose recording fails ends
+   with `localport: session ended: recording_failed`.
 
    Port forwarding (RFC 4254 section 7, OpenSSH PROTOCOL section 2.4) is
    served on an `ssh` connection only, when the device's config enables
@@ -763,20 +776,19 @@ stream:
    it `exited`, with nothing told.
 
    On a `vnc` connection the agent reads the VNC handshake (RFC 6143 section
-   7.1, as noVNC speaks it), forwarding each byte it admits unchanged: the server's
-   ProtocolVersion (`RFB ddd.ddd\n`; the repeater's `000.000` is refused),
-   the client's (`RFB 003.003`, `003.007` or `003.008`), the security type
-   list and the client's choice (3.3: the server's `u32` choice), and for
-   VeNCrypt (19) its versions, ack, subtypes and the client's subtype. When
-   the choice or the VeNCrypt subtype is RA2ne (6) it reads the server's RSA
-   key (`u32` bit length, 1024 to 8192, then modulus and exponent of
-   `ceil(bits/8)` bytes each) and holds it for the key step below, whose
-   key is the SHA-256 of exactly those length, modulus and exponent bytes;
-   the key question's payload is that hash in lowercase hex (SSH string)
-   and whether it is pinned (boolean). After a true reply or a pin match it
-   forwards the key. Once a key is pinned for the target, a handshake that
-   chooses no RA2ne ends `desktop_key_downgraded`. A malformed handshake
-   ends `desktop_handshake_invalid`.
+   7.1, as noVNC speaks it), forwarding each byte it admits unchanged: the
+   server's ProtocolVersion (`RFB ddd.ddd\n`; the repeater's `000.000` is
+   refused), the client's (`RFB 003.003`, `003.007` or `003.008`), the security
+   type list and the client's choice (3.3: the server's `u32` choice), and for
+   VeNCrypt (19) its versions, ack, subtypes and the client's subtype. When the
+   choice or the VeNCrypt subtype is RA2ne (6) it reads the server's RSA key
+   (`u32` bit length, 1024 to 8192, then modulus and exponent of `ceil(bits/8)`
+   bytes each) and holds it for the key step below, whose key is the SHA-256 of
+   exactly those length, modulus and exponent bytes; the key question's payload
+   is that hash in lowercase hex (SSH string) and whether it is pinned
+   (boolean). After a true reply it forwards the key. Once a key is pinned for
+   the target, a handshake that chooses no RA2ne ends `desktop_key_downgraded`.
+   A malformed handshake ends `desktop_handshake_invalid`.
 
    The security types are those noVNC 1.7.0 runs and the agent frames: None
    (1), VNCAuth (2), RA2ne (6), Tight (16), VeNCrypt (19), XVP (22), ARD (30)
@@ -787,19 +799,19 @@ stream:
    A server's refusal (type 0 under 3.3, an empty list under 3.7 and 3.8) is
    forwarded with its reason of at most 4 KiB and ends the connection.
 
-   The agent then frames the rest of the handshake per security type,
-   forwarding each message: authentication, the Tight NOTUNNEL tunnel and
-   None, VNCAuth or UnixLogon (129) sub-authentications only, SecurityResult
-   (a failure and its 3.8 reason are forwarded and end the connection),
-   ClientInit and ServerInit. Every length is bounded before it is read. After
-   ServerInit it frames every message in both directions, and streams
-   rectangle bodies as they arrive. These end the connection
-   `desktop_protocol_violation`: an unknown message type, a length past its
-   bound, a rectangle in an encoding no forwarded `SetEncodings` kept, a
-   negative `CutText` length, a `SetPixelFormat` after the first
-   `SetEncodings`, `FramebufferUpdateRequest` or `EnableContinuousUpdates`, a 24-bit
-   `SetPixelFormat` of 8-bit channels at shifts that are not byte-aligned, and
-   an extension message whose pseudo-encoding no forwarded `SetEncodings` kept.
+   The agent then frames the rest of the handshake per security type, forwarding
+   each message: authentication, the Tight NOTUNNEL tunnel and None, VNCAuth or
+   UnixLogon (129) sub-authentications only, SecurityResult (a failure and its
+   3.8 reason are forwarded and end the connection), ClientInit and ServerInit.
+   Every length is bounded before it is read. After ServerInit it frames every
+   message in both directions, and streams rectangle bodies as they arrive.
+   These end the connection `desktop_protocol_violation`: an unknown message
+   type, a length past its bound, a rectangle in an encoding no forwarded
+   `SetEncodings` kept, a negative `CutText` length, a `SetPixelFormat` after
+   the first `SetEncodings`, `FramebufferUpdateRequest` or
+   `EnableContinuousUpdates`, a 24-bit `SetPixelFormat` of 8-bit channels at
+   shifts that are not byte-aligned, and an extension message whose
+   pseudo-encoding no forwarded `SetEncodings` kept.
 
    Client to server the agent allows `SetPixelFormat` (8, 16 or 32 bits per
    pixel), `SetEncodings`, `FramebufferUpdateRequest`, `KeyEvent`,
@@ -843,9 +855,9 @@ stream:
    SHA-1 (the Windows thumbprint), both lowercase hex, string subject and
    string issuer (RFC 4514, each at most 512 bytes), boolean self-signed
    (subject and issuer equal), uint64 notBefore and uint64 notAfter (Unix
-   seconds). After a true reply or a pin match the agent sends the
-   RDCleanPath response PDU (version 3390, the confirm as
-   `x224_connection_pdu`, every peer certificate's DER leaf first as
+   seconds). After a true reply the agent sends the RDCleanPath response
+   PDU (version 3390, the confirm as `x224_connection_pdu`, every peer
+   certificate's DER leaf first as
    `server_cert_chain`, the configured target as `server_addr`) and relays
    the channel and the TLS plaintext through its RDP filter; nothing from
    the target reaches the client before then. A malformed request or
@@ -870,18 +882,18 @@ stream:
      Indication and Disconnect Provider Ultimatum. Fast-path PDUs (action 0,
      no security flags) are framed by their length and forwarded; they
      carry no channel data (2.2.8.1.2, 2.2.9.1.2).
-   - Static channels: the Connect Initial's CS_NET (at most 31 channels)
-     may name only `drdynvc` and, when the certificate allows a clipboard
-     direction, `cliprdr` (names compared case-insensitively). Any other
-     name, or `cliprdr` with no direction allowed, ends the connection
-     `desktop_channel_refused` before the Connect Initial reaches the
-     target; the agent never rewrites CS_NET. The Connect Response must
-     select no RDP Standard Security encryption; its SC_NET maps the names
-     to channel ids. The I/O, message, static and user channel ids must be
-     non-zero and distinct, or the connection ends. Send Data on any id other than the I/O channel, the
-     message channel, the user channel from Attach User Confirm and the
-     mapped `cliprdr` and `drdynvc` ids, or a client Send Data from another
-     initiator, ends the connection.
+   - Static channels: the Connect Initial's CS_NET (at most 31 channels) may
+     name only `drdynvc` and, when the certificate allows a clipboard direction,
+     `cliprdr` (names compared case-insensitively). Any other name, or `cliprdr`
+     with no direction allowed, ends the connection `desktop_channel_refused`
+     before the Connect Initial reaches the target; the agent never rewrites
+     CS_NET. The Connect Response must select no RDP Standard Security
+     encryption; its SC_NET maps the names to channel ids. The I/O, message,
+     static and user channel ids must be non-zero and distinct, or the
+     connection ends. Send Data on any id other than the I/O channel, the
+     message channel, the user channel from Attach User Confirm and the mapped
+     `cliprdr` and `drdynvc` ids, or a client Send Data from another initiator,
+     ends the connection.
    - Chunks: on `cliprdr` and `drdynvc` a chunk with `CHANNEL_PACKET_COMPRESSED`
      or a compression type, or larger than the negotiated chunk size, ends
      the connection. The chunk size is the server's `VCChunkSize` when both
@@ -922,40 +934,40 @@ stream:
      refused) keeps the most recent 8 ids, as IronRDP's client drops data
      for a channel it declined; at most 8 ids are pending, open or server
      closing.
-   - Clipboard (`cliprdr`), per the connection's current certificate:
-     Clipboard Capabilities reach the peer as one general capability set
-     the agent builds, with the sender's version (1 or 2) and only
-     `CB_USE_LONG_FORMAT_NAMES` of its flags; other sets are dropped, and a
-     PDU without exactly one general set ends the connection. Monitor Ready passes server to
-     client. A Format List from the server passes only when `copy` is
-     allowed, from the client only when `paste` is, reduced to CF_TEXT (1),
-     CF_OEMTEXT (7), CF_UNICODETEXT (13) and CF_LOCALE (16). A list refused
-     or reduced to nothing is answered by the agent with a Format List
-     Response OK, in order behind the receiver's answers to the sender's
-     earlier lists, and when the receiver held a list in that direction the
-     agent sends it an empty Format List and absorbs its answer; a resume
-     that narrows a direction does the same at the next `cliprdr` PDU. A
-     Format Data Request passes only for a format of the list the agent
-     forwarded that way; the agent answers any other with
-     `CB_RESPONSE_FAIL`, in order behind the answers to earlier requests (at
-     most 64 outstanding per direction). A Format Data Response passes only
-     as the answer to the oldest outstanding request, while its direction is
-     allowed, and up to 1 MiB; otherwise the requester gets
-     `CB_RESPONSE_FAIL`. A File Contents Request is answered
-     `CB_RESPONSE_FAIL` with its stream id; File Contents Responses, Lock,
-     Unlock and Temporary Directory are dropped. Every length is checked
-     before use. Typed keystrokes and the screen are not restricted.
+   - Clipboard (`cliprdr`), per the connection's current certificate: Clipboard
+     Capabilities reach the peer as one general capability set the agent builds,
+     with the sender's version (1 or 2) and only `CB_USE_LONG_FORMAT_NAMES` of
+     its flags; other sets are dropped, and a PDU without exactly one general
+     set ends the connection. Monitor Ready passes server to client. A Format
+     List from the server passes only when `copy` is allowed, from the client
+     only when `paste` is, reduced to CF_TEXT (1), CF_OEMTEXT (7),
+     CF_UNICODETEXT (13) and CF_LOCALE (16). A list refused or reduced to
+     nothing is answered by the agent with a Format List Response OK, in order
+     behind the receiver's answers to the sender's earlier lists, and when the
+     receiver held a list in that direction the agent sends it an empty Format
+     List and absorbs its answer; a resume that narrows a direction does the
+     same at the next `cliprdr` PDU. A Format Data Request passes only for a
+     format of the list the agent forwarded that way; the agent answers any
+     other with `CB_RESPONSE_FAIL`, in order behind the answers to earlier
+     requests (at most 64 outstanding per direction). A Format Data Response
+     passes only as the answer to the oldest outstanding request, while its
+     direction is allowed, and up to 1 MiB; otherwise the requester gets
+     `CB_RESPONSE_FAIL`. A File Contents Request is answered `CB_RESPONSE_FAIL`
+     with its stream id; File Contents Responses, Lock, Unlock and Temporary
+     Directory are dropped. Every length is checked before use. Typed keystrokes
+     and the screen are not restricted.
 
-   The key step, both kinds: a key other than the one pinned for the
-   device's target of the kind ends the connection `desktop_key_changed`
-   (the agent logs the target and both hashes); otherwise the agent sends
-   the channel request `desktop-key@localport.io` (want-reply true) with
-   the kind's payload. A false reply ends it `desktop_key_rejected`; a true
-   one pins an unpinned key. An unreadable pin store ends
-   `desktop_key_unavailable`. The pins live in `desktop_pins.json` (see
-   Stored identity); `localport set <device> --rdp-reset-pin` or
-   `--vnc-reset-pin` forgets the kind's pin, or removes the whole file when
-   it is unreadable.
+   The key step, both kinds: a key other than the one pinned for the device's
+   target of the kind ends the connection `desktop_key_changed` (the agent logs
+   the target and both hashes); otherwise the agent sends the channel request
+   `desktop-key@localport.io` (want-reply true) with the kind's payload, a
+   pinned key included. A false reply ends it `desktop_key_rejected`; a true one
+   pins an unpinned key. A device holds one pin per kind, naming the target it
+   was pinned for; after the configured target changes, the key question is
+   asked again and a true reply replaces that pin. An unreadable pin store ends
+   `desktop_key_unavailable`. The pins live in `desktop_pins.json` (see Stored
+   identity); `localport set <device> --rdp-reset-pin` or `--vnc-reset-pin`
+   forgets the kind's pin, or removes the whole file when it is unreadable.
 
    The agent then relays the channel and the target until either ends; the
    channel's end, or its refusal after the dial, ends the connection, and
@@ -1013,14 +1025,14 @@ never closed before that step.
 
 A session connection survives a lost stream (network drop, edge restart,
 fleet re-pin) for 5 minutes: the layer runs below SSH, so every channel and
-forward carries on. Code: `agent/internal/session/resume.go`,
-`resume_prelude.go`; the browser's copy is `web/wasm/sshclient/client` (the
-two pin one wire vector, `TestResumeWireVector`). A connection does not
+forward carries on. Code: `internal/session/resume.go` and
+`resume_prelude.go`; the browser client implements the same layer, and both
+pin one wire vector (`TestResumeWireVector`). A connection does not
 survive an agent restart.
 
-Prelude messages are a 4-byte big-endian length (at most 16 KiB) and the x/crypto
-SSH wire encoding of one message (`sshtype` 160 to 165, version 2; the agent
-refuses any other version). The edge relays them like any bytes.
+Prelude messages are a 4-byte big-endian length (at most 16 KiB) and the
+x/crypto SSH wire encoding of one message (`sshtype` 160 to 165, version 2; the
+agent refuses any other version). The edge relays them like any bytes.
 
 | Step | Sender | Message |
 | --- | --- | --- |
@@ -1081,64 +1093,63 @@ peer reported. A deliberate close (the SSH layer closes the connection, or
 waiting. The closing side keeps reading until the peer closes the stream, at
 most 2 s.
 
-On the agent a stream that ends without a closeTag detaches the connection:
-it keeps its session slot, channels and helpers, and every recording gets an
+On the agent a stream that ends without a closeTag detaches the connection: it
+keeps its session slot, channels and helpers, and every recording gets an
 asciicast marker `detach` (then `attach` on a resume). The detach deadline is
 fixed when the connection's last stream ends, 5 minutes later, and only an
-installed resume clears it: a refused or failed resume attempt never moves
-it (the handle is not secret). An attempt in progress is not cut off; a
-deadline that passed meanwhile ends the connection `detach_timeout` when the
-attempt ends. Attempts on one connection run one at a time: a resume
-arriving while another attempt runs is `resume_busy`, and one arriving after
-the deadline with no attempt running is `resume_lost`. Shutdown, a config change, the idle timeout and a handler panic
-end detached connections as attached ones.
+installed resume clears it: a refused or failed resume attempt never moves it
+(the handle is not secret). An attempt in progress is not cut off; a deadline
+that passed meanwhile ends the connection `detach_timeout` when the attempt
+ends. Attempts on one connection run one at a time: a resume arriving while
+another attempt runs is `resume_busy`, and one arriving after the deadline with
+no attempt running is `resume_lost`. Shutdown, a config change, the idle timeout
+and a handler panic end detached connections as attached ones.
 
 ## Session recording
 
 A `terminal`, `ssh` or `files` certificate may carry `rec@localport.io`:
-`{"policy","pub_sha256"}`, where `pub_sha256` is the unpadded base64url
-SHA-256 of the team recording public key (43 characters) and `policy`
-`best_effort` or `strict`; the userauth checks are in the table under
-[Session mux](#session-mux). On a recorded connection every `shell`, `exec`
-or `sftp` subsystem opens its own recording before its helper starts: a fresh UUIDv7 recording id,
-and the session id from the notice (`session_id`) of the stream the connection runs on (a resume's, after a resume), so every
-channel of every connection, including multiplexed channels (OpenSSH
-ControlMaster) and repeat connections on one certificate, has its own
-recording. A Strict channel whose open fails within 5 s is refused
-(`recording_unavailable`) and other channels are unaffected; a Best effort one
-runs unrecorded. A recorded `shell` or `exec` writes
-`localport: this session is recorded` to its stderr before any helper
-output; an `sftp` channel, whose client shows no stderr, does not. The agent records the channel's output, resizes and exit,
-seals it in segments and delivers them over its session mux. The open carries
-the admitting certificate (`certificate`, base64url, at most 8 KiB), from
-which the control plane creates the recording's row; the edge forwards the
-open only for a connection its session mux carries and adds when it admitted
-that certificate, so a channel that starts after a short-lived certificate
-expired is still recorded. The spool's `meta.json` keeps the certificate and
-the session id so a resumed open after a restart sends them again. Code:
-`internal/recording/`, `internal/session/recorder.go`,
-`internal/tunnel/recording_client.go`.
+`{"policy","pub_sha256"}`, where `pub_sha256` is the unpadded base64url SHA-256
+of the team recording public key (43 characters) and `policy` `best_effort` or
+`strict`; the userauth checks are in the table under [Session
+mux](#session-mux). On a recorded connection every `shell`, `exec` or `sftp`
+subsystem opens its own recording before its helper starts: a fresh UUIDv7
+recording id, and the session id from the notice (`session_id`) of the stream
+the connection runs on (a resume's, after a resume), so every channel of every
+connection, including multiplexed channels (OpenSSH ControlMaster) and repeat
+connections on one certificate, has its own recording. A Strict channel whose
+open fails within 5 s is refused (`recording_unavailable`) and other channels
+are unaffected; a Best effort one runs unrecorded. A recorded `shell` or `exec`
+writes `localport: this session is recorded` to its stderr before any helper
+output; an `sftp` channel, whose client shows no stderr, does not. The agent
+records the channel's output, resizes and exit, seals it in segments and
+delivers them over its session mux. The open carries the admitting certificate
+(`certificate`, base64url, at most 8 KiB), from which the control plane creates
+the recording; the edge forwards the open only for a connection its
+session mux carries and adds when it admitted that certificate, so a channel
+that starts after a short-lived certificate expired is still recorded. The
+spool's `meta.json` keeps the certificate and the session id so a resumed open
+after a restart sends them again. Code: `internal/recording/`,
+`internal/session/recorder.go`, `internal/tunnel/recording_client.go`.
 
-Format: the plaintext is asciicast v3, one JSON line per event (header, then
-`o` output, `r` resize, `f` file activity and `x` exit events; an `sftp`
-channel's header has the default size, 80 by 24). An `f` event's data is a
-JSON object string: `op` (`exec`, `read`, `write`, `mkdir`, `rmdir`,
-`remove`, `rename`, `setstat`, `symlink`, `link`, `list`), `path`, `target`
-(rename, symlink, link), `command` (exec, at most 2 KiB), `bytes` (read and
-write: one event when the handle closes, with the bytes moved) and `result`
-(`ok`, `no_such_file`, `permission_denied`, `file_exists` or `failure`;
-absent on `exec`). The agent writes the `exec` event from the request when the
-command starts; the SFTP server sends the others to the agent on its own pipe,
-and an event that fails validation ends the channel. `path` and `target` are
-at most 4 KiB: bytes that are not valid UTF-8, control characters and the
-backslash are written as `\xNN`, and a longer name is cut and ends with `...(truncated)`.
-An `sftp` channel's recording holds its `f` events only, never the protocol
-bytes it carries. Players skip codes
-they do not know, as asciicast v3 requires. A segment holds whole lines and
-is cut at 10 s or 256 KiB of plaintext, whichever comes first. Each recording
-has a random 32-byte DEK, wrapped once with HPKE (ML-KEM-768 with X25519,
-HKDF-SHA256, ChaCha20-Poly1305, info `localport-recording-v1` followed by
-the id) to the team recording public key; the result is `wrapped_dek`. A
+Format: the plaintext is asciicast v3, one JSON line per event (header, then `o`
+output, `r` resize, `f` file activity and `x` exit events; an `sftp` channel's
+header has the default size, 80 by 24). An `f` event's data is a JSON object
+string: `op` (`exec`, `read`, `write`, `mkdir`, `rmdir`, `remove`, `rename`,
+`setstat`, `symlink`, `link`, `list`), `path`, `target` (rename, symlink, link),
+`command` (exec, at most 2 KiB), `bytes` (read and write: one event when the
+handle closes, with the bytes moved) and `result` (`ok`, `no_such_file`,
+`permission_denied`, `file_exists` or `failure`; absent on `exec`). The agent
+writes the `exec` event from the request when the command starts; the SFTP
+server sends the others to the agent on its own pipe, and an event that fails
+validation ends the channel. `path` and `target` are at most 4 KiB: bytes that
+are not valid UTF-8, control characters and the backslash are written as `\xNN`,
+and a longer name is cut and ends with `...(truncated)`. An `sftp` channel's
+recording holds its `f` events only, never the protocol bytes it carries.
+Players skip codes they do not know, as asciicast v3 requires. A segment holds
+whole lines and is cut at 10 s or 256 KiB of plaintext, whichever comes first.
+Each recording has a random 32-byte DEK, wrapped once with HPKE (ML-KEM-768 with
+X25519, HKDF-SHA256, ChaCha20-Poly1305, info `localport-recording-v1` followed
+by the id) to the team recording public key; the result is `wrapped_dek`. A
 segment object is:
 
 | Bytes | Meaning |
@@ -1158,23 +1169,26 @@ Padme(4 + length), and non-zero padding. The largest object, a 256 KiB
 payload, is 270354 bytes.
 
 The nonce is the segment index as a 96-bit big-endian integer, and the AAD is
-`id || index (uint32 BE) || final (1 byte) || version || codec`. Only the
-last segment has `final` 1; a recording that ends with nothing buffered seals
-an empty final segment (22 bytes). A recording holds at most 2^32 - 1
-segments; the agent seals none past that. `h_i` is SHA-256 of object `i`; the chain
-is `chain_0 = SHA-256(h_0)` and `chain_i = SHA-256(chain_{i-1} || h_i)`. The
-agent clears its DEK buffer after the final segment is sealed or the
-recording is discarded. Copies inside the cipher state and those the Go
-runtime makes are not cleared and stay in process memory until the runtime
-reuses it.
+`id || index (uint32 BE) || final (1 byte) || version || codec`. Only the last
+segment has `final` 1; a recording that ends with nothing buffered seals an
+empty final segment (22 bytes). A recording holds at most 2^32 - 1 segments; the
+agent seals none past that. `h_i` is SHA-256 of object `i`; the chain is
+`chain_0 = SHA-256(h_0)` and `chain_i = SHA-256(chain_{i-1} || h_i)`. The agent
+clears its DEK buffer after the final segment is sealed or the recording is
+discarded. Copies inside the cipher state and those the Go runtime makes are not
+cleared and stay in process memory until the runtime reuses it.
 
 Signatures: `lp(x)` is a `uint32` big-endian length then `x`. The agent signs
 SHA-256 of these messages with the key of the device certificate the carrying
 session mux presented, as ASN.1 DER in unpadded base64url:
 
-- open: `lp("localport-recording-open-v2") || lp(id) || lp(session_id) || lp(SHA-256(wrapped_dek)) || lp(key_sha256)`
-- failed open: `lp("localport-recording-open-failed-v1") || lp(id) || lp(session_id) || lp(key_sha256) || lp(reason)`, `key_sha256` being the hash the admitting certificate names
-- complete: `lp("localport-recording-complete-v1") || lp(id) || lp(SHA-256(wrapped_dek)) || segments (uint32 BE) || lp(final_hash) || ended_at (uint64 BE, Unix seconds) || incomplete (1 byte) || final (1 byte) || lp(reason)`
+- open:
+  `lp("localport-recording-open-v2") || lp(id) || lp(session_id) || lp(SHA-256(wrapped_dek)) || lp(key_sha256)`
+- failed open:
+  `lp("localport-recording-open-failed-v1") || lp(id) || lp(session_id) || lp(key_sha256) || lp(reason)`,
+  `key_sha256` being the hash the admitting certificate names
+- complete:
+  `lp("localport-recording-complete-v1") || lp(id) || lp(SHA-256(wrapped_dek)) || segments (uint32 BE) || lp(final_hash) || ended_at (uint64 BE, Unix seconds) || incomplete (1 byte) || final (1 byte) || lp(reason)`
 
 Test vectors, pinned by the agent (`internal/recording/sealer_test.go`
 `TestDigestGoldenVectors`) and by the control plane's tests. Inputs: id
@@ -1243,11 +1257,12 @@ Backoff is full jitter from 1 s to 60 s and also covers transport failures and a
 missing session mux; an entry that found no session mux is retried at once, with
 its backoff reset, when the device's session mux comes up. Per mux the agent
 sends at most 2 segment requests (spool drain uses at most 1, so a live segment
-always has a stream), 1 open and 1 complete or failed open, and per recording at most one
-segment at a time, in index order. A drop on a server refusal is logged with the
-refusal's code, and a drop on a chain mismatch with `recording_mismatch`; a
-local drop (device no longer configured, nothing accepted for 24 h, a server
-count the agent cannot resync to) is logged without a code.
+always has a stream), 1 open and 1 complete or failed open, and per recording at
+most one segment at a time, in index order. A drop on a server refusal is logged
+with the refusal's code, and a drop on a chain mismatch with
+`recording_mismatch`; a local drop (device no longer configured, nothing
+accepted for 24 h, a server count the agent cannot resync to) is logged without
+a code.
 
 Delivery and spool: each sealed segment is sent at once. A segment not
 acknowledged within 5 s, or sealed while no session mux is up, is written to the
@@ -1299,11 +1314,11 @@ body is completed with `incomplete` true, `final` false and reason
 
 Policies:
 
-- Best effort: the channel's open is sent before its helper starts, within
-  5 s; when it fails the channel runs unrecorded and no spool entry stays. When the spool
-  has no room for a segment's hash, or memory is full and the spool refuses the
-  segment, recording stops (indices stay contiguous), the recording completes
-  `incomplete` with reason `spool_full` or `disk_low`, and the session
+- Best effort: the channel's open is sent before its helper starts, within 5 s;
+  when it fails the channel runs unrecorded and no spool entry stays. When the
+  spool has no room for a segment's hash, or memory is full and the spool
+  refuses the segment, recording stops (indices stay contiguous), the recording
+  completes `incomplete` with reason `spool_full` or `disk_low`, and the session
   continues. When the recorder's queue (512 KiB of output not yet sealed) is
   full, recording stops the same way with reason `recording_failed`; terminal
   output never waits for it. An agent without a recording uploader, or whose
@@ -1356,9 +1371,9 @@ are queued or 2 s after the last attempt. The body is JSON:
 
 - `id`: a version 7 UUID the agent mints when it queues the notice, in queue
   order (a 12-bit per-millisecond sequence keeps ids increasing, also when
-  the clock steps back). The edge stores the row under a name-based UUID it
-  derives from the session and this id, so the same notice always lands on
-  the same row and no device names another row.
+  the clock steps back). The edge keys the audit entry by a name-based UUID
+  it derives from the session and this id, so a notice sent again lands on
+  the same entry and no device can name another device's entry.
 - `session_id`: the canonical UUID of the stream the connection runs on now
   (a resume stream's after a resume), as a recording's `session_id`.
 - `kind`: `vnc` or `rdp`; `direction`: `copy` or `paste`; `outcome`:
@@ -1384,10 +1399,10 @@ of the notice's `kind`; its time is clamped to between 1 minute before the
 session's admission and 1 minute after the edge clock. A notice not newer
 than the last one the edge counted for its session (a batch sent again) is
 ignored. Any other notice is dropped and counted in the edge log. The first
-100 notices of a session become `clipboard` rows; later ones, count notices,
-and notices past the edge's row budgets are summed
-per minute of receipt into one `clipboard_fold` row per session, or past the
-fold budgets one per fleet and kind.
+100 notices of a session become `clipboard` audit entries; later ones, count
+notices, and notices past the edge's audit budgets are summed per minute of
+receipt into one `clipboard_fold` entry per session, or past the fold budgets
+one per fleet and kind.
 Notices are lost when the agent exits before sending them, when the flush at
 mux stop passes its bound, and when they reach the edge more than 10 minutes
 after the session ended, at another edge, or after an edge restart.
@@ -1399,7 +1414,8 @@ consumer credential (`localport login` or `localport setup`). Code:
 `internal/cli/ssh.go`, `internal/identity/session.go`.
 
 Mint: `POST /v1/sessions` on the control plane the credential came from, no
-session, body `{"device_host","kind","login","client_ssh_pubkey","cert_chain","timestamp","sig"}`:
+session, body
+`{"device_host","kind","login","client_ssh_pubkey","cert_chain","timestamp","sig"}`:
 `kind` `ssh`, `client_ssh_pubkey` the client key in authorized_keys form,
 `cert_chain` the credential's certificate PEM, `timestamp` Unix seconds, and
 `sig` standard base64 of the credential key's signature over SHA-256 of
@@ -1410,8 +1426,8 @@ the control plane accepts it within a minute of its clock. The answer is
 `{"certificate","url","host_key","device_host"}`: an OpenSSH user certificate
 for the client key, valid 5 minutes, whose one principal is the login; the
 WebSocket URL on the device's edge; and the device host key
-(`ecdsa-sha2-nistp256`). Transport failures, `5xx` and `429` are retried
-within the retry budget.
+(`ecdsa-sha2-nistp256`). Transport failures, `5xx` and `429` are retried within
+the retry budget.
 
 Files, under the state root (the directory holding `identity/`): per
 credential, device and login, the client key
@@ -1439,7 +1455,10 @@ Stream: `ssh-proxy` dials the URL, sends the certificate in SSH wire form as
 the first binary WebSocket message, runs the first connect's prelude with the
 host key `known_hosts` holds at start, then carries the SSH connection in
 frames (see [Resumable connections](#resumable-connections)). The end of its
-input is a deliberate close. A stream lost without the agent's close, with no
+input is a deliberate close. A first stream the edge refuses with `edge_full`,
+`no_session_mux`, `wrong_edge` or `edge_shutdown`, before the connection runs,
+gets one new certificate (held in memory, never written to the certificate
+file) and one more try. A stream lost without the agent's close, with no
 close frame or a reason in `sshResumableEnds` (`closed`, `edge_shutdown`,
 `edge_lost`, `device_offline`, `agent_closed`, `no_session_mux`, `edge_full`,
 `wrong_edge`), is resumed within 5 minutes: a mint with `resume_certificate`
@@ -1650,8 +1669,8 @@ user. The base may be a symlink only when it comes from `LOCALPORT_HOME` or
 `$HOME`, and its target must have the same owner. The machine-wide config
 directory is never followed. A failing path is refused, never repaired.
 `meta.json`, `pending.json`, the certificate, the key, `ticket_keys.json` and
-`desktop_pins.json` are opened with `O_NOFOLLOW` (`FILE_FLAG_OPEN_REPARSE_POINT` on Windows) and must be
-owner-only.
+`desktop_pins.json` are opened with `O_NOFOLLOW` (`FILE_FLAG_OPEN_REPARSE_POINT`
+on Windows) and must be owner-only.
 
 A save writes the certificate and key under new serial-named files, then
 `meta.json`, which names them. Writing `meta.json` is the commit point, so a
@@ -1663,12 +1682,11 @@ person holding credentials in two teams can tell them apart, and nothing else
 reads it. It is omitted when the control plane could not resolve it, and a
 record without it still loads. A renewal refreshes it but never blanks it.
 
-`source` is `token`, `oidc` or `sso`. Only `token` and `oidc` count as
-renewing sources in the store, and any other value is treated as
-non-renewing. A workload (`oidc`) certificate is held in memory for one run
-and never renewed: the control plane refuses its renewal, and the job requests
-a new certificate with a new workload token. A renewal carries the source forward
-unchanged.
+`source` is `token`, `oidc` or `sso`. Only `token` and `oidc` count as renewing
+sources in the store, and any other value is treated as non-renewing. A workload
+(`oidc`) certificate is held in memory for one run and never renewed: the
+control plane refuses its renewal, and the job requests a new certificate with a
+new workload token. A renewal carries the source forward unchanged.
 
 `meta.json` is validated on read and on write. A record naming an unknown kind
 or source, missing an expiry, or pairing a non-renewing source with a renewal
@@ -1825,13 +1843,13 @@ Rollover:
   after a `RegisterAck` on it. A promotion blocked by a renewal in flight is
   retried.
 - Once the pending certificate has been presented, the old one is never
-  presented again: the control plane may already have promoted the pending
-  one and superseded it. A retryable refusal retries with the pending
-  certificate. `SE031` on it renews again from the pending key and retries; a
-  definitive renewal refusal stops the device. `SE006` (expired) is retried
-  while the renewal loop renews the certificate, and stops the device while
-  the loop reports a definitive renewal refusal (a `4xx` other than `429` and the in-flight `409` `SE037`);
-  a renewal that lands clears it.
+  presented again: the control plane may already have promoted the pending one
+  and superseded it. A retryable refusal retries with the pending certificate.
+  `SE031` on it renews again from the pending key and retries; a definitive
+  renewal refusal stops the device. `SE006` (expired) is retried while the
+  renewal loop renews the certificate, and stops the device while the loop
+  reports a definitive renewal refusal (a `4xx` other than `429` and the
+  in-flight `409` `SE037`); a renewal that lands clears it.
 - A store read error is retried and never deletes a credential.
 
 `localport access` never offers or selects a device credential, and `setup`
@@ -1898,9 +1916,9 @@ carries none.
   control plane did not record. After any other answer the next request gets a
   new key.
 - The sign-in poll takes a new key after each `authorization_pending` (`SE021`)
-  or `slow_down` (`SE022`) answer, and repeats a poll whose outcome was lost under its key,
-  so a lost answer to the poll that consumed the device code returns the same
-  certificate.
+  or `slow_down` (`SE022`) answer, and repeats a poll whose outcome was lost
+  under its key, so a lost answer to the poll that consumed the device code
+  returns the same certificate.
 - Across attempts of one key the operation fields are byte-identical. The proof
   of possession (the signature over a timestamp or minute bucket) is signed
   again per attempt, since a

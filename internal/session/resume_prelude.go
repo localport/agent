@@ -16,13 +16,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// The prelude runs on a session stream before any frame (agent/docs/PROTOCOL.md
+// The prelude runs on a session stream before any frame (docs/PROTOCOL.md
 // "Resumable connections"). A first connect binds the connection to the
 // client's certificate key and derives a static resume token from an X25519
-// exchange; the token never crosses the wire. A resume proves the token with
-// an HMAC over a transcript that holds the agent's fresh key, after the
-// client verified the agent's host-key signature, so a relay learns nothing
-// it could replay (the TLS 1.3 PSK binder model).
+// exchange; the token never crosses the wire. A resume proves the token with an
+// HMAC over a transcript that holds the agent's fresh key, after the client
+// verified the agent's host-key signature, so a relay learns nothing it could
+// replay (the TLS 1.3 PSK binder model).
 const (
 	preludeVersion    = 2
 	preludeMaxMessage = 16 << 10

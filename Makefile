@@ -69,7 +69,7 @@ build-all: winres
 		fi; \
 	done
 
-# VERSIONINFO resources of the Windows executables; see scripts/release/winres.sh.
+# VERSIONINFO resources of the Windows executables (scripts/release/winres.sh).
 winres:
 	@./scripts/release/winres.sh '$(VERSION)'
 
@@ -80,11 +80,11 @@ check-packaging:
 	./scripts/release/check-packaging.sh
 
 # The Docker builds in SESSION_LINUX; CI runs one entry per job by setting
-# SESSION_LINUX. The build context is a staged copy of the tracked files and
-# the "git" build context the .git of a fresh clone of HEAD
-# (scripts/release/tracked-context.sh), mounted only while go build stamps the
-# VCS information, so BUILDVCS means the same as for the other builds and no
-# untracked file or host git config reaches the builder.
+# SESSION_LINUX. scripts/release/tracked-context.sh stages the build context
+# from the tracked files and the "git" build context from the .git of a fresh
+# clone of HEAD. The Dockerfile mounts the git context only while go build
+# stamps the VCS information, so BUILDVCS means the same as for the other
+# builds, and no untracked file or host git config reaches the builder.
 build-session-linux:
 	@ctx="$$(mktemp -d)" || exit 1; \
 	trap 'rm -rf "$$ctx"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; \
@@ -105,7 +105,8 @@ check-build-context:
 	./scripts/release/check-build-context.sh
 
 # 32-bit ARM glibc build for ARMv6 hard float (Raspberry Pi OS on Pi Zero and
-# Pi 1). Debian's armhf compiler emits ARMv7 code, so this uses its own toolchain.
+# Pi 1). Debian's armhf compiler emits ARMv7 code, so this build uses its own
+# toolchain.
 build-session-armv6:
 	@cc=$(ARMV6_TOOLCHAIN)/$(ARMV6_TARGET)/bin/$(ARMV6_TARGET)-gcc; pam=$(ARMV6_TOOLCHAIN)/pam; \
 	[ -x "$$cc" ] || { echo "no ARMv6 toolchain; run packaging/session/armv6/toolchain.sh $(ARMV6_TOOLCHAIN)"; exit 1; }; \

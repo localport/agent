@@ -99,8 +99,9 @@ func consumerOnly(m *Material, err error) (*Material, error) {
 	return m, err
 }
 
-// ErrNotRenewable is a sentinel so callers can tell "never renews" from "renewal
-// failed, retry": the loop backs off on the second and must stop on the first.
+// ErrNotRenewable is a sentinel so callers can tell "never renews" from
+// "renewal failed, retry": the loop backs off on the second and must stop on
+// the first.
 var ErrNotRenewable = errcode.New(errcode.NotRenewable)
 
 // Renew exchanges the stored credential for a new one. The current private
@@ -216,7 +217,7 @@ func checkIssued(m *Material, want Ref) error {
 // assemble turns a response into on-disk material. Leaf first, then the chain:
 // the order a PEM bundle requires.
 //
-// Identity, team and kind come from the CERTIFICATE, never the response body.
+// Identity, team and kind come from the certificate, never the response body.
 // The certificate is what gets presented, so it is what they have to describe.
 func (c *Client) assemble(key Key, in issuedMaterial) (*Material, error) {
 	bundle := []byte(ensureTrailingNewline(in.CertPEM))

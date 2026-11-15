@@ -30,8 +30,8 @@ var ErrTicketKeysBusy = errcode.New(errcode.TicketKeysBusy)
 var ErrTicketKeysUnreadable = errcode.New(errcode.TicketKeysUnreadable)
 
 // ErrRecordingKeyDropped means Load found a recording key in ticket_keys.json
-// that does not parse: the session CA keys loaded, the recording key was skipped,
-// and the next Replace (key fetch or renewal) writes a valid one.
+// that does not parse: the session CA keys loaded, the recording key was
+// skipped, and the next Replace (key fetch or renewal) writes a valid one.
 var ErrRecordingKeyDropped = errors.New("the stored team recording key does not parse and was skipped")
 
 // keysLockWait bounds the wait for .keys.lock. Its holders do file I/O only.
@@ -46,9 +46,9 @@ var ErrNotDeviceIdentity = errors.New("only a device identity holds session CA k
 
 // TicketKeys is a device identity's session CA keys (the SSH user certificate
 // signers) and its team's recording key, kept in ticket_keys.json beside
-// meta.json. Only the
-// control plane changes the stored set (Replace, from enrolment, renewal and
-// KeyRefresher's fetch); a kid absent from its set is revoked.
+// meta.json. Only the control plane changes the stored set (Replace, from
+// enrolment, renewal and KeyRefresher's fetch); a kid absent from its set is
+// revoked.
 //
 // The edge names kids it saw revoked in each RegisterAck. The edge relays them
 // without authority over the key set, so they are hints kept in memory only
@@ -157,8 +157,8 @@ func (s *Store) forgetTicketKeys(dir string) {
 
 // Load reads ticket_keys.json into memory. An absent file is an empty set; a
 // file it cannot read returns ErrTicketKeysUnreadable and leaves memory
-// unchanged. A recording key that does not parse is skipped: the session CA keys
-// load, the recording key held before (if any) stays, and Load returns
+// unchanged. A recording key that does not parse is skipped: the session CA
+// keys load, the recording key held before (if any) stays, and Load returns
 // ErrRecordingKeyDropped for the caller to log.
 func (t *TicketKeys) Load() error {
 	t.writeMu.Lock()
@@ -264,8 +264,8 @@ func (t *TicketKeys) Hint(kids []string) (added bool, err error) {
 // Replace makes set the identity's key set and recording key and settles the
 // hints given at or before generation, which the caller read before it
 // requested set. It never merges: a kid absent from set leaves. A set with an
-// unusable session CA key or recording key is refused whole and the held set and
-// key stay. ctx bounds the wait for another writer.
+// unusable session CA key or recording key is refused whole and the held set
+// and key stay. ctx bounds the wait for another writer.
 func (t *TicketKeys) Replace(ctx context.Context, generation uint64, set DeviceKeys) error {
 	if _, err := parseTicketKeys(set.TicketKeys); err != nil {
 		return errAnswer.With(err, "session CA keys")
@@ -327,8 +327,8 @@ func (t *TicketKeys) publishLocked(pubs map[string]ed25519.PublicKey, recKey hel
 // read returns the validated file and its decoded keys; an absent file is an
 // empty record with no recording key. The directory passes the same trust
 // checks as the credential's. Every refusal wraps ErrTicketKeysUnreadable. A
-// recording key that does not parse is not a refusal: the record and ticket
-// keys come back with no recording key and an error wrapping
+// recording key that does not parse is not a refusal: the record and session
+// CA keys come back with no recording key and an error wrapping
 // ErrRecordingKeyDropped.
 func (t *TicketKeys) read() (ticketKeysRecord, map[string]ed25519.PublicKey, heldRecordingKey, error) {
 	if err := t.store.trusted(t.dir); err != nil {

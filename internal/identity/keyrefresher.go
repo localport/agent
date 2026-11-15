@@ -30,11 +30,11 @@ const (
 // before it starts or after it returns.
 var ErrKeyRefresherStopped = errors.New("session CA key refresher is not running")
 
-// KeyRefresher keeps one device identity's session CA key set current from
-// POST /v1/devices/keys. Run fetches at once when the stored set is empty,
-// then every keyRefreshInterval with ±10 % jitter; RefreshNow fetches on
-// demand, and Hint brings the next fetch forward to the earliest time
-// keyRefreshFloor allows. Each fetch loads the identity's current credential, so a promoted
+// KeyRefresher keeps one device identity's session CA key set current from POST
+// /v1/devices/keys. Run fetches at once when the stored set is empty, then
+// every keyRefreshInterval with ±10 % jitter; RefreshNow fetches on demand, and
+// Hint brings the next fetch forward to the earliest time keyRefreshFloor
+// allows. Each fetch loads the identity's current credential, so a promoted
 // certificate signs, and stores the result through TicketKeys.Replace. A failed
 // fetch keeps the stored set and retries with exponential backoff from
 // minKeyRetry to maxKeyRetry, each wait ±20 % jitter; any successful fetch

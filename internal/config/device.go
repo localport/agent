@@ -405,8 +405,7 @@ func (c *LocalConfig) marshal() ([]byte, error) {
 }
 
 // Validate applies the rules LoadLocal and WriteLocal enforce, for this
-// machine's operating system.
-// Refusals wrap ErrInvalidLocalConfig.
+// machine's operating system. Refusals wrap ErrInvalidLocalConfig.
 func (c *LocalConfig) Validate() error {
 	if err := c.validate(runtime.GOOS); err != nil {
 		return invalidLocal(err)
@@ -614,10 +613,10 @@ const localLockWait = 2 * time.Minute
 
 // LockLocal takes the local config's write lock, agent.yaml.lock beside it,
 // creating the directory owner-only when missing (for the system config, root
-// only, see openLock). set holds it across its
-// read-modify-write, and connect from its re-read after enrolment to its
-// write, so neither drops the other's entry. It waits up to localLockWait.
-// A process that also holds run.lock takes run.lock first (see LockRun).
+// only, see openLock). set holds it across its read-modify-write, and connect
+// from its re-read after enrolment to its write, so neither drops the other's
+// entry. It waits up to localLockWait. A process that also holds run.lock takes
+// run.lock first (see LockRun).
 func LockLocal(f LocalConfigFile) (release func(), err error) {
 	lock, held, err := lockBeside(context.Background(), f, f.LockPath(), localLockWait)
 	if err != nil {
@@ -641,13 +640,12 @@ func (f LocalConfigFile) RunLockPath() string {
 // LockRun takes the exclusive run.lock of the config directory, creating the
 // directory owner-only when missing (for the system config, root creates both
 // and the agent account opens the existing run.lock), so only one process
-// serves the devices
-// of a config. It waits up to wait (zero tries once) and then returns
-// ErrRunLocked. The holder records its PID in the file (RunLockHolder). The
-// lock file is opened close-on-exec (not inheritable on Windows), so session
-// children never hold it. release unlocks, then closes the file; the holder
-// calls it before it exits. Lock order: run.lock before agent.yaml.lock; a
-// process holding agent.yaml.lock only tries run.lock.
+// serves the devices of a config. It waits up to wait (zero tries once) and
+// then returns ErrRunLocked. The holder records its PID in the file
+// (RunLockHolder). The lock file is opened close-on-exec (not inheritable on
+// Windows), so session children never hold it. release unlocks, then closes the
+// file; the holder calls it before it exits. Lock order: run.lock before
+// agent.yaml.lock; a process holding agent.yaml.lock only tries run.lock.
 func LockRun(f LocalConfigFile, wait time.Duration) (release func() error, err error) {
 	return LockRunContext(context.Background(), f, wait)
 }

@@ -256,8 +256,8 @@ func normalizeLocalAddr(addr string) string {
 }
 
 // defaultRegion is only where the agent lands when no region is given. A
-// tunnel's region lives on the tunnel, and an edge that does not hold it answers
-// Register with a redirect.
+// tunnel's region lives on the tunnel, and an edge that does not hold it
+// answers Register with a redirect.
 const defaultRegion = "eu"
 
 // ResolveEdge maps a region to its edge address. The "connect." label makes

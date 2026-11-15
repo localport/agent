@@ -27,19 +27,18 @@ import (
 // calls Serve again on the same handler.
 //
 // Serve runs on its own goroutine per stream and must return once the stream
-// fails. id is the stream's session id from the edge's notice (the bytes of
-// the UUID its access row carries and the recordings of channels opened on
-// it name), serial the serial of the SSH user certificate the edge admitted
-// for it, and clientAddr the client's `ip:port` as the edge saw it, empty
-// when the edge did not report one. Serve reports refusedUnread when it
-// closed the stream without reading or writing it. The session mux closes
-// stream after Serve returns, first delivering what Serve wrote unless it
-// refused the stream unread. Shutdown ends the
-// sessions the handler holds when it is called and must return once ctx ends.
-// It is not terminal: Serve may be called again after Shutdown returns, for
-// the next control session. No stream of the stopping
-// mux is handed to Serve once Shutdown has been called, but a Serve started
-// just before may still be running when Shutdown begins.
+// fails. id is the stream's session id from the edge's notice (the bytes of the
+// session's UUID, which the recordings of channels opened on it name), serial
+// the serial of the SSH user certificate the edge admitted for it, and
+// clientAddr the client's `ip:port` as the edge saw it, empty when the edge did
+// not report one. Serve reports refusedUnread when it closed the stream without
+// reading or writing it. The session mux closes stream after Serve returns,
+// first delivering what Serve wrote unless it refused the stream unread.
+// Shutdown ends the sessions the handler holds when it is called and must
+// return once ctx ends. It is not terminal: Serve may be called again after
+// Shutdown returns, for the next control session. No stream of the stopping mux
+// is handed to Serve once Shutdown has been called, but a Serve started just
+// before may still be running when Shutdown begins.
 //
 // LiveSessions returns the number of sessions the handler serves now; a
 // certificate rollover that is not forced waits while it is above zero.

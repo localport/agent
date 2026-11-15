@@ -325,8 +325,8 @@ func (rc *resumeConn) resume(t *testing.T, edit func(*certOpts)) error {
 	}
 	_ = stream.SetDeadline(time.Time{})
 	rc.stream = stream
-	// The client's close of a resumed stream sends no FIN, so a test can
-	// leave the agent's end half open (TestResumeTakesOverAHalfOpenResumedStream).
+	// The client's close of a resumed stream sends no FIN, so a test can leave
+	// the agent's end half open (TestResumeTakesOverAHalfOpenResumedStream).
 	rc.ended = attachAsync(rc.cr.Conn, noFIN{stream}, pos)
 	return nil
 }

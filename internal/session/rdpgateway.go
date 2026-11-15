@@ -41,8 +41,7 @@ const (
 	// rdcleanpathNegotiationError is the RDCleanPath error code of a
 	// Negotiation Failure, which carries the target's confirm.
 	rdcleanpathNegotiationError = 2
-	// x224MaxPDU bounds the X.224 Connection Request and Confirm TPKTs, as
-	// Devolutions Gateway does.
+	// x224MaxPDU bounds the X.224 Connection Request and Confirm TPKTs.
 	x224MaxPDU = 512
 	// tpktHeaderLen is a TPKT header: version 3, reserved, 16-bit length.
 	tpktHeaderLen = 4
@@ -155,7 +154,8 @@ func (g *rdpGateway) run(ctx context.Context) (string, error) {
 	}
 
 	_ = g.target.SetDeadline(time.Now().Add(g.timeout))
-	// The pinned SPKI below replaces chain verification; no server name is sent.
+	// The pinned SPKI below replaces chain verification; no server name is
+	// sent.
 	tc := tls.Client(g.target, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
 	if err := tc.Handshake(); err != nil {
 		if !isTLSProtocolError(err) {

@@ -11,8 +11,8 @@ import (
 )
 
 // TestResumeWireVector pins the prelude transcript, the close resume message
-// and its transcript, token, proof and closeTag encoding. web/wasm/sshclient/client
-// holds the same test, so the two implementations cannot drift.
+// and its transcript, token, proof and closeTag encoding. The browser client
+// pins the same vector, so the two implementations cannot drift.
 func TestResumeWireVector(t *testing.T) {
 	hello := helloMsg{Version: preludeVersion, ClientKey: bytes.Repeat([]byte{1}, 32), Cert: []byte("cert")}
 	reply := helloReplyMsg{AgentKey: bytes.Repeat([]byte{2}, 32), Handle: bytes.Repeat([]byte{3}, resumeHandleLen)}

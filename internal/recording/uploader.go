@@ -156,7 +156,7 @@ const (
 
 type result struct {
 	e *upload
-	// failed is set instead of e on the result of a failed open.
+	// failed replaces e when the request was a failed-open report.
 	failed *failedOpen
 	op     op
 	index  uint32
@@ -261,7 +261,7 @@ type Handoff struct {
 
 // BeginOpen writes m as the entry's meta.json, hands the recording over and
 // sends the open now, ahead of any open or complete the uploader has not
-// started on that device: the first open creates the recording's row from
+// started on that device: the first open creates the recording from
 // m.Certificate, which verifies only within its short validity, so a queued
 // open could come too late. m carries no segment yet. On failure it removes
 // the entry and returns the error; the caller decides whether the session
@@ -920,11 +920,11 @@ func (u *Uploader) backoffLocked(e *upload, floor time.Duration) {
 	e.next = u.now().Add(d)
 }
 
-// spill writes the entry's segments marked spilling (with all, every segment
-// in memory) to the spool, then its meta. A refused write pins the segment in
-// memory. It runs on Run's goroutine (or after Run's requests
-// ended), so no acknowledgement or cut changes mem during the writes, and
-// the entry's io lock keeps its handoffs out.
+// spill writes the entry's segments marked spilling (with all, every segment in
+// memory) to the spool, then its meta. A refused write pins the segment in
+// memory. It runs on Run's goroutine (or after Run's requests ended), so no
+// acknowledgement or cut changes mem during the writes, and the entry's io lock
+// keeps its handoffs out.
 func (u *Uploader) spill(e *upload, all bool) {
 	e.io.Lock()
 	defer e.io.Unlock()

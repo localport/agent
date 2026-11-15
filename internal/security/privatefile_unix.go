@@ -33,8 +33,8 @@ func inspectPrivateDir(path string, follow, secure bool) error {
 	}
 	f, err := os.OpenFile(path, flags, 0)
 	if err != nil {
-		// symlink or non-directory. The errno differs by OS (ELOOP, EMLINK on
-		// FreeBSD, EFTYPE on NetBSD, ENOTDIR).
+		// A symlink or a non-directory. The errno differs by OS (ELOOP, EMLINK
+		// on FreeBSD, EFTYPE on NetBSD, ENOTDIR).
 		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EMLINK) || errors.Is(err, refusedLinkErrno) {
 			return ErrUntrustedPath.With(nil, fmt.Sprintf("%s is not a directory of its own; credential paths must not be redirected", path))
 		}

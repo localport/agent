@@ -19,8 +19,8 @@ var (
 )
 
 func main() {
-	// Called before any token is read. The process holds bearer credentials
-	// for its lifetime, and a core dump or same-user debugger exposes them.
+	// Runs before any token is read: the process holds bearer credentials for
+	// its lifetime, and a core dump or same-user debugger would expose them.
 	security.HardenProcess()
 
 	app := cli.New(version, commit, date)

@@ -137,7 +137,8 @@ func TestReceiveLoopIdleDisconnect(t *testing.T) {
 	edgeIdleTimeout = 300 * time.Millisecond
 	defer func() { edgeIdleTimeout = oldIdle }()
 
-	// An open pipe that never delivers a frame simulates a dead link with no error.
+	// An open pipe that never delivers a frame simulates a dead link with no
+	// error.
 	a, b := net.Pipe()
 	defer a.Close()
 	defer b.Close()

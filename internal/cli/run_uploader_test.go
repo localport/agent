@@ -34,7 +34,8 @@ func spooledMeta(id, identifier string) recording.Meta {
 }
 
 // A store with an empty Base keeps its spool under Root, the state root the
-// credential walk uses, and follows Root when it is a symlink as that walk does.
+// credential walk uses, and follows Root when it is a symlink as that walk
+// does.
 func TestOpenUploaderSpoolsUnderRootWhenBaseIsEmpty(t *testing.T) {
 	real := filepath.Join(t.TempDir(), "state")
 	if err := os.Mkdir(real, 0o700); err != nil {

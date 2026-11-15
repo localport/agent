@@ -83,7 +83,7 @@ type edgeCall struct {
 	index uint32
 	hash  [32]byte
 	done  Completion
-	// reason is a failed open's.
+	// reason is the reason a failed open reports.
 	reason string
 	reply  chan edgeReply
 }
@@ -209,8 +209,8 @@ func (b *syncBuffer) String() string {
 var fixtureStart = time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 
 // startUploader runs an uploader over a fresh spool with a fake clock, a fake
-// edge that is up, and a jitter source returning 0 unless a test sets maxJitter.
-// Each edit changes the uploader before Run starts.
+// edge that is up, and a jitter source returning 0 unless a test sets
+// maxJitter. Each edit changes the uploader before Run starts.
 func startUploader(t *testing.T, maxJitter bool, edits ...func(*Uploader)) *uploaderFixture {
 	t.Helper()
 	return runUploader(t, spoolDir(t), maxJitter, nil, func(string) bool { return true }, edits...)
@@ -627,7 +627,8 @@ func TestUploaderBusyBacksOffWithRetryAfterFloor(t *testing.T) {
 	f.clock.Advance(time.Second)
 	refuse(f.edge.expect(t, "open", spoolID1, 0), http.StatusBadGateway, CodeStorage, 0)
 	f.waitBackoff(t, spoolID1)
-	// Second attempt: full jitter up to 2 s, here 1 s with zero jitter.
+	// Second attempt: the backoff is jittered up to 2 s; with zero jitter it is
+	// the 1 s minimum (minBackoff).
 	f.clock.Advance(time.Second)
 	f.edge.expect(t, "open", spoolID1, 0)
 }

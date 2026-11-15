@@ -526,8 +526,8 @@ func (t *Tunnel) Run(ctx context.Context) error {
 	}
 }
 
-// hintRevokedTicketKeys hands the ticket key ids the edge names revoked to
-// the HintRevoked hook.
+// hintRevokedTicketKeys hands the session CA key ids the edge names revoked
+// to the HintRevoked hook.
 func (t *Tunnel) hintRevokedTicketKeys(kids []string) {
 	if t.opts.HintRevoked != nil && len(kids) > 0 {
 		t.opts.HintRevoked(kids)
@@ -789,7 +789,8 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 				return ErrRegisterFailed.With(err, "parse redirect")
 			}
 			if !allowedRedirectHost(rd.EdgeAddr) {
-				// The address is edge text: the cause, shown by --verbose and logs.
+				// The address is edge text: the cause, shown by --verbose and
+				// logs.
 				return ErrUntrustedRedirect.With(fmt.Errorf("redirect to %q", sanitizeDisplay(rd.EdgeAddr)), "")
 			}
 			if h := t.opts.Handler; h != nil {
@@ -997,11 +998,9 @@ func (t *Tunnel) readDeadline(lastInbound time.Time) time.Time {
 }
 
 // interruptReader wakes a Recv parked on a long deadline so the receive loop
-// re-evaluates now (a probe was armed, or the session is tearing down). If a
-// frame happens to be mid-flight the framing desyncs, the next length check
-// fails, and the session reconnects. That is bounded and self-healing, and the
-// interrupt only fires when the link just changed or is being torn down, so the
-// cost is a rare reconnect rather than a corrupt stream.
+// re-evaluates now (a probe was armed, or the session is tearing down). A frame
+// cut mid-read fails the next length check and the session reconnects; this
+// happens only when the link just changed or is closing.
 func (t *Tunnel) interruptReader() {
 	t.mu.RLock()
 	raw := t.raw
@@ -1584,8 +1583,8 @@ func (e *RegistrationError) RemoteMessage() string {
 // RemoteCode is the edge's code, or AG001 (errcode.Remote).
 func (e *RegistrationError) RemoteCode() string { return e.Code }
 
-// registrationErrorFrom is the refusal of ack, whose text proto.ParseRegisterAck
-// has sanitized.
+// registrationErrorFrom is the refusal of ack, whose text
+// proto.ParseRegisterAck has sanitized.
 func registrationErrorFrom(ack *proto.RegisterAckPayload) *RegistrationError {
 	msg := ack.Error
 	if msg == "" {

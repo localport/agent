@@ -13,12 +13,12 @@ import (
 	"github.com/localport/agent/internal/identity"
 )
 
-// runSet edits one enrolled device's settings in the local config and, as
-// root or an elevated Administrator, reloads the installed device service so
-// they apply (Manager.Reload: SIGHUP on Unix, a parameter change on Windows;
-// the agent restarts only the changed devices). Besides a re-enrolment with connect,
-// it is the way to change what an enrolled device allows. As root it records
-// its outcome in the system log.
+// runSet edits one enrolled device's settings in the local config and, as root
+// or an elevated Administrator, reloads the installed device service so they
+// apply (Manager.Reload: SIGHUP on Unix, a parameter change on Windows; the
+// agent restarts only the changed devices). Besides a re-enrolment with
+// connect, it is the way to change what an enrolled device allows. As root it
+// records its outcome in the system log.
 func runSet(args []string) (err error) {
 	var who invoker
 	defer func() {

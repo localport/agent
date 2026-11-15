@@ -63,8 +63,8 @@ func (o openrc) Check() ([]string, error) { return nil, checkOwned(o.paths()...)
 func (o openrc) Installed() (bool, error) { return owned(o.script(OpenRCService)) }
 
 // MainPID asks the agent's script for the child pid supervise-daemon
-// records; a service status reports as not started (openrcNotRunning)
-// reports 0, and any other failure is an error.
+// records. A status that reports the service not started (openrcNotRunning)
+// gives 0; any other failure is an error.
 func (o openrc) MainPID(ctx context.Context) (int, error) {
 	if _, err := o.run(ctx, o.rcService, OpenRCService, "status"); err != nil {
 		var cmdErr *CommandError
@@ -194,8 +194,8 @@ func (o openrc) runlevelsOf(name string) ([]string, error) {
 }
 
 // openrcScripts are the init scripts for the agent at exe and the launcher
-// beside it, by service name. The paths go into shell variables unquoted
-// by the shell's own rules, so they must match systemdSafePath.
+// beside it, by service name. The paths are written into the scripts as shell
+// strings without escaping, so they must match systemdSafePath.
 func openrcScripts(exe string) (map[string][]byte, error) {
 	if !systemdSafePath.MatchString(exe) {
 		return nil, ErrUnsafeExecutable.With(nil, fmt.Sprintf("%q (OpenRC needs an absolute path of letters, digits and ._+@/-)", exe))

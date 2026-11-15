@@ -29,8 +29,8 @@ const (
 	// segment write is refused while less is available.
 	MinFreeSpace = 64 << 20
 
-	// PolicyBestEffort and PolicyStrict are the recording policies a session certificate's
-	// rec carries.
+	// PolicyBestEffort and PolicyStrict are the recording policies a session
+	// certificate's rec carries.
 	PolicyBestEffort = "best_effort"
 	PolicyStrict     = "strict"
 
@@ -72,10 +72,11 @@ var (
 type Meta struct {
 	ID string `json:"id"`
 	// SessionID is the session id of the connection the recording belongs to
-	// (the edge's notice); a connection has one recording per session channel, plus one for its port forwards.
+	// (the edge's notice); a connection has one recording per session channel,
+	// plus one for its port forwards.
 	SessionID string `json:"session_id"`
-	// Identifier is the local device identity the session certificate was for. The
-	// uploader keys the device's session mux on it.
+	// Identifier is the local device identity the session certificate was
+	// for. The uploader keys the device's session mux on it.
 	Identifier string `json:"identifier"`
 	// LastAcceptedAt is the session start, then the time of each segment the
 	// server accepted; see LocalDeadline.
@@ -84,8 +85,8 @@ type Meta struct {
 	KeySHA256      []byte    `json:"key_sha256"`
 	Policy         string    `json:"policy"`
 	// Certificate is the SSH user certificate that admitted the session's
-	// connection (wire form). The open sends it; the open that finds no row
-	// creates it from the certificate, so a resumed open after a restart
+	// connection (wire form). Every open sends it, and the open that finds
+	// no recording creates one from it, so a resumed open after a restart
 	// still has it.
 	Certificate []byte `json:"certificate,omitempty"`
 	// Sealed is the count of segments sealed.
@@ -330,7 +331,7 @@ func readMeta(dir, id string) (Meta, error) {
 // metaBudget returns the largest meta.json m can become without a new
 // segment hash: complete fields with the longest reason, an acknowledged
 // chain, the widest counters and the longest timestamps, and one hash more
-// than m holds, which also counts the hashes key an empty list omits.
+// than m holds, which also covers the "hashes" key that an empty list omits.
 func metaBudget(m Meta) (int64, error) {
 	widest := time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.FixedZone("", -(23*3600+59*60)))
 	reason := ""

@@ -141,10 +141,9 @@ func warnNoPortCeiling(renderer tunnelUI, devices []config.DeviceSpec) {
 }
 
 // refuseBesideConfig reports the named flags given alongside --config. The file
-// describes everything that runs, so a flag that would otherwise set the
-// endpoint is dropped; refusing it is what stops a person believing a
-// `--name` they typed took effect. Visit sees only flags actually passed, so a
-// default such as --proto=http is never mistaken for one.
+// describes everything that runs, so an endpoint flag would be ignored; it is
+// refused instead of dropped silently. Visit sees only flags actually passed,
+// so a default such as --proto=http is never mistaken for one.
 func refuseBesideConfig(fs *flag.FlagSet, configPath string, names ...string) error {
 	if configPath == "" {
 		return nil

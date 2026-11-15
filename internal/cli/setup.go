@@ -12,9 +12,8 @@ import (
 	"github.com/localport/agent/internal/security"
 )
 
-// setupTokenEnv keeps the setup token off the command line. An argument is
-// visible in shell history and in `ps` to every local account, which for a
-// single-use credential on a provisioning run is exactly the wrong place.
+// setupTokenEnv keeps the setup token off the command line, where shell history
+// and `ps` show it to every local account.
 const setupTokenEnv = "LOCALPORT_SETUP_TOKEN"
 
 // `localport setup <TOKEN>` redeems a single-use setup token and stores a

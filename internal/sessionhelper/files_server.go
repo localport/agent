@@ -90,10 +90,9 @@ type filesServer struct {
 	events io.Writer
 }
 
-// emit writes one event, its names escaped and bounded by
-// launcher.EventName so no file name keeps an operation out of the log. A
-// broken event pipe drops
-// it: the helper ends the channel when its pipe breaks.
+// emit writes one event, its names escaped and bounded by launcher.EventName so
+// no file name keeps an operation out of the log. A broken event pipe drops it:
+// the helper ends the channel when its pipe breaks.
 func (s *filesServer) emit(ev launcher.FileEvent) {
 	ev.Path, ev.Target = launcher.EventName(ev.Path), launcher.EventName(ev.Target)
 	b, err := ev.Marshal()

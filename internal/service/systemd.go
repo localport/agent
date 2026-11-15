@@ -112,7 +112,7 @@ func (s systemd) MainPID(ctx context.Context) (int, error) {
 }
 
 // Install writes the three units, enables the launcher socket and the agent,
-// and (re)starts them. A running launcher is restarted only when it runs
+// and (re)starts them. The launcher is restarted only when it is running
 // (try-restart), so an upgraded binary takes effect; its sessions survive
 // (KillMode=process).
 func (s systemd) Install(ctx context.Context, exe string) error {

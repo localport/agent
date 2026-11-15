@@ -42,8 +42,8 @@ func TestLoginSurvivesATransportFailureMidPoll(t *testing.T) {
 				w.WriteHeader(http.StatusPreconditionRequired)
 				writeJSON(t, w, map[string]any{"code": codeAuthorizationPending, "message": "pending"})
 			case 2:
-				// The blip. Hijacking the connection kills it mid-request, which
-				// is what a dropped packet looks like to the client.
+				// The blip. Hijacking the connection kills it mid-request,
+				// which is what a dropped packet looks like to the client.
 				hj, ok := w.(http.Hijacker)
 				if !ok {
 					t.Error("test server cannot hijack")

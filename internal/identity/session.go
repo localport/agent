@@ -104,8 +104,8 @@ func (c *Client) MintSession(ctx context.Context, cur *Material, req SessionRequ
 // minute bucket): each of device_host, kind, login, client_ssh_pubkey,
 // cert_chain, timestamp (decimal) and, only when set, resume_certificate as a
 // 4-byte big-endian length and its bytes, then timestamp/60 as 8 bytes
-// big-endian. A request without resume_certificate keeps the digest it had
-// before the field existed.
+// big-endian. Without resume_certificate the field adds nothing to the
+// digest.
 func sessionRequestDigest(b mintSessionBody) []byte {
 	h := sha256.New()
 	h.Write([]byte(sessionRequestContext))

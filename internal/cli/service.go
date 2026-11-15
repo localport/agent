@@ -16,10 +16,10 @@ import (
 	"github.com/localport/agent/internal/service"
 )
 
-// runService runs `localport service install` and
-// `localport service uninstall [--purge]`. Both run to the end through a
-// hangup of the terminal they run in, which restarting or stopping the
-// service may cause, and as root record their outcome in the system log.
+// runService runs `localport service install` and `localport service uninstall
+// [--purge]`. Both run to the end through a hangup of the terminal they run in,
+// which restarting or stopping the service may cause, and as root record their
+// outcome in the system log.
 func runService(args []string) (err error) {
 	ignoreHangup()
 	if len(args) == 0 || (args[0] != "install" && args[0] != "uninstall") {

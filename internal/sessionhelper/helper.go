@@ -329,9 +329,9 @@ const maxPAMMessageBytes = 8 << 10
 
 // pamMessages collects the session setup's messages for the client: the
 // informational and error messages PAM modules send (pam_nologin's text, an
-// expiry warning, pam_motd) and, without PAM, the /etc/nologin text. They
-// are sanitized for the client's terminal: invalid UTF-8 and control bytes other than tab and
-// newline become U+FFFD.
+// expiry warning, pam_motd) and, without PAM, the /etc/nologin text. They are
+// sanitized for the client's terminal: invalid UTF-8 and control bytes other
+// than tab and newline become U+FFFD.
 type pamMessages struct {
 	list  []string
 	bytes int
