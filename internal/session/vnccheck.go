@@ -23,7 +23,8 @@ const (
 	// CloseDesktopHandshakeTimeout: the client wait or a target deadline of
 	// the handshake expired.
 	CloseDesktopHandshakeTimeout = "desktop_handshake_timeout"
-	// CloseDesktopTargetClosed: the target closed or failed before the relay.
+	// CloseDesktopTargetClosed: the target closed or failed, before or
+	// during the relay.
 	CloseDesktopTargetClosed = "desktop_target_closed"
 )
 

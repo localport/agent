@@ -3,13 +3,17 @@
 package session
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"io"
 	"net"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -466,6 +470,9 @@ func TestDesktopIdle(t *testing.T) {
 			t.Fatalf("end reason %q, want %q", reason, CloseIdle)
 		}
 		target.waitClosed(t)
+		// The idle end closed the target under the relay; the end logged is
+		// the connection's, not the target error the relay saw after it.
+		waitEvent(t, f.events, desktopEndLine("vnc", target.ln.Addr().String(), CloseIdle))
 		waitClosed(t, client)
 	})
 	t.Run("client data", func(t *testing.T) {
@@ -589,14 +596,33 @@ func TestDesktopDialFinishingAfterTheEnd(t *testing.T) {
 	target.waitClosed(t)
 }
 
-// The target's close during the relay ends the channel and the connection
-// without an end request: the channel already stopped. During the handshake
-// it ends desktop_target_closed, told to the client. A client's EOF ends the
-// target.
+// desktopEndLine is the log line of a desktop connection's end.
+func desktopEndLine(kind, addr, end string) string {
+	return "session: " + kind + " desktop connection to " + addr + " ended: " + end
+}
+
+// failingWrites is a target connection whose writes fail once fail is set,
+// as a write to a target that reset does.
+type failingWrites struct {
+	net.Conn
+	fail *atomic.Bool
+}
+
+func (c failingWrites) Write(b []byte) (int, error) {
+	if c.fail.Load() {
+		return 0, syscall.ECONNRESET
+	}
+	return c.Conn.Write(b)
+}
+
+// The target's close or I/O error, before or during the relay, ends
+// desktop_target_closed, told to the client, for both kinds; the end is
+// logged once. A client's EOF ends the target, with nothing told.
 func TestDesktopEndsWithItsChannel(t *testing.T) {
 	t.Run("target closes", func(t *testing.T) {
 		target := newVNCTarget(t)
-		f := desktopFixture(t, target.ln.Addr().String(), nil)
+		addr := target.ln.Addr().String()
+		f := desktopFixture(t, addr, nil)
 		client := f.connect(t, f.vncOpts())
 		ch, reqs, err := openVNC(client)
 		if err != nil {
@@ -604,14 +630,191 @@ func TestDesktopEndsWithItsChannel(t *testing.T) {
 		}
 		desktopPing(t, ch)
 		_ = target.serverSide(t).Close()
-		select {
-		case r, ok := <-reqs:
-			if ok {
-				t.Fatalf("request %q after the target closed", r.Type)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("the channel did not close")
+		if reason := waitEndRequest(t, reqs); reason != CloseDesktopTargetClosed {
+			t.Fatalf("end reason %q, want %q", reason, CloseDesktopTargetClosed)
 		}
+		waitEvent(t, f.events, desktopEndLine("vnc", addr, CloseDesktopTargetClosed))
+		waitClosed(t, client)
+	})
+	t.Run("target write fails", func(t *testing.T) {
+		target := newVNCTarget(t)
+		var fail atomic.Bool
+		f := desktopFixture(t, target.ln.Addr().String(), func(c *ServerConfig) {
+			c.dialDesktop = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				nc, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+				return failingWrites{Conn: nc, fail: &fail}, nil
+			}
+		})
+		client := f.connect(t, f.vncOpts())
+		ch, reqs, err := openVNC(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		desktopPing(t, ch)
+		fail.Store(true)
+		if _, err := ch.Write([]byte{rfbClientKeyEvent, 1, 0, 0, 0, 0, 0, 'p'}); err != nil {
+			t.Fatal(err)
+		}
+		if reason := waitEndRequest(t, reqs); reason != CloseDesktopTargetClosed {
+			t.Fatalf("end reason %q, want %q", reason, CloseDesktopTargetClosed)
+		}
+		waitClosed(t, client)
+	})
+	t.Run("rdp target closes", func(t *testing.T) {
+		cert := testCert(t, "desktop.test")
+		target := newRDPTarget(t, cert, x224Confirm(rdpProtocolHybrid), func(c net.Conn) error {
+			tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+			if _, err := io.ReadFull(tc, make([]byte, len(tsNego))); err != nil {
+				return err
+			}
+			if _, err := tc.Write(tsNego); err != nil {
+				return err
+			}
+			_ = tc.Close()
+			return errors.New("closed mid-relay")
+		})
+		addr := target.ln.Addr().String()
+		f := rdpFixture(t, addr, nil)
+		client := f.connect(t, f.rdpOpts())
+		ch, reqs := openRDP(t, client, marshalRequest(t, validRequest()))
+		rdpKeyRequest(t, reqs, true)
+		r := bufio.NewReader(ch)
+		readResponse(t, r)
+		if _, err := ch.Write(tsNego); err != nil {
+			t.Fatal(err)
+		}
+		readFor(t, r, string(tsNego))
+		if reason := waitEndRequest(t, reqs); reason != CloseDesktopTargetClosed {
+			t.Fatalf("end reason %q, want %q", reason, CloseDesktopTargetClosed)
+		}
+		waitEvent(t, f.events, desktopEndLine("rdp", addr, CloseDesktopTargetClosed))
+		waitClosed(t, client)
+	})
+	t.Run("rdp target write fails", func(t *testing.T) {
+		target := newRDPTarget(t, testCert(t, "desktop.test"), x224Confirm(rdpProtocolHybrid), nil)
+		var fail atomic.Bool
+		f := rdpFixture(t, target.ln.Addr().String(), func(c *ServerConfig) {
+			c.dialDesktop = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				nc, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+				return failingWrites{Conn: nc, fail: &fail}, nil
+			}
+		})
+		client := f.connect(t, f.rdpOpts())
+		ch, reqs := openRDP(t, client, marshalRequest(t, validRequest()))
+		rdpKeyRequest(t, reqs, true)
+		r := bufio.NewReader(ch)
+		readResponse(t, r)
+		if _, err := ch.Write(tsNego); err != nil {
+			t.Fatal(err)
+		}
+		readFor(t, r, string(tsNego))
+		fail.Store(true)
+		if _, err := ch.Write(tsNego); err != nil {
+			t.Fatal(err)
+		}
+		if reason := waitEndRequest(t, reqs); reason != CloseDesktopTargetClosed {
+			t.Fatalf("end reason %q, want %q", reason, CloseDesktopTargetClosed)
+		}
+		waitClosed(t, client)
+	})
+	t.Run("rdp idle during the relay", func(t *testing.T) {
+		clock := &idleClock{}
+		target := newRDPTarget(t, testCert(t, "desktop.test"), x224Confirm(rdpProtocolHybrid), nil)
+		addr := target.ln.Addr().String()
+		f := rdpFixture(t, addr, func(c *ServerConfig) { c.clock = clock })
+		client := f.connect(t, f.rdpOpts())
+		ch, reqs := openRDP(t, client, marshalRequest(t, validRequest()))
+		rdpKeyRequest(t, reqs, true)
+		r := bufio.NewReader(ch)
+		readResponse(t, r)
+		// The round trip settles the client's bytes, which are activity,
+		// before the clock moves.
+		if _, err := ch.Write(tsNego); err != nil {
+			t.Fatal(err)
+		}
+		readFor(t, r, string(tsNego))
+		clock.advance(idleTimeout + time.Minute)
+		clock.fireIdle()
+		if reason := waitEndRequest(t, reqs); reason != CloseIdle {
+			t.Fatalf("end reason %q, want %q", reason, CloseIdle)
+		}
+		target.waitClosed(t)
+		waitEvent(t, f.events, desktopEndLine("rdp", addr, CloseIdle))
+		waitClosed(t, client)
+	})
+	t.Run("dial fails after another end was decided", func(t *testing.T) {
+		release := make(chan struct{})
+		f := desktopFixture(t, "127.0.0.1:5900", func(c *ServerConfig) {
+			c.dialDesktop = func(context.Context, string, string) (net.Conn, error) {
+				<-release
+				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+			}
+		})
+		client := f.connect(t, f.vncOpts())
+		opened := make(chan error, 1)
+		go func() {
+			_, _, err := openDesktopChannel(client, chanVNC)
+			opened <- err
+		}()
+		// Shutdown is decided first; the dial then fails and records its
+		// code before the end line is written.
+		var once sync.Once
+		hook := func(reason string) {
+			if reason != CloseShutdown {
+				return
+			}
+			once.Do(func() {
+				close(release)
+				<-opened
+			})
+		}
+		onConnEnd.Store(&hook)
+		t.Cleanup(func() { onConnEnd.Store(nil) })
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := f.srv.Shutdown(ctx); err != nil {
+			t.Fatalf("shutdown: %v", err)
+		}
+		waitEvent(t, f.events, desktopEndLine("vnc", "127.0.0.1:5900", CloseShutdown))
+	})
+	t.Run("rdp client closes", func(t *testing.T) {
+		target := newRDPTarget(t, testCert(t, "desktop.test"), x224Confirm(rdpProtocolHybrid), nil)
+		addr := target.ln.Addr().String()
+		f := rdpFixture(t, addr, nil)
+		client := f.connect(t, f.rdpOpts())
+		ch, reqs := openRDP(t, client, marshalRequest(t, validRequest()))
+		rdpKeyRequest(t, reqs, true)
+		r := bufio.NewReader(ch)
+		readResponse(t, r)
+		if _, err := ch.Write(tsNego); err != nil {
+			t.Fatal(err)
+		}
+		readFor(t, r, string(tsNego))
+		_ = ch.CloseWrite()
+		noRequestsThenClose(t, reqs)
+		target.waitClosed(t)
+		waitEvent(t, f.events, desktopEndLine("rdp", addr, CloseExited))
+		waitClosed(t, client)
+	})
+	t.Run("dial refused", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		_ = ln.Close()
+		f := desktopFixture(t, addr, nil)
+		client := f.connect(t, f.vncOpts())
+		if _, _, err := openDesktopChannel(client, chanVNC); err == nil {
+			t.Fatal("the channel opened to a closed port")
+		}
+		waitEvent(t, f.events, desktopEndLine("vnc", addr, CloseExited+" (connection_refused)"))
 		waitClosed(t, client)
 	})
 	t.Run("target closes during the check", func(t *testing.T) {
@@ -635,15 +838,18 @@ func TestDesktopEndsWithItsChannel(t *testing.T) {
 	})
 	t.Run("client EOF", func(t *testing.T) {
 		target := newVNCTarget(t)
-		f := desktopFixture(t, target.ln.Addr().String(), nil)
+		addr := target.ln.Addr().String()
+		f := desktopFixture(t, addr, nil)
 		client := f.connect(t, f.vncOpts())
-		ch, _, err := openVNC(client)
+		ch, reqs, err := openVNC(client)
 		if err != nil {
 			t.Fatal(err)
 		}
 		desktopPing(t, ch)
 		_ = ch.CloseWrite()
+		noRequestsThenClose(t, reqs)
 		target.waitClosed(t)
+		waitEvent(t, f.events, desktopEndLine("vnc", addr, CloseExited))
 		waitClosed(t, client)
 	})
 }

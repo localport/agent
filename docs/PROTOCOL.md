@@ -771,9 +771,11 @@ stream:
    are cleared before the relay. Waiting for the reply to
    `desktop-key@localport.io` has no handshake bound. Both bounds keep
    running while the connection is detached, so a network drop during the
-   handshake ends it rather than resuming it. A target EOF or I/O error
-   before the relay ends `desktop_target_closed`; a client EOF or close ends
-   it `exited`, with nothing told.
+   handshake ends it rather than resuming it. A target EOF or I/O error,
+   before or during the relay, ends `desktop_target_closed`; a client EOF or
+   close ends it `exited`, with nothing told. When the connection's own end
+   (idle, shutdown, a kick, the client's drop) closes the target first, that
+   end is the reason, not the target's close.
 
    On a `vnc` connection the agent reads the VNC handshake (RFC 6143 section
    7.1, as noVNC speaks it), forwarding each byte it admits unchanged: the
@@ -848,9 +850,16 @@ stream:
    (1), CredSSP (2) or CredSSP with Early User Authorization Result (8) ends
    `rdp_security_refused`. The agent then runs TLS 1.2 or later with the
    target, without a server name and without chain verification; a TLS
-   alert or protocol error ends `rdp_tls_failed`. The key is the SHA-256 of
-   the leaf certificate's SubjectPublicKeyInfo; the key question's payload
-   is, as SSH wire values: string that hash in lowercase hex, boolean
+   alert or protocol error ends `rdp_tls_failed`. Its ClientHello is the one
+   RDP clients send: under TLS 1.3 it offers psk_key_exchange_modes
+   (psk_dhe_ke), and under TLS 1.2 the session ticket extension, yet it
+   never resumes a session, so every connection runs a full handshake in
+   which the target proves the key checked below. The Windows RDP listener
+   ends a TLS 1.3 session whose client offered no psk_key_exchange_modes
+   once the client stays silent, as the agent does during the key question.
+   The key is the SHA-256 of the leaf certificate's SubjectPublicKeyInfo;
+   the key question's payload is, as SSH wire values: string that hash in
+   lowercase hex, boolean
    pinned, string the certificate's SHA-256 (whole DER) and string its
    SHA-1 (the Windows thumbprint), both lowercase hex, string subject and
    string issuer (RFC 4514, each at most 512 bytes), boolean self-signed
@@ -989,8 +998,8 @@ stream:
    or desktop connection, or the last channel of a `files` connection, closed or
    was refused, a Strict
    recording failure on it included), the desktop handshake's
-   `desktop_handshake_timeout`, `desktop_target_closed`,
-   `desktop_key_changed`, `desktop_key_downgraded` (`vnc`),
+   `desktop_handshake_timeout`, `desktop_target_closed` (also during the
+   relay), `desktop_key_changed`, `desktop_key_downgraded` (`vnc`),
    `desktop_key_rejected`, `desktop_key_unavailable`,
    `desktop_handshake_invalid`, `rdp_negotiation_failed`,
    `rdp_security_refused` and `rdp_tls_failed` (`rdp`) (step 3),

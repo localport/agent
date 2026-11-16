@@ -156,7 +156,7 @@ func (g *rdpGateway) run(ctx context.Context) (string, error) {
 	_ = g.target.SetDeadline(time.Now().Add(g.timeout))
 	// The pinned SPKI below replaces chain verification; no server name is
 	// sent.
-	tc := tls.Client(g.target, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	tc := tls.Client(g.target, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12, ClientSessionCache: noResumption{}})
 	if err := tc.Handshake(); err != nil {
 		if !isTLSProtocolError(err) {
 			return "", targetIOError(err)
@@ -319,6 +319,20 @@ func parseX224Confirm(confirm []byte) (protocol uint32, failed bool, err error) 
 	}
 	return 0, false, malformed(sideTarget, "X.224 negotiation type %#x", neg[0])
 }
+
+// noResumption is the gateway's TLS session cache: it never stores or
+// returns a session, so every connection runs a full handshake in which the
+// target proves the key the pin checks. crypto/tls offers
+// psk_key_exchange_modes on TLS 1.3 only when a cache is set, and the
+// Windows RDP listener aborts a TLS 1.3 session whose client offered none
+// once the client idles, as the gateway does during the key question. RDP
+// clients send the same hello: rustls (IronRDP) with resumption disabled,
+// OpenSSL (FreeRDP).
+type noResumption struct{}
+
+func (noResumption) Get(string) (*tls.ClientSessionState, bool) { return nil, false }
+
+func (noResumption) Put(string, *tls.ClientSessionState) {}
 
 // isTLSProtocolError reports whether a TLS handshake error is an alert or a
 // protocol error from the target, rather than a deadline, EOF or I/O error.

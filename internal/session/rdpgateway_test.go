@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -737,6 +738,71 @@ func TestDesktopClientEOFDuringHandshake(t *testing.T) {
 		target.waitClosed(t)
 		waitClosed(t, client)
 	})
+}
+
+// extPSKKeyExchangeModes is the TLS psk_key_exchange_modes extension
+// (RFC 8446 4.2.9).
+const extPSKKeyExchangeModes = 45
+
+// tls13Target answers the X.224 request with a CredSSP confirm and runs a
+// TLS 1.3 server that refuses a ClientHello without psk_key_exchange_modes,
+// as the Windows RDP listener in effect does (it aborts such a session once
+// the client idles). It sends each connection's DidResume to resumed, then
+// echoes the plaintext. One config serves every connection, so a ticket the
+// target issued would resume a later connection that offered it.
+func tls13Target(t *testing.T, cert tls.Certificate, resumed chan<- bool) *rdpTarget {
+	t.Helper()
+	cfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13,
+		GetConfigForClient: func(h *tls.ClientHelloInfo) (*tls.Config, error) {
+			if !slices.Contains(h.Extensions, extPSKKeyExchangeModes) {
+				return nil, errors.New("no psk_key_exchange_modes")
+			}
+			return nil, nil
+		}}
+	return newRDPTarget(t, cert, x224Confirm(rdpProtocolHybrid), func(c net.Conn) error {
+		tc := tls.Server(c, cfg)
+		if err := tc.Handshake(); err != nil {
+			return err
+		}
+		resumed <- tc.ConnectionState().DidResume
+		_, _ = io.Copy(tc, tc)
+		return errors.New("session over")
+	})
+}
+
+// The gateway's TLS 1.3 ClientHello offers psk_key_exchange_modes, as RDP
+// clients do, and it never resumes a session: the target's tickets, read
+// in the relay before the second connection, are not offered back, so every
+// connection runs a full handshake and its key is checked again.
+func TestRDPGatewayTLS13Profile(t *testing.T) {
+	cert := testCert(t, "desktop.test")
+	resumed := make(chan bool, 2)
+	target := tls13Target(t, cert, resumed)
+	addr := target.ln.Addr().String()
+	f := rdpFixture(t, addr, nil)
+	for i, wantPinned := range []bool{false, true} {
+		o := f.rdpOpts()
+		o.serial = uint64(42 + i)
+		client := f.connect(t, o)
+		ch, reqs := openRDP(t, client, marshalRequest(t, validRequest()))
+		<-target.requests
+		if info := rdpKeyRequest(t, reqs, true); info.Pinned != wantPinned {
+			t.Fatalf("connection %d: pinned %v, want %v", i, info.Pinned, wantPinned)
+		}
+		r := bufio.NewReader(ch)
+		readResponse(t, r)
+		if got := <-resumed; got {
+			t.Fatalf("connection %d resumed a TLS session", i)
+		}
+		// The echo follows the target's session tickets, so reading it means
+		// the gateway's TLS client processed them.
+		if _, err := ch.Write(tsNego); err != nil {
+			t.Fatal(err)
+		}
+		readFor(t, r, string(tsNego))
+		_ = ch.Close()
+		waitClosed(t, client)
+	}
 }
 
 // waitClock is manualClock whose desktop client wait the test fires. With

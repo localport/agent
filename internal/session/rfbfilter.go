@@ -695,11 +695,15 @@ func (f *rfbFilter) serverInit() error {
 }
 
 // end maps a direction's end to the relay's end reason: a violation's code,
-// or "" for a close.
+// desktop_target_closed for the target's EOF or I/O error, or "" for the
+// client's close.
 func (f *rfbFilter) end(err error) string {
-	if errors.Is(err, errRFBViolation) {
+	switch {
+	case errors.Is(err, errRFBViolation):
 		f.c.s.log("session: vnc connection refused: %v", err)
 		return CloseDesktopProtocolViolation
+	case targetEnded(err):
+		return CloseDesktopTargetClosed
 	}
 	return ""
 }

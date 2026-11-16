@@ -61,6 +61,9 @@ type desktopChannel struct {
 	// endReason is the connection's end reason when it ended before the
 	// channel was accepted; the open goroutine tells it instead.
 	endReason string
+	// detail names what ended the open when it ended the connection with no
+	// reason (endDetail, a dial's refusal code); the end line carries it.
+	detail string
 }
 
 // Clipboard decision vocabulary: the direction text moves (copy from the
@@ -173,7 +176,9 @@ func (c *conn) openDesktop(nc ssh.NewChannel, kind string, wg *sync.WaitGroup) {
 			_ = nc.Reject(ssh.ConnectionFailed, endRefusal(reason))
 			return
 		case err != nil:
-			_ = nc.Reject(ssh.ConnectionFailed, desktopDialCode(err))
+			code := desktopDialCode(err)
+			c.noteDesktopEnd(d, code)
+			_ = nc.Reject(ssh.ConnectionFailed, code)
 			return
 		}
 		ch, reqs, err := nc.Accept()
@@ -235,6 +240,7 @@ func (c *conn) openDesktop(nc ssh.NewChannel, kind string, wg *sync.WaitGroup) {
 			failed = true
 			return
 		case err != nil:
+			c.noteDesktopEnd(d, endDetail(err))
 			return
 		case reason != "":
 			failed = true
@@ -275,6 +281,13 @@ const (
 	sideTarget
 )
 
+func (s handshakeSide) String() string {
+	if s == sideTarget {
+		return "target"
+	}
+	return "client"
+}
+
 // handshakeFault is what went wrong in a desktop handshake.
 type handshakeFault uint8
 
@@ -287,6 +300,16 @@ const (
 	faultMalformed
 )
 
+func (f handshakeFault) String() string {
+	switch f {
+	case faultDeadline:
+		return "deadline"
+	case faultClosed:
+		return "closed"
+	}
+	return "malformed"
+}
+
 // handshakeError is a failure of a desktop handshake, typed by side and
 // fault so the end code never depends on error text.
 type handshakeError struct {
@@ -296,11 +319,7 @@ type handshakeError struct {
 }
 
 func (e *handshakeError) Error() string {
-	side := "client"
-	if e.side == sideTarget {
-		side = "target"
-	}
-	return fmt.Sprintf("desktop handshake (%s): %v", side, e.err)
+	return fmt.Sprintf("desktop handshake (%s): %v", e.side, e.err)
 }
 
 func (e *handshakeError) Unwrap() error { return e.err }
@@ -321,6 +340,27 @@ func targetIOError(err error) error {
 // malformed types bytes from side that do not parse or take a refused form.
 func malformed(side handshakeSide, format string, args ...any) error {
 	return &handshakeError{side: side, fault: faultMalformed, err: fmt.Errorf(format, args...)}
+}
+
+// targetEnded reports whether err is the target's EOF, I/O error or
+// deadline.
+func targetEnded(err error) bool {
+	var he *handshakeError
+	return errors.As(err, &he) && he.side == sideTarget && he.fault != faultMalformed
+}
+
+// endDetail names what ended a desktop open for its end line, by type
+// only, never by error text: the server's refusal of the VNC handshake,
+// the side and fault of a handshake error, or "internal".
+func endDetail(err error) string {
+	var he *handshakeError
+	switch {
+	case errors.Is(err, errRFBClosed):
+		return "target_refused"
+	case errors.As(err, &he):
+		return he.side.String() + "_" + he.fault.String()
+	}
+	return "internal"
 }
 
 // errDesktopEnded marks a handshake interrupted by the connection's end,
@@ -490,8 +530,9 @@ func (noDesktopKeys) Pin(context.Context, string, string, [32]byte) (identity.Pi
 
 // relayDesktop runs both directions of a desktop connection until either
 // ends: neither desktop protocol has a half-close, so one side's end is the
-// session's. A pump returns "" for a close, and the relay then closes the
-// channel and the target and waits for the other pump. A pump's reason closes
+// session's. A pump returns "" for the client's close, and the relay then
+// closes the channel and the target and waits for the other pump. A pump's
+// reason (a violation, a refusal, the target's end) closes
 // the target only and is returned at once: the channel stays open so the
 // connection's end can tell the client why, and that end's close of the
 // channel stops the other pump.
@@ -536,6 +577,36 @@ func desktopDialCode(err error) string {
 	return launcher.FwdCodeName(launcher.FwdCodeUnreachable)
 }
 
+// noteDesktopEnd records detail for the connection's end line.
+func (c *conn) noteDesktopEnd(d *desktopChannel, detail string) {
+	c.mu.Lock()
+	d.detail = detail
+	c.mu.Unlock()
+}
+
+// logDesktopEnd logs a desktop connection's end once, from run, which
+// decides it: the kind, the target, the reason ("exited" when it has none)
+// and the open's detail when one was recorded. The detail explains only an
+// end the open path caused, which is "exited"; an end decided otherwise
+// (idle, shutdown, a kick) that raced the open's failure is logged without
+// it. The line holds no error text and no bytes from either side.
+func (c *conn) logDesktopEnd(reason string) {
+	kind := c.adm.Load().Kind
+	c.mu.Lock()
+	var detail string
+	if c.desktop != nil {
+		detail = c.desktop.detail
+	}
+	c.mu.Unlock()
+	if reason == "" {
+		reason = CloseExited
+	}
+	if detail != "" && reason == CloseExited {
+		reason += " (" + detail + ")"
+	}
+	c.s.log("session: %s desktop connection to %s ended: %s", kind, c.s.desktopTarget(kind), reason)
+}
+
 // desktopDone marks the desktop channel stopped and ends the connection,
 // whose one channel it was.
 func (c *conn) desktopDone(d *desktopChannel) {
@@ -568,8 +639,8 @@ func (c *conn) endDesktop(reason string) {
 	}
 	c.mu.Unlock()
 	cancel()
-	// The client is told before the target closes: the target's close ends
-	// the relay, which closes the channel.
+	// The end request goes out before the channel closes; closing the
+	// target afterwards ends the relay's pumps.
 	if ch != nil {
 		if tell {
 			_, _ = ch.SendRequest(reqDesktopEnd, false, ssh.Marshal(struct{ Reason string }{reason}))

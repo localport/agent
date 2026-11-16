@@ -28,8 +28,7 @@ import (
 	"github.com/localport/agent/internal/security"
 )
 
-// DefaultAPIURL is the control plane. `--api` and LOCALPORT_API_URL override
-// it.
+// DefaultAPIURL is the control plane. `--api` and LOCALPORT_API_URL override it
 const DefaultAPIURL = "https://api.localport.io"
 
 // APIURLEnv is the environment override for DefaultAPIURL.

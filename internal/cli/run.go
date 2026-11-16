@@ -117,7 +117,8 @@ func runEnrolledDevices(ctx context.Context, version string, who invoker, asServ
 // reload signal (SIGHUP on Unix) re-reads the devices through it and applies
 // the changed ones only (deviceRunner.reload).
 func serveDevices(parent context.Context, version string, store *identity.Store, devices []config.LocalDevice, noUI, noMux bool, reload func() ([]config.LocalDevice, error)) error {
-	logEvent := func(line string) { fmt.Fprintf(os.Stderr, "  [identity] %s\n", line) }
+	// Each line names its own topic (identity, session, reload).
+	logEvent := func(line string) { fmt.Fprintf(os.Stderr, "  [event] %s\n", line) }
 	cfg := &config.Config{AgentVersion: version, NoMux: noMux}
 	var a *agent.Agent
 	runner := &deviceRunner{parent: parent, store: store, logEvent: logEvent, served: map[identity.Ref]*servedDevice{}}

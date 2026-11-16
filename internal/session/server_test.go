@@ -1049,6 +1049,35 @@ func TestShutdownEndsConnections(t *testing.T) {
 	}
 }
 
+// A connection's session slot is free before its handler is unregistered,
+// so a Shutdown that returned leaves no slot taken.
+func TestConnReleasesItsSlotBeforeShutdownReturns(t *testing.T) {
+	f := newSSHFixture(t, nil)
+	live := make(chan int, 1)
+	hook := func(s *Server) {
+		if s != f.srv {
+			return
+		}
+		select {
+		case live <- s.LiveSessions():
+		default:
+		}
+	}
+	beforeConnUnregister.Store(&hook)
+	t.Cleanup(func() { beforeConnUnregister.Store(nil) })
+	client := f.connect(t, f.defaults())
+	if n := f.srv.LiveSessions(); n != 1 {
+		t.Fatalf("live sessions %d", n)
+	}
+	if err := f.srv.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	waitClosed(t, client)
+	if n := <-live; n != 0 {
+		t.Fatalf("%d session slots taken when the connection's handler was unregistered", n)
+	}
+}
+
 // A launcher refusal fails the shell request and names the reason on stderr.
 func TestLauncherRefusalFailsTheRequest(t *testing.T) {
 	f := newSSHFixture(t, nil)

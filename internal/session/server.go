@@ -141,7 +141,8 @@ type ServerConfig struct {
 	// DesktopKeys holds the desktop targets' pinned server keys; nil ends
 	// every connection whose handshake needs it (desktop_key_unavailable).
 	DesktopKeys DesktopKeys
-	// OnEvent receives one line per notable failure. Optional.
+	// OnEvent receives one line per notable failure and one per desktop
+	// connection's end. Optional.
 	OnEvent func(string)
 	// OnClipboard receives each clipboard transfer decision of a desktop
 	// connection; it must not block. Nil reports none.
@@ -314,6 +315,11 @@ var afterConnPublished atomic.Pointer[func(*resumable)]
 // onConnEnd, when set by a test, gets the reason serveConn ends a connection
 // with ("" for a client's close), before its channels end.
 var onConnEnd atomic.Pointer[func(reason string)]
+
+// beforeConnUnregister, when set by a test, runs in removeConn just before
+// the connection's handler is unregistered, the step that lets Shutdown
+// return. It gets the server, since every test's servers share it.
+var beforeConnUnregister atomic.Pointer[func(*Server)]
 
 // detachTimeout bounds how long a connection waits detached for a resume.
 const detachTimeout = 5 * time.Minute
@@ -836,9 +842,8 @@ func (s *Server) proofFailed(e *resumable) int {
 
 // serveConn runs one connection: the SSH handshake on its ResumableConn,
 // bounded by handshakeTimeout, then run. It owns the session slot serveNew
-// took and removes the connection when it ends.
+// took and removes the connection, slot included, when it ends.
 func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64, admitted *ssh.Certificate, clientAddr string) {
-	defer s.releaseSlot()
 	defer s.removeConn(e, h)
 	defer func() {
 		if r := recover(); r != nil {
@@ -871,7 +876,9 @@ func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64,
 
 // removeConn forgets an ended connection: no resume finds it, its detach
 // timer stops, its last bytes get closeFlushTimeout to leave on an attached
-// stream, and then the conn is dropped.
+// stream, and then the conn is dropped and its session slot freed. The slot
+// is freed before the handler is unregistered, the step that lets Shutdown
+// return, so a returned Shutdown leaves no slot taken.
 func (s *Server) removeConn(e *resumable, h *handler) {
 	s.mu.Lock()
 	delete(s.conns, e.handle)
@@ -884,6 +891,10 @@ func (s *Server) removeConn(e *resumable, h *handler) {
 	case <-time.After(closeFlushTimeout):
 	}
 	e.rc.End(errConnEnded)
+	s.releaseSlot()
+	if hook := beforeConnUnregister.Load(); hook != nil {
+		(*hook)(s)
+	}
 	s.unregister(h)
 }
 
@@ -1450,6 +1461,9 @@ wait:
 	}
 	if hook := onConnEnd.Load(); hook != nil {
 		(*hook)(reason)
+	}
+	if isDesktopKind(c.adm.Load().Kind) {
+		c.logDesktopEnd(reason)
 	}
 	ended := c.end(reason)
 	_ = sc.Close()

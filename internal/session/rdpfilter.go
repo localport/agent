@@ -222,7 +222,9 @@ func newRDPFilterOver(c *conn, protocol uint32, fromClient *bufio.Reader, toClie
 	return f
 }
 
-// end maps a direction's end to the relay's end reason.
+// end maps a direction's end to the relay's end reason: a refusal's or a
+// violation's code, desktop_target_closed for the target's EOF or I/O
+// error, or "" for the client's close.
 func (f *rdpFilter) end(err error) string {
 	switch {
 	case errors.Is(err, errRDPChannelRefused):
@@ -231,6 +233,8 @@ func (f *rdpFilter) end(err error) string {
 	case errors.Is(err, errRDPViolation):
 		f.c.s.log("session: rdp connection refused: %v", err)
 		return CloseDesktopProtocolViolation
+	case targetEnded(err):
+		return CloseDesktopTargetClosed
 	}
 	return ""
 }
