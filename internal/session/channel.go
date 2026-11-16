@@ -61,6 +61,10 @@ var termPattern = regexp.MustCompile(`^[a-zA-Z0-9.+-]{1,32}$`)
 // a test can order an end before a launcher Start returns.
 var afterChannelEnd atomic.Pointer[func()]
 
+// beforeRequestReply, when set by a test, runs after a channel request was
+// handled and before its reply, so a test can hold the reply back.
+var beforeRequestReply atomic.Pointer[func(*channel)]
+
 // ptyRequest is a pty-req's terminal (RFC 4254 6.2).
 type ptyRequest struct {
 	Term          string
@@ -95,6 +99,10 @@ type channel struct {
 	rec *sessionRecorder
 	// recAttempted is set under mu once the start tried to record.
 	recAttempted bool
+	// relayPending is set by a successful start; serve starts the relay
+	// (startRelay) once the start request is answered. Only serve's
+	// goroutine reads and writes it.
+	relayPending bool
 
 	// mu orders start's hand-off of helper, session, started and readerDone
 	// against end, which may run on another goroutine while the launcher
@@ -121,8 +129,14 @@ func (ch *channel) serve(reqs <-chan *ssh.Request) {
 	for req := range reqs {
 		ch.c.active()
 		ok := ch.handle(req)
+		if hook := beforeRequestReply.Load(); hook != nil {
+			(*hook)(ch)
+		}
 		if req.WantReply {
 			_ = req.Reply(ok, nil)
+		}
+		if ch.relayPending {
+			ch.startRelay()
 		}
 	}
 	ch.end("")
@@ -215,9 +229,10 @@ func validSize(cols, rows uint32) bool {
 	return cols >= 1 && cols <= maxTerminalSize && rows >= 1 && rows <= maxTerminalSize
 }
 
-// start opens the channel's recording on a recorded connection, asks the
-// launcher for the channel's session and starts the relay. A refusal is
-// written to the channel's stderr and fails the request.
+// start opens the channel's recording on a recorded connection and asks the
+// launcher for the channel's session; serve starts the relay once the request
+// is answered. A refusal is written to the channel's stderr and fails the
+// request.
 func (ch *channel) start(kind, command string) bool {
 	s := ch.c.s
 	adm := ch.c.adm.Load()
@@ -302,17 +317,25 @@ func (ch *channel) start(kind, command string) bool {
 			rec.file(ev, ch.halted)
 		}
 	}
-	if rec != nil {
-		if kind != launcher.KindSFTP {
-			// Written before the helper's output is relayed, so it is the
-			// first line the user sees; an sftp client shows no stderr.
-			_, _ = ch.ch.Stderr().Write([]byte(recordedNotice))
-		}
-		go ch.watchRecording(rec)
+	if rec != nil && kind != launcher.KindSFTP {
+		// Written before the helper's output is relayed, so it is the first
+		// line the user sees; an sftp client shows no stderr.
+		_, _ = ch.ch.Stderr().Write([]byte(recordedNotice))
+	}
+	ch.relayPending = true
+	return true
+}
+
+// startRelay starts the relay goroutines of a channel whose start succeeded.
+// serve calls it after the start request's reply: a helper that exits at once
+// closes the channel from readHelper, which must not overtake that reply.
+func (ch *channel) startRelay() {
+	ch.relayPending = false
+	if ch.rec != nil {
+		go ch.watchRecording(ch.rec)
 	}
 	go ch.readHelper()
 	go ch.readClient()
-	return true
 }
 
 // openRecording opens this channel's own recording when the certificate the

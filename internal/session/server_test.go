@@ -552,6 +552,34 @@ func TestUserauthRequiresThePrincipalAsUser(t *testing.T) {
 	}
 }
 
+// The reply to exec precedes everything the command's end sends: a helper
+// that exits at once must not close the channel before the client learns its
+// request succeeded, or the client sees the request fail (io.EOF). The hook
+// holds the reply until the relay has ended, or 500 ms when no relay runs.
+func TestExecReplyPrecedesTheExit(t *testing.T) {
+	hold := func(ch *channel) {
+		if ch.readerDone == nil {
+			return
+		}
+		select {
+		case <-ch.readerDone:
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	beforeRequestReply.Store(&hold)
+	t.Cleanup(func() { beforeRequestReply.Store(nil) })
+	f := newSSHFixture(t, nil)
+	o := f.defaults()
+	o.kind = "ssh"
+	client := f.connect(t, o)
+	sess, _ := client.NewSession()
+	err := sess.Run("ls -l /tmp")
+	var exitErr *ssh.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitStatus() != 3 {
+		t.Fatalf("run = %v, want exit status 3", err)
+	}
+}
+
 func waitClosed(t *testing.T, client *ssh.Client) {
 	t.Helper()
 	done := make(chan error, 1)
