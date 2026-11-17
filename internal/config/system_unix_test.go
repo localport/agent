@@ -105,7 +105,7 @@ func TestSystemConfigWriteNamesInstallWhenGroupMissing(t *testing.T) {
 	}
 }
 
-// Root creates run.lock root:localport 0660; the agent account then opens the
+// Root creates run.lock root:security.AgentGroup 0660; the agent account then opens the
 // existing file without creating it and locks it.
 func TestSystemRunLock(t *testing.T) {
 	f := systemTestFile(t, false)

@@ -11,7 +11,7 @@ import (
 	"github.com/localport/agent/internal/errcode"
 )
 
-// errAccount is a failure to create or look up the agent account.
+// errAccount is a failure to create, look up or inspect the agent account.
 var errAccount = errcode.New(errcode.AccountNotChanged)
 
 // Account is the agent account's ids.

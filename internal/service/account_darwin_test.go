@@ -103,8 +103,10 @@ func TestAccountIDs(t *testing.T) {
 		"uid below the range":             {groups: "wheel 0\n", owner: ownerIDs{401, 401}, hasOwner: true, uid: 450, gid: 450},
 		"uid above the range":             {groups: "wheel 0\n", owner: ownerIDs{501, 501}, hasOwner: true, uid: 450, gid: 450},
 		"root-owned directory":            {groups: "wheel 0\n", owner: ownerIDs{0, 0}, hasOwner: true, uid: 450, gid: 450},
-		"gid held by another group":       {groups: "wheel 0\nstaff 20\nmine 481\n", owner: ownerIDs{480, 481}, hasOwner: true, uid: 450, gid: 450},
-		"gid free but outside the range":  {groups: "wheel 0\n", owner: ownerIDs{480, 20}, hasOwner: true, uid: 450, gid: 450},
+		"owner gid held, group exists":    {groups: AgentAccount + " 490\nstaff 20\n", owner: ownerIDs{480, 20}, hasOwner: true, uid: 480, gid: 490},
+		"owner gid held, no group":        {groups: "wheel 0\nstaff 20\nmine 481\n", owner: ownerIDs{480, 481}, hasOwner: true, uid: 480, gid: 480},
+		"owner gid outside the range":     {groups: "wheel 0\n", owner: ownerIDs{480, 1234}, hasOwner: true, uid: 480, gid: 480},
+		"owner gid and uid held as gids":  {groups: "wheel 0\nmine 481\nyours 480\n", owner: ownerIDs{480, 481}, hasOwner: true, uid: 480, gid: 450},
 	} {
 		uid, gid, err := accountIDs(users, tc.groups, tc.owner, tc.hasOwner)
 		if err != nil || uid != tc.uid || gid != tc.gid {

@@ -132,7 +132,7 @@ func TestSetPinsChildResetsThePin(t *testing.T) {
 
 // Root on the system layout never opens the store: a pin reset runs in the
 // set-pins agent child. A reset after a setting takes the same resetPins
-// path; writing the system config here would need the localport group.
+// path; writing the system config here would need the agent group.
 func TestSetRootResetsPinsInTheAgentChild(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the agent child runs under Unix root only (agentChildRoot)")

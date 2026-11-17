@@ -315,7 +315,7 @@ var registry = []Entry{
 	{ServiceManagerFailed, "Service manager failed", "the service manager could not carry out the step"},
 	{ServiceDefinitionFailed, "Service definition not written", "the device service definition could not be read, written or removed"},
 	{AccountMissing, "Agent account missing", "the agent account " + agentaccount.Name + " does not exist; create it with: sudo localport service install"},
-	{AccountNotChanged, "Agent account not changed", "the agent account " + agentaccount.Name + " could not be created or looked up"},
+	{AccountNotChanged, "Agent account not changed", "the agent account " + agentaccount.Name + " could not be created, looked up or inspected"},
 	{SystemNeedsRoot, "Needs root", "only root or an elevated Administrator changes the device config directory"},
 	{AgentGroupMissing, "Agent group missing", "the group " + agentaccount.Name + " does not exist; create it with: sudo localport service install"},
 	{LocalConfigUnusable, "Local config unusable", "the local config cannot be located, read, secured or locked"},

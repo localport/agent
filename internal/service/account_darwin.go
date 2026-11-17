@@ -46,7 +46,8 @@ var identityDirOwner = lstatDirOwner
 
 // lstatDirOwner returns the owner of the directory at path, without following
 // a link. Any failure reads as no directory: createAccount then takes fresh
-// ids, and ensureIdentityDir refuses a directory the new account does not own.
+// ids, and ensureIdentityDir adopts an empty directory owned by root and
+// refuses any other owner.
 func lstatDirOwner(path string) (ownerIDs, bool) {
 	fi, err := os.Lstat(path)
 	if err != nil || !fi.IsDir() {
@@ -106,30 +107,35 @@ func createAccount(ctx context.Context, run runner, identityDir string) error {
 }
 
 // accountIDs picks the uid and gid of a new account from the dscl -list
-// outputs. A recreated account takes the identity directory's owner when its
-// uid lies in the account range and no account holds it, and its gid is the
-// agent group's or free (and in range, when it becomes the group's): the
-// credentials then keep their owner and no key material is chowned.
-// Otherwise it takes the first id free as both a uid and a gid. An existing
-// agent group keeps its gid either way.
+// outputs. The uid is the identity directory owner's when that uid lies in
+// the account range and no account holds it, so the credentials keep their
+// owner and no key material is chowned; otherwise it is the first id free as
+// both a uid and a gid. The directory's gid grants nothing (the directory is
+// 0700, its files 0600), so it does not decide reuse. An existing agent group
+// keeps its gid. A new group takes the first of the directory's gid, the uid
+// and a fresh id that lies in the range and is held by no group.
 func accountIDs(uids, gids string, owner ownerIDs, hasOwner bool) (uid, gid int, err error) {
 	groupGID, groupFound := listedID(gids, AgentAccount)
-	if hasOwner && inAccountRange(owner.uid) && !idListed(uids, owner.uid) {
-		switch {
-		case groupFound && (owner.gid == groupGID || !idListed(gids, owner.gid)):
-			return owner.uid, groupGID, nil
-		case !groupFound && inAccountRange(owner.gid) && !idListed(gids, owner.gid):
-			return owner.uid, owner.gid, nil
+	if !hasOwner || !inAccountRange(owner.uid) || idListed(uids, owner.uid) {
+		id, err := freeSystemID(uids, gids)
+		if err != nil {
+			return 0, 0, err
 		}
-	}
-	id, err := freeSystemID(uids, gids)
-	if err != nil {
-		return 0, 0, err
+		if groupFound {
+			return id, groupGID, nil
+		}
+		return id, id, nil
 	}
 	if groupFound {
-		return id, groupGID, nil
+		return owner.uid, groupGID, nil
 	}
-	return id, id, nil
+	for _, id := range []int{owner.gid, owner.uid} {
+		if inAccountRange(id) && !idListed(gids, id) {
+			return owner.uid, id, nil
+		}
+	}
+	gid, err = freeSystemID(uids, gids)
+	return owner.uid, gid, err
 }
 
 func inAccountRange(id int) bool { return id >= accountIDFirst && id < accountIDLimit }

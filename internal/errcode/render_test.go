@@ -215,7 +215,7 @@ func TestAccountCodesNameThePlatformAccount(t *testing.T) {
 	}
 	for code, want := range map[errcode.Code]string{
 		errcode.AccountMissing:     "the agent account " + account + " does not exist; create it with: sudo localport service install [AG137]",
-		errcode.AccountNotChanged:  "the agent account " + account + " could not be created or looked up [AG138]",
+		errcode.AccountNotChanged:  "the agent account " + account + " could not be created, looked up or inspected [AG138]",
 		errcode.AgentGroupMissing:  "the group " + account + " does not exist; create it with: sudo localport service install [AG140]",
 		errcode.AgentChildStart:    "localport could not start itself as the agent account " + account + " [AG038]",
 		errcode.AgentAccountUnsafe: "the agent account " + account + " can log in or reaches other users' files; remove it, then run: sudo localport service install: it is a member of staff [AG147]",
