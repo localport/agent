@@ -222,3 +222,97 @@ func TestFindDevice(t *testing.T) {
 		t.Fatalf("an unknown name = %v, want AG120", err)
 	}
 }
+
+// A Windows default login comes only from a user account SID (S-1-5-21-*): a
+// local account's SAM name, a domain account's UPN. Services, Entra ID and a
+// failed lookup get none, with the reason and the --logins remedy.
+func TestWindowsDefaultLogin(t *testing.T) {
+	name := func(s string) func() (string, error) { return func() (string, error) { return s, nil } }
+	fail := func() (string, error) { return "", errors.New("ERROR_NO_SUCH_DOMAIN") }
+	const user = "S-1-5-21-1004336348-1177238915-682003330-1001"
+	cases := []struct {
+		label, sid string
+		local      bool
+		sam, upn   func() (string, error)
+		want, hint string
+	}{
+		{"local account", user, true, name("ana"), fail, "ana", ""},
+		{"domain account", user, false, fail, name("ana@corp.example"), "ana@corp.example", ""},
+		{"domain unreachable", user, false, name("ana"), fail, "", "--password-logins"},
+		{"local name unreadable", user, true, fail, name("x@y"), "", "--logins"},
+		{"SYSTEM", "S-1-5-18", false, name("SYSTEM"), name("x@y"), "", "not a user account"},
+		{"LOCAL SERVICE", "S-1-5-19", false, name("LOCAL SERVICE"), name("x@y"), "", "not a user account"},
+		{"NETWORK SERVICE", "S-1-5-20", false, name("NETWORK SERVICE"), name("x@y"), "", "not a user account"},
+		{"NT SERVICE", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", false, name("svc"), name("x@y"), "", "not a user account"},
+		{"virtual account", "S-1-5-83-1-1", false, name("vm"), name("x@y"), "", "not a user account"},
+		{"Entra ID", "S-1-12-1-1-2-3-4", false, name("ana"), name("ana@corp.example"), "", "--password-logins"},
+	}
+	for _, tc := range cases {
+		login, noDefault := windowsDefaultLogin(tc.sid, tc.local, tc.sam, tc.upn)
+		if login != tc.want || (tc.want == "") != (noDefault != "") || !strings.Contains(noDefault, tc.hint) {
+			t.Errorf("%s: = %q, %q; want %q with a reason containing %q", tc.label, login, noDefault, tc.want, tc.hint)
+		}
+	}
+}
+
+// The Windows rows of the default-login table, through apply as connect and set
+// run it.
+func TestWindowsLoginsThroughApply(t *testing.T) {
+	apply := func(who invoker, stored config.LocalDevice, args ...string) (config.LocalDevice, error) {
+		fs, flags := parseDeviceFlags(t, args...)
+		err := flags.apply(fs, &stored, who)
+		return stored, err
+	}
+	elevated := invoker{privileged: true, current: "ana@corp.example", sudoUser: "ignored", goos: "windows"}
+	if d, err := apply(elevated, config.LocalDevice{}, "--enable", "terminal"); err != nil || !slices.Equal(d.Logins, []string{"ana@corp.example"}) {
+		t.Fatalf("elevated default = %v, %v; want the elevated account", d.Logins, err)
+	}
+	plain := invoker{privileged: false, current: "ana", goos: "windows"}
+	if d, err := apply(plain, config.LocalDevice{}, "--enable", "terminal"); err != nil || !slices.Equal(d.Logins, []string{"ana"}) {
+		t.Fatalf("non-elevated default = %v, %v; want [ana]", d.Logins, err)
+	}
+	if _, err := apply(plain, config.LocalDevice{}, "--enable", "terminal", "--logins", "Ana"); err != nil {
+		t.Fatalf("non-elevated --logins with its own name = %v, want accepted", err)
+	}
+	if _, err := apply(plain, config.LocalDevice{}, "--enable", "terminal", "--logins", "bob"); err == nil || !strings.Contains(err.Error(), "an elevated shell") {
+		t.Fatalf("non-elevated --logins bob = %v, want a refusal naming an elevated shell", err)
+	}
+	service := invoker{privileged: true, noDefault: "this process runs as S-1-5-18, which is not a user account; name the accounts terminal and files sessions may use with --logins", goos: "windows"}
+	if _, err := apply(service, config.LocalDevice{}, "--enable", "files"); !errors.Is(err, errNoDefaultLogin) || !strings.Contains(err.Error(), "S-1-5-18") {
+		t.Fatalf("service account default = %v, want errNoDefaultLogin naming the SID", err)
+	}
+	if d, err := apply(service, config.LocalDevice{}, "--enable", "files", "--logins", "ops"); err != nil || !slices.Equal(d.Logins, []string{"ops"}) {
+		t.Fatalf("service account with --logins = %v, %v; want [ops]", d.Logins, err)
+	}
+	entra := invoker{privileged: false, noDefault: "an Entra ID account's sign-in name cannot be read; " + windowsLoginHint, goos: "windows"}
+	if _, err := apply(entra, config.LocalDevice{}, "--enable", "terminal"); !errors.Is(err, errNoDefaultLogin) || !strings.Contains(err.Error(), "--password-logins") {
+		t.Fatalf("Entra default = %v, want errNoDefaultLogin naming --password-logins", err)
+	}
+	if _, err := apply(entra, config.LocalDevice{}, "--enable", "terminal", "--logins", "ana@corp.example"); err == nil || !strings.Contains(err.Error(), "elevated") {
+		t.Fatalf("non-elevated Entra --logins = %v, want told to run elevated", err)
+	}
+	stored := config.LocalDevice{Enable: []config.Capability{config.CapabilityTerminal}, Logins: []string{"ops"}}
+	if d, err := apply(service, stored, "--allow-ports", "22"); err != nil || !slices.Equal(d.Logins, []string{"ops"}) {
+		t.Fatalf("set keeping stored logins = %v, %v", d.Logins, err)
+	}
+}
+
+// The Windows account lookup runs only when the merged device uses logins, and
+// its answer is the default.
+func TestWindowsLoginLookupIsDeferred(t *testing.T) {
+	calls := 0
+	who := invoker{privileged: true, goos: "windows", lookupLogin: func() (string, string) {
+		calls++
+		return "ana@corp.example", ""
+	}}
+	fs, flags := parseDeviceFlags(t, "--allow-ports", "502")
+	var d config.LocalDevice
+	if err := flags.apply(fs, &d, who); err != nil || calls != 0 {
+		t.Fatalf("port-only device: err %v, %d lookups; want none", err, calls)
+	}
+	fs, flags = parseDeviceFlags(t, "--enable", "terminal")
+	d = config.LocalDevice{}
+	if err := flags.apply(fs, &d, who); err != nil || calls != 1 || !slices.Equal(d.Logins, []string{"ana@corp.example"}) {
+		t.Fatalf("terminal device: %v, %v, %d lookups; want [ana@corp.example] after one", d.Logins, err, calls)
+	}
+}

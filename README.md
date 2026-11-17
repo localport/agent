@@ -82,8 +82,9 @@ Create a tunnel in the [dashboard](https://dashboard.localport.io) to obtain its
 localport http 3000 -t <token>
 
 # Enrol this machine as a fleet device with the join token the dashboard shows,
-# and install the device service that runs it at boot
-sudo localport connect <join-token> --enable terminal,files --logins pi
+# and install the device service that runs it at boot. Terminal and files sign
+# in as the user who ran sudo unless --logins names the accounts.
+sudo localport connect <join-token> --enable terminal,files
 
 # A device serving another machine, limited to these ports
 sudo localport connect <join-token> --host 192.168.1.100 --allow-ports 502,8000-8100
