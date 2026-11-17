@@ -247,7 +247,11 @@ func TestConcurrentDesktopPins(t *testing.T) {
 // A pin waiting for another process's lock stops when its context ends.
 func TestDesktopPinWaitIsCancellable(t *testing.T) {
 	store := deviceTicketKeys(t)
-	release, held, err := tryLockFile(filepath.Join(store.Dir(deviceRef), desktopPinsLockFile))
+	lock, err := store.lockFileAt(deviceRef.Path(), desktopPinsLockFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, held, err := tryLockFile(lock, false)
 	if err != nil || !held {
 		t.Fatalf("hold the lock: %v, %v", held, err)
 	}

@@ -186,28 +186,79 @@ func (s *Store) Promote(ref Ref, serial string) error {
 	return nil
 }
 
-// tryLock takes the credential's renewal lock without blocking. It lives
-// beside the material, so it is scoped to one credential, and the OS releases
-// it if the holder dies. The credential directory must exist.
+// tryLock takes the credential's renewal lock without blocking. It lives in
+// the credential's lock directory (LockDir), so it is scoped to one credential
+// and exists whether or not the credential does, and the OS releases it if
+// the holder dies.
 func (s *Store) tryLock(ref Ref) (release func(), held bool, err error) {
-	return tryLockFile(filepath.Join(s.Dir(ref), lockFile))
+	unshare, held, err := s.tryShareStore()
+	if err != nil || !held {
+		return nil, false, err
+	}
+	path, err := s.lockFileAt(ref.Path(), lockFile)
+	if err != nil {
+		unshare()
+		return nil, false, err
+	}
+	unlock, held, err := tryLockFile(path, false)
+	if err != nil || !held {
+		unshare()
+		return nil, false, err
+	}
+	return func() { unlock(); unshare() }, true, nil
+}
+
+// lockCredential takes the store lock shared, then the lock file name of the
+// credential at rel (a path relative to Root), each waiting up to wait and
+// returning busy when still held then. The returned func releases both.
+// onAttempt, when set, runs after each attempt on the credential lock.
+func (s *Store) lockCredential(ctx context.Context, rel, name string, wait time.Duration, busy error, onAttempt func(held bool)) (func(), error) {
+	unshare, err := s.shareStore(ctx, wait, busy)
+	if err != nil {
+		return nil, err
+	}
+	path, err := s.lockFileAt(rel, name)
+	if err != nil {
+		unshare()
+		return nil, err
+	}
+	release, err := waitLockFile(ctx, path, false, wait, busy, onAttempt)
+	if err != nil {
+		unshare()
+		return nil, err
+	}
+	return func() { release(); unshare() }, nil
 }
 
 // waitLock takes the renewal lock, retrying for up to wait. It returns
 // ErrRenewalInProgress when the lock is still held then, and ctx.Err() when
 // ctx ends first.
 func (s *Store) waitLock(ctx context.Context, ref Ref, wait time.Duration) (func(), error) {
-	return WaitLockFile(ctx, filepath.Join(s.Dir(ref), lockFile), wait, ErrRenewalInProgress)
+	return s.waitLockAt(ctx, ref.Path(), wait)
 }
 
-// tryLockFile takes the file lock at path without blocking. The lock is per
-// open file, so two holders in one process exclude each other too.
-func tryLockFile(path string) (release func(), held bool, err error) {
+// waitLockAt is waitLock for the credential at rel, a path relative to Root.
+func (s *Store) waitLockAt(ctx context.Context, rel string, wait time.Duration) (func(), error) {
+	release, err := s.lockCredential(ctx, rel, lockFile, wait, ErrRenewalInProgress, s.renewLockAttempt)
+	if err != nil || s.renewLockReleasing == nil {
+		return release, err
+	}
+	return func() { s.renewLockReleasing(); release() }, nil
+}
+
+// tryLockFile takes the file lock at path without blocking, shared or
+// exclusive. The lock is per open file, so two holders in one process exclude
+// each other too.
+func tryLockFile(path string, shared bool) (release func(), held bool, err error) {
 	f, err := security.OpenLockFile(path)
 	if err != nil {
 		return nil, false, errStoreUnusable.With(err, "open the lock "+filepath.Base(path))
 	}
-	held, err = security.TryLockFile(f)
+	if shared {
+		held, err = security.TryLockFileShared(f)
+	} else {
+		held, err = security.TryLockFile(f)
+	}
 	if err != nil || !held {
 		f.Close()
 		return nil, false, err
@@ -222,14 +273,23 @@ func tryLockFile(path string) (release func(), held bool, err error) {
 // returns busy when the lock is still held then, and ctx.Err() when ctx ends
 // first.
 func WaitLockFile(ctx context.Context, path string, wait time.Duration, busy error) (func(), error) {
+	return waitLockFile(ctx, path, false, wait, busy, nil)
+}
+
+// waitLockFile is WaitLockFile for a shared or exclusive lock; onAttempt,
+// when set, runs after each attempt with whether it took the lock.
+func waitLockFile(ctx context.Context, path string, shared bool, wait time.Duration, busy error, onAttempt func(held bool)) (func(), error) {
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 	poll := time.NewTicker(lockPollInterval)
 	defer poll.Stop()
 	for {
-		release, held, err := tryLockFile(path)
+		release, held, err := tryLockFile(path, shared)
 		if err != nil {
 			return nil, err
+		}
+		if onAttempt != nil {
+			onAttempt(held)
 		}
 		if held {
 			return release, nil

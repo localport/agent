@@ -16,6 +16,15 @@ import (
 type Agent struct {
 	cfg *config.Config
 
+	// KeepIdle keeps Run running with no tunnel left, until ctx ends, and
+	// makes it return nil: the device service idles instead of exiting, and
+	// OnDeviceEnd handles each end. Set before Run.
+	KeepIdle bool
+	// OnDeviceEnd, optional, receives each device tunnel whose Run returned an
+	// error, after it returned. It runs on that tunnel's goroutine and must
+	// not block or call back into the Agent. Set before Run.
+	OnDeviceEnd func(t *tunnel.Tunnel, err error)
+
 	mu sync.Mutex
 	// idle is signalled, under mu, when live drops.
 	idle    *sync.Cond
@@ -48,7 +57,8 @@ func New(cfg *config.Config) *Agent {
 // changes. Run is called once per Agent.
 func (a *Agent) Started() <-chan struct{} { return a.started }
 
-// Run starts every endpoint with handler and blocks until all return.
+// Run starts every endpoint with handler and blocks until all return, or with
+// KeepIdle until ctx ends and all return.
 //
 // handler is a parameter because the renderer reads a.Tunnels and is built
 // after the Agent, and each tunnel copies the handler at construction.
@@ -72,6 +82,15 @@ func (a *Agent) Run(ctx context.Context, handler tunnel.EventHandler) error {
 		}
 	}()
 
+	if a.KeepIdle {
+		// Wakes the wait below when ctx ends with no tunnel left.
+		stop := context.AfterFunc(ctx, func() {
+			a.mu.Lock()
+			a.idle.Broadcast()
+			a.mu.Unlock()
+		})
+		defer stop()
+	}
 	a.mu.Lock()
 	a.ctx, a.handler = ctx, handler
 	for _, spec := range a.cfg.Tunnels {
@@ -95,11 +114,14 @@ func (a *Agent) Run(ctx context.Context, handler tunnel.EventHandler) error {
 		a.startLocked(deviceOptions(device))
 	}
 	close(a.started)
-	for a.live > 0 {
+	for a.live > 0 || (a.KeepIdle && ctx.Err() == nil) {
 		a.idle.Wait()
 	}
 	a.done = true
 	defer a.mu.Unlock()
+	if a.KeepIdle {
+		return nil
+	}
 	return errors.Join(a.runErrs...)
 }
 
@@ -162,8 +184,12 @@ func (a *Agent) startLocked(opts tunnel.Options) *tunnel.Tunnel {
 	ctx := a.ctx
 	go func() {
 		err := t.Run(ctx)
+		if err != nil && t.IsDevice() && a.OnDeviceEnd != nil {
+			a.OnDeviceEnd(t, err)
+		}
 		a.mu.Lock()
-		if err != nil {
+		// With KeepIdle, Run returns nil and OnDeviceEnd handled the error.
+		if err != nil && !a.KeepIdle {
 			a.runErrs = append(a.runErrs, err)
 		}
 		delete(a.exited, t)
@@ -203,6 +229,8 @@ func deviceOptions(device config.DeviceSpec) tunnel.Options {
 		SessionHandler:   device.SessionHandler,
 		ClipboardNotices: device.ClipboardNotices,
 		HintRevoked:      device.HintRevoked,
+		OnStatus:         device.OnStatus,
+		FlushRecordings:  device.FlushRecordings,
 	}
 	// A nil *DeviceRegistrar in the interface would read as present.
 	if device.Credential != nil {

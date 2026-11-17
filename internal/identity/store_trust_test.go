@@ -83,8 +83,12 @@ func TestLoadRefusesAGroupWritableMeta(t *testing.T) {
 // A symlinked renewal lock is refused before O_CREATE or O_RDWR reach its
 // target.
 func TestRenewLockRefusesSymlink(t *testing.T) {
-	store, ref, dir, _ := savedCredential(t)
+	store, ref, _, _ := savedCredential(t)
 	victim := filepath.Join(t.TempDir(), "victim")
+	dir, err := store.LockDir(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_ = os.Remove(filepath.Join(dir, lockFile))
 	if err := os.Symlink(victim, filepath.Join(dir, lockFile)); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)

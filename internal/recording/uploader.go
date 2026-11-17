@@ -101,6 +101,9 @@ type Uploader struct {
 	// diskWork holds the spool removals decided under mu; Run performs them
 	// after releasing it.
 	diskWork []func()
+	// removed is closed, and replaced, each time an entry is removed; Flush
+	// waits on it.
+	removed chan struct{}
 }
 
 // upload is one recording's delivery state, guarded by Uploader.mu.
@@ -191,6 +194,7 @@ func NewUploader(cfg UploaderConfig) *Uploader {
 			return requestBase + time.Duration(n)*time.Second/requestRate
 		},
 		wake:    make(chan struct{}, 1),
+		removed: make(chan struct{}),
 		entries: make(map[string]*upload),
 		control: make(map[string]int),
 		strict:  make(map[string]int),
@@ -481,6 +485,47 @@ func (u *Uploader) ClientUp(identifier string) {
 		}
 	}
 	u.resetFailedOpensLocked(identifier)
+	u.mu.Unlock()
+	u.poke()
+}
+
+// Flush waits until the device with identifier has no entry left: each was
+// delivered, or dropped. It returns ctx.Err() when ctx ends first; the entries
+// then stay queued and spooled.
+func (u *Uploader) Flush(ctx context.Context, identifier string) error {
+	for {
+		u.mu.Lock()
+		held := false
+		for _, e := range u.entries {
+			if e.meta.Identifier == identifier {
+				held = true
+				break
+			}
+		}
+		removed := u.removed
+		u.mu.Unlock()
+		if !held {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-removed:
+		}
+	}
+}
+
+// Forget makes every entry of the device with identifier due at once, so Run
+// drops it: the caller has already made Configured report the device as not
+// configured. It does not block.
+func (u *Uploader) Forget(identifier string) {
+	u.mu.Lock()
+	for _, e := range u.entries {
+		if e.meta.Identifier == identifier {
+			e.noMux = false
+			e.next = time.Time{}
+		}
+	}
 	u.mu.Unlock()
 	u.poke()
 }
@@ -1000,6 +1045,8 @@ func (u *Uploader) removeSegmentLocked(e *upload, idx uint32) {
 func (u *Uploader) removeEntryLocked(e *upload) {
 	id := e.meta.ID
 	delete(u.entries, id)
+	close(u.removed)
+	u.removed = make(chan struct{})
 	u.diskWork = append(u.diskWork, func() {
 		if err := u.spool.Remove(id); err != nil {
 			u.log.Error("recording entry not removed", slog.String("recording", id), slog.Any("error", err))

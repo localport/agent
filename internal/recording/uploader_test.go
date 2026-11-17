@@ -1064,3 +1064,38 @@ func TestUploaderHandoffDoesNotWaitOnAnotherEntrysSpoolWrite(t *testing.T) {
 		t.Fatal("segment past the memory cap was not spooled")
 	}
 }
+
+// Flush waits for the device's entries and gives up at its context; Forget of
+// a device no longer configured makes its waiting entry due at once, so Run
+// drops it and Flush returns.
+func TestUploaderForgetDropsAWaitingEntryAndFlushReturns(t *testing.T) {
+	var forgotten atomic.Bool
+	configured := func(string) bool { return !forgotten.Load() }
+	f := runUploader(t, spoolDir(t), false, nil, configured)
+	h := f.begin(t, spoolID1, PolicyBestEffort)
+	f.edge.up.Store(false)
+	handSegment(t, h, testSeg(0, 64))
+	f.waitBackoff(t, spoolID1)
+	identifier := testMeta(spoolID1).Identifier
+
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := f.u.Flush(short, identifier); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Flush with a held entry = %v, want DeadlineExceeded", err)
+	}
+
+	flushed := make(chan error, 1)
+	go func() { flushed <- f.u.Flush(context.Background(), identifier) }()
+	forgotten.Store(true)
+	f.u.Forget(identifier)
+	select {
+	case err := <-flushed:
+		if err != nil {
+			t.Fatalf("Flush = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Flush did not return after Forget")
+	}
+	waitFor(t, "spool entry removal", func() bool { return f.entryGone(spoolID1) })
+	f.edge.expectNone(t)
+}

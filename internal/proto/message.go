@@ -125,6 +125,9 @@ type RegisterAckPayload struct {
 	ErrorCode  string    `json:"error_code,omitempty"`
 	Retryable  *bool     `json:"retryable,omitempty"`
 	LimitType  LimitType `json:"limit_type,omitempty"`
+	// RetryAfter, in seconds, marks a refusal the control plane lifts without
+	// local action; zero for every other refusal.
+	RetryAfter uint32 `json:"retry_after,omitempty"`
 
 	// SessionID identifies this session. Send it as resume_session_id on the
 	// next Register to reclaim the slot.
@@ -196,6 +199,8 @@ type ShutdownPayload struct {
 	Code      string    `json:"code,omitempty"`
 	Retryable *bool     `json:"retryable,omitempty"`
 	LimitType LimitType `json:"limit_type,omitempty"`
+	// RetryAfter: as RegisterAckPayload.RetryAfter.
+	RetryAfter uint32 `json:"retry_after,omitempty"`
 }
 
 type ErrorPayload struct {

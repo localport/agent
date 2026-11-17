@@ -20,10 +20,12 @@ const SystemdUnit = "localport-device.service"
 // SystemdUnitPath is where the unit is installed.
 const SystemdUnitPath = "/etc/systemd/system/" + SystemdUnit
 
-// The session launcher's units, installed beside SystemdUnit: the socket
-// systemd binds and the root service it starts on the first connection.
+// The session launcher's units, installed beside SystemdUnit: the sockets
+// systemd binds (the launcher socket and the status endpoint) and the root
+// service it starts on the first connection to either.
 const (
 	SystemdLauncherSocket  = "localport-session.socket"
+	SystemdStatusSocket    = "localport-status.socket"
 	SystemdLauncherService = "localport-session.service"
 )
 
@@ -47,6 +49,7 @@ func (s systemd) units() []struct{ name, path string } {
 	return []struct{ name, path string }{
 		{SystemdUnit, s.unitPath},
 		{SystemdLauncherSocket, filepath.Join(dir, SystemdLauncherSocket)},
+		{SystemdStatusSocket, filepath.Join(dir, SystemdStatusSocket)},
 		{SystemdLauncherService, filepath.Join(dir, SystemdLauncherService)},
 	}
 }
@@ -131,7 +134,7 @@ func (s systemd) Install(ctx context.Context, exe string) error {
 	}
 	return s.sequence(ctx,
 		[]string{"daemon-reload"},
-		[]string{"enable", "--now", SystemdLauncherSocket},
+		[]string{"enable", "--now", SystemdLauncherSocket, SystemdStatusSocket},
 		[]string{"try-restart", SystemdLauncherService},
 		[]string{"enable", SystemdUnit},
 		// restart starts a stopped unit and restarts a running one, so a
@@ -152,7 +155,7 @@ func (s systemd) Reload(ctx context.Context) error {
 }
 
 // Uninstall stops and disables the agent and the launcher, and removes the
-// three units. Running sessions end with the agent: their helpers read the
+// four units. Running sessions end with the agent: their helpers read the
 // end of the channel.
 func (s systemd) Uninstall(ctx context.Context) error {
 	if err := checkOwned(s.paths()...); err != nil {
@@ -167,7 +170,7 @@ func (s systemd) Uninstall(ctx context.Context) error {
 	}
 	if err := s.sequence(ctx,
 		[]string{"disable", "--now", SystemdUnit},
-		[]string{"disable", "--now", SystemdLauncherSocket},
+		[]string{"disable", "--now", SystemdLauncherSocket, SystemdStatusSocket},
 		[]string{"stop", SystemdLauncherService},
 	); err != nil {
 		return err
@@ -272,6 +275,7 @@ Documentation=https://localport.io/docs
 
 [Socket]
 ListenStream=%[2]s
+FileDescriptorName=session
 SocketUser=root
 SocketGroup=%[3]s
 SocketMode=0660
@@ -283,22 +287,44 @@ DirectoryMode=0755
 WantedBy=sockets.target
 `, Marker, launcher.LinuxSocketPath, agentaccount.Linux),
 
+		SystemdStatusSocket: fmt.Appendf(nil, `# %[1]s
+
+[Unit]
+Description=Localport device status socket
+Documentation=https://localport.io/docs
+
+[Socket]
+ListenStream=%[2]s
+FileDescriptorName=status
+SocketUser=root
+SocketGroup=%[3]s
+SocketMode=0660
+DirectoryMode=0755
+Service=%[4]s
+
+[Install]
+WantedBy=sockets.target
+`, Marker, launcher.LinuxStatusSocketPath, agentaccount.Linux, SystemdLauncherService),
+
 		SystemdLauncherService: fmt.Appendf(nil, `# %[1]s
 
 [Unit]
 Description=Localport session launcher
 Documentation=https://localport.io/docs
-Requires=%[3]s
-After=%[3]s
+Requires=%[3]s %[4]s
+After=%[3]s %[4]s
 
 [Service]
 ExecStart=%[2]s launcher
+# Both sockets are passed whichever one starts the launcher; it tells them
+# apart by FileDescriptorName.
+Sockets=%[3]s %[4]s
 Restart=on-failure
 # Sessions are children of the launcher; a stop or restart leaves them
 # running, each with its own channel to the agent.
 KillMode=process
 # No sandboxing: every session inherits the launcher's, and a session must
 # reach the network, devices and setuid programs as a login does.
-`, Marker, session, SystemdLauncherSocket),
+`, Marker, session, SystemdLauncherSocket, SystemdStatusSocket),
 	}, nil
 }

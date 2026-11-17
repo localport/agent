@@ -20,8 +20,8 @@ type SessionsLock struct {
 	release func()
 }
 
-// LockSessions takes .sessions.lock in the identity directory dir until
-// Close. It returns ErrSessionsLocked when another holder has it.
+// LockSessions takes .sessions.lock in dir, the identity's lock directory
+// (identity.Store.LockDir), until Close. It returns ErrSessionsLocked when another holder has it.
 func LockSessions(dir string) (*SessionsLock, error) {
 	f, err := security.OpenLockFile(filepath.Join(dir, sessionsLockFile))
 	if err != nil {

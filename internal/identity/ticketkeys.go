@@ -67,6 +67,7 @@ var ErrNotDeviceIdentity = errors.New("only a device identity holds session CA k
 // directory, so a process shares locks and memory only through one Store.
 type TicketKeys struct {
 	store *Store
+	ref   Ref
 	dir   string
 
 	// writeMu queues this process's writers, so they wait on it instead of
@@ -133,6 +134,7 @@ func (s *Store) TicketKeys(ref Ref) (*TicketKeys, error) {
 	}
 	tk := &TicketKeys{
 		store:    s,
+		ref:      ref,
 		dir:      dir,
 		keys:     map[string]ed25519.PublicKey{},
 		suspects: map[string]suspect{},
@@ -280,7 +282,7 @@ func (t *TicketKeys) Replace(ctx context.Context, generation uint64, set DeviceK
 
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	release, err := WaitLockFile(ctx, filepath.Join(t.dir, ticketKeysLockFile), keysLockWait, ErrTicketKeysBusy)
+	release, err := t.store.lockCredential(ctx, t.ref.Path(), ticketKeysLockFile, keysLockWait, ErrTicketKeysBusy, nil)
 	if err != nil {
 		return err
 	}

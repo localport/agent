@@ -292,6 +292,9 @@ func deviceSpec(store *identity.Store, d config.LocalDevice, probe sessionProbe,
 type deviceSessionState struct {
 	refresher *identity.KeyRefresher
 	lock      *session.SessionsLock
+	// unshare releases the store lock's shared hold taken for lock; it runs
+	// after lock is closed.
+	unshare func()
 }
 
 // deviceSessions sets spec's HintRevoked hook and, when the device enables a
@@ -328,8 +331,20 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 			return nil, err
 		}
 	}
-	lock, err := session.LockSessions(store.Dir(ref))
+	// The sessions lock lives in the credential's lock directory, held under a
+	// shared hold of the store lock for as long as the lock is.
+	unshare, err := store.ShareStore(context.Background())
 	if err != nil {
+		spec.HintRevoked = hintRevoked(keys, nil, logEvent)
+		return nil, err
+	}
+	lockDir, err := store.LockDir(ref)
+	var lock *session.SessionsLock
+	if err == nil {
+		lock, err = session.LockSessions(lockDir)
+	}
+	if err != nil {
+		unshare()
 		spec.HintRevoked = hintRevoked(keys, nil, logEvent)
 		return nil, err
 	}
@@ -364,7 +379,7 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 		Launcher:       sessionLauncher,
 	})
 	spec.ClipboardNotices = notices
-	return &deviceSessionState{refresher: refresher, lock: lock}, nil
+	return &deviceSessionState{refresher: refresher, lock: lock, unshare: unshare}, nil
 }
 
 // clipboardReporter queues a device's clipboard decisions on notices; nil

@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -17,36 +16,56 @@ import (
 	"github.com/localport/agent/internal/launcher"
 )
 
-// systemdListenFD is the first descriptor systemd passes (sd_listen_fds).
-const systemdListenFD = 3
-
-// listener returns the socket systemd passed (localport-session.socket), or
-// binds launcher.SocketPath itself (OpenRC, procd): inside a root-owned 0750
-// directory of group gid, mode 0660, created with the umask set before bind
-// so it is never wider.
-func listener(gid uint32) (*net.UnixListener, error) {
-	if os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) && os.Getenv("LISTEN_FDS") == "1" {
+// listeners returns the launcher socket and the status endpoint: the sockets
+// systemd passed (localport-session.socket and localport-status.socket,
+// matched by FileDescriptorName), or both bound by the launcher itself
+// (OpenRC, procd): inside a root-owned 0750 directory of group gid, mode
+// 0660, created with the umask set before bind so it is never wider.
+func listeners(gid uint32) (session, status *net.UnixListener, err error) {
+	fds, err := systemdFDs(os.Getenv("LISTEN_PID"), os.Getenv("LISTEN_FDS"), os.Getenv("LISTEN_FDNAMES"), os.Getpid())
+	if err != nil {
+		return nil, nil, err
+	}
+	if fds != nil {
 		os.Unsetenv("LISTEN_PID")
 		os.Unsetenv("LISTEN_FDS")
 		os.Unsetenv("LISTEN_FDNAMES")
-		f := os.NewFile(systemdListenFD, "localport-session.socket")
-		ln, err := net.FileListener(f)
-		_ = f.Close()
-		if err != nil {
-			return nil, fmt.Errorf("the socket systemd passed: %w", err)
+		if session, err = passedListener(fds[fdNameSession], "localport-session.socket"); err != nil {
+			return nil, nil, err
 		}
-		ul, ok := ln.(*net.UnixListener)
-		if !ok {
-			ln.Close()
-			return nil, errors.New("the socket systemd passed is not a Unix socket")
+		if status, err = passedListener(fds[fdNameStatus], "localport-status.socket"); err != nil {
+			session.Close()
+			return nil, nil, err
 		}
-		return ul, nil
+		return session, status, nil
 	}
-	return bindSocket(gid)
+	if session, err = bindSocket(launcher.SocketPath, gid); err != nil {
+		return nil, nil, err
+	}
+	if status, err = bindSocket(launcher.StatusSocketPath, gid); err != nil {
+		session.Close()
+		return nil, nil, err
+	}
+	return session, status, nil
 }
 
-func bindSocket(gid uint32) (*net.UnixListener, error) {
-	dir := filepath.Dir(launcher.SocketPath)
+func passedListener(fd int, name string) (*net.UnixListener, error) {
+	f := os.NewFile(uintptr(fd), name)
+	ln, err := net.FileListener(f)
+	_ = f.Close()
+	if err != nil {
+		return nil, fmt.Errorf("the socket systemd passed (%s): %w", name, err)
+	}
+	ul, ok := ln.(*net.UnixListener)
+	if !ok {
+		ln.Close()
+		return nil, fmt.Errorf("the socket systemd passed (%s) is not a Unix socket", name)
+	}
+	return ul, nil
+}
+
+func bindSocket(path string, gid uint32) (*net.UnixListener, error) {
+	dir := filepath.Dir(path)
 	if err := os.Mkdir(dir, 0o750); err != nil && !errors.Is(err, fs.ErrExist) {
 		return nil, err
 	}
@@ -65,21 +84,21 @@ func bindSocket(gid uint32) (*net.UnixListener, error) {
 		return nil, err
 	}
 	// Only the launcher binds here; a leftover socket is from its last run.
-	if fi, err := os.Lstat(launcher.SocketPath); err == nil {
+	if fi, err := os.Lstat(path); err == nil {
 		if fi.Mode()&fs.ModeSocket == 0 {
-			return nil, fmt.Errorf("%s exists and is not a socket", launcher.SocketPath)
+			return nil, fmt.Errorf("%s exists and is not a socket", path)
 		}
-		if err := os.Remove(launcher.SocketPath); err != nil {
+		if err := os.Remove(path); err != nil {
 			return nil, err
 		}
 	}
 	old := unix.Umask(0o117)
-	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: launcher.SocketPath, Net: "unix"})
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	unix.Umask(old)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chown(launcher.SocketPath, 0, int(gid)); err != nil {
+	if err := os.Chown(path, 0, int(gid)); err != nil {
 		ln.Close()
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -30,7 +31,64 @@ type Server struct {
 	Probe func() Probe
 	Log   func(format string, args ...any)
 
-	slots chan struct{}
+	slots  chan struct{}
+	status statusRelay
+}
+
+// ServeStatus serves the status document on ln, the status pipe, until ctx
+// ends. The pipe's DACL admits only SYSTEM and elevated Administrators; the
+// launcher reads nothing from a reader, so it does not impersonate one.
+func (s *Server) ServeStatus(ctx context.Context, ln *PipeListener) error {
+	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+	defer stop()
+	var delay time.Duration
+	for {
+		conn, err := ln.Accept()
+		if errors.Is(err, net.ErrClosed) {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("launcher: accept a status reader: %w", err)
+		}
+		if err != nil {
+			delay = min(max(2*delay, 5*time.Millisecond), time.Second)
+			s.Log("launcher: accept a status reader: %v; retrying in %v", err, delay)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil
+			}
+			continue
+		}
+		delay = 0
+		if !s.status.enterReader() {
+			_ = conn.Close()
+			continue
+		}
+		go func() {
+			defer s.status.leaveReader()
+			defer conn.Close()
+			if err := s.status.writeTo(conn); err != nil {
+				s.Log("launcher: write the status document: %v", err)
+			}
+		}()
+	}
+}
+
+// publish takes the publisher slot for conn, the device service's KindStatus
+// connection, and relays its frames until it closes. It takes no helper slot.
+func (s *Server) publish(conn *os.File) {
+	if !s.status.claim() {
+		s.Log("launcher: refused a second status publisher")
+		s.refuse(conn, CodeBusy)
+		return
+	}
+	defer s.status.release()
+	respond(conn, Response{Publishing: true})
+	_ = conn.SetDeadline(time.Time{})
+	if err := s.status.relay(conn); !errors.Is(err, io.EOF) {
+		s.Log("launcher: status publisher: %v", err)
+	}
 }
 
 // Serve accepts connections on ln until ctx ends. Running helpers outlive
@@ -102,6 +160,10 @@ func (s *Server) handle(conn *os.File) {
 	defer clear(req.Password)
 	if err := req.Validate(); err != nil {
 		s.refuse(conn, CodeOf(err))
+		return
+	}
+	if req.Kind == KindStatus {
+		s.publish(conn)
 		return
 	}
 	if req.Kind == KindProbe {

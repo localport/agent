@@ -790,12 +790,12 @@ func TestPendingOfAReplacedCredentialIsIgnored(t *testing.T) {
 	}
 }
 
-// Remove and RemoveDevices wait for the renewal lock, so a renewal in flight
+// Remove and PurgeDevices wait for the renewal lock, so a renewal in flight
 // does not write a credential into a directory being deleted.
 func TestRemoveWaitsForARenewalInFlight(t *testing.T) {
 	for name, remove := range map[string]func(*Store) error{
-		"Remove":        func(s *Store) error { return s.Remove(context.Background(), deviceRef) },
-		"RemoveDevices": func(s *Store) error { _, err := s.RemoveDevices(context.Background()); return err },
+		"Remove":       func(s *Store) error { return s.Remove(context.Background(), deviceRef) },
+		"PurgeDevices": func(s *Store) error { _, err := s.PurgeDevices(context.Background(), nil); return err },
 	} {
 		t.Run(name, func(t *testing.T) {
 			store, _ := savedDevice(t, newTestCA(t), time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))

@@ -145,6 +145,17 @@ func runLauncher(ctx context.Context, running func(), logger *log.Logger) error 
 		},
 		Log: logger.Printf,
 	}
+	// The status endpoint never stops the launcher: a failure is logged and
+	// session requests keep being served.
+	if statusLn, err := launcher.ListenStatusPipe(); err != nil {
+		logger.Printf("localport-session: status endpoint %s: %v", launcher.StatusPipePath, err)
+	} else {
+		go func() {
+			if err := s.ServeStatus(ctx, statusLn); err != nil {
+				logger.Printf("localport-session: status endpoint: %v", err)
+			}
+		}()
+	}
 	running()
 	logger.Printf("localport-session: launcher serving %s for %s", launcher.PipePath, agent)
 	if err := s.Serve(ctx, ln); err != nil {

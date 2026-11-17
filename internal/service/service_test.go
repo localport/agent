@@ -107,16 +107,28 @@ func TestSystemdUnits(t *testing.T) {
 		SystemdLauncherSocket: {
 			"# " + Marker,
 			"ListenStream=" + launcher.LinuxSocketPath,
+			"FileDescriptorName=session",
 			"SocketUser=root",
 			"SocketGroup=localport",
 			"SocketMode=0660",
+			"WantedBy=sockets.target",
+		},
+		SystemdStatusSocket: {
+			"# " + Marker,
+			"ListenStream=" + launcher.LinuxStatusSocketPath,
+			"FileDescriptorName=status",
+			"SocketUser=root",
+			"SocketGroup=localport",
+			"SocketMode=0660",
+			"Service=" + SystemdLauncherService,
 			"WantedBy=sockets.target",
 		},
 		SystemdLauncherService: {
 			"# " + Marker,
 			"ExecStart=/usr/local/bin/localport-session launcher",
 			"KillMode=process",
-			"Requires=" + SystemdLauncherSocket,
+			"Requires=" + SystemdLauncherSocket + " " + SystemdStatusSocket,
+			"Sockets=" + SystemdLauncherSocket + " " + SystemdStatusSocket,
 		},
 	} {
 		got := lines(units[name])
@@ -204,7 +216,7 @@ func TestSystemdInstallSequence(t *testing.T) {
 	}
 	want := []string{
 		"systemctl daemon-reload",
-		"systemctl enable --now " + SystemdLauncherSocket,
+		"systemctl enable --now " + SystemdLauncherSocket + " " + SystemdStatusSocket,
 		"systemctl try-restart " + SystemdLauncherService,
 		"systemctl enable " + SystemdUnit,
 		"systemctl restart " + SystemdUnit,
@@ -344,7 +356,7 @@ func TestSystemdUninstall(t *testing.T) {
 	}
 	want := []string{
 		"systemctl disable --now " + SystemdUnit,
-		"systemctl disable --now " + SystemdLauncherSocket,
+		"systemctl disable --now " + SystemdLauncherSocket + " " + SystemdStatusSocket,
 		"systemctl stop " + SystemdLauncherService,
 		"systemctl daemon-reload",
 	}
@@ -424,7 +436,7 @@ func TestLaunchdPlists(t *testing.T) {
 		t.Fatal(err)
 	}
 	strs = plistStrings(t, session)
-	for _, want := range []string{LaunchdLauncherLabel, "/opt/a&b/localport-session", "launcher", launchdLauncherLog, launchdSocketName, launcher.DarwinSocketPath, "401", "432"} {
+	for _, want := range []string{LaunchdLauncherLabel, "/opt/a&b/localport-session", "launcher", launchdLauncherLog, launchdSocketName, launcher.DarwinSocketPath, launchdStatusSocketName, launcher.DarwinStatusSocketPath, "401", "432"} {
 		if !slices.Contains(strs, want) {
 			t.Errorf("launcher plist lacks %q in %q", want, strs)
 		}

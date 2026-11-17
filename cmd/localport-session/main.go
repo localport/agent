@@ -139,7 +139,7 @@ func runLauncher(logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	ln, err := listener(gid)
+	ln, statusLn, err := listeners(gid)
 	if err != nil {
 		return err
 	}
@@ -147,6 +147,7 @@ func runLauncher(logger *log.Logger) error {
 	defer stop()
 	s := &launcher.Server{
 		AgentUID:     uid,
+		AgentGID:     gid,
 		AgentAccount: agentAccount,
 		LoadConfig:   func() (*config.LocalConfig, error) { return config.LoadLocal(file) },
 		HelperPath:   exe,
@@ -155,6 +156,13 @@ func runLauncher(logger *log.Logger) error {
 		},
 		Log: logger.Printf,
 	}
-	logger.Printf("localport-session: launcher serving %s for uid %d", launcher.SocketPath, uid)
+	logger.Printf("localport-session: launcher serving %s for uid %d and %s", launcher.SocketPath, uid, launcher.StatusSocketPath)
+	// The status endpoint never stops the launcher: a failed accept loop is
+	// logged and session requests keep being served.
+	go func() {
+		if err := s.ServeStatus(ctx, statusLn); err != nil {
+			logger.Printf("localport-session: status endpoint: %v", err)
+		}
+	}()
 	return s.Serve(ctx, ln)
 }

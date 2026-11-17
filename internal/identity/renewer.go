@@ -41,8 +41,11 @@ type Renewer struct {
 	// schedule; a device stops retrying an expired certificate while a refusal
 	// stands.
 	OnRefused func(error)
+	// OnRemoved, optional, receives a renewal the control plane refused with
+	// SE018 or SE041: the device no longer exists. The loop then ends.
+	OnRemoved func(*RemovedError)
 
-	// client replaces NewClient(APIURL) in RenewPending. Tests set it to reach
+	// client replaces NewClient(APIURL) in RenewOnce and RenewPending. Tests set it to reach
 	// an httptest server.
 	client *Client
 }
@@ -85,9 +88,11 @@ func (r *Renewer) RenewOnce(ctx context.Context) (*Material, error) {
 	if err != nil {
 		return nil, err
 	}
-	client, err := NewClient(cur.Meta.APIURL)
-	if err != nil {
-		return nil, err
+	client := r.client
+	if client == nil {
+		if client, err = NewClient(cur.Meta.APIURL); err != nil {
+			return nil, err
+		}
 	}
 	return r.renewLocked(ctx, client, cur)
 }
@@ -98,7 +103,7 @@ func (r *Renewer) renewLocked(ctx context.Context, client *Client, cur *Material
 	generation := r.keyGeneration()
 	next, err := client.Renew(ctx, cur)
 	if err != nil {
-		return nil, err
+		return nil, removedError(err, cur)
 	}
 	if cur.Meta.Kind != KindDevice {
 		if _, err := r.Store.saveLocked(next); err != nil {
@@ -179,7 +184,8 @@ func (r *Renewer) RenewPending(ctx context.Context) (*Material, error) {
 	generation := r.keyGeneration()
 	next, err := client.Renew(ctx, pending)
 	if err != nil {
-		return nil, err
+		// The refused certificate is the pending one; Forget matches it.
+		return nil, removedError(err, pending)
 	}
 	ref, err := r.Store.savePending(next, cur.Meta.Serial)
 	if err != nil {
@@ -284,6 +290,12 @@ func (r *Renewer) Run(ctx context.Context) {
 					return
 				}
 				continue
+			}
+			var removed *RemovedError
+			if errors.As(err, &removed) && r.OnRemoved != nil {
+				r.log("identity: %s: renewal refused: %v", r.Ref, err)
+				r.OnRemoved(removed)
+				return
 			}
 			if r.OnRefused != nil && definitiveRefusal(err) {
 				r.OnRefused(err)

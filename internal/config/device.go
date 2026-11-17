@@ -118,6 +118,9 @@ type LocalDevice struct {
 	// RunAsAgent runs terminal and files sessions as the agent account,
 	// without PAM, for hosts with no usable login. Logins is then empty.
 	RunAsAgent bool
+	// Paused is set by `localport down`: the device service keeps the entry
+	// and holds no connection for it until `localport up` clears it.
+	Paused bool
 }
 
 // LocalConfigFile locates the local config and the private directory walk
@@ -196,6 +199,7 @@ type localDeviceFile struct {
 	RDP            string   `yaml:"rdp,omitempty"`
 	VNC            string   `yaml:"vnc,omitempty"`
 	RunAsAgent     bool     `yaml:"run_as_agent,omitempty"`
+	Paused         bool     `yaml:"paused,omitempty"`
 }
 
 // LoadLocal reads and validates the local config. The directory walk and the
@@ -225,7 +229,24 @@ func LoadLocal(f LocalConfigFile) (*LocalConfig, error) {
 	if err != nil {
 		return nil, errLocalUnusable.With(err, f.Path)
 	}
-	return parseLocal(raw, runtime.GOOS)
+	cfg, err := parseLocal(raw, runtime.GOOS)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkHasDevices(f, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// checkHasDevices refuses a user config with no device. The system config may
+// hold none: the device service idles until one is enrolled, and pruning a
+// removed device can clear its last entry.
+func checkHasDevices(f LocalConfigFile, cfg *LocalConfig) error {
+	if !f.System && len(cfg.Devices) == 0 {
+		return invalidLocal(errcode.Invalidf("local config lists no devices"))
+	}
+	return nil
 }
 
 func parseLocal(raw []byte, goos string) (*LocalConfig, error) {
@@ -278,6 +299,7 @@ func decodeLocal(raw []byte, goos string) (*LocalConfig, error) {
 			RDP:            d.RDP,
 			VNC:            d.VNC,
 			RunAsAgent:     d.RunAsAgent,
+			Paused:         d.Paused,
 		})
 	}
 	if err := cfg.validate(goos); err != nil {
@@ -293,6 +315,9 @@ func decodeLocal(raw []byte, goos string) (*LocalConfig, error) {
 // write.
 func WriteLocal(f LocalConfigFile, cfg *LocalConfig, changed identity.Ref) error {
 	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if err := checkHasDevices(f, cfg); err != nil {
 		return err
 	}
 	for _, d := range cfg.Devices {
@@ -395,6 +420,7 @@ func (c *LocalConfig) marshal() ([]byte, error) {
 			RDP:            d.RDP,
 			VNC:            d.VNC,
 			RunAsAgent:     d.RunAsAgent,
+			Paused:         d.Paused,
 		}
 	}
 	raw, err := yaml.Marshal(&lf)
@@ -414,9 +440,6 @@ func (c *LocalConfig) Validate() error {
 }
 
 func (c *LocalConfig) validate(goos string) error {
-	if len(c.Devices) == 0 {
-		return errcode.Invalidf("local config lists no devices")
-	}
 	seen := make(map[identity.Ref]struct{}, len(c.Devices))
 	for _, d := range c.Devices {
 		if _, dup := seen[d.Identity]; dup {
@@ -448,7 +471,7 @@ func (d LocalDevice) validate(goos string) error {
 }
 
 // ValidateSettings applies the per-device rules other than the identity, for
-// this machine's operating system: what `connect` checks before it spends a
+// this machine's operating system: what `up` checks before it spends a
 // join token. Refusals wrap ErrInvalidLocalConfig.
 func (d LocalDevice) ValidateSettings() error {
 	if err := d.validateSettings("this device", runtime.GOOS); err != nil {
@@ -519,7 +542,8 @@ func (d LocalDevice) validateSettings(name, goos string) error {
 func (d LocalDevice) Equal(o LocalDevice) bool {
 	return d.Identity == o.Identity && d.Host == o.Host && d.AllowPorts.String() == o.AllowPorts.String() &&
 		slices.Equal(d.Enable, o.Enable) && slices.Equal(d.Logins, o.Logins) &&
-		slices.Equal(d.PasswordLogins, o.PasswordLogins) && d.FilesRoot == o.FilesRoot && d.RDP == o.RDP && d.VNC == o.VNC && d.RunAsAgent == o.RunAsAgent
+		slices.Equal(d.PasswordLogins, o.PasswordLogins) && d.FilesRoot == o.FilesRoot && d.RDP == o.RDP && d.VNC == o.VNC && d.RunAsAgent == o.RunAsAgent &&
+		d.Paused == o.Paused
 }
 
 // UsesLogins reports whether d enables a session kind that runs as a login:

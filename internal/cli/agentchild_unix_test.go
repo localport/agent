@@ -263,32 +263,41 @@ func TestKeptAccountNoticeNamesTheRemoval(t *testing.T) {
 	}
 }
 
-// Purge removes the device credentials, the spool and the team directories they
-// leave empty, so an identity directory that held only devices ends empty and
-// removeAgentDirs can remove it; another credential keeps its team directory.
+// Purge removes the device credentials, the spool, the team directories they
+// leave empty and the lock files, so an identity directory that held only
+// devices ends empty and removeAgentDirs can remove it; another credential
+// keeps its team directory and the store lock it is locked under.
 func TestPurgeStoreLeavesNoEmptyTeamDirectory(t *testing.T) {
-	root := t.TempDir()
-	for _, d := range []string{"t1/device-a.gw", "t2/device-b.gw", "t2/client-c", "recordings/0b6f"} {
-		if err := os.MkdirAll(filepath.Join(root, d), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	store := &identity.Store{Root: root, Base: root}
-	if err := purgeStore(store); err != nil {
-		t.Fatalf("purgeStore = %v", err)
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, e := range entries {
-		names = append(names, e.Name())
-	}
-	if !slices.Equal(names, []string{"t2"}) {
-		t.Fatalf("left %q, want only t2 (it holds a client credential)", names)
-	}
-	if _, err := os.Stat(filepath.Join(root, "t2", "client-c")); err != nil {
-		t.Fatalf("the client credential went: %v", err)
+	for _, tc := range []struct {
+		name string
+		dirs []string
+		want []string
+	}{
+		{"devices only", []string{"t1/device-a.gw", "recordings/0b6f", identity.LocksDir + "/0f"}, nil},
+		{"a client credential", []string{"t1/device-a.gw", "t2/device-b.gw", "t2/client-c", "recordings/0b6f"}, []string{".store.lock", "t2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, d := range tc.dirs {
+				if err := os.MkdirAll(filepath.Join(root, d), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store := &identity.Store{Root: root, Base: root}
+			if err := purgeStore(store); err != nil {
+				t.Fatalf("purgeStore = %v", err)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			if !slices.Equal(names, tc.want) {
+				t.Fatalf("left %q, want %q", names, tc.want)
+			}
+		})
 	}
 }

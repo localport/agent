@@ -37,6 +37,7 @@ func TestLocalDeviceEqualSeesEveryField(t *testing.T) {
 		"RDP":            func(d *LocalDevice) { d.RDP = "localhost:3389" },
 		"VNC":            func(d *LocalDevice) { d.VNC = "localhost:5900" },
 		"RunAsAgent":     func(d *LocalDevice) { d.RunAsAgent = true },
+		"Paused":         func(d *LocalDevice) { d.Paused = true },
 	}
 	if n := reflect.TypeFor[LocalDevice]().NumField(); n != len(edits) {
 		t.Fatalf("LocalDevice has %d fields, the test edits %d", n, len(edits))
@@ -241,7 +242,6 @@ func TestLocalConfigValidation(t *testing.T) {
 		want string
 	}{
 		{"version 1", "version: 1\ndevices:\n  - identity: " + testIdentity + "\n", "linux", "unsupported local config version 1"},
-		{"no devices", "version: 2\ndevices: []\n", "linux", "lists no devices"},
 		{"unknown key", device("    hosts: 10.0.0.2\n"), "linux", "field hosts not found"},
 		{"identity of another kind", "version: 2\ndevices:\n  - identity: 01kpq7x2abcd34/client/gw-01\n", "linux", "device 1: identity \"01kpq7x2abcd34/client/gw-01\" is not of the form <team>/device/<tunnel>.<prefix>"},
 		{"identity without tunnel", "version: 2\ndevices:\n  - identity: 01kpq7x2abcd34/device/gw-01\n", "linux", "device 1: identity \"01kpq7x2abcd34/device/gw-01\" is not of the form <team>/device/<tunnel>.<prefix>"},
@@ -377,5 +377,39 @@ func TestWriteLocalChecksOnlyTheChangedFilesRoot(t *testing.T) {
 	}
 	if err := WriteLocal(f, cfg, unmounted.Identity); !errors.Is(err, ErrFilesRootMissing) {
 		t.Fatalf("WriteLocal of the changed entry = %v, want ErrFilesRootMissing", err)
+	}
+}
+
+// paused survives a write and a load and is omitted when false.
+func TestLocalConfigPausedRoundTrip(t *testing.T) {
+	f := userLocalConfig(t)
+	ref, _ := identity.ParseDeviceRef(testIdentity)
+	if err := WriteLocal(f, &LocalConfig{Devices: []LocalDevice{{Identity: ref, Paused: true}}}, ref); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadLocal(f)
+	if err != nil || !cfg.Devices[0].Paused {
+		t.Fatalf("LoadLocal = %+v, %v; want the device paused", cfg, err)
+	}
+	raw, err := (&LocalConfig{Devices: []LocalDevice{{Identity: ref}}}).marshal()
+	if err != nil || strings.Contains(string(raw), "paused") {
+		t.Fatalf("marshal of a running device = %q, %v; want no paused key", raw, err)
+	}
+}
+
+// A user config with no device is refused on load and write.
+func TestUserLocalConfigNeedsADevice(t *testing.T) {
+	f := userLocalConfig(t)
+	if err := WriteLocal(f, &LocalConfig{}, identity.Ref{}); !errors.Is(err, ErrInvalidLocalConfig) {
+		t.Fatalf("WriteLocal(no devices) = %v, want ErrInvalidLocalConfig", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.Path, []byte("version: 2\ndevices: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadLocal(f); !errors.Is(err, ErrInvalidLocalConfig) || !strings.Contains(err.Error(), "lists no devices") {
+		t.Fatalf("LoadLocal(no devices) = %v, want the refusal naming the rule", err)
 	}
 }

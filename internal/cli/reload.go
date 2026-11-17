@@ -28,6 +28,7 @@ type servedDevice struct {
 	local     config.LocalDevice
 	sessions  *session.Server
 	lock      *session.SessionsLock
+	unshare   func() // the store lock hold lock needs; nil once released
 	renewer   *identity.Renewer
 	refresher *identity.KeyRefresher
 	cancel    context.CancelFunc
@@ -53,6 +54,10 @@ func (s *servedDevice) end() {
 	}
 	s.loops.Wait()
 	_ = s.lock.Close()
+	if s.unshare != nil {
+		s.unshare()
+		s.unshare = nil
+	}
 }
 
 // deviceRunner builds and tracks the served devices of one serveDevices call.
@@ -90,7 +95,7 @@ func (r *deviceRunner) build(d config.LocalDevice) (spec config.DeviceSpec, ok b
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  device %s: sessions disabled: %v\n", d.Identity, err)
 	} else if state != nil {
-		served.refresher, served.lock = state.refresher, state.lock
+		served.refresher, served.lock, served.unshare = state.refresher, state.lock, state.unshare
 		served.sessions, _ = spec.SessionHandler.(*session.Server)
 	}
 	if renews {

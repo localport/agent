@@ -517,6 +517,7 @@ func TestDefinitiveRefusal(t *testing.T) {
 		{"server error", &APIError{Status: http.StatusBadGateway}, false},
 		{"forbidden", &APIError{Status: http.StatusForbidden}, true},
 		{"other conflict", &APIError{Status: http.StatusConflict, Code: "SE038"}, true},
+		{"disconnected by an admin", &APIError{Status: http.StatusForbidden, Code: CodeDeviceDisabled}, false},
 		{"not renewable", ErrNotRenewable, true},
 	} {
 		if got := definitiveRefusal(tc.err); got != tc.want {

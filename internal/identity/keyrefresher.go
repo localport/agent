@@ -47,6 +47,9 @@ type KeyRefresher struct {
 	Ref   Ref
 	// OnEvent receives one line per notable transition. Optional.
 	OnEvent func(string)
+	// OnRemoved, optional, receives a fetch the control plane refused with
+	// SE018 or SE041: the device no longer exists. Called without mu held.
+	OnRemoved func(*RemovedError)
 
 	// client replaces NewClient(APIURL). Tests set it to reach an httptest
 	// server.
@@ -283,6 +286,10 @@ func (r *KeyRefresher) startLocked(ctx context.Context) *keyFetch {
 		// may call RefreshNow or wait for another caller's RefreshNow.
 		if err != nil && ctx.Err() == nil {
 			r.log("identity: session CA key fetch for %s failed, retrying in %s: %v", r.Ref, retryIn.Round(time.Second), err)
+			var removed *RemovedError
+			if errors.As(err, &removed) && r.OnRemoved != nil {
+				r.OnRemoved(removed)
+			}
 		}
 	}()
 	return f
@@ -330,7 +337,7 @@ func (r *KeyRefresher) fetch(ctx context.Context) error {
 	generation := keys.Generation()
 	set, err := client.FetchDeviceKeys(ctx, cur)
 	if err != nil {
-		return err
+		return removedError(err, cur)
 	}
 	if err := keys.Replace(ctx, generation, *set); err != nil {
 		if errors.Is(err, ErrTicketKeysUnreadable) {

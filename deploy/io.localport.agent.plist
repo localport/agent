@@ -2,17 +2,25 @@
 <!--
   Localport agent as a launchd daemon.
 
-  A service account first, so the daemon does not run as root. The UID is the
-  next free one below 500, which is where macOS keeps hidden system accounts:
+  A service account first, so the daemon does not run as root, in the shape of
+  Apple's daemon accounts and of the one `localport up` creates: hidden, user
+  and group id the first one free in 450-499, no password, shell
+  /usr/bin/false, home /var/empty, and in no other group:
 
-    ID=$(( $(dscl . -list /Users UniqueID | awk '$2 < 500 {print $2}' | sort -n | tail -1) + 1 ))
+    ID=$(for i in $(seq 450 499); do
+      dscl . -search /Users UniqueID "$i" | grep -q . || dscl . -search /Groups PrimaryGroupID "$i" | grep -q . || { echo "$i"; break; }
+    done)
     sudo dscl . -create /Groups/_localport PrimaryGroupID "$ID"
+    sudo dscl . -create /Groups/_localport Password '*'
     sudo dscl . -create /Users/_localport UniqueID "$ID"
     sudo dscl . -create /Users/_localport PrimaryGroupID "$ID"
+    sudo dscl . -create /Users/_localport Password '*'
     sudo dscl . -create /Users/_localport RealName "Localport agent"
     sudo dscl . -create /Users/_localport UserShell /usr/bin/false
     sudo dscl . -create /Users/_localport NFSHomeDirectory /var/empty
     sudo dscl . -create /Users/_localport IsHidden 1
+
+  When _localport already exists (a fleet device created it), use it as it is.
 
   Then the daemon, its state and its log, all owned by that account:
 
@@ -35,7 +43,7 @@
   the daemon's only boundary.
 
   This daemon runs an unprivileged tunnel. A fleet device does not use it:
-  `sudo localport connect <join-token>` enrols the machine and installs its
+  `sudo localport up <join-token>` enrols the machine and installs its
   own daemon, io.localport.device.
 -->
 <plist version="1.0">

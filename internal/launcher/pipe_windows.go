@@ -107,6 +107,38 @@ func ListenPipe(agent *windows.SID) (*PipeListener, error) {
 	return l, nil
 }
 
+// StatusPipePath is the status endpoint. Only Administrators and SYSTEM can
+// create a pipe under ProtectedPrefix\Administrators, so no other account can
+// hold the name first.
+const StatusPipePath = `\\.\pipe\ProtectedPrefix\Administrators\Localport\device-status`
+
+// statusReadAccess is what the status pipe grants Administrators:
+// FILE_READ_DATA, FILE_READ_ATTRIBUTES, READ_CONTROL and SYNCHRONIZE. It
+// leaves out FILE_CREATE_PIPE_INSTANCE and every write right.
+const statusReadAccess = 0x120081
+
+// ListenStatusPipe creates the status pipe owned by SYSTEM with a protected
+// DACL: SYSTEM full access (the launcher creates each further instance) and
+// Administrators statusReadAccess. An unelevated administrator's filtered
+// token is denied.
+func ListenStatusPipe() (*PipeListener, error) {
+	stop, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		return nil, err
+	}
+	l := &PipeListener{
+		name:  StatusPipePath,
+		sddl:  fmt.Sprintf("O:SYD:P(A;;GA;;;SY)(A;;0x%x;;;BA)", statusReadAccess),
+		first: true,
+		stop:  stop,
+	}
+	if err := l.prepare(); err != nil {
+		_ = windows.CloseHandle(stop)
+		return nil, err
+	}
+	return l, nil
+}
+
 // prepare creates the waiting instance when there is none.
 func (l *PipeListener) prepare() error {
 	if l.next != 0 {

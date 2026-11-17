@@ -250,10 +250,15 @@ func (m *sessionMux) start() { go m.run() }
 func (m *sessionMux) stop() {
 	m.stopOnce.Do(func() {
 		m.mu.Lock()
+		drained := m.stopping
 		m.stopping = true
-		m.served.Add(1)
+		if !drained {
+			m.served.Add(1)
+		}
 		m.mu.Unlock()
-		m.shutdownHandler()
+		if !drained {
+			m.shutdownHandler()
+		}
 		if m.flushClipboard != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), clipboardFinalFlush)
 			m.flushClipboard(ctx)
@@ -262,6 +267,35 @@ func (m *sessionMux) stop() {
 		m.cancel()
 	})
 	<-m.done
+}
+
+// drain ends the handler's sessions as stop does, then runs flush bounded by
+// recordingDrainBound, while the mux stays published so the recordings of
+// those sessions still reach the server over it. stop then skips the
+// handler's Shutdown. Nil flush skips the wait.
+func (m *sessionMux) drain(flush func(context.Context)) {
+	m.mu.Lock()
+	if m.stopping {
+		m.mu.Unlock()
+		return
+	}
+	m.stopping = true
+	m.served.Add(1)
+	m.mu.Unlock()
+	m.shutdownHandler()
+	if flush != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), recordingDrainBound)
+		flush(ctx)
+		cancel()
+	}
+}
+
+// drainSessions drains the current session mux, if one runs: its sessions end
+// and FlushRecordings waits for their recordings.
+func (t *Tunnel) drainSessions() {
+	if m := t.sessionMux.Load(); m != nil {
+		m.drain(t.opts.FlushRecordings)
+	}
 }
 
 // shutdownHandler runs Shutdown and waits for it at most shutdownTimeout. A

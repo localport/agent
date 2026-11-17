@@ -8,7 +8,9 @@ package identity
 import (
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -36,7 +38,15 @@ const (
 	// key; ticketKeysLockFile serializes its writers across processes.
 	ticketKeysFile     = "ticket_keys.json"
 	ticketKeysLockFile = ".keys.lock"
+	// storeLockFile in Root is held shared by every holder of a credential
+	// lock and exclusively by PurgeDevices.
+	storeLockFile = ".store.lock"
 )
+
+// LocksDir under a store's Root holds every credential's lock directory. Team
+// names start with an alphanumeric (validRefComponent), so it never collides
+// with a team directory. Only PurgeDevices deletes it.
+const LocksDir = ".locks"
 
 // Source is how a credential was obtained. Values are persisted in meta.json
 // and must not change meaning.
@@ -147,6 +157,17 @@ type Store struct {
 	// afterMetaRead, when set, runs in readPair between its two reads. Tests
 	// promote there.
 	afterMetaRead func()
+	// renewLockAttempt, when set, runs after each waitLockAt attempt with
+	// whether it took the renewal lock. Tests interleave writers there.
+	renewLockAttempt func(held bool)
+	// renewLockReleasing, when set, runs just before a waitLockAt holder
+	// releases the renewal lock. Tests check what was done under it.
+	renewLockReleasing func()
+	// storeLockReleasing, when set, runs just before PurgeDevices releases the
+	// store lock; storeShareAttempt runs after each attempt to take it
+	// shared, with whether it was taken.
+	storeLockReleasing func()
+	storeShareAttempt  func(held bool)
 }
 
 // HomeEnv overrides where credentials live.
@@ -284,55 +305,158 @@ func (s *Store) Remove(ctx context.Context, ref Ref) error {
 	if _, err := os.Stat(dir); err != nil {
 		return errUnreadable.With(err, ref.String())
 	}
-	if err := removeCredentialDir(ctx, dir); err != nil {
+	if err := s.removeCredential(ctx, ref); err != nil {
 		return errStoreUnusable.With(err, "remove "+ref.String())
 	}
 	s.forgetTicketKeys(dir)
 	return nil
 }
 
-// removeCredentialDir deletes a credential directory under its renewal lock,
-// waiting up to saveLockWait for a renewal in flight. Every entry but the lock
-// file goes while the lock is held; the lock file and the directory go after
-// the release, as Windows may refuse to delete a directory holding an open
-// file. A path that is not a real directory (a symlink) is removed itself,
-// never followed.
-func removeCredentialDir(ctx context.Context, dir string) error {
-	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
-		return os.RemoveAll(dir)
-	}
-	release, err := WaitLockFile(ctx, filepath.Join(dir, lockFile), saveLockWait, ErrRenewalInProgress)
+// removeCredential deletes ref's credential directory while holding its
+// renewal lock, waiting up to saveLockWait for a renewal in flight. The lock
+// lives in the lock directory, so the whole credential directory goes under it
+// and a Save waiting on the lock creates the directory afresh. A path that is
+// not a real directory (a symlink) is removed itself, never followed.
+func (s *Store) removeCredential(ctx context.Context, ref Ref) error {
+	release, err := s.waitLock(ctx, ref, saveLockWait)
 	if err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(dir)
-	for i := 0; err == nil && i < len(entries); i++ {
-		if entries[i].Name() != lockFile {
-			err = os.RemoveAll(filepath.Join(dir, entries[i].Name()))
-		}
-	}
-	release()
-	if err != nil {
-		return err
-	}
-	return os.RemoveAll(dir)
+	defer release()
+	return os.RemoveAll(s.dir(ref))
 }
 
-// RemoveDevices deletes every device credential directory, readable or not,
-// and returns their paths. Other credentials and the team directories stay.
-// Local only, as Remove; each waits for its renewal lock as Remove does.
-func (s *Store) RemoveDevices(ctx context.Context) ([]string, error) {
-	dirs, err := filepath.Glob(filepath.Join(s.Root, "*", string(KindDevice)+"-*"))
+// PurgeDevices deletes every device credential directory and tombstone,
+// readable or not, then runs also, and returns the deleted paths. Other
+// credentials and their team directories stay. It does this holding the store
+// lock exclusively, so no credential lock is held or awaited, waiting up to
+// saveLockWait for the holders of credential locks (ErrRenewalInProgress).
+// Under that hold it deletes the lock directory and, when Root then holds
+// nothing else, the store lock file itself, so an emptied Root can be removed.
+// Purges never overlap (the one caller, `service uninstall --purge`, holds
+// run.lock and agent.yaml.lock) and every other holder takes the store lock
+// shared. A holder that opened the store lock before its deletion can still
+// take the deleted file shared after the release, unseen by a later purge;
+// it then only writes a credential, as a command run beside that purge would.
+// A missing Root is left missing: only also runs. Local only, as Remove.
+func (s *Store) PurgeDevices(ctx context.Context, also func() error) ([]string, error) {
+	if _, err := os.Lstat(s.Root); errors.Is(err, fs.ErrNotExist) {
+		if also != nil {
+			return nil, also()
+		}
+		return nil, nil
+	}
+	path, err := s.storeLockPath()
+	if err != nil {
+		return nil, err
+	}
+	release, err := waitLockFile(ctx, path, false, saveLockWait, ErrRenewalInProgress, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if s.storeLockReleasing != nil {
+			s.storeLockReleasing()
+		}
+		release()
+	}()
+	paths, err := filepath.Glob(filepath.Join(s.Root, "*", string(KindDevice)+"-*"))
 	if err != nil {
 		return nil, fmt.Errorf("read identity store: %w", err)
 	}
-	for i, dir := range dirs {
-		if err := removeCredentialDir(ctx, dir); err != nil {
-			return dirs[:i], errStoreUnusable.With(err, "remove "+dir)
+	for i, p := range paths {
+		if err := os.RemoveAll(p); err != nil {
+			return paths[:i], errStoreUnusable.With(err, "remove "+p)
 		}
-		s.forgetTicketKeys(dir)
+		s.forgetTicketKeys(p)
 	}
-	return dirs, nil
+	if also != nil {
+		if err := also(); err != nil {
+			return paths, err
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(s.Root, LocksDir)); err != nil {
+		return paths, errStoreUnusable.With(err, "remove the lock directory")
+	}
+	left, err := os.ReadDir(s.Root)
+	if err != nil {
+		return paths, errStoreUnusable.With(err, "read "+s.Root)
+	}
+	if len(left) == 1 && left[0].Name() == storeLockFile {
+		if err := os.Remove(path); err != nil {
+			return paths, errStoreUnusable.With(err, "remove the store lock")
+		}
+	}
+	return paths, nil
+}
+
+// storeLockPath creates Root and returns the path of the store lock: every
+// holder of a credential lock holds it shared, and PurgeDevices holds it
+// exclusively.
+func (s *Store) storeLockPath() (string, error) {
+	if err := s.EnsureRoot(); err != nil {
+		return "", err
+	}
+	return filepath.Join(s.Root, storeLockFile), nil
+}
+
+// shareStore takes the store lock shared, waiting up to wait, and returns busy
+// when a purge still holds it then.
+func (s *Store) shareStore(ctx context.Context, wait time.Duration, busy error) (func(), error) {
+	path, err := s.storeLockPath()
+	if err != nil {
+		return nil, err
+	}
+	return waitLockFile(ctx, path, true, wait, busy, s.storeShareAttempt)
+}
+
+// tryShareStore is shareStore without waiting.
+func (s *Store) tryShareStore() (func(), bool, error) {
+	path, err := s.storeLockPath()
+	if err != nil {
+		return nil, false, err
+	}
+	return tryLockFile(path, true)
+}
+
+// ShareStore takes the store lock shared, waiting up to saveLockWait, for a
+// caller that keeps a lock file in LockDir: it holds the returned hold for as
+// long as it holds that lock. It returns ErrRenewalInProgress while a purge
+// runs past the wait.
+func (s *Store) ShareStore(ctx context.Context) (func(), error) {
+	return s.shareStore(ctx, saveLockWait, ErrRenewalInProgress)
+}
+
+// LockDir creates ref's lock directory and returns its path. Every lock file
+// of the credential (renewal, ticket keys, desktop pins, sessions) lives there
+// rather than in the credential directory, and is held only under a shared
+// hold of the store lock (ShareStore). A lock file is never deleted while a
+// holder could have it open: only PurgeDevices deletes the lock directory,
+// holding the store lock exclusively.
+func (s *Store) LockDir(ref Ref) (string, error) { return s.lockDirAt(ref.Path()) }
+
+// lockDirAt creates the lock directory of the credential at rel, a path
+// relative to Root, and returns it. The directory is named by the SHA-256 of
+// rel in slash form, so the lock files left behind after a credential is
+// deleted name no team or device.
+func (s *Store) lockDirAt(rel string) (string, error) {
+	sum := sha256.Sum256([]byte(filepath.ToSlash(rel)))
+	dir := filepath.Join(s.Root, LocksDir, hex.EncodeToString(sum[:]))
+	base, follow := s.StateRoot()
+	if err := security.EnsurePrivateDir(base, dir, follow); err != nil {
+		return "", errStoreUnusable.With(err, "create the lock directory "+dir)
+	}
+	return dir, nil
+}
+
+// lockFileAt creates the lock directory of the credential at rel and returns
+// the path of its lock file name.
+func (s *Store) lockFileAt(rel, name string) (string, error) {
+	dir, err := s.lockDirAt(rel)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, name), nil
 }
 
 // Resolve returns the one credential a selector names. An ambiguous selector
@@ -451,7 +575,7 @@ func (s *Store) trusted(dir string) error {
 // finish, then returns ErrRenewalInProgress; it returns ctx.Err() when ctx
 // ends first.
 func (s *Store) Save(ctx context.Context, m Material) (Ref, error) {
-	ref, dir, err := s.prepare(&m)
+	ref, err := completeMeta(&m)
 	if err != nil {
 		return Ref{}, err
 	}
@@ -460,7 +584,21 @@ func (s *Store) Save(ctx context.Context, m Material) (Ref, error) {
 		return Ref{}, err
 	}
 	defer release()
-	return ref, s.commitCurrent(dir, &m)
+	// Created under the lock: a Forget or Remove holding it deletes the
+	// whole directory before this Save can use it.
+	dir, err := s.ensureCredentialDir(ref)
+	if err != nil {
+		return ref, err
+	}
+	if err := s.commitCurrent(dir, &m); err != nil {
+		return ref, err
+	}
+	// A new enrolment supersedes a forgotten device of the same ref; the
+	// tombstone sits beside the directory, so replacing it leaves the file.
+	if ref.Kind == KindDevice {
+		return ref, s.DeleteTombstone(ref)
+	}
+	return ref, nil
 }
 
 // SaveIssued is Save for material a spent one-time secret (join token, setup
@@ -499,18 +637,28 @@ func (s *Store) commitCurrent(dir string, m *Material) error {
 }
 
 // prepare completes m.Meta from the certificate and creates the credential
-// directory. It writes no credential file.
+// directory. It writes no credential file. The caller holds the renewal lock.
 func (s *Store) prepare(m *Material) (Ref, string, error) {
-	leaf, err := leafOf(m.CertPEM)
+	ref, err := completeMeta(m)
 	if err != nil {
 		return Ref{}, "", err
+	}
+	dir, err := s.ensureCredentialDir(ref)
+	return ref, dir, err
+}
+
+// completeMeta completes m.Meta from the certificate and returns its Ref.
+func completeMeta(m *Material) (Ref, error) {
+	leaf, err := leafOf(m.CertPEM)
+	if err != nil {
+		return Ref{}, err
 	}
 	ref, err := RefFromCert(leaf)
 	if err != nil {
-		return Ref{}, "", err
+		return Ref{}, err
 	}
 	if !ref.valid() {
-		return Ref{}, "", fmt.Errorf("certificate yields an unusable credential ref (%+v)", ref)
+		return Ref{}, fmt.Errorf("certificate yields an unusable credential ref (%+v)", ref)
 	}
 	// Identity fields come from the certificate and override the caller's
 	// values.
@@ -523,22 +671,26 @@ func (s *Store) prepare(m *Material) (Ref, string, error) {
 
 	// The serial is a path component. Text(16) is hex and always valid.
 	if !validPathComponent(m.Meta.Serial) {
-		return Ref{}, "", fmt.Errorf("certificate serial %q is not usable as a filename", m.Meta.Serial)
+		return Ref{}, fmt.Errorf("certificate serial %q is not usable as a filename", m.Meta.Serial)
 	}
 	m.Meta.Cert = "cert-" + m.Meta.Serial + ".pem"
 	m.Meta.Key.File = "key-" + m.Meta.Serial + ".pem"
 
 	// Validate before writing, since readMeta refuses an invalid record.
 	if err := m.Meta.validate(); err != nil {
-		return Ref{}, "", fmt.Errorf("refusing to store an unusable credential record: %w", err)
+		return Ref{}, fmt.Errorf("refusing to store an unusable credential record: %w", err)
 	}
+	return ref, nil
+}
 
+// ensureCredentialDir creates ref's credential directory and returns it.
+func (s *Store) ensureCredentialDir(ref Ref) (string, error) {
 	dir := s.dir(ref)
 	base, follow := s.StateRoot()
 	if err := security.EnsurePrivateDir(base, dir, follow); err != nil {
-		return Ref{}, "", err
+		return "", err
 	}
-	return ref, dir, nil
+	return dir, nil
 }
 
 // writeKeyMaterial writes m's certificate and key under the names prepare

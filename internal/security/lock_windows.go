@@ -12,9 +12,19 @@ import (
 // TryLockFile takes an exclusive lock on f without blocking. It reports false when
 // another process holds it. The OS releases the lock when the holder exits.
 func TryLockFile(f *os.File) (bool, error) {
+	return tryLockFileEx(f, windows.LOCKFILE_EXCLUSIVE_LOCK)
+}
+
+// TryLockFileShared takes a shared lock on f without blocking. Shared holders
+// exclude only an exclusive holder. It reports false when one holds it.
+func TryLockFileShared(f *os.File) (bool, error) {
+	return tryLockFileEx(f, 0)
+}
+
+func tryLockFileEx(f *os.File, flags uint32) (bool, error) {
 	var overlapped windows.Overlapped
 	err := windows.LockFileEx(windows.Handle(f.Fd()),
-		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+		flags|windows.LOCKFILE_FAIL_IMMEDIATELY,
 		0, 1, 0, &overlapped)
 	if err == nil {
 		return true, nil

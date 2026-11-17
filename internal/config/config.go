@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"os"
 	"strconv"
 	"strings"
@@ -88,6 +89,12 @@ type DeviceSpec struct {
 	ClipboardNotices *tunnel.ClipboardNotices
 	// HintRevoked receives the session CA key ids a RegisterAck names revoked.
 	HintRevoked func(kids []string)
+	// OnStatus receives the device tunnel's status on every change; it must
+	// not block.
+	OnStatus func(tunnel.Status)
+	// FlushRecordings waits for the device's recordings to reach the server
+	// when an admin's Disconnect drains it.
+	FlushRecordings func(ctx context.Context)
 }
 
 // DefaultDeviceHost is the device host when none is configured.

@@ -52,6 +52,10 @@ const (
 	// server, run as the login, dials and listens for its port forwards
 	// (forwardwire.go).
 	KindForward = "forward"
+	// KindStatus opens the device service's status publication: after the
+	// launcher answers Publishing, the connection carries status frames
+	// (status.go) until it closes. It takes no helper slot.
+	KindStatus = "status"
 )
 
 // Refusal codes. The agent maps each to a session error code.
@@ -187,7 +191,7 @@ func (r Request) Validate() error {
 		return Refusal(CodeBadRequest)
 	}
 	switch r.Kind {
-	case KindProbe:
+	case KindProbe, KindStatus:
 		if r.Device != "" || r.Login != "" || r.Cols != 0 || r.Rows != 0 || r.Term != "" || r.Command != "" ||
 			r.Pipe != "" || r.HasPassword || len(r.Password) != 0 || len(r.Env) != 0 || r.ClientAddr != "" {
 			return Refusal(CodeBadRequest)
@@ -277,6 +281,8 @@ type Response struct {
 	Refused *Refused `json:"refused,omitempty"`
 	Probe   *Probe   `json:"probe,omitempty"`
 	Exit    *Exit    `json:"exit,omitempty"`
+	// Publishing accepts a KindStatus request: status frames follow.
+	Publishing bool `json:"publishing,omitempty"`
 	// Messages are the session setup's PAM messages for the client, in
 	// order (HelperReply.Messages).
 	Messages []string `json:"messages,omitempty"`
@@ -513,7 +519,7 @@ func readResponse(r io.Reader) (Response, error) {
 		return Response{}, fmt.Errorf("launcher: bad response: %w", err)
 	}
 	set := 0
-	for _, p := range []bool{resp.Started != nil, resp.Refused != nil, resp.Probe != nil, resp.Exit != nil} {
+	for _, p := range []bool{resp.Started != nil, resp.Refused != nil, resp.Probe != nil, resp.Exit != nil, resp.Publishing} {
 		if p {
 			set++
 		}

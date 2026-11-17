@@ -38,9 +38,13 @@ const (
 	launchdLauncherLog = "/var/log/localport-session.log"
 )
 
-// launchdSocketName is the Sockets key the launcher checks in with
-// (launch_activate_socket); cmd/localport-session names the same.
-const launchdSocketName = "Listeners"
+// The Sockets keys the launcher checks in with (launch_activate_socket):
+// the launcher socket and the status endpoint. cmd/localport-session names
+// the same.
+const (
+	launchdSocketName       = "Listeners"
+	launchdStatusSocketName = "Status"
+)
 
 const launchctlPath = "/bin/launchctl"
 
@@ -362,7 +366,8 @@ func launchdAgentPlist(exe string) ([]byte, error) {
 }
 
 // launchdLauncherPlist is the launcher's daemon definition: root, with the
-// socket launchd binds root:gid 0660 (SockPathMode is decimal).
+// launcher socket and the status endpoint launchd binds root:gid 0660
+// (SockPathMode is decimal).
 func launchdLauncherPlist(session string, gid int) ([]byte, error) {
 	program, err := xmlPath(session)
 	if err != nil {
@@ -393,11 +398,23 @@ func launchdLauncherPlist(session string, gid int) ([]byte, error) {
       <key>SockPathMode</key>
       <integer>432</integer>
     </dict>
+    <key>%s</key>
+    <dict>
+      <key>SockPathName</key>
+      <string>%s</string>
+      <key>SockPathOwner</key>
+      <integer>0</integer>
+      <key>SockPathGroup</key>
+      <integer>%d</integer>
+      <key>SockPathMode</key>
+      <integer>432</integer>
+    </dict>
   </dict>
   <!-- Sessions are the launcher's children; they keep running when it stops. -->
   <key>AbandonProcessGroup</key>
   <true/>
 </dict>
 </plist>
-`, Marker, LaunchdLauncherLabel, program, launchdLauncherLog, launchdSocketName, launcher.DarwinSocketPath, gid), nil
+`, Marker, LaunchdLauncherLabel, program, launchdLauncherLog, launchdSocketName, launcher.DarwinSocketPath, gid,
+		launchdStatusSocketName, launcher.DarwinStatusSocketPath, gid), nil
 }

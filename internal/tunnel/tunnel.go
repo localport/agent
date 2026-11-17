@@ -88,6 +88,12 @@ const (
 	StateActive
 	StateReconnecting
 	StateStopped
+	// StateWaiting: a device refused with a retry_after hint waits for the
+	// control plane to lift the refusal (Status.Code, Status.NextRetry).
+	StateWaiting
+	// StateDraining: a device disconnected by an admin ends its sessions and
+	// delivers their recordings before it closes the connection.
+	StateDraining
 )
 
 func (s State) String() string {
@@ -104,6 +110,10 @@ func (s State) String() string {
 		return "reconnecting"
 	case StateStopped:
 		return "stopped"
+	case StateWaiting:
+		return "waiting"
+	case StateDraining:
+		return "draining"
 	}
 	return "unknown"
 }
@@ -251,6 +261,13 @@ type Options struct {
 	// HintRevoked receives RegisterAck.revoked_ticket_kids of a successful
 	// registration. It runs on Run's goroutine and must not block.
 	HintRevoked func(kids []string)
+	// OnStatus receives the tunnel's status on every change. It runs on the
+	// tunnel's goroutines and must not block.
+	OnStatus func(Status)
+	// FlushRecordings waits, until ctx ends, for the device's recordings to
+	// reach the server. A device disconnected by an admin runs it after its
+	// sessions end and before its connection closes. Nil skips the wait.
+	FlushRecordings func(ctx context.Context)
 
 	// DisableInspect turns off the HTTP request view on http tunnels.
 	DisableInspect bool
@@ -273,6 +290,8 @@ type Tunnel struct {
 	// now and sleep pace the port mux re-establishment.
 	now   func() time.Time
 	sleep func(context.Context, time.Duration) bool
+	// after times a hinted refusal's wait; tests replace it.
+	after func(time.Duration) <-chan time.Time
 	// rolloverEvery is how often a device session checks for a pending
 	// certificate to register with.
 	rolloverEvery time.Duration
@@ -300,6 +319,14 @@ type Tunnel struct {
 
 	terminalMu  sync.Mutex
 	terminalErr error
+
+	// kicked is the hinted Shutdown that ended the current session, if any.
+	kicked atomic.Pointer[kick]
+	// statusMu guards the fields Status reports beside state.
+	statusMu   sync.Mutex
+	stateSince time.Time
+	waitCode   string
+	nextRetry  time.Time
 
 	// dialer is the transport chosen by the last Probe. Dial-backs reuse it
 	// and a reconnect resets it.
@@ -376,6 +403,7 @@ func New(opts Options) *Tunnel {
 		newDialers:    transport.DefaultDialers,
 		now:           time.Now,
 		sleep:         sleepCtx,
+		after:         time.After,
 		rolloverEvery: rolloverCheckInterval,
 		edgeAddr:      opts.Edge,
 		activeConns:   make(map[string]*activeConn),
@@ -446,6 +474,8 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		h.OnStart(t.EventKey(), t.opts.Label)
 	}
 	attempt := 0
+	// refusals counts consecutive hinted refusals of a device.
+	refusals := 0
 	var failingSince time.Time
 	for {
 		// Capture the channel here. The next iteration replaces
@@ -463,6 +493,16 @@ func (t *Tunnel) Run(ctx context.Context) error {
 				return t.consumeTerminalError()
 			}
 			var regErr *RegistrationError
+			if errors.As(err, &regErr) && t.IsDevice() && regErr.RetryAfter > 0 {
+				// The control plane lifts this refusal without local action:
+				// the device keeps retrying at its pace and never parks.
+				t.emitError(err)
+				refusals++
+				if !t.waitRefused(ctx, regErr.Code, regErr.RetryAfter, refusals) {
+					return nil
+				}
+				continue
+			}
 			if errors.As(err, &regErr) && !regErr.Retryable {
 				t.setState(StateStopped)
 				t.emitShutdown(regErr.Message, regErr.Code, regErr.LimitType, false)
@@ -495,7 +535,7 @@ func (t *Tunnel) Run(ctx context.Context) error {
 			continue
 		}
 
-		attempt = 0
+		attempt, refusals = 0, 0
 		failingSince = time.Time{}
 		t.setState(StateActive)
 		t.emitConnected()
@@ -505,6 +545,10 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		stopSessionMux := t.startSessionMux(ctx)
 
 		t.runSession(ctx, sessionDone)
+		kicked := t.kicked.Swap(nil)
+		if kicked != nil && kicked.drain {
+			t.drainSessions()
+		}
 		stopSessionMux()
 		stopMux()
 
@@ -515,6 +559,13 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		t.closeConn()
 		t.emitDisconnected(nil)
 
+		if kicked != nil {
+			refusals++
+			if !t.waitRefused(ctx, kicked.code, kicked.retryAfter, refusals) {
+				return nil
+			}
+			continue
+		}
 		if t.rollover.Swap(false) {
 			continue
 		}
@@ -818,12 +869,14 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 // refused lets the device credential act on a non-retryable refusal of the
 // certificate it presented, which may turn it into a retry.
 func (t *Tunnel) refused(ctx context.Context, presented *identity.Presentation, regErr *RegistrationError) error {
-	if presented == nil || regErr.Retryable {
+	regErr.Serial = presentedSerial(presented)
+	if presented == nil || regErr.Retryable || regErr.RetryAfter > 0 {
 		return regErr
 	}
 	retry, err := t.opts.Credential.Refused(ctx, presented, regErr.Code)
 	if err != nil {
-		return &RegistrationError{Message: regErr.Message + "; renewing the device certificate failed", Code: regErr.Code, LimitType: regErr.LimitType, Err: err}
+		return &RegistrationError{Message: regErr.Message + "; renewing the device certificate failed", Code: regErr.Code,
+			LimitType: regErr.LimitType, Serial: regErr.Serial, Err: err}
 	}
 	regErr.Retryable = retry
 	return regErr
@@ -1073,15 +1126,29 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 
 	case proto.MsgShutdown:
 		sd, _ := proto.ParseShutdown(body)
+		if k := t.kickOf(sd); k != nil {
+			// The control plane lifts it without local action: close this
+			// session, after a drain on an admin's Disconnect, and retry.
+			t.kicked.Store(k)
+			if k.drain {
+				t.setState(StateDraining)
+			}
+			t.signalDisconnected()
+			return
+		}
 		if sd != nil && sd.Retryable != nil && !*sd.Retryable {
 			reason := sd.Reason
 			if reason == "" {
 				reason = "edge closed the tunnel"
 			}
+			t.mu.RLock()
+			presented := t.presented
+			t.mu.RUnlock()
 			t.setTerminalError(&RegistrationError{
 				Message:   reason,
 				Code:      sd.Code,
 				LimitType: sd.LimitType,
+				Serial:    presentedSerial(presented),
 			})
 			t.emitShutdown(reason, sd.Code, sd.LimitType, false)
 			t.Stop()
@@ -1439,9 +1506,13 @@ func (t *Tunnel) setState(s State) {
 	}
 	old := State(t.state.Swap(int32(s)))
 	if old != s {
+		t.statusMu.Lock()
+		t.stateSince = time.Now()
+		t.statusMu.Unlock()
 		if h := t.opts.Handler; h != nil {
 			h.OnStateChange(t.EventKey(), old, s)
 		}
+		t.notifyStatus()
 	}
 }
 
@@ -1554,6 +1625,12 @@ type RegistrationError struct {
 	Code      string
 	LimitType proto.LimitType
 	Retryable bool
+	// RetryAfter is the edge's retry_after hint: the control plane lifts the
+	// refusal without local action. Zero when absent.
+	RetryAfter time.Duration
+	// Serial is the serial of the device certificate refused, empty for a
+	// tunnel.
+	Serial string
 	// Err is a local failure that followed the refusal, such as a failed
 	// certificate renewal.
 	Err error
@@ -1595,10 +1672,11 @@ func registrationErrorFrom(ack *proto.RegisterAckPayload) *RegistrationError {
 		retryable = *ack.Retryable
 	}
 	return &RegistrationError{
-		Message:   msg,
-		Code:      ack.ErrorCode,
-		LimitType: ack.LimitType,
-		Retryable: retryable,
+		Message:    msg,
+		Code:       ack.ErrorCode,
+		LimitType:  ack.LimitType,
+		Retryable:  retryable,
+		RetryAfter: time.Duration(ack.RetryAfter) * time.Second,
 	}
 }
 
@@ -1667,4 +1745,12 @@ func wirePortRanges(c ports.Ceiling) []proto.PortRange {
 		out[i] = proto.PortRange{From: r.From, To: r.To}
 	}
 	return out
+}
+
+// presentedSerial is p's certificate serial, empty for nil.
+func presentedSerial(p *identity.Presentation) string {
+	if p == nil {
+		return ""
+	}
+	return p.Serial
 }

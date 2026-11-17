@@ -63,12 +63,13 @@ type desktopPin struct {
 // in others (`localport set --rdp-reset-pin`, `--vnc-reset-pin`) never lose a
 // write. .pins.lock is taken alone, never with .renew.lock or .keys.lock, and
 // is held across file I/O only. The file goes with the identity directory
-// (Store.Remove, Store.RemoveDevices), which is never recreated here.
+// (Store.Remove, Store.PurgeDevices), which is never recreated here.
 //
 // Obtain it with Store.DesktopPins; each Store holds one instance per
 // identity directory.
 type DesktopPins struct {
 	store *Store
+	ref   Ref
 	dir   string
 	// writeMu queues this process's writers, so they wait on it instead of
 	// polling .pins.lock.
@@ -94,7 +95,7 @@ func (s *Store) DesktopPins(ref Ref) (*DesktopPins, error) {
 	if s.desktopPins == nil {
 		s.desktopPins = make(map[string]*DesktopPins)
 	}
-	p := &DesktopPins{store: s, dir: dir}
+	p := &DesktopPins{store: s, ref: ref, dir: dir}
 	s.desktopPins[dir] = p
 	return p, nil
 }
@@ -183,7 +184,7 @@ func (p *DesktopPins) update(ctx context.Context, change func(map[string]desktop
 func (p *DesktopPins) updateOrDiscard(ctx context.Context, discard bool, change func(map[string]desktopPin) bool) (discarded bool, err error) {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
-	release, err := WaitLockFile(ctx, filepath.Join(p.dir, desktopPinsLockFile), pinsLockWait, ErrDesktopPinsBusy)
+	release, err := p.store.lockCredential(ctx, p.ref.Path(), desktopPinsLockFile, pinsLockWait, ErrDesktopPinsBusy, nil)
 	if err != nil {
 		return false, err
 	}

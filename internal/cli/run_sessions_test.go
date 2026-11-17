@@ -49,7 +49,7 @@ func TestDeviceSessionsUseTheRegisteredCertificate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lock, err := security.OpenLockFile(filepath.Join(store.Dir(sessionsRef), ".renew.lock"))
+	lock, err := security.OpenLockFile(filepath.Join(sessionsLockDir(t, store), ".renew.lock"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +73,7 @@ func TestDeviceSessionsUseTheRegisteredCertificate(t *testing.T) {
 	if err != nil || spec.SessionHandler == nil {
 		t.Fatalf("deviceSessions = %v, %v; want a session server", state, err)
 	}
+	defer state.unshare()
 	defer state.lock.Close()
 
 	const serial = 77
@@ -196,11 +197,20 @@ func sessionsStore(t *testing.T) *identity.Store {
 	return store
 }
 
+func sessionsLockDir(t *testing.T, store *identity.Store) string {
+	t.Helper()
+	dir, err := store.LockDir(sessionsRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // A second process on the same identity cannot take .sessions.lock and sets
 // no session handler; the revoked-kid hook is still set.
 func TestDeviceSessionsNeedTheSessionsLock(t *testing.T) {
 	store := sessionsStore(t)
-	held, err := session.LockSessions(store.Dir(sessionsRef))
+	held, err := session.LockSessions(sessionsLockDir(t, store))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,6 +227,30 @@ func TestDeviceSessionsNeedTheSessionsLock(t *testing.T) {
 	}
 	if spec.HintRevoked == nil {
 		t.Fatal("HintRevoked is not set")
+	}
+}
+
+// The sessions lock is held under a shared hold of the store lock for the
+// device's lifetime: a purge waits while the device serves sessions and runs
+// once the device ends.
+func TestDeviceSessionsHoldTheStoreUntilTheDeviceEnds(t *testing.T) {
+	store := sessionsStore(t)
+	spec := config.DeviceSpec{
+		Name: "gw-01", Credential: identity.NewDeviceRegistrar(store, sessionsRef, nil), Capabilities: []string{"terminal"},
+	}
+	state, err := deviceSessions(store, sessionsRef, &spec, nil, nil, nil)
+	if err != nil || state == nil {
+		t.Fatalf("deviceSessions = %v, %v; want a session state", state, err)
+	}
+	served := &servedDevice{lock: state.lock, unshare: state.unshare}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if _, err := store.PurgeDevices(ctx, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("purge while the device serves sessions = %v, want it to wait", err)
+	}
+	served.end()
+	if _, err := store.PurgeDevices(context.Background(), nil); err != nil {
+		t.Fatalf("purge after the device ended = %v", err)
 	}
 }
 

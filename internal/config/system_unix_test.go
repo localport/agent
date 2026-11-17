@@ -157,3 +157,17 @@ func TestSystemRunLockRefusesWritableDir(t *testing.T) {
 		t.Fatalf("LockRun in a group-writable dir = %v, want ErrUntrustedPath", err)
 	}
 }
+
+// The system config may hold no device: removing the last one writes an empty
+// list, and the device service loads it and idles.
+func TestSystemConfigHoldsNoDevice(t *testing.T) {
+	f := systemTestFile(t, true)
+	if err := WriteLocal(f, &LocalConfig{}, identity.Ref{}); err != nil {
+		t.Fatalf("WriteLocal(no devices): %v", err)
+	}
+	setSystemRoot(t, false)
+	got, err := LoadLocal(f)
+	if err != nil || len(got.Devices) != 0 {
+		t.Fatalf("LoadLocal = %+v, %v; want an empty device list", got, err)
+	}
+}

@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -20,8 +22,12 @@ import (
 
 // Server is the launcher daemon's configuration.
 type Server struct {
-	// AgentUID is the only peer uid the launcher serves.
+	// AgentUID is the only peer uid the launcher serves on its request
+	// socket, and the only publisher of the status document.
 	AgentUID uint32
+	// AgentGID is the agent group: its members, root and AgentUID read the
+	// status document.
+	AgentGID uint32
 	// AgentAccount is the agent account's name, the login of a session
 	// that runs as the agent account.
 	AgentAccount string
@@ -33,8 +39,89 @@ type Server struct {
 	Probe func() Probe
 	Log   func(format string, args ...any)
 
-	slots chan struct{}
-	wg    sync.WaitGroup
+	slots  chan struct{}
+	wg     sync.WaitGroup
+	status statusRelay
+	// peerGroups is peerCredGroups; tests replace it.
+	peerGroups func(*net.UnixConn) (uid uint32, gids []uint32, err error)
+}
+
+// ServeStatus serves the status document on ln until ctx ends: to root, the
+// agent account and members of the agent group, by the kernel's record of
+// the peer; anyone else is closed without a byte. The socket's mode admits
+// the same set; this check holds if the mode is ever wider.
+func (s *Server) ServeStatus(ctx context.Context, ln *net.UnixListener) error {
+	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+	defer stop()
+	var delay time.Duration
+	for {
+		conn, err := ln.AcceptUnix()
+		if errors.Is(err, net.ErrClosed) {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("launcher: accept a status reader: %w", err)
+		}
+		if err != nil {
+			// Any other failure (EMFILE, a timeout) is retried with a backoff,
+			// so it never ends the status endpoint.
+			delay = min(max(2*delay, 5*time.Millisecond), time.Second)
+			s.Log("launcher: accept a status reader: %v; retrying in %v", err, delay)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil
+			}
+			continue
+		}
+		delay = 0
+		if !s.status.enterReader() {
+			_ = conn.Close()
+			continue
+		}
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			defer s.status.leaveReader()
+			s.serveStatusReader(conn)
+		}()
+	}
+}
+
+func (s *Server) serveStatusReader(conn *net.UnixConn) {
+	defer conn.Close()
+	read := s.peerGroups
+	if read == nil {
+		read = peerCredGroups
+	}
+	uid, gids, err := read(conn)
+	if err != nil {
+		s.Log("launcher: status reader credentials: %v", err)
+		return
+	}
+	if uid != 0 && uid != s.AgentUID && !slices.Contains(gids, s.AgentGID) {
+		s.Log("launcher: refused a status reader of uid %d: not root, the agent account or the agent group", uid)
+		return
+	}
+	if err := s.status.writeTo(conn); err != nil {
+		s.Log("launcher: write the status document: %v", err)
+	}
+}
+
+// publish takes the publisher slot for conn, the agent account's KindStatus
+// connection, and relays its frames until it closes. It takes no helper slot.
+func (s *Server) publish(conn *net.UnixConn) {
+	if !s.status.claim() {
+		s.Log("launcher: refused a second status publisher")
+		s.refuse(conn, CodeBusy)
+		return
+	}
+	defer s.status.release()
+	respond(conn, Response{Publishing: true})
+	_ = conn.SetDeadline(time.Time{})
+	if err := s.status.relay(conn); !errors.Is(err, io.EOF) {
+		s.Log("launcher: status publisher: %v", err)
+	}
 }
 
 // Serve accepts connections on ln until ctx ends. Running helpers outlive
@@ -99,6 +186,14 @@ func (s *Server) handle(conn *net.UnixConn) {
 	// The channel is the passed descriptor, and PAM never takes a password.
 	if req.Pipe != "" || req.HasPassword {
 		s.refuse(conn, CodeBadRequest)
+		return
+	}
+	if req.Kind == KindStatus {
+		if channel != nil {
+			s.refuse(conn, CodeBadRequest)
+			return
+		}
+		s.publish(conn)
 		return
 	}
 	if req.Kind == KindProbe {

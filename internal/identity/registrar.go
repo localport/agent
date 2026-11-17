@@ -241,15 +241,15 @@ func (r *DeviceRegistrar) RenewalRefused(err error) {
 }
 
 // definitiveRefusal reports a renewal the control plane refused for good: a
-// 4xx other than 429 and the in-flight 409 (InFlight), or a credential that
-// does not renew.
+// 4xx other than 429, the in-flight 409 (InFlight) and SE040 (an admin's
+// Reconnect lifts it), or a credential that does not renew.
 func definitiveRefusal(err error) bool {
 	if errors.Is(err, ErrNotRenewable) {
 		return true
 	}
 	var apiErr *APIError
 	return errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 &&
-		apiErr.Status != http.StatusTooManyRequests && !InFlight(err)
+		apiErr.Status != http.StatusTooManyRequests && !InFlight(err) && apiErr.Code != CodeDeviceDisabled
 }
 
 // Tick retries a promotion the store refused earlier and reports whether a

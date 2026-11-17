@@ -99,3 +99,35 @@ func TestDeviceOptionsCarryTheSpec(t *testing.T) {
 		t.Fatal("a spec without a registrar must leave the credential interface nil")
 	}
 }
+
+// With KeepIdle, Run starts with no device, keeps running when its only
+// device is removed, and returns nil once ctx ends.
+func TestKeepIdleRunsWithoutDevicesUntilCancel(t *testing.T) {
+	a := New(&config.Config{})
+	a.KeepIdle = true
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ran := make(chan error, 1)
+	go func() { ran <- a.Run(ctx, nil) }()
+	<-a.Started()
+	if _, err := a.Apply(nil, specs(unreachableDevice("a.one"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Apply(a.Tunnels(), specs()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-ran:
+		t.Fatalf("Run returned with no device left: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-ran:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}

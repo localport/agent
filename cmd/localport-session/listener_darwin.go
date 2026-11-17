@@ -18,13 +18,29 @@ import (
 	"unsafe"
 )
 
-// launchdSocketName is the Sockets key of the io.localport.session plist.
-const launchdSocketName = "Listeners"
+// The Sockets keys of the io.localport.session plist: the launcher socket
+// and the status endpoint.
+const (
+	launchdSocketName = "Listeners"
+	launchdStatusName = "Status"
+)
 
-// listener returns the socket launchd bound from the plist's Sockets entry
-// (launch_activate_socket(3)); launchd owns its path, owner and mode.
-func listener(uint32) (*net.UnixListener, error) {
-	name := C.CString(launchdSocketName)
+// listeners returns the sockets launchd bound from the plist's Sockets
+// entries (launch_activate_socket(3)); launchd owns their paths, owners and
+// modes.
+func listeners(uint32) (session, status *net.UnixListener, err error) {
+	if session, err = activatedSocket(launchdSocketName); err != nil {
+		return nil, nil, err
+	}
+	if status, err = activatedSocket(launchdStatusName); err != nil {
+		session.Close()
+		return nil, nil, err
+	}
+	return session, status, nil
+}
+
+func activatedSocket(key string) (*net.UnixListener, error) {
+	name := C.CString(key)
 	defer C.free(unsafe.Pointer(name))
 	var fds *C.int
 	var n C.size_t
@@ -37,9 +53,9 @@ func listener(uint32) (*net.UnixListener, error) {
 		for _, fd := range all {
 			_ = syscall.Close(int(fd))
 		}
-		return nil, fmt.Errorf("launchd passed %d sockets, want 1", int(n))
+		return nil, fmt.Errorf("launchd passed %d sockets for %s, want 1", int(n), key)
 	}
-	f := os.NewFile(uintptr(all[0]), "io.localport.session")
+	f := os.NewFile(uintptr(all[0]), "io.localport.session "+key)
 	ln, err := net.FileListener(f)
 	_ = f.Close()
 	if err != nil {

@@ -221,22 +221,22 @@ func runPurgeChild() error {
 	return nil
 }
 
-// purgeStore deletes the device credentials of store and its recording
-// spool, printing each deletion. Each credential's removal waits a bounded
-// time for a renewal in flight (an `identity renew` run).
+// purgeStore deletes the device credentials of store, its recording spool and
+// the team directories they leave empty, printing each deletion, all under
+// identity.Store.PurgeDevices, which waits a bounded time for a credential
+// lock holder (an `identity renew` run).
 func purgeStore(store *identity.Store) error {
-	removed, err := store.RemoveDevices(context.Background())
+	spool := recordingSpoolDir(store)
+	removed, err := store.PurgeDevices(context.Background(), func() error {
+		if err := os.RemoveAll(spool); err != nil {
+			return fmt.Errorf("remove %s: %w", spool, err)
+		}
+		return removeEmptyTeamDirs(store.Root)
+	})
 	for _, d := range removed {
 		fmt.Fprintf(os.Stderr, "  deleted %s\n", d)
 	}
 	if err != nil {
-		return err
-	}
-	spool := recordingSpoolDir(store)
-	if err := os.RemoveAll(spool); err != nil {
-		return fmt.Errorf("remove %s: %w", spool, err)
-	}
-	if err := removeEmptyTeamDirs(store.Root); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "  deleted %s; other credentials in %s remain\n", spool, store.Root)
