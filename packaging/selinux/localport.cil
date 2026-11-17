@@ -57,7 +57,7 @@
 (filecon "/etc/localport-device/run\.lock" file (system_u object_r localport_lock_t ((s0) (s0))))
 
 ; File contexts apply on relabel only. Root creates the device dir, identity/
-; and run.lock at run time (connect, service install), so a named transition
+; and run.lock at run time (up, service install), so a named transition
 ; for each admin domain gives them their type at creation, as the
 ; distribution's own *_filetrans_named_content interfaces do. Files inside
 ; take the type of their directory.

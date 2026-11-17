@@ -17,7 +17,7 @@ import (
 // or an elevated Administrator, reloads the installed device service so they
 // apply (Manager.Reload: SIGHUP on Unix, a parameter change on Windows; the
 // agent restarts only the changed devices). Besides a re-enrolment with
-// connect, it is the way to change what an enrolled device allows. As root it
+// up, it is the way to change what an enrolled device allows. As root it
 // records its outcome in the system log.
 func runSet(args []string) (err error) {
 	var who invoker
@@ -30,7 +30,7 @@ func runSet(args []string) (err error) {
 	fs.SetOutput(os.Stderr)
 	device := addDeviceFlags(fs)
 	// set's own flags: they act on the device's pinned keys, not its config,
-	// so they are not deviceFlags flags connect would share.
+	// so they are not deviceFlags flags up would share.
 	resetRDPPin := fs.Bool("rdp-reset-pin", false, "forget the RDP server certificate key trusted for this device; the next connection asks to trust it again")
 	resetVNCPin := fs.Bool("vnc-reset-pin", false, "forget the VNC server key trusted for this device; the next connection asks to trust the key again")
 	fs.Usage = func() { usageSet(fs) }
@@ -121,18 +121,25 @@ func updateDevice(file config.LocalConfigFile, fs *flag.FlagSet, device *deviceF
 	if err != nil {
 		return identity.Ref{}, err
 	}
-	i, err := findDevice(local.Devices, name)
+	facts, err := readDeviceFacts(file, who, local.Devices)
 	if err != nil {
 		return identity.Ref{}, err
 	}
+	pruned := pruneRemoved(local, facts)
+	i, err := findDevice(local.Devices, name)
+	if err != nil {
+		// The pruning is kept even when the named device is among the removed.
+		return identity.Ref{}, errors.Join(err, writePruned(file, local, pruned))
+	}
 	d := local.Devices[i]
 	if err := device.apply(fs, &d, who); err != nil {
-		return identity.Ref{}, err
+		return identity.Ref{}, errors.Join(err, writePruned(file, local, pruned))
 	}
 	local.Devices[i] = d
 	if err := config.WriteLocal(file, local, d.Identity); err != nil {
 		return identity.Ref{}, err
 	}
+	reportPruned(pruned)
 	return d.Identity, nil
 }
 

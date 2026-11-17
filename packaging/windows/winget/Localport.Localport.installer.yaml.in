@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.28.0.schema.json
-# The machine installer registers no service by itself; `localport connect`
+# The machine installer registers no service by itself; `localport up`
 # run elevated does. The zip is the command-line package for any scope.
 PackageIdentifier: Localport.Localport
 PackageVersion: @VERSION@

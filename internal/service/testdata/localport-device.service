@@ -1,4 +1,4 @@
-# Managed by localport connect; localport service uninstall removes it.
+# Managed by localport up; localport service uninstall removes it.
 # Configure the devices with localport set; /etc/localport-device/agent.yaml
 # holds their settings and /etc/localport-device/identity their private keys,
 # so keep that directory out of backups and configuration management.

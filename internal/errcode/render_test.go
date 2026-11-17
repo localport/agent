@@ -140,7 +140,7 @@ func TestRenderShowsAnEdgeRefusal(t *testing.T) {
 // A remedy a caller adds prints after the error and its codes, also when the
 // error it wraps is a plain chain.
 func TestRenderRemedy(t *testing.T) {
-	err := fmt.Errorf("connect: %w", errcode.WithRemedy(errcode.New(errcode.RunLocked).With(nil, "run.lock is held"), "run the device in the foreground with --foreground"))
+	err := fmt.Errorf("up: %w", errcode.WithRemedy(errcode.New(errcode.RunLocked).With(nil, "run.lock is held"), "run the device in the foreground with --foreground"))
 	want := "localport is already running the devices of this config: run.lock is held [AG021]\n  run the device in the foreground with --foreground"
 	if text, _ := errcode.Render(err); text != want {
 		t.Fatalf("Render = %q, want %q", text, want)

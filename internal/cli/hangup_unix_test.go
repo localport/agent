@@ -50,7 +50,7 @@ func (m *hangupManagerProcess) Reload(ctx context.Context) error            { re
 func (m *hangupManagerProcess) Uninstall(ctx context.Context) error         { return m.run(ctx) }
 
 // TestHangupSafeHelper is the re-executed test binary. As the command it runs
-// set, service install, service uninstall or connect as root against
+// set, service install, service uninstall or up as root against
 // hangupManagerProcess with the production dispositions, and writes the
 // outcome line to a file. As the service manager it hangs up its process
 // group, command included, as the end of a terminal session does, and
@@ -73,9 +73,9 @@ func TestHangupSafeHelper(t *testing.T) {
 			err = runSet(args[1:])
 		case "service":
 			err = runService(args[1:])
-		case "connect":
+		case "up":
 			fakeEnrol(t, deviceRef("factory.gw-01"))
-			err = runConnect("test", append(args[1:], connectArgs[1:]...))
+			err = runUp("test", append(args[1:], upArgs[1:]...))
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -112,17 +112,17 @@ func hungUpTerminal(t *testing.T) *os.File {
 	return slave
 }
 
-// service install, service uninstall and a privileged connect, run from
+// service install, service uninstall and a privileged up, run from
 // a terminal session whose hangup reaches them and their service manager
 // command while it runs, and with their stdout and stderr gone, run to the
-// end and log that they completed. The connect record names no argument. A
+// end and log that they completed. The up record names no argument. A
 // closed stdout at exec needs no case: the Go runtime opens /dev/null on a
 // closed fd 0, 1 or 2 at startup (runtime.checkfds).
 func TestHangupSafeCommandsRunToTheEnd(t *testing.T) {
 	for args, want := range map[string]string{
-		"service install":                "localport service install: completed",
-		"service uninstall":              "localport service uninstall: completed",
-		"connect " + hangupSentinelToken: "localport connect: completed",
+		"service install":           "localport service install: completed",
+		"service uninstall":         "localport service uninstall: completed",
+		"up " + hangupSentinelToken: "localport up: completed",
 	} {
 		for name, output := range map[string]func(*testing.T) *os.File{"broken pipe": brokenOutput, "hung-up terminal": hungUpTerminal} {
 			t.Run(args+" "+name, func(t *testing.T) {

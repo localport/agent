@@ -28,12 +28,13 @@ type fakeManager struct {
 	installed                          bool
 	mainPID                            int
 	installs, uninstalls, reloads      int
+	restarts                           int
 }
 
 func (f *fakeManager) Name() string                  { return "localport-device.service" }
 func (f *fakeManager) Check() ([]string, error)      { return nil, f.checkErr }
 func (f *fakeManager) Installed() (bool, error)      { return f.installed, f.installedErr }
-func (f *fakeManager) Restart(context.Context) error { return nil }
+func (f *fakeManager) Restart(context.Context) error { f.restarts++; return nil }
 func (f *fakeManager) Reload(context.Context) error  { f.reloads++; return nil }
 func (f *fakeManager) MainPID(context.Context) (int, error) {
 	return f.mainPID, nil
@@ -96,7 +97,7 @@ func fakeEnrol(t *testing.T, ref identity.Ref) *int {
 	return &calls
 }
 
-var connectArgs = []string{"lpj_x", "--api", "https://127.0.0.1:1", "--wait", "0"}
+var upArgs = []string{"lpj_x", "--api", "https://127.0.0.1:1", "--wait", "0"}
 
 // holdRun holds run.lock of file, as another localport run would, until the
 // test ends.
@@ -123,11 +124,11 @@ func TestServiceTextsNameEveryManager(t *testing.T) {
 	}
 }
 
-// A privileged connect refuses, before any enrolment request, a foreign
-// service definition, a binary someone other than root could replace, a
-// manual run holding run.lock with no device service installed, and
-// --foreground while another process holds run.lock.
-func TestPrivilegedConnectRefusesBeforeTheSpend(t *testing.T) {
+// A privileged up refuses, before any enrolment request, a foreign service
+// definition, a binary someone other than root could replace, a manual run
+// holding run.lock with no device service installed, and --foreground while
+// another process holds run.lock.
+func TestPrivilegedUpRefusesBeforeTheSpend(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		m       fakeManager
@@ -154,45 +155,45 @@ func TestPrivilegedConnectRefusesBeforeTheSpend(t *testing.T) {
 				holdRun(t, file)
 			}
 			calls := fakeEnrol(t, deviceRef("factory.gw-01"))
-			err := runConnect("test", append(slices.Clone(connectArgs), c.extra...))
+			err := runUp("test", append(slices.Clone(upArgs), c.extra...))
 			if !errors.Is(err, c.want) {
-				t.Fatalf("connect = %v, want %v", err, c.want)
+				t.Fatalf("up = %v, want %v", err, c.want)
 			}
 			if c.holdRun && !slices.Contains(c.extra, "--foreground") && !strings.Contains(err.Error(), fmt.Sprintf("process %d", os.Getpid())) {
-				t.Fatalf("connect = %v, want the refusal to name the holder PID %d", err, os.Getpid())
+				t.Fatalf("up = %v, want the refusal to name the holder PID %d", err, os.Getpid())
 			}
 			if *calls != 0 || m.installs != 0 {
-				t.Fatalf("connect sent %d enrolment requests and %d installs after the refusal", *calls, m.installs)
+				t.Fatalf("up sent %d enrolment requests and %d installs after the refusal", *calls, m.installs)
 			}
 		})
 	}
 }
 
-// --no-mux is refused before the spend when connect installs the service,
-// which would serve the device with the mux.
-func TestPrivilegedConnectRefusesNoMuxForTheService(t *testing.T) {
+// --no-mux is refused before the spend when up installs the service, which
+// would serve the device with the mux.
+func TestPrivilegedUpRefusesNoMuxForTheService(t *testing.T) {
 	m := &fakeManager{}
 	asRoot(t, m)
 	calls := fakeEnrol(t, deviceRef("factory.gw-01"))
-	err := runConnect("test", append(slices.Clone(connectArgs), "--no-mux"))
+	err := runUp("test", append(slices.Clone(upArgs), "--no-mux"))
 	if err == nil || !strings.Contains(err.Error(), "--no-mux applies only to a device run in this terminal") {
-		t.Fatalf("connect --no-mux as root = %v, want a refusal", err)
+		t.Fatalf("up --no-mux as root = %v, want a refusal", err)
 	}
 	if *calls != 0 || m.installs != 0 {
-		t.Fatalf("connect sent %d enrolment requests and %d installs after the refusal", *calls, m.installs)
+		t.Fatalf("up sent %d enrolment requests and %d installs after the refusal", *calls, m.installs)
 	}
 }
 
 // With the device service installed, the run.lock holder is that service:
-// connect enrols and reinstalls (restarts) it.
-func TestConnectBesideTheRunningServiceInstalls(t *testing.T) {
+// up enrols and reinstalls (restarts) it.
+func TestUpBesideTheRunningServiceInstalls(t *testing.T) {
 	// The test process holds run.lock and stands in for the service's main
 	// process.
 	m := &fakeManager{installed: true, mainPID: os.Getpid()}
 	file := asRoot(t, m)
 	holdRun(t, file)
 	calls := fakeEnrol(t, deviceRef("factory.gw-01"))
-	if err := runConnect("test", connectArgs); err != nil {
+	if err := runUp("test", upArgs); err != nil {
 		t.Fatal(err)
 	}
 	if *calls != 1 || m.installs != 1 {
@@ -210,10 +211,10 @@ func testRecordingKey(t *testing.T) string {
 	return base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes())
 }
 
-// Connect writes the enrolled session CA keys after the credential is saved. A
-// key store failure only warns: the credential stays saved and enrolment
+// up writes the enrolled session CA keys after the credential is saved. A key
+// store failure only warns: the credential stays saved and enrolment
 // completes. Only a ticket_keys.json it cannot read gets the file remedy.
-func TestConnectWritesTheEnrolledTicketKeysAndWarnsWhenItCannot(t *testing.T) {
+func TestUpWritesTheEnrolledTicketKeysAndWarnsWhenItCannot(t *testing.T) {
 	usable := identity.DeviceKeys{
 		TicketKeys:   []identity.TicketKey{{KID: "k1", PublicKey: base64.RawURLEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize))}},
 		RecordingKey: testRecordingKey(t),
@@ -254,9 +255,9 @@ func TestConnectWritesTheEnrolledTicketKeysAndWarnsWhenItCannot(t *testing.T) {
 			}
 
 			var err error
-			stderr := captureStderr(t, func() { err = runConnect("test", connectArgs) })
+			stderr := captureStderr(t, func() { err = runUp("test", upArgs) })
 			if err != nil {
-				t.Fatalf("connect: %v", err)
+				t.Fatalf("up: %v", err)
 			}
 			if saves != 1 {
 				t.Fatalf("credential saves = %d, want 1", saves)
@@ -289,9 +290,9 @@ func TestInstallFailureAfterTheSpendNamesServiceInstall(t *testing.T) {
 	file := asRoot(t, m)
 	ref := deviceRef("factory.gw-01")
 	calls := fakeEnrol(t, ref)
-	err := runConnect("test", connectArgs)
+	err := runUp("test", upArgs)
 	if err == nil || !strings.Contains(err.Error(), serviceInstallCommand) || strings.Contains(err.Error(), joinTokenSpent) {
-		t.Fatalf("connect = %v, want the service install remedy and no spent-token remedy", err)
+		t.Fatalf("up = %v, want the service install remedy and no spent-token remedy", err)
 	}
 	if *calls != 1 || m.installs != 1 {
 		t.Fatalf("enrolments %d, installs %d, want 1 and 1", *calls, m.installs)

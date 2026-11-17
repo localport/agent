@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/localport/agent/internal/errcode"
+	"github.com/localport/agent/internal/security"
 )
 
 // App is the top-level CLI router. It dispatches `localport <command> …`
@@ -64,8 +66,10 @@ func (a *App) Run(args []string) error {
 		return runAsAgentAccount(args, os.Stdin, os.Stdout)
 	}
 	switch args[0] {
-	case "connect":
-		return runConnect(a.version, args[1:])
+	case "up":
+		return runUp(a.version, args[1:])
+	case "down":
+		return runDown(args[1:])
 	case "run":
 		return runRun(a.version, args[1:])
 	case "set":
@@ -100,7 +104,11 @@ func (a *App) Run(args []string) error {
 		printMainUsage(a.stderr)
 		return nil
 	default:
-		// Anything else is the flat tunnel form.
+		// Flags or a protocol start the flat tunnel form; any other word is
+		// not a command.
+		if !strings.HasPrefix(args[0], "-") && !isTunnelProto(args[0]) {
+			return errcode.New(errcode.UnknownCommand).With(nil, fmt.Sprintf("%q", security.SanitizeDisplay(args[0])))
+		}
 		return runTunnel(a.version, args)
 	}
 }
@@ -109,7 +117,8 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage: localport <command> [flags]
 
 Commands:
-  connect   Enrol this machine as a fleet device, or run a config file
+  up        Enrol this machine as a fleet device, resume a paused one, or run a config file
+  down      Pause an enrolled device until up
   run       Run every device enrolled on this machine
   set       Change what an enrolled device allows
   service   Install or remove the device service (service install|uninstall)
@@ -135,13 +144,17 @@ Examples:
   localport --token <token> --local tcp://192.168.1.13:11434 --region eu
 
   # Run several tunnels from one config file:
-  localport connect --config localport.yaml
+  localport up --config localport.yaml
 
   # Enrol this machine as a fleet device with the command the dashboard shows:
-  sudo localport connect <join-token> --enable terminal,files --logins pi
+  sudo localport up <join-token> --enable terminal,files --logins pi
 
   # A device serving another machine on this network (ports are set in the dashboard):
-  sudo localport connect <join-token> --host 192.168.1.100 --allow-ports 502,80
+  sudo localport up <join-token> --host 192.168.1.100 --allow-ports 502,80
+
+  # Take a device offline until you bring it back:
+  sudo localport down
+  sudo localport up
 
   # Reach a device's ports with your client certificate:
   localport access plc-01-factory.ap.localport.dev -L 5020:502 -L 8080:80

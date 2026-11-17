@@ -59,7 +59,7 @@ func runService(args []string) (err error) {
 
 // installService installs or rewrites the device service for the devices
 // already in the local config, and starts it. It spends no token, so it
-// recovers from an install that failed after connect enrolled.
+// recovers from an install that failed after up enrolled.
 func installService(who invoker) error {
 	unlock, err := lockServiceDefinitions(context.Background())
 	if err != nil {
@@ -82,7 +82,7 @@ func installServiceLocked(who invoker, exe string) error {
 		return err
 	}
 	if len(local.Devices) == 0 {
-		return errNoDevice.With(nil, fmt.Sprintf("%s lists no device; enrol one with: sudo localport connect <join-token>", file.Path))
+		return errNoDevice.With(nil, fmt.Sprintf("%s lists no device; enrol one %s", file.Path, elevatedCommand("up <join-token>")))
 	}
 	if needsSystemLayout(file) {
 		// Before prepareService, whose run.lock check needs the account's
@@ -147,11 +147,12 @@ func uninstallService(who invoker, purge bool) error {
 // deletion (m is nil without a supported service manager), and while
 // another process holds run.lock after runLockWait. It holds run.lock, then
 // the config's lock, through the deletion, so no run serves and no set or
-// connect writes meanwhile. On Windows it also deletes both services' crash
+// up writes meanwhile. On Windows it also deletes both services' crash
 // directories (service.CrashRoot), which only a purge removes; the services
-// are gone by then, so nothing writes there. The lock files and the
-// directory stay, so a concurrent command never locks an unlinked file; a
-// missing directory is left missing.
+// are gone by then, so nothing writes there. agent.yaml.lock, run.lock and
+// the directory stay, so a concurrent command never locks an unlinked config
+// lock; the store's credential lock files go under its store lock
+// (identity.Store.PurgeDevices). A missing directory is left missing.
 func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duration) (retErr error) {
 	file, err := who.localConfigFile()
 	if err != nil {
@@ -185,7 +186,7 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 	}
 	releaseRun, err := config.LockRun(file, runLockWait)
 	if errors.Is(err, config.ErrRunLocked) {
-		return errcode.WithRemedy(err, "stop the localport run or connect --foreground serving the devices, then run the command again")
+		return errcode.WithRemedy(err, "stop the localport run or up --foreground serving the devices, then run the command again")
 	}
 	if err != nil {
 		return err
@@ -251,15 +252,16 @@ const serviceUsage = `Usage: localport service install
 
   uninstall stops and removes the device service. A service definition
   localport did not write is refused. With no service installed it says so
-  and exits 0. The devices' credentials and local config stay, so connect or
+  and exits 0. The devices' credentials and local config stay, so up or
   the service can use them again, unless --purge deletes them.
 
   --purge waits up to 30 s for the stopped service to release run.lock and
   is refused while another localport run holds it. It deletes agent.yaml,
   the device credentials under identity/ and the recording spool
   recordings/, with the recordings not yet uploaded. Machine credentials
-  from setup and sign-in credentials stay, as do the lock files
-  agent.yaml.lock and run.lock and the directory. On Linux and macOS, when
+  from setup and sign-in credentials stay with their store lock
+  identity/.store.lock, as do the lock files agent.yaml.lock and run.lock
+  and the directory. On Linux and macOS, when
   identity/ is then empty, it and the agent's log directory
   /var/log/localport are removed too. The agent account and group
   always stay, since files elsewhere may belong to them; --purge prints the

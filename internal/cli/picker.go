@@ -10,7 +10,10 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/ui"
 )
 
@@ -103,5 +106,118 @@ func chooseCredential(in io.Reader, out io.Writer, store *identity.Store, refs [
 			continue
 		}
 		return refs[n-1], nil
+	}
+}
+
+// pickerTTY reports whether up and down may ask which device; tests replace it.
+var pickerTTY = func() bool { return ui.IsTTY(os.Stdin) && ui.IsTTY(os.Stderr) }
+
+// selectDevices returns the indexes of devices that up or down (command, as
+// shown in an error) acts on: every one with all; the one selector names
+// (identity, <team>/<prefix>, <tunnel>.<prefix> or a unique prefix); with no
+// selector the only device, or with several a choice from a numbered list in
+// a terminal, or else an error listing each exact command. It never reads
+// stdin without a terminal.
+func selectDevices(devices []config.LocalDevice, facts map[identity.Ref]deviceFact, selector string, all bool, command string) ([]int, error) {
+	if len(devices) == 0 {
+		return nil, errcode.New(errcode.DeviceNotFound).With(nil, "no device is enrolled on this machine")
+	}
+	switch {
+	case all:
+		idx := make([]int, len(devices))
+		for i := range devices {
+			idx[i] = i
+		}
+		return idx, nil
+	case selector != "":
+		i, err := matchDevice(devices, selector)
+		if err != nil {
+			return nil, err
+		}
+		return []int{i}, nil
+	case len(devices) == 1:
+		return []int{0}, nil
+	case !pickerTTY():
+		return nil, ambiguousDevices(devices, command)
+	}
+	return chooseDevices(os.Stdin, os.Stderr, devices, facts)
+}
+
+// matchDevice is findDevice that also accepts <team>/<prefix>.
+func matchDevice(devices []config.LocalDevice, selector string) (int, error) {
+	if team, prefix, ok := strings.Cut(selector, "/"); ok && !strings.Contains(prefix, "/") {
+		found := -1
+		for i, d := range devices {
+			_, p, _ := strings.Cut(d.Identity.Identity, ".")
+			if d.Identity.Team != team || (p != prefix && d.Identity.Identity != prefix) {
+				continue
+			}
+			if found >= 0 {
+				return -1, errcode.New(errcode.DeviceAmbiguous).With(nil, fmt.Sprintf("%q; use the full identity", security.SanitizeDisplay(selector)))
+			}
+			found = i
+		}
+		if found >= 0 {
+			return found, nil
+		}
+	}
+	return findDevice(devices, selector)
+}
+
+// ambiguousDevices lists one exact command per device and the --all form.
+func ambiguousDevices(devices []config.LocalDevice, command string) error {
+	var b strings.Builder
+	b.WriteString("several devices are enrolled on this machine; name one:\n")
+	for _, d := range devices {
+		b.WriteString("    sudo " + command + " " + d.Identity.String() + "\n")
+	}
+	b.WriteString("    sudo " + command + " --all")
+	return errcode.New(errcode.DeviceAmbiguous).With(nil, b.String())
+}
+
+// chooseDevices asks on out and reads the answer from in: a number, or a for
+// every device. EOF chooses nothing.
+func chooseDevices(in io.Reader, out io.Writer, devices []config.LocalDevice, facts map[identity.Ref]deviceFact) ([]int, error) {
+	fmt.Fprintf(out, "\n  Several devices are enrolled on this machine. Which one?\n\n")
+	tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+	for i, d := range devices {
+		f := facts[d.Identity]
+		target := d.Host
+		if target == "" {
+			target = "this machine"
+		}
+		state := "enabled"
+		if d.Paused {
+			state = "paused"
+		}
+		fmt.Fprintf(tw, "    %d)\t%s\t%s\t%s\t%s (%s)\t%s\n", i+1, d.Identity.Identity, valueOrUnknown(f.Host),
+			security.SanitizeDisplay(target), valueOrUnknown(f.Team), d.Identity.Team, state)
+	}
+	fmt.Fprintf(tw, "    a)\tall\n")
+	if err := tw.Flush(); err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReader(in)
+	for {
+		fmt.Fprintf(out, "\n  Choose [1-%d or a]: ", len(devices))
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Fprintln(out)
+			return nil, errors.New("no device chosen")
+		}
+		answer := strings.TrimSpace(line)
+		if answer == "a" {
+			idx := make([]int, len(devices))
+			for i := range devices {
+				idx[i] = i
+			}
+			return idx, nil
+		}
+		n, convErr := strconv.Atoi(answer)
+		if convErr != nil || n < 1 || n > len(devices) {
+			fmt.Fprintf(out, "  Enter a number between 1 and %d, or a.\n", len(devices))
+			continue
+		}
+		return []int{n - 1}, nil
 	}
 }

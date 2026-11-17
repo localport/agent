@@ -201,7 +201,7 @@ func TestAMergeWriteFailureIsNotAConflict(t *testing.T) {
 }
 
 // A new identity whose entry cannot be written is reported as unrecorded, and
-// connect removes its credential, so no credential is left that nothing uses.
+// up removes its credential, so no credential is left that nothing uses.
 func TestAnAppendWriteFailureForgetsTheNewCredential(t *testing.T) {
 	stored := storedDevice(t)
 	file := storedConfig(t, stored)
@@ -264,9 +264,9 @@ func TestAMissingStoredFilesRootIsNotAFlagConflict(t *testing.T) {
 	}
 }
 
-// connect checks the store directory and the local config before it spends
-// the join token: both fail here, never at the unroutable API.
-func TestConnectChecksTheStoreAndConfigBeforeTheSpend(t *testing.T) {
+// up checks the store directory and the local config before it spends the
+// join token: both fail here, never at the unroutable API.
+func TestUpChecksTheStoreAndConfigBeforeTheSpend(t *testing.T) {
 	asUnprivileged(t)
 	args := []string{"lpj_x", "--api", "https://127.0.0.1:1", "--wait", "0"}
 
@@ -275,8 +275,8 @@ func TestConnectChecksTheStoreAndConfigBeforeTheSpend(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(identity.HomeEnv, home)
-	if err := runConnect("test", args); !errors.Is(err, security.ErrUntrustedPath) {
-		t.Fatalf("connect with an unusable store = %v, want ErrUntrustedPath before any request", err)
+	if err := runUp("test", args); !errors.Is(err, security.ErrUntrustedPath) {
+		t.Fatalf("up with an unusable store = %v, want ErrUntrustedPath before any request", err)
 	}
 
 	home = t.TempDir()
@@ -284,20 +284,20 @@ func TestConnectChecksTheStoreAndConfigBeforeTheSpend(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(identity.HomeEnv, home)
-	if err := runConnect("test", args); !errors.Is(err, config.ErrInvalidLocalConfig) {
-		t.Fatalf("connect with a refused config = %v, want ErrInvalidLocalConfig before any request", err)
+	if err := runUp("test", args); !errors.Is(err, config.ErrInvalidLocalConfig) {
+		t.Fatalf("up with a refused config = %v, want ErrInvalidLocalConfig before any request", err)
 	}
 }
 
 // --no-inspect and --log-requests apply only to a config file and are
 // refused beside a join token, before the spend.
-func TestConnectRefusesInspectFlagsBesideAJoinToken(t *testing.T) {
+func TestUpRefusesInspectFlagsBesideAJoinToken(t *testing.T) {
 	t.Setenv(identity.HomeEnv, t.TempDir())
 	calls := fakeEnrol(t, deviceRef("factory.gw-01"))
 	for _, flag := range []string{"--no-inspect", "--log-requests"} {
-		err := runConnect("test", append(slices.Clone(connectArgs), flag))
+		err := runUp("test", append(slices.Clone(upArgs), flag))
 		if err == nil || !strings.Contains(err.Error(), flag+" apply only with --config") {
-			t.Fatalf("connect %s = %v, want a refusal", flag, err)
+			t.Fatalf("up %s = %v, want a refusal", flag, err)
 		}
 	}
 	if *calls != 0 {
@@ -305,9 +305,9 @@ func TestConnectRefusesInspectFlagsBesideAJoinToken(t *testing.T) {
 	}
 }
 
-// --no-mux reaches the device a foreground connect serves.
-func TestConnectNoMuxReachesTheDevice(t *testing.T) {
-	// A foreground connect is the unprivileged one; a privileged run would
+// --no-mux reaches the device a foreground up serves.
+func TestUpNoMuxReachesTheDevice(t *testing.T) {
+	// A foreground up is the unprivileged one; a privileged run would
 	// install the service instead.
 	asUnprivileged(t)
 	stored := config.LocalDevice{Identity: deviceRef("factory.gw-01")}
@@ -321,22 +321,22 @@ func TestConnectNoMuxReachesTheDevice(t *testing.T) {
 			got = noMux
 			return nil
 		}
-		args := slices.Clone(connectArgs)
+		args := slices.Clone(upArgs)
 		if want {
 			args = append(args, "--no-mux")
 		}
-		if err := runConnect("test", args); err != nil {
+		if err := runUp("test", args); err != nil {
 			t.Fatal(err)
 		}
 		if got != want {
-			t.Fatalf("connect %q served with noMux %v, want %v", args, got, want)
+			t.Fatalf("up %q served with noMux %v, want %v", args, got, want)
 		}
 	}
 }
 
-// connect removes the credential it just saved when the local config write
-// fails, so no enrolled credential is left without a config entry.
-func TestConnectForgetsTheCredentialWhenTheConfigWriteFails(t *testing.T) {
+// up removes the credential it just saved when the local config write fails,
+// so no enrolled credential is left without a config entry.
+func TestUpForgetsTheCredentialWhenTheConfigWriteFails(t *testing.T) {
 	t.Setenv(identity.HomeEnv, t.TempDir())
 	ref := deviceRef("factory.gw-03")
 	fakeEnrol(t, ref)
@@ -350,8 +350,8 @@ func TestConnectForgetsTheCredentialWhenTheConfigWriteFails(t *testing.T) {
 	writeLocal = func(config.LocalConfigFile, *config.LocalConfig, identity.Ref) error { return failing }
 	t.Cleanup(func() { writeLocal = config.WriteLocal })
 
-	if err := runConnect("test", connectArgs); !isDeviceNotRecorded(err) || !errors.Is(err, failing) {
-		t.Fatalf("runConnect = %v, want deviceNotRecorded wrapping the write error", err)
+	if err := runUp("test", upArgs); !isDeviceNotRecorded(err) || !errors.Is(err, failing) {
+		t.Fatalf("runUp = %v, want deviceNotRecorded wrapping the write error", err)
 	}
 	store := &identity.Store{Root: filepath.Join(os.Getenv(identity.HomeEnv), "identity")}
 	if _, err := os.Lstat(store.Dir(ref)); !errors.Is(err, os.ErrNotExist) {

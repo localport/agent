@@ -20,6 +20,7 @@ import (
 	"github.com/localport/agent/internal/recording"
 	"github.com/localport/agent/internal/service"
 	"github.com/localport/agent/internal/session"
+	"github.com/localport/agent/internal/status"
 	"github.com/localport/agent/internal/tunnel"
 	"github.com/localport/agent/internal/ui"
 )
@@ -79,12 +80,18 @@ func runEnrolledDevices(ctx context.Context, version string, who invoker, asServ
 	// Before the run.lock wait: under the Windows service control manager the
 	// service then accepts Stop, which ends the wait through ctx.
 	running()
+	var board *status.Board
 	if who.privileged {
 		release, err := holdRunLock(ctx, file, "localport run", asService)
 		if err != nil {
 			return err
 		}
 		defer func() { retErr = errors.Join(retErr, release()) }()
+		// The one process holding run.lock publishes the devices' states to
+		// the session launcher; the connection closes before the release.
+		board = status.NewBoard(os.Getpid())
+		stopPublishing := startPublishing(ctx, board)
+		defer stopPublishing()
 	}
 	cfg, err := config.LoadLocal(file)
 	if err != nil {
@@ -106,22 +113,51 @@ func runEnrolledDevices(ctx context.Context, version string, who invoker, asServ
 			return cfg.Devices, nil
 		}
 	}
-	return serveDevices(ctx, version, store, cfg.Devices, noUI, false, reload)
+	return serveDevicesOn(ctx, version, store, cfg.Devices, noUI, false, reload, board)
+}
+
+// openStatus opens the launcher's status publication; tests replace it.
+var openStatus status.Opener = launcher.DefaultClient().OpenStatus
+
+// startPublishing runs status.Publish for board and returns a function that
+// stops it and waits until its connection is closed.
+func startPublishing(ctx context.Context, board *status.Board) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		status.Publish(ctx, board, openStatus, func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "  [event] "+format+"\n", args...)
+		})
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// serveDevices is serveDevicesOn without a status board.
+func serveDevices(parent context.Context, version string, store *identity.Store, devices []config.LocalDevice, noUI, noMux bool, reload func() ([]config.LocalDevice, error)) error {
+	return serveDevicesOn(parent, version, store, devices, noUI, noMux, reload, nil)
 }
 
 // serveDevices runs the enrolled devices until a signal or until parent ends,
 // with the renewal loop of each renewable device credential. A device whose
-// credential is missing or unreadable is logged and skipped; it refuses to
-// start when no device can. noMux serves every inbound connection over its
+// credential is missing or unreadable is logged and skipped. A foreground run
+// refuses to start when no device can and returns when the last one ends; the
+// service (reload set) keeps running with none until it stops. A device
+// refused for good is forgotten (SE018, SE041) or parked (deviceRunner.handleEnd). noMux serves every inbound connection over its
 // own connection, so the devices serve no sessions. With reload set, each
 // reload signal (SIGHUP on Unix) re-reads the devices through it and applies
-// the changed ones only (deviceRunner.reload).
-func serveDevices(parent context.Context, version string, store *identity.Store, devices []config.LocalDevice, noUI, noMux bool, reload func() ([]config.LocalDevice, error)) error {
+// the changed ones only (deviceRunner.reload). board, when set, receives each
+// device's state for the status endpoint.
+func serveDevicesOn(parent context.Context, version string, store *identity.Store, devices []config.LocalDevice, noUI, noMux bool, reload func() ([]config.LocalDevice, error), board *status.Board) error {
 	// Each line names its own topic (identity, session, reload).
 	logEvent := func(line string) { fmt.Fprintf(os.Stderr, "  [event] %s\n", line) }
 	cfg := &config.Config{AgentVersion: version, NoMux: noMux}
 	var a *agent.Agent
-	runner := &deviceRunner{parent: parent, store: store, logEvent: logEvent, served: map[identity.Ref]*servedDevice{}}
+	runner := &deviceRunner{parent: parent, store: store, logEvent: logEvent, served: map[identity.Ref]*servedDevice{},
+		forget: store.Forget, endWake: make(chan struct{}, 1), board: board}
 	runner.configured.Store(&devices)
 	// The uploader runs only after a is set.
 	runner.uploads = openUploader(store, runner.isConfigured, func(identifier string) (recording.Client, error) {
@@ -143,13 +179,21 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 			cfg.Devices = append(cfg.Devices, spec)
 		}
 	}
-	if len(cfg.Devices) == 0 {
+	runner.storeConfigured(devices)
+	runner.pruneTombstones(devices)
+	// The service (reload set) idles with no device to run, until a reload
+	// starts one or the service stops.
+	if len(cfg.Devices) == 0 && reload == nil {
 		return errNoDeviceStarts
 	}
 
 	mode := ui.DetectMode(noUI, os.Stderr)
 	cfg.NoInspect = inspectDisabled(mode, false, false)
 	a = agent.New(cfg)
+	a.KeepIdle = reload != nil
+	a.OnDeviceEnd = func(t *tunnel.Tunnel, err error) {
+		runner.queueEnd(deviceEnd{identifier: t.Identity(), tunnel: t, err: err})
+	}
 	renderer := pickRenderer(mode, a)
 	renderer.Banner(version, cfg)
 	warnNoPortCeiling(renderer, cfg.Devices)
@@ -181,17 +225,20 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 	for _, s := range runner.served {
 		s.start(ctx)
 	}
-	if reload != nil {
-		renewing.Go(func() { runner.watchReload(ctx, a, reload) })
-	}
+	renewing.Go(func() { runner.watchReload(ctx, a, reload) })
 	if devicesRunning != nil {
 		devicesRunning()
+	}
+	if runnerServing != nil {
+		runnerServing(runner, a)
 	}
 	runErr := a.Run(ctx, renderer)
 	// Every device has stopped; end the reload, renewal and key refresh loops
 	// with them.
 	stop()
 	renewing.Wait()
+	// Ends queued as the last tunnels stopped still forget or park.
+	runner.handleEnds(context.WithoutCancel(ctx), a)
 	for _, s := range runner.served {
 		s.end()
 	}
@@ -228,6 +275,10 @@ var resolveEdge = config.ResolveEdge
 // outlives the devices has started, just before the devices run. Tests set
 // it; nil otherwise.
 var devicesRunning func()
+
+// runnerServing, when set, receives the runner and agent where devicesRunning
+// runs. Tests set it to queue device ends; nil otherwise.
+var runnerServing func(*deviceRunner, *agent.Agent)
 
 // deviceSpec builds the runtime spec of one enrolled device from its local
 // config entry, its stored credential and the launcher probe. renews

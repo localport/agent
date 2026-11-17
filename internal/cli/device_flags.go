@@ -139,7 +139,7 @@ func (who invoker) defaultLogin() (string, error) {
 	return name, nil
 }
 
-// deviceFlags are the capability flags `connect` and `set` share.
+// deviceFlags are the capability flags `up` and `set` share.
 type deviceFlags struct {
 	enable, logins, passwordLogins, filesRoot, host, allowPorts *string
 	rdp, vnc                                                    string

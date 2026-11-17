@@ -41,6 +41,21 @@ func EnsureAccount(ctx context.Context, identityDir string) (Account, error) {
 // it does not exist.
 func LookupAccount() (Account, error) { return lookupAccount(hostAccounts{}) }
 
+// CheckAccount looks up the agent account and checks its shape as
+// EnsureAccount does, changing nothing: AccountMissing when it does not
+// exist, AgentAccountUnsafe (macOS) when it can log in or reaches other
+// users' files.
+func CheckAccount(ctx context.Context) (Account, error) {
+	acct, err := lookupAccount(hostAccounts{})
+	if err != nil {
+		return Account{}, err
+	}
+	if err := checkShape(ctx, execRun, acct); err != nil {
+		return Account{}, err
+	}
+	return acct, nil
+}
+
 // accounts reads the local account database; tests replace it.
 type accounts interface {
 	lookup(name string) (uid, gid int, found bool, err error)

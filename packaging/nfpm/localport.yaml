@@ -3,7 +3,7 @@
 # Variables are set by scripts/release/packages.sh. SESSION_BINARY is the
 # localport-session build the target needs: glibc with PAM for deb and rpm, musl
 # without PAM for apk (localport-pam.yaml replaces it with the musl PAM build).
-# Service units are not packaged: `localport connect` and
+# Service units are not packaged: `localport up` and
 # `localport service install` write them.
 
 name: localport

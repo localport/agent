@@ -160,7 +160,7 @@ func TestServiceWritersRefuseWhileTheConfigLockIsHeld(t *testing.T) {
 	writers := map[string]func() error{
 		"service install":   func() error { return installService(currentInvoker(true)) },
 		"service uninstall": func() error { return uninstallService(currentInvoker(true), false) },
-		"connect":           func() error { return (&deviceService{}).install() },
+		"up":                func() error { return (&deviceService{}).install() },
 	}
 	for name, write := range writers {
 		if err := write(); !errors.Is(err, errServiceConfigBusy) || !errors.Is(err, errServiceConfigHeld) {

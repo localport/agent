@@ -32,7 +32,7 @@ LoadCredential=token:/etc/localport/token
 Environment=LOCALPORT_TOKEN_FILE=%d/token
 
 ; This unit runs an unprivileged tunnel. A fleet device does not use it:
-; `sudo localport connect <join-token>` enrols the machine and installs its
+; `sudo localport up <join-token>` enrols the machine and installs its
 ; own service, localport-device.service.
 
 ; Found in /usr/bin (package) or /usr/local/bin (install script).

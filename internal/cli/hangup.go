@@ -13,7 +13,7 @@ var (
 
 // logOutcome records how a hangup-safe command run as root ended in the
 // system log, where it stays readable after the terminal the command ran in
-// is gone. The record quotes the error only when withCause is set: connect
+// is gone. The record quotes the error only when withCause is set: up
 // passes false, because its errors can quote its arguments.
 func logOutcome(command []string, err error, withCause bool) {
 	line := "localport " + strings.Join(command, " ") + ": "

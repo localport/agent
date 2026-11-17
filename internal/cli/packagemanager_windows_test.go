@@ -7,7 +7,7 @@ import (
 	"github.com/localport/agent/internal/security"
 )
 
-// connect and service install take their service binary from
+// up and service install take their service binary from
 // serviceExecutable, which refuses one under each package-manager root.
 func TestServiceExecutableRefusesAPackageManagerInstall(t *testing.T) {
 	t.Setenv("USERPROFILE", `C:\Users\ana`)

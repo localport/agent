@@ -5,7 +5,7 @@
 # source tarball it makes of the checked-out tree. Follows the layout of the
 # golang feed's Go packages in openwrt/packages.
 #
-# No init scripts: `localport connect` writes the procd scripts for both
+# No init scripts: `localport up` writes the procd scripts for both
 # services. The package creates the system user and group localport (USERID).
 #
 

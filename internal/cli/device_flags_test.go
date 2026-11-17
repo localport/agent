@@ -27,7 +27,7 @@ func parseDeviceFlags(t *testing.T, args ...string) (*flag.FlagSet, *deviceFlags
 
 // Flag parsing stops at the first argument that is not a flag, so anything
 // after a second positional would be dropped while the token is spent.
-func TestConnectRefusesAnArgumentBeyondTheJoinToken(t *testing.T) {
+func TestUpRefusesAnArgumentBeyondTheJoinToken(t *testing.T) {
 	// A regression must not touch the real home store or config.
 	t.Setenv(identity.HomeEnv, t.TempDir())
 	for _, args := range [][]string{
@@ -37,8 +37,8 @@ func TestConnectRefusesAnArgumentBeyondTheJoinToken(t *testing.T) {
 		// The flags lead, so a regression that parses on stops at the
 		// unroutable --api instead of a real control plane.
 		withAPI := append([]string{"--api", "https://127.0.0.1:1", "--wait", "0"}, args...)
-		if err := runConnect("test", withAPI); !errors.Is(err, errExtraArgument) {
-			t.Errorf("connect %v = %v, want errExtraArgument", args, err)
+		if err := runUp("test", withAPI); !errors.Is(err, errExtraArgument) {
+			t.Errorf("up %v = %v, want errExtraArgument", args, err)
 		}
 	}
 }
@@ -49,7 +49,7 @@ func TestUnprivilegedLoginsNameOnlyTheInvokingUser(t *testing.T) {
 	fs, flags := parseDeviceFlags(t, "--enable", "terminal", "--logins", "pi,root")
 	var d config.LocalDevice
 	if err := flags.apply(fs, &d, who); err == nil {
-		t.Fatal("an unprivileged connect accepted another user's login")
+		t.Fatal("an unprivileged up accepted another user's login")
 	}
 	fs, flags = parseDeviceFlags(t, "--enable", "terminal", "--logins", "pi")
 	d = config.LocalDevice{}
@@ -255,7 +255,7 @@ func TestWindowsDefaultLogin(t *testing.T) {
 	}
 }
 
-// The Windows rows of the default-login table, through apply as connect and set
+// The Windows rows of the default-login table, through apply as up and set
 // run it.
 func TestWindowsLoginsThroughApply(t *testing.T) {
 	apply := func(who invoker, stored config.LocalDevice, args ...string) (config.LocalDevice, error) {

@@ -14,7 +14,7 @@ import (
 )
 
 // The service configuration mutex serializes every writer of the device
-// service definitions: connect, service install and uninstall, and the
+// service definitions: up, service install and uninstall, and the
 // installer's transaction steps. It lives in a private namespace whose
 // boundary requires the Administrators SID, so only an elevated
 // Administrator (or SYSTEM) can create or open it; no other account can
@@ -34,7 +34,7 @@ var serviceConfigLockWait = 2 * time.Minute
 
 // errServiceConfigHeld is the wait for another writer running out, as
 // distinct from failing to open the lock at all.
-var errServiceConfigHeld = errors.New("another installer, connect or service command holds the service configuration mutex")
+var errServiceConfigHeld = errors.New("another installer, up or service command holds the service configuration mutex")
 
 // serviceConfigWaiting, when set by a test, runs once a writer holds its
 // namespace and mutex handles and starts waiting.
@@ -68,7 +68,7 @@ func lockServiceConfig(ctx context.Context) (func(), error) {
 	}, nil
 }
 
-// lockServiceDefinitions is lockServiceConfig for connect and the service
+// lockServiceDefinitions is lockServiceConfig for up and the service
 // commands. It refuses while an interrupted installer transaction is open in
 // any directory the open-transaction record lists: that transaction's
 // rollback restores the service definitions it recorded and would undo

@@ -62,10 +62,10 @@ func TestAppAccessRefusesAudienceWithCredentialFile(t *testing.T) {
 func TestAppConfigRefusesEndpointFlags(t *testing.T) {
 	app := New("1.2.3", "abc123", "2026-04-13")
 	cases := [][]string{
-		{"connect", "--config", "x.yaml", "--enable", "terminal"},
-		{"connect", "--config", "x.yaml", "--allow-ports", "22"},
-		{"connect", "--config", "x.yaml", "--rdp"},
-		{"connect", "--config", "x.yaml", "--host", "192.168.1.20"},
+		{"up", "--config", "x.yaml", "--enable", "terminal"},
+		{"up", "--config", "x.yaml", "--allow-ports", "22"},
+		{"up", "--config", "x.yaml", "--rdp"},
+		{"up", "--config", "x.yaml", "--host", "192.168.1.20"},
 		{"--config", "x.yaml", "--local", "localhost:3000"},
 		{"--config", "x.yaml", "-l", "localhost:3000"},
 		{"--config", "x.yaml", "--region", "eu"},
@@ -81,18 +81,29 @@ func TestAppConfigRefusesEndpointFlags(t *testing.T) {
 
 	// --noui is a per-run switch, so it gets past the guard and fails only on
 	// the missing file.
-	err := app.Run([]string{"connect", "--config", "does-not-exist.yaml", "--noui"})
+	err := app.Run([]string{"up", "--config", "does-not-exist.yaml", "--noui"})
 	if err == nil || strings.Contains(err.Error(), "cannot be combined") {
 		t.Fatalf("--noui beside --config must not be refused, got %v", err)
 	}
 }
 
-// `connect` without a token fails on the missing token.
-func TestAppConnectNeedsAToken(t *testing.T) {
-	t.Setenv("LOCALPORT_TOKEN", "")
+// A word that is neither a command nor a tunnel protocol, the removed
+// `connect` included, is an unknown command, never the flat tunnel form.
+func TestAppRefusesAnUnknownCommand(t *testing.T) {
 	app := New("1.2.3", "abc123", "2026-04-13")
-	if err := app.Run([]string{"connect"}); err == nil {
-		t.Fatal("connect without a token must error")
+	for _, args := range [][]string{{"connect"}, {"connect", "lpj_x"}, {"connect", "--config", "x.yaml"}, {"bogus", "3000"}} {
+		if err := app.Run(args); !errors.Is(err, errcode.New(errcode.UnknownCommand)) {
+			t.Errorf("%v = %v, want %s", args, err, errcode.UnknownCommand)
+		}
+	}
+}
+
+// `up` with a flag other than --all and no join token is the enrolment form
+// and fails on the missing token.
+func TestAppUpNeedsAToken(t *testing.T) {
+	app := New("1.2.3", "abc123", "2026-04-13")
+	if err := app.Run([]string{"up", "--enable", "terminal"}); err == nil || !strings.Contains(err.Error(), "join token required") {
+		t.Fatalf("up --enable without a token = %v, want join token required", err)
 	}
 }
 

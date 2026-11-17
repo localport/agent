@@ -10,7 +10,7 @@ import (
 	"github.com/localport/agent/internal/identity"
 )
 
-// hangupSentinelToken is a join token that a connect system log record must
+// hangupSentinelToken is a join token that an up system log record must
 // not hold.
 const hangupSentinelToken = "lpj_hangup-sentinel"
 
@@ -58,20 +58,20 @@ func TestHangupSafeCommandsLogOnlyAsRoot(t *testing.T) {
 	}
 }
 
-// The record of a privileged connect that failed names the command and the
+// The record of a privileged up that failed names the command and the
 // outcome only: neither the join token nor the error text, which can quote
 // the arguments.
-func TestConnectRecordHoldsNoArgument(t *testing.T) {
+func TestUpRecordHoldsNoArgument(t *testing.T) {
 	asRoot(t, &fakeManager{})
 	lines := recordSystemLog(t)
 	fakeEnrol(t, deviceRef("factory.gw-01"))
 	enrolDevice = func(_ *identity.Client, _ context.Context, token string, _ time.Duration, _ identity.RetryNotice) (*identity.Material, error) {
 		return nil, errors.New("refused " + token)
 	}
-	if err := runConnect("test", append([]string{hangupSentinelToken, "--logins", "root"}, connectArgs[1:]...)); err == nil {
-		t.Fatal("connect succeeded, want the enrolment failure")
+	if err := runUp("test", append([]string{hangupSentinelToken, "--logins", "root"}, upArgs[1:]...)); err == nil {
+		t.Fatal("up succeeded, want the enrolment failure")
 	}
-	if len(*lines) != 1 || (*lines)[0] != "localport connect: failed" {
-		t.Fatalf("system log %q, want only %q", *lines, "localport connect: failed")
+	if len(*lines) != 1 || (*lines)[0] != "localport up: failed" {
+		t.Fatalf("system log %q, want only %q", *lines, "localport up: failed")
 	}
 }

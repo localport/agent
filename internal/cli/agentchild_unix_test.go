@@ -84,8 +84,19 @@ func TestAgentChildRefusesAnyOtherAccount(t *testing.T) {
 		}
 	}
 	as(990, 990)
-	if err := runAgentChild(New("test", "", ""), []string{"connect"}); !errors.Is(err, errcode.New(errcode.AgentChildOnly)) || !strings.Contains(err.Error(), "unknown command") {
-		t.Fatalf("runAgentChild connect = %v, want unknown command", err)
+	if err := runAgentChild(New("test", "", ""), []string{"up"}); !errors.Is(err, errcode.New(errcode.AgentChildOnly)) || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("runAgentChild up = %v, want unknown command", err)
+	}
+	// devices is dispatched to runDevicesChild, which reads the system config:
+	// an unusable one fails there, not as an unknown command.
+	restoreFile := systemLocalConfig
+	t.Cleanup(func() { systemLocalConfig = restoreFile })
+	dir := t.TempDir()
+	systemLocalConfig = func() (config.LocalConfigFile, error) {
+		return config.LocalConfigFile{Path: filepath.Join(dir, "agent.yaml"), Base: dir, System: true}, nil
+	}
+	if err := runAgentChild(New("test", "", ""), []string{"devices"}); err == nil || errors.Is(err, errcode.New(errcode.AgentChildOnly)) || !errors.Is(err, errcode.New(errcode.LocalConfigUnusable)) {
+		t.Fatalf("runAgentChild devices = %v, want runDevicesChild's config error", err)
 	}
 }
 
@@ -96,7 +107,7 @@ func TestRootRunsAsAgentOnlyOnTheSystemLayout(t *testing.T) {
 	systemLocalConfig = func() (config.LocalConfigFile, error) {
 		return config.LocalConfigFile{Path: "/etc/localport-device/agent.yaml", Base: "/etc/localport-device", System: true}, nil
 	}
-	for cmd, want := range map[string]bool{"run": true, "status": true, "identity": true, "login": true, "setup": true, "access": true, "connect": false, "set": false, "service": false, "enrol": false, "purge": false} {
+	for cmd, want := range map[string]bool{"run": true, "status": true, "identity": true, "login": true, "setup": true, "access": true, "up": false, "down": false, "set": false, "service": false, "enrol": false, "purge": false, "set-pins": false, "devices": false} {
 		if got := rootRunsAsAgent(cmd); got != want {
 			t.Errorf("rootRunsAsAgent(%q) = %v, want %v", cmd, got, want)
 		}

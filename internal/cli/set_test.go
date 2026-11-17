@@ -79,7 +79,8 @@ func TestReloadAppliesOnlyChangedDevices(t *testing.T) {
 // nothing is probed.
 func TestReloadProbesTheLauncherAgain(t *testing.T) {
 	for _, noMux := range []bool{false, true} {
-		r := &deviceRunner{logEvent: func(string) {}, probed: true, noMux: noMux, served: map[identity.Ref]*servedDevice{}}
+		r := &deviceRunner{logEvent: func(string) {}, probed: true, noMux: noMux, served: map[identity.Ref]*servedDevice{},
+			store: &identity.Store{Root: t.TempDir()}}
 		r.reload(context.Background(), nil, nil)
 		if r.probed != noMux {
 			t.Errorf("noMux %v: probed = %v after reload, want %v", noMux, r.probed, noMux)

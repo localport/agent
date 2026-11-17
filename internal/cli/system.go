@@ -126,7 +126,7 @@ type installHost interface {
 	deleteAtReboot(path string) error
 	// markOpen and markClosed add and remove dir in the machine's list of
 	// directories with an open transaction (after Windows Installer's
-	// InProgress key), which connect, the service commands and the other
+	// InProgress key), which up, the service commands and the other
 	// steps check; listOpen reads it.
 	markOpen(dir string) error
 	markClosed(dir string) error

@@ -38,13 +38,13 @@ const agentChildCommand = "__agent"
 var asAgentChild bool
 
 // agentChildCommands are the commands a child runs whole, with root's argv;
-// enrol, purge and set-pins are the parts of connect, service uninstall
-// --purge and set that touch the store.
-var agentChildCommands = []string{"run", "status", "identity", "login", "setup", "access", "enrol", "purge", "set-pins"}
+// enrol, purge, set-pins and devices are the parts of up, service uninstall
+// --purge, set, and up, down and set that touch the store.
+var agentChildCommands = []string{"run", "status", "identity", "login", "setup", "access", "enrol", "purge", "set-pins", "devices"}
 
 // storePartCommands are the agentChildCommands that are a part of a root
 // command, never a command of their own.
-var storePartCommands = []string{"enrol", "purge", "set-pins"}
+var storePartCommands = []string{"enrol", "purge", "set-pins", "devices"}
 
 // needsAgentChild reports whether this process is root and file is the
 // system config, so the store must be reached through the agent account.
@@ -96,6 +96,8 @@ func runAgentChild(app *App, args []string) error {
 		return runPurgeChild()
 	case "set-pins":
 		return runSetPinsChild(args[1:])
+	case "devices":
+		return runDevicesChild(os.Stdout)
 	}
 	return app.Run(args)
 }
@@ -119,7 +121,7 @@ func runSetPinsChild(args []string) error {
 	return resetDesktopPins(currentInvoker(false), ref, args[1:])
 }
 
-// enrolRequest is what connect, as root, sends the enrol child on its stdin.
+// enrolRequest is what up, as root, sends the enrol child on its stdin.
 type enrolRequest struct {
 	JoinToken string        `json:"join_token"`
 	APIURL    string        `json:"api_url"`
@@ -133,7 +135,7 @@ type enrolResult struct {
 }
 
 // enrolInStore readies the store, spends the join token, saves the issued
-// credential and its session CA keys, and prints the credential. connect runs
+// credential and its session CA keys, and prints the credential. up runs
 // it in-process or, as root, in the enrol child.
 func enrolInStore(store *identity.Store, req enrolRequest) (enrolResult, error) {
 	if err := store.EnsureRoot(); err != nil {

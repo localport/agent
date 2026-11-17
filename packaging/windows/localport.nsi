@@ -4,7 +4,7 @@
 ; and runs the `localport system` steps (internal/cli/system.go) from a copy
 ; of the new localport.exe, checking each exit status; the steps make every
 ; change to the machine as one transaction. It never enrols a device:
-; services are registered by an elevated `localport connect` or `localport
+; services are registered by an elevated `localport up` or `localport
 ; service install`, and re-registered here on upgrade.
 ;
 ; makensis defines (scripts/release/windows-package.sh):

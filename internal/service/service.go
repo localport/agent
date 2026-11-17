@@ -29,7 +29,7 @@ import (
 )
 
 // Marker identifies a service definition this package wrote.
-const Marker = "Managed by localport connect; localport service uninstall removes it."
+const Marker = "Managed by localport up; localport service uninstall removes it."
 
 // StopBudget is how long every service manager lets the agent stop after
 // SIGTERM, a Windows stop or a Windows preshutdown before it kills it. It

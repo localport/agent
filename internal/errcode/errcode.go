@@ -194,6 +194,7 @@ const (
 	LogFileUnusable         Code = "AG145"
 	TokenFileUnreadable     Code = "AG146"
 	AgentAccountUnsafe      Code = "AG147"
+	UnknownCommand          Code = "AG148"
 )
 
 // NewJoinCommand is the remedy for every lost or unusable device credential.
@@ -227,7 +228,7 @@ var registry = []Entry{
 	{ForwardingTerminal, "Forwarding without terminal", "forwarding rides an ssh connection and needs terminal enabled"},
 
 	{NoDevice, "No enrolled device", "no enrolled device"},
-	{NoDeviceStarts, "No device can start", "no enrolled device can start: every device's credential is missing or unreadable (see above)"},
+	{NoDeviceStarts, "No device can start", "no enrolled device can start: each one is paused, removed, or its credential is missing or unreadable (see above)"},
 	{ServiceInstalled, "Device service installed", "the device service is installed and runs the enrolled devices"},
 	{MergeConflict, "Flags conflict with stored settings", "the flags conflict with this device's stored settings"},
 	{ExtraArgument, "Unexpected argument", "unexpected argument"},
@@ -325,6 +326,7 @@ var registry = []Entry{
 	{LogFileUnusable, "Log file unusable", "the --log-file path cannot be opened as the agent's log"},
 	{TokenFileUnreadable, "Token file unreadable", "the token file named by the _FILE variable cannot be read"},
 	{AgentAccountUnsafe, "Agent account unsafe", "the agent account " + agentaccount.Name + " can log in or reaches other users' files; remove it, then run: sudo localport service install"},
+	{UnknownCommand, "Unknown command", "no such localport command; run localport help for the list"},
 }
 
 // New returns the sentinel of a registered code. An unregistered code is a

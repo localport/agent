@@ -99,7 +99,7 @@ func runTunnel(version string, args []string) error {
 
 // inspectDisabled reports whether the HTTP request view is off. --no-inspect
 // turns it off. Otherwise it is on in the TUI, and in plain mode only with
-// --log-requests. Used by connect and the flat tunnel form.
+// --log-requests. Used by up --config and the flat tunnel form.
 func inspectDisabled(mode ui.Mode, noInspect, logRequests bool) bool {
 	switch {
 	case noInspect:
@@ -202,7 +202,7 @@ func usageTunnel(fs *flag.FlagSet) {
        localport --token <token> --local <address> [flags]
 
   Config file (it sets every endpoint, so endpoint flags beside it are refused):
-    localport connect --config localport.yaml
+    localport up --config localport.yaml
 
   Single endpoint, scheme in --local sets the protocol:
     localport --token <token> --local tcp://localhost:18789
@@ -224,6 +224,15 @@ Flags:
 	fs.PrintDefaults()
 }
 
+// isTunnelProto reports whether word is a positional tunnel protocol.
+func isTunnelProto(word string) bool {
+	switch strings.ToLower(word) {
+	case "http", "https", "tcp", "tls":
+		return true
+	}
+	return false
+}
+
 // extractPositional consumes a leading "<proto> <port|host:port>" pair
 // when present so callers can write `localport tcp 18789 -t tok`. The
 // recognised protocols are http, https, tcp, tls; anything else leaves
@@ -232,9 +241,7 @@ func extractPositional(args []string) (proto, local string, rest []string) {
 	if len(args) < 2 || strings.HasPrefix(args[0], "-") {
 		return "", "", args
 	}
-	switch strings.ToLower(args[0]) {
-	case "http", "https", "tcp", "tls":
-	default:
+	if !isTunnelProto(args[0]) {
 		return "", "", args
 	}
 	if strings.HasPrefix(args[1], "-") {

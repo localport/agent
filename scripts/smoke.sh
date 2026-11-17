@@ -14,9 +14,9 @@ if go run ./cmd/localport --token tok_test >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[smoke] connect rejects a missing token"
-if env -u LOCALPORT_TOKEN go run ./cmd/localport connect >/dev/null 2>&1; then
-  echo "expected connect to fail without a token" >&2
+echo "[smoke] up --config rejects a missing file"
+if env -u LOCALPORT_TOKEN go run ./cmd/localport up --config /nonexistent/localport.yaml >/dev/null 2>&1; then
+  echo "expected up --config to fail without its file" >&2
   exit 1
 fi
 

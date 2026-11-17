@@ -160,6 +160,7 @@ never replace without a resume match.
   "error": "",
   "error_code": "",
   "retryable": null,
+  "retry_after": 0,
   "limit_type": "",
   "session_id": "hex32",
   "client_id": "cl_<32 hex>",
@@ -284,9 +285,25 @@ agent takes no action.
   "reason": "bandwidth limit exceeded",
   "code": "BL007",
   "retryable": false,
+  "retry_after": 60,
   "limit_type": "bandwidth"
 }
 ```
+
+`retry_after` (seconds, omitted when 0, on `RegisterAck` and `Shutdown`) marks
+a refusal the control plane can lift without any action on the device: `SE040`
+(disconnected by an admin), `BL005` and `BL010` (plan limit or feature),
+`BL007` (bandwidth for the cycle), `BL011` (payment due), `BL012` (plan
+paused), `SE019` (fleet device limit), `RS002` (resource limit) and `SE001`
+(IP not allowed), each with 60. The edge does not count such a failed
+registration against its registration rate limit, so devices behind one
+address are never banned for it. A device tunnel that gets one stays in its
+retry loop and never parks: it waits a uniformly random time in
+`[0, min(5 min, max(retry_after, backoff)))`, the backoff starting at 30 s and
+doubling for each consecutive refusal. An interactive tunnel prints the
+refusal and exits. A device refused for good without `retry_after` stops
+(parks) until `localport up`, a reload or a restart; `SE018` and `SE041` make
+it forget its credential (below).
 
 `limit_type` values:
 
@@ -300,10 +317,12 @@ agent takes no action.
 | `plan_paused`        | Team's subscription is paused; it resumes from the billing page | no |
 | `blocked`            | Access blocked for this tunnel or team           | no        |
 
-`payment_due_paused`, `plan_paused` and `no_plan` are all terminal. The first
-asks the team to pay an overdue invoice, the second to resume its paused plan,
-the third to subscribe. The agent uses `limit_type` only to pick the hint it
-appends to `reason`. Whether it reconnects is decided by `retryable`.
+`payment_due_paused`, `plan_paused` and `no_plan` are terminal for a tunnel.
+The first asks the team to pay an overdue invoice, the second to resume its
+paused plan, the third to subscribe. The agent uses `limit_type` only to pick
+the hint it appends to `reason`. Whether it reconnects is decided by
+`retryable`, except that a device tunnel keeps retrying a refusal that
+carries `retry_after` (below).
 
 A Shutdown with `code` `SE040` (an admin disconnected the device, `retryable`
 true) is a drain: the edge keeps the connection, its session streams and the
@@ -315,7 +334,11 @@ renewal and key fetch is refused `SE040` until an admin reconnects the device.
 A Shutdown or refusal with `SE018` (the device was removed or its fleet
 deleted) or `SE041` (its certificate was revoked because the device was
 removed or enrolled again) is final: no later state makes that credential
-usable.
+usable. The device stops the tunnel, ends its sessions and releases them,
+then deletes the credential and its spooled recordings and writes the
+tombstone `identity/<team>/device-<id>.removed` (the code and the time only)
+when the stored certificate is the refused one; a credential a re-enrolment
+replaced is kept. A renewal or key fetch refused the same way does the same.
 
 ### Error (9)
 
@@ -496,7 +519,8 @@ acceptable client certificate or the connection is refused.
 
 ### Retry policy
 
-1. The `retryable` field on `RegisterAck` / `Shutdown` is authoritative.
+1. The `retryable` field on `RegisterAck` / `Shutdown` is authoritative, except
+   that a device tunnel acts on `retry_after` first (see Shutdown).
 2. When `retryable` is unset, the agent retries a `Shutdown` and gives up on
    a failed `RegisterAck`.
 3. Unknown / opaque codes never change behavior; the agent relies on
@@ -1664,7 +1688,7 @@ unprivileged process with neither `LOCALPORT_HOME` nor a home directory has no
 root and refuses to start.
 
 On Windows the machine-wide credentials are shared by the elevated
-Administrator that runs `connect` and the device service, which runs as the
+Administrator that runs `up` and the device service, which runs as the
 virtual account `NT SERVICE\localport-device`: files under its `identity\`
 directory grant SYSTEM, Administrators and that account, and only a
 privileged process, and only for paths under `identity\`, accepts that
@@ -1682,20 +1706,31 @@ of backups and configuration management.
   meta.json           identity, team, team_name, kind, spiffe_id, source, api_url,
                       serial, not_after, the cert and key file names, and
                       renew_after only when the credential renews
-  .renew.lock         serializes the credential's writers (save, renewal, promotion)
   ticket_keys.json    device only: { keys: [{ kid, public_key }], recording_key },
                       the session CA keys (SSH user certificate signers) the
                       device pins
-  .keys.lock          serializes ticket_keys.json writers; taken after
-                      .renew.lock, never before it
   desktop_pins.json   device only: { <kind>: { target, key_sha256 } }, the
                       desktop target server key a person trusted on the
                       first browser connection, per desktop kind
+.store.lock           held shared by every holder of a lock below, exclusively
+                      by `service uninstall --purge`
+.locks/<sha256 hex of "<team>/<kind>-<identity>">/
+  .renew.lock         serializes the credential's writers (save, renewal,
+                      promotion, forget, remove)
+  .keys.lock          serializes ticket_keys.json writers; taken after
+                      .renew.lock, never before it
   .pins.lock          serializes desktop_pins.json writers (the agent and
                       `set --rdp-reset-pin`, `--vnc-reset-pin`); taken alone
   .sessions.lock      held by the one process that serves the device's
                       sessions
 ```
+
+The lock files live outside the credential directory, so a credential is
+deleted whole while its writers' lock is held. Only `service uninstall
+--purge` deletes lock files: it holds `.store.lock` exclusively, so no lock
+below it is held or awaited, deletes `.locks`, and deletes `.store.lock` when
+nothing else remains. The hashed directory name carries no team or device
+identifier.
 
 Before every read and write, each directory from the base (`LOCALPORT_HOME`,
 `~/.localport` or the machine-wide config directory) down to the credential is
@@ -1813,7 +1848,7 @@ certificate stays valid until its own expiry, so rollover overlaps.
 
 ### Device enrolment and rollover
 
-`localport connect <join-token>` checks or creates the store directory, then
+`localport up <join-token>` checks or creates the store directory, then
 spends a single-use join token at
 `POST /v1/devices/enrol { join_token, csr_pem }` and stores a `device`
 credential. A device identity is `<tunnelIdentifier>.<prefix>`; each half
@@ -1905,10 +1940,10 @@ Rollover:
 - A store read error is retried and never deletes a credential.
 
 `localport access` never offers or selects a device credential, and `setup`
-and `login` refuse one. `connect`, `setup` and `login` check the store
+and `login` refuse one. `up`, `setup` and `login` check the store
 directory before they spend their one-time secret.
 
-A second `connect` for an enrolled device checks its flags before the spend
+A second `up` for an enrolled device checks its flags before the spend
 without the stored entry, since the identity is unknown until enrolment; a flag
 that needs the stored entry (`--logins` alone, `--enable desktop` relying on a
 stored target) is refused with the remedy: re-enrol without it, then
@@ -1917,14 +1952,20 @@ config and merges the flags onto the stored entry as `set` does: each flag
 given overrides, the rest keep their stored values. A new identity appends an
 entry. It prints the settings in force, and a re-enrolment that changes nothing
 does not rewrite the config. When the flags conflict with the stored entry,
-the stored entry stays in force with the new credential and `connect` exits
+the stored entry stays in force with the new credential and `up` exits
 non-zero naming the conflict and `localport set`. A stored files root that no
 longer exists is reported as such, with the stored entry in force; any other
 failure to write the config prints the spent-token remedy. A device entry
 enabling `terminal` or `files` needs at least one login, and one enabling
 neither has none. `localport run` logs and skips a device whose credential is
-missing or unreadable and runs the others; it refuses to start when the config
-lists no device or none can start. A save or local config write that fails
+missing or unreadable and runs the others. In a terminal it refuses to start
+when the config lists no device or none can start, and returns when the last
+one ends; the device service (`run --service`) instead keeps running with no
+connection until a reload or a stop. A device whose tombstone stands and whose
+credential is gone is skipped without a dial, and the service deletes the
+tombstones of devices absent from the config. `localport down` sets
+`paused: true` on an entry, which the service then runs no tunnel for, until
+`localport up` clears it. A save or local config write that fails
 after a join token, setup token or sign-in was spent names the remedy: a new
 token or sign-in, then the command again.
 
