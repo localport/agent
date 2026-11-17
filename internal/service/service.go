@@ -188,7 +188,10 @@ func Executable() (string, error) {
 	return filepath.Abs(real)
 }
 
-// AgentAccount is the system account the device service runs as.
+// AgentAccount is the system account the device service runs as on this
+// platform. Each service definition names its own platform's account
+// (agentaccount.Linux or agentaccount.MacOS), so it renders the same on
+// every build.
 const AgentAccount = launcher.AgentAccount
 
 // AgentLogDir is the agent's own log directory under launchd and OpenRC,

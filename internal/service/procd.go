@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+
+	"github.com/localport/agent/internal/agentaccount"
 )
 
 // The OpenWrt procd services: init scripts in /etc/init.d through
@@ -175,7 +177,7 @@ start_service() {
 reload_service() {
 	procd_send_signal %[4]s '*' HUP
 }
-`, Marker, exe, AgentAccount, ProcdService, stopBudgetSeconds),
+`, Marker, exe, agentaccount.Linux, ProcdService, stopBudgetSeconds),
 
 		ProcdLauncherService: fmt.Appendf(nil, `#!/bin/sh /etc/rc.common
 # %[1]s

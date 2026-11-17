@@ -32,9 +32,14 @@ func accountRemoval() (usr, group []string) {
 	return deleteCommandsFor(tool, shadow)
 }
 
+// checkAccountShape accepts any account: the packages and useradd --system
+// create it, and a shape check would need the host's shadow and PAM rules.
+func checkAccountShape(context.Context, runner, Account) error { return nil }
+
 // createAccount creates the group, when missing, and the user with the
-// host's tool.
-func createAccount(ctx context.Context, run runner) error {
+// host's tool. The identity directory does not choose the ids: useradd
+// --system and the packages pick them.
+func createAccount(ctx context.Context, run runner, _ string) error {
 	tool, shadow := accountTool(fileExists)
 	if tool == "" {
 		// OpenWrt has neither; its localport package creates the account.

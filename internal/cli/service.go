@@ -261,7 +261,7 @@ const serviceUsage = `Usage: localport service install
   from setup and sign-in credentials stay, as do the lock files
   agent.yaml.lock and run.lock and the directory. On Linux and macOS, when
   identity/ is then empty, it and the agent's log directory
-  /var/log/localport are removed too. The localport account and group
+  /var/log/localport are removed too. The agent account and group
   always stay, since files elsewhere may belong to them; --purge prints the
   commands that remove them. --purge does not revoke the devices: their
   certificates stay valid until the devices are removed in the dashboard.

@@ -79,8 +79,8 @@ func TestSystemdUnits(t *testing.T) {
 	for name, want := range map[string][]string{
 		SystemdUnit: {
 			"# " + Marker,
-			"User=" + AgentAccount,
-			"Group=" + AgentAccount,
+			"User=localport",
+			"Group=localport",
 			"ExecStart=" + exe + " run --service",
 			"ExecReload=/bin/kill -HUP $MAINPID",
 			"Restart=always",
@@ -108,7 +108,7 @@ func TestSystemdUnits(t *testing.T) {
 			"# " + Marker,
 			"ListenStream=" + launcher.LinuxSocketPath,
 			"SocketUser=root",
-			"SocketGroup=" + AgentAccount,
+			"SocketGroup=localport",
 			"SocketMode=0660",
 			"WantedBy=sockets.target",
 		},
@@ -393,9 +393,17 @@ func TestLaunchdPlists(t *testing.T) {
 		t.Error("agent plist does not run localport run --service --log-file")
 	}
 	strs := plistStrings(t, agent)
-	for _, want := range []string{LaunchdLabel, "/opt/a&b/localport", launchdAgentLog, AgentAccount} {
+	for _, want := range []string{LaunchdLabel, "/opt/a&b/localport", launchdAgentLog} {
 		if !slices.Contains(strs, want) {
 			t.Errorf("agent plist lacks %q in %q", want, strs)
+		}
+	}
+	for _, want := range []string{
+		"<key>UserName</key>\n  <string>_localport</string>",
+		"<key>GroupName</key>\n  <string>_localport</string>",
+	} {
+		if !bytes.Contains(agent, []byte(want)) {
+			t.Errorf("agent plist lacks %q", want)
 		}
 	}
 	if bytes.Contains(agent, []byte("StandardOutPath")) {

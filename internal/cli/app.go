@@ -113,7 +113,7 @@ Commands:
   run       Run every device enrolled on this machine
   set       Change what an enrolled device allows
   service   Install or remove the device service (service install|uninstall)
-  status    Show the device service, and to root or group localport the devices
+  status    Show the device service, and to root or the agent group the devices
   access    Reach a fleet device's ports through your client certificate
   ssh       Open an SSH session on a fleet device with the system ssh
   ssh-config  Print ssh_config lines so ssh, scp, sftp and rsync reach devices

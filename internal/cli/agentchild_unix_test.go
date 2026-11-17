@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -248,8 +249,14 @@ func TestRemoveAgentDirsKeepsCredentials(t *testing.T) {
 // Purge keeps the account and names the host's commands that remove it.
 func TestKeptAccountNoticeNamesTheRemoval(t *testing.T) {
 	got := keptAccountNotice([]string{"/usr/sbin/userdel", "localport"}, []string{"/usr/sbin/groupdel", "localport"})
-	if !strings.Contains(got, "kept the account localport") || !strings.Contains(got, "sudo /usr/sbin/userdel localport, then sudo /usr/sbin/groupdel localport") {
+	if !strings.Contains(got, "kept the account "+service.AgentAccount) || !strings.Contains(got, "sudo /usr/sbin/userdel localport, then sudo /usr/sbin/groupdel localport") {
 		t.Fatalf("notice = %q", got)
+	}
+	if runtime.GOOS == "darwin" {
+		want := "kept the account _localport (it may own files elsewhere); to remove it: sudo /usr/bin/dscl . -delete /Users/_localport, then sudo /usr/bin/dscl . -delete /Groups/_localport if the group remains"
+		if got := keptAccountNotice(service.AccountRemoval()); got != want {
+			t.Fatalf("macOS notice = %q, want %q", got, want)
+		}
 	}
 	if got := keptAccountNotice(nil, nil); !strings.Contains(got, "package that created it owns it") {
 		t.Fatalf("notice without a tool = %q", got)

@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/localport/agent/internal/agentaccount"
 	"github.com/localport/agent/internal/launcher"
 )
 
@@ -310,8 +311,8 @@ const plistHeader = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 `
 
-// launchdAgentPlist is the agent's daemon definition: exe as AgentAccount,
-// its own rotated log.
+// launchdAgentPlist is the agent's daemon definition: exe as the macOS agent
+// account and group, its own rotated log.
 func launchdAgentPlist(exe string) ([]byte, error) {
 	program, err := xmlPath(exe)
 	if err != nil {
@@ -357,7 +358,7 @@ func launchdAgentPlist(exe string) ([]byte, error) {
   </dict>
 </dict>
 </plist>
-`, Marker, LaunchdLabel, program, launchdAgentLog, AgentAccount, AgentAccount, stopBudgetSeconds), nil
+`, Marker, LaunchdLabel, program, launchdAgentLog, agentaccount.MacOS, agentaccount.MacOS, stopBudgetSeconds), nil
 }
 
 // launchdLauncherPlist is the launcher's daemon definition: root, with the

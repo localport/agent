@@ -636,7 +636,7 @@ func usageConnect(fs *flag.FlagSet) {
   --foreground runs the device in this terminal instead, and is refused while
   another process (the device service or a manual run) serves the devices.
   As root on Linux and macOS it runs every device in the machine-wide config,
-  as localport run --system does, under the localport account; --no-mux is
+  as localport run --system does, under the agent account; --no-mux is
   not available there.
 
   Without root, the device is recorded in $LOCALPORT_HOME/agent.yaml and runs

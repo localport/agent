@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/localport/agent/internal/agentaccount"
 	"github.com/localport/agent/internal/launcher"
 	"github.com/localport/agent/internal/security"
 )
@@ -261,7 +262,7 @@ SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target
-`, Marker, systemdDeviceDir, identityDir, exe, runLock, SystemdLauncherSocket, AgentAccount, stopBudgetSeconds),
+`, Marker, systemdDeviceDir, identityDir, exe, runLock, SystemdLauncherSocket, agentaccount.Linux, stopBudgetSeconds),
 
 		SystemdLauncherSocket: fmt.Appendf(nil, `# %[1]s
 
@@ -280,7 +281,7 @@ DirectoryMode=0755
 
 [Install]
 WantedBy=sockets.target
-`, Marker, launcher.LinuxSocketPath, AgentAccount),
+`, Marker, launcher.LinuxSocketPath, agentaccount.Linux),
 
 		SystemdLauncherService: fmt.Appendf(nil, `# %[1]s
 

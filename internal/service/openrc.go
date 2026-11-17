@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/localport/agent/internal/agentaccount"
 )
 
 // The OpenRC services: the agent and the session launcher, init scripts in
@@ -238,7 +240,7 @@ reload() {
 mainpid() {
 	service_get_value child_pid
 }
-`, Marker, exe, openrcAgentLog, AgentAccount, OpenRCLauncherService, stopBudgetSeconds),
+`, Marker, exe, openrcAgentLog, agentaccount.Linux, OpenRCLauncherService, stopBudgetSeconds),
 
 		OpenRCLauncherService: fmt.Appendf(nil, `#!/sbin/openrc-run
 # %[1]s

@@ -11,11 +11,12 @@ import (
 	"strings"
 
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/service"
 )
 
 // runStatus prints the device service state and, to an account that can read
-// the system config (root or a member of group localport), its devices and
+// the system config (root or a member of security.AgentGroup), its devices and
 // the launcher's state. The OS decides who reads the config: anyone else sees
 // the service state only.
 func runStatus(args []string) error {
@@ -37,7 +38,7 @@ func printStatus(ctx context.Context, w io.Writer) error {
 	cfg, err := config.LoadLocal(file)
 	switch {
 	case errors.Is(err, fs.ErrPermission):
-		fmt.Fprintf(w, "config     %s is readable by root and group localport only\n", file.Path)
+		fmt.Fprintf(w, "config     %s is readable by root and group %s only\n", file.Path, security.AgentGroup)
 		return nil
 	case errors.Is(err, fs.ErrNotExist):
 		fmt.Fprintf(w, "config     none at %s\n", file.Path)

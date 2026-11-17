@@ -26,6 +26,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/localport/agent/internal/agentaccount"
 	"github.com/localport/agent/internal/errcode"
 )
 
@@ -35,7 +36,8 @@ const Version = 2
 
 // AgentAccount is the system account the network agent runs as: the only
 // peer the launcher serves, and the login of a run_as_agent session.
-const AgentAccount = "localport"
+// It is _localport on macOS and localport elsewhere.
+const AgentAccount = agentaccount.Name
 
 // MaxMessage bounds one request or response body in bytes.
 const MaxMessage = 4 << 10

@@ -26,19 +26,23 @@ func needsSystemLayout(file config.LocalConfigFile) bool { return needsAgentChil
 
 // prepareSystemLayout readies the machine-wide state for the agent account,
 // as root, before the agent service runs or a child touches the store: the
-// account (service.EnsureAccount), the device directory root:localport 0750
-// with run.lock root:localport 0660 (config.EnsureSystemRunLock) and the
-// identity directory owned by the account with mode 0700. agent.yaml gets
-// root:localport 0640 from config.WriteLocal. It is idempotent.
+// account (service.EnsureAccount; on macOS a recreated account takes the ids
+// that own an existing identity directory, so its credentials keep their
+// owner), the device directory root:AgentGroup 0750 with run.lock
+// root:AgentGroup 0660 (config.EnsureSystemRunLock) and the identity
+// directory owned by the account with mode 0700. agent.yaml gets
+// root:AgentGroup 0640 from config.WriteLocal. An unsafe account is refused
+// before any file is written. It is idempotent.
 func prepareSystemLayout(ctx context.Context, file config.LocalConfigFile) error {
-	acct, err := service.EnsureAccount(ctx)
+	idDir := filepath.Join(filepath.Dir(file.Path), "identity")
+	acct, err := service.EnsureAccount(ctx, idDir)
 	if err != nil {
 		return err
 	}
 	if err := config.EnsureSystemRunLock(file); err != nil {
 		return err
 	}
-	return ensureIdentityDir(filepath.Join(filepath.Dir(file.Path), "identity"), acct)
+	return ensureIdentityDir(idDir, acct)
 }
 
 // ensureIdentityDir creates the identity directory owned by acct, mode

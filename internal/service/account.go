@@ -27,10 +27,14 @@ const accountDescription = "Localport agent"
 const accountHome = "/nonexistent"
 
 // EnsureAccount creates the system group and user AgentAccount when missing
-// (no login shell, no home) and returns their ids. It is idempotent, as the
-// packages' postinstall is, which creates the same account.
-func EnsureAccount(ctx context.Context) (Account, error) {
-	return ensureAccount(ctx, execRun, hostAccounts{})
+// (no login shell, no home), checks the account's shape and returns its ids.
+// identityDir is the device identity directory: on macOS a recreated account
+// takes the ids that own it when they are free (createAccount). An account
+// that can log in or reaches other users' files is refused with
+// AgentAccountUnsafe on macOS. It is idempotent, as the packages' postinstall
+// is, which creates the same account.
+func EnsureAccount(ctx context.Context, identityDir string) (Account, error) {
+	return ensureAccount(ctx, execRun, hostAccounts{}, identityDir)
 }
 
 // LookupAccount returns the agent account's ids, or an error naming it when
@@ -78,11 +82,25 @@ func lookupAccount(db accounts) (Account, error) {
 	return Account{UID: uid, GID: gid}, nil
 }
 
-func ensureAccount(ctx context.Context, run runner, db accounts) (Account, error) {
+// checkShape is checkAccountShape; tests of the create path replace it.
+var checkShape = checkAccountShape
+
+func ensureAccount(ctx context.Context, run runner, db accounts, identityDir string) (Account, error) {
+	acct, err := findOrCreateAccount(ctx, run, db, identityDir)
+	if err != nil {
+		return Account{}, err
+	}
+	if err := checkShape(ctx, run, acct); err != nil {
+		return Account{}, err
+	}
+	return acct, nil
+}
+
+func findOrCreateAccount(ctx context.Context, run runner, db accounts, identityDir string) (Account, error) {
 	if _, _, found, err := db.lookup(AgentAccount); err != nil {
 		return Account{}, errAccount.With(err, "look up "+AgentAccount)
 	} else if !found {
-		if err := createAccount(ctx, run); err != nil {
+		if err := createAccount(ctx, run, identityDir); err != nil {
 			// A concurrent install or package postinstall may have created
 			// it between the lookup and the create.
 			if acct, lookupErr := lookupAccount(db); lookupErr == nil {

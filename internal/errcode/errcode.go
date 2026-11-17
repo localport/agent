@@ -9,7 +9,11 @@
 // are not defined here and pass through unchanged (Remote).
 package errcode
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/localport/agent/internal/agentaccount"
+)
 
 // Code is a local error code: "AG" and three digits. Codes are grouped by
 // package in blocks of ten.
@@ -189,6 +193,7 @@ const (
 	TunnelConfigInvalid     Code = "AG144"
 	LogFileUnusable         Code = "AG145"
 	TokenFileUnreadable     Code = "AG146"
+	AgentAccountUnsafe      Code = "AG147"
 )
 
 // NewJoinCommand is the remedy for every lost or unusable device credential.
@@ -228,7 +233,7 @@ var registry = []Entry{
 	{ExtraArgument, "Unexpected argument", "unexpected argument"},
 	{NoDefaultLogin, "No default login", "no default login"},
 	{AgentChildFailed, "Agent account step failed", "the step localport runs as the agent account failed (its error is above)"},
-	{AgentChildStart, "Agent account step not started", "localport could not start itself as the agent account localport"},
+	{AgentChildStart, "Agent account step not started", "localport could not start itself as the agent account " + agentaccount.Name},
 	{AgentChildOnly, "Internal command", "this command is run only by localport itself, as the agent account"},
 
 	{ForeignUnit, "Foreign service definition", "a service definition not written by localport is in the way"},
@@ -309,16 +314,17 @@ var registry = []Entry{
 
 	{ServiceManagerFailed, "Service manager failed", "the service manager could not carry out the step"},
 	{ServiceDefinitionFailed, "Service definition not written", "the device service definition could not be read, written or removed"},
-	{AccountMissing, "Agent account missing", "the agent account localport does not exist; create it with: sudo localport service install"},
-	{AccountNotChanged, "Agent account not changed", "the agent account localport could not be created or looked up"},
+	{AccountMissing, "Agent account missing", "the agent account " + agentaccount.Name + " does not exist; create it with: sudo localport service install"},
+	{AccountNotChanged, "Agent account not changed", "the agent account " + agentaccount.Name + " could not be created or looked up"},
 	{SystemNeedsRoot, "Needs root", "only root or an elevated Administrator changes the device config directory"},
-	{AgentGroupMissing, "Agent group missing", "the localport group does not exist; create it with: sudo localport service install"},
+	{AgentGroupMissing, "Agent group missing", "the group " + agentaccount.Name + " does not exist; create it with: sudo localport service install"},
 	{LocalConfigUnusable, "Local config unusable", "the local config cannot be located, read, secured or locked"},
 	{LocalConfigBusy, "Local config busy", "another localport command is still changing the local config"},
 	{LocalConfigNotWritten, "Local config not written", "the local config could not be written"},
 	{TunnelConfigInvalid, "Invalid tunnel config", "the tunnel config file cannot be read or holds an invalid entry"},
 	{LogFileUnusable, "Log file unusable", "the --log-file path cannot be opened as the agent's log"},
 	{TokenFileUnreadable, "Token file unreadable", "the token file named by the _FILE variable cannot be read"},
+	{AgentAccountUnsafe, "Agent account unsafe", "the agent account " + agentaccount.Name + " can log in or reaches other users' files; remove it, then run: sudo localport service install"},
 }
 
 // New returns the sentinel of a registered code. An unregistered code is a

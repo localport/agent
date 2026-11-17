@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -202,5 +203,29 @@ func TestRenderPlainChains(t *testing.T) {
 	netErr := fmt.Errorf("fetch: %w", &url.Error{Op: "Get", URL: "https://x/v1/y", Err: errors.New("eof")})
 	if text, hidden := errcode.Render(netErr); text != "a network operation failed" || !hidden {
 		t.Fatalf("network: Render = %q, %v", text, hidden)
+	}
+}
+
+// The account codes name this platform's agent account: _localport on macOS,
+// localport elsewhere.
+func TestAccountCodesNameThePlatformAccount(t *testing.T) {
+	account := "localport"
+	if runtime.GOOS == "darwin" {
+		account = "_localport"
+	}
+	for code, want := range map[errcode.Code]string{
+		errcode.AccountMissing:     "the agent account " + account + " does not exist; create it with: sudo localport service install [AG137]",
+		errcode.AccountNotChanged:  "the agent account " + account + " could not be created or looked up [AG138]",
+		errcode.AgentGroupMissing:  "the group " + account + " does not exist; create it with: sudo localport service install [AG140]",
+		errcode.AgentChildStart:    "localport could not start itself as the agent account " + account + " [AG038]",
+		errcode.AgentAccountUnsafe: "the agent account " + account + " can log in or reaches other users' files; remove it, then run: sudo localport service install: it is a member of staff [AG147]",
+	} {
+		detail := ""
+		if code == errcode.AgentAccountUnsafe {
+			detail = "it is a member of staff"
+		}
+		if text, _ := errcode.Render(errcode.New(code).With(nil, detail)); text != want {
+			t.Errorf("%s: Render = %q, want %q", code, text, want)
+		}
 	}
 }

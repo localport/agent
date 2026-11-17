@@ -1,18 +1,22 @@
 package security
 
-import "github.com/localport/agent/internal/errcode"
+import (
+	"github.com/localport/agent/internal/agentaccount"
+	"github.com/localport/agent/internal/errcode"
+)
 
 // System files are the root-owned device config directory and the files in it
 // that root writes and the unprivileged agent account reads through group
-// AgentGroup: the directory is root:localport 0750, agent.yaml root:localport
-// 0640, run.lock root:localport 0660 and agent.yaml.lock root-only 0600. Every
+// AgentGroup (localport, _localport on macOS): the directory is
+// root:AgentGroup 0750, agent.yaml root:AgentGroup 0640, run.lock
+// root:AgentGroup 0660 and agent.yaml.lock root-only 0600. Every
 // check runs on a descriptor opened without following a symlink, as for the
 // private files. Windows has the same set guarded by DACLs instead
 // (systemfile_windows.go); the gid arguments are unused there.
 
 // AgentGroup is the group of the agent account, the only group besides root
 // that reaches the system files.
-const AgentGroup = "localport"
+const AgentGroup = agentaccount.Name
 
 // ErrAgentGroupMissing means the agent group does not exist on this host:
 // `localport service install` creates it.

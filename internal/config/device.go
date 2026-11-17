@@ -130,8 +130,8 @@ type LocalConfigFile struct {
 	Base       string
 	FollowBase bool
 	// System marks the machine-wide device directory: it is checked and
-	// written with the security system file functions (on Unix root:localport
-	// 0750 directory and 0640 agent.yaml; on Windows owned by Administrators,
+	// written with the security system file functions (on Unix a
+	// root:security.AgentGroup 0750 directory and 0640 agent.yaml; on Windows owned by Administrators,
 	// read-only to the device service) and never walked by the private
 	// directory walk.
 	System bool
@@ -350,7 +350,7 @@ var (
 func systemWriter() bool { return security.IsSystemWriter(geteuid()) }
 
 // ensureSystemDir creates or secures the system config directory as
-// root:localport 0750 and returns the group's gid. A missing group is
+// root:security.AgentGroup 0750 and returns the group's gid. A missing group is
 // security.ErrAgentGroupMissing, whose message names the install command.
 func ensureSystemDir(f LocalConfigFile) (int, error) {
 	if !systemWriter() {
@@ -367,7 +367,7 @@ func ensureSystemDir(f LocalConfigFile) (int, error) {
 }
 
 // EnsureSystemRunLock creates or secures the system config directory and its
-// run.lock (root:localport 0660), so the agent account can lock it. Root
+// run.lock (root:security.AgentGroup 0660), so the agent account can lock it. Root
 // only; install and connect run it before the agent service starts.
 func EnsureSystemRunLock(f LocalConfigFile) error {
 	lock, err := openLock(f, f.RunLockPath())
@@ -745,7 +745,7 @@ func lockBeside(ctx context.Context, f LocalConfigFile, path string, wait time.D
 
 // openLock opens the lock file path beside the config. For the system config,
 // root (an elevated Administrator on Windows) creates or secures the
-// directory and the lock (run.lock root:localport 0660, agent.yaml.lock 0600;
+// directory and the lock (run.lock root:security.AgentGroup 0660, agent.yaml.lock 0600;
 // on Windows the matching DACLs); any other account only checks the
 // directory and opens the existing run.lock.
 func openLock(f LocalConfigFile, path string) (*os.File, error) {

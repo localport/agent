@@ -3,23 +3,68 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
+	"slices"
 	"strconv"
 	"strings"
+	"syscall"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
-const dsclPath = "/usr/bin/dscl"
-
-// macOS reserves ids below 500 for system accounts; the account takes the
-// first id free as both a uid and a gid, searched from accountIDFirst up.
 const (
-	accountIDFirst = 400
+	dsclPath         = "/usr/bin/dscl"
+	dsmemberutilPath = "/usr/bin/dsmemberutil"
+)
+
+// The account takes an id in [accountIDFirst, accountIDLimit), the range
+// sysadminctl documents for role accounts; Apple's own accounts sit below it.
+const (
+	accountIDFirst = 450
 	accountIDLimit = 500
 )
 
-// createAccount creates the hidden user with dscl under an id free as both a
-// uid and a gid below 500, and its group under the same id. A group of that
-// name that already exists keeps its gid, so files it owns keep their group.
-func createAccount(ctx context.Context, run runner) error {
+// The record fields of an account in the shape of Apple's role accounts
+// (_www, _mdnsresponder): no password and no authentication authority, so no
+// login of any kind, and no shell.
+const (
+	accountPassword = "*"
+	accountShell    = "/usr/bin/false"
+	accountHomeDir  = "/var/empty"
+)
+
+// privilegedGroups are the groups the account must not belong to: admin and
+// wheel administer the Mac, and staff reaches every user's home directory.
+var privilegedGroups = []string{"admin", "wheel", "staff"}
+
+// ownerIDs is the uid and gid that own a file.
+type ownerIDs struct{ uid, gid int }
+
+// identityDirOwner returns the owner of an existing identity directory; tests
+// replace it.
+var identityDirOwner = lstatDirOwner
+
+// lstatDirOwner returns the owner of the directory at path, without following
+// a link. Any failure reads as no directory: createAccount then takes fresh
+// ids, and ensureIdentityDir refuses a directory the new account does not own.
+func lstatDirOwner(path string) (ownerIDs, bool) {
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.IsDir() {
+		return ownerIDs{}, false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ownerIDs{}, false
+	}
+	return ownerIDs{uid: int(st.Uid), gid: int(st.Gid)}, true
+}
+
+// createAccount creates the hidden user with dscl in the role-account shape,
+// with the ids accountIDs picks for it, and its group when missing. A group
+// of that name that already exists keeps its gid, so files it owns keep their
+// group. It never runs sysadminctl, which writes a ShadowHash and adds the
+// account to staff.
+func createAccount(ctx context.Context, run runner, identityDir string) error {
 	uids, err := run(ctx, dsclPath, ".", "-list", "/Users", "UniqueID")
 	if err != nil {
 		return err
@@ -28,31 +73,29 @@ func createAccount(ctx context.Context, run runner) error {
 	if err != nil {
 		return err
 	}
-	id, err := freeSystemID(uids, gids)
+	owner, hasOwner := identityDirOwner(identityDir)
+	uid, gid, err := accountIDs(uids, gids, owner, hasOwner)
 	if err != nil {
 		return err
 	}
-	ids := strconv.Itoa(id)
 	group := "/Groups/" + AgentAccount
 	usr := "/Users/" + AgentAccount
 	var steps [][]string
-	gid, found := listedID(gids, AgentAccount)
-	if !found {
-		gid = id
+	if _, found := listedID(gids, AgentAccount); !found {
 		steps = [][]string{
 			{".", "-create", group},
-			{".", "-create", group, "PrimaryGroupID", ids},
-			{".", "-create", group, "Password", "*"},
+			{".", "-create", group, "PrimaryGroupID", strconv.Itoa(gid)},
+			{".", "-create", group, "Password", accountPassword},
 		}
 	}
 	for _, args := range append(steps, [][]string{
 		{".", "-create", usr},
-		{".", "-create", usr, "UniqueID", ids},
+		{".", "-create", usr, "UniqueID", strconv.Itoa(uid)},
 		{".", "-create", usr, "PrimaryGroupID", strconv.Itoa(gid)},
-		{".", "-create", usr, "UserShell", "/usr/bin/false"},
-		{".", "-create", usr, "NFSHomeDirectory", "/var/empty"},
+		{".", "-create", usr, "UserShell", accountShell},
+		{".", "-create", usr, "NFSHomeDirectory", accountHomeDir},
 		{".", "-create", usr, "RealName", accountDescription},
-		{".", "-create", usr, "Password", "*"},
+		{".", "-create", usr, "Password", accountPassword},
 		{".", "-create", usr, "IsHidden", "1"},
 	}...) {
 		if _, err := run(ctx, dsclPath, args...); err != nil {
@@ -60,6 +103,130 @@ func createAccount(ctx context.Context, run runner) error {
 		}
 	}
 	return nil
+}
+
+// accountIDs picks the uid and gid of a new account from the dscl -list
+// outputs. A recreated account takes the identity directory's owner when its
+// uid lies in the account range and no account holds it, and its gid is the
+// agent group's or free (and in range, when it becomes the group's): the
+// credentials then keep their owner and no key material is chowned.
+// Otherwise it takes the first id free as both a uid and a gid. An existing
+// agent group keeps its gid either way.
+func accountIDs(uids, gids string, owner ownerIDs, hasOwner bool) (uid, gid int, err error) {
+	groupGID, groupFound := listedID(gids, AgentAccount)
+	if hasOwner && inAccountRange(owner.uid) && !idListed(uids, owner.uid) {
+		switch {
+		case groupFound && (owner.gid == groupGID || !idListed(gids, owner.gid)):
+			return owner.uid, groupGID, nil
+		case !groupFound && inAccountRange(owner.gid) && !idListed(gids, owner.gid):
+			return owner.uid, owner.gid, nil
+		}
+	}
+	id, err := freeSystemID(uids, gids)
+	if err != nil {
+		return 0, 0, err
+	}
+	if groupFound {
+		return id, groupGID, nil
+	}
+	return id, id, nil
+}
+
+func inAccountRange(id int) bool { return id >= accountIDFirst && id < accountIDLimit }
+
+// checkAccountShape refuses, with AgentAccountUnsafe, an account that can log
+// in or reaches other users' files: an authentication authority, a password
+// other than "*", a shell other than /usr/bin/false, a primary group other
+// than the agent group, a uid outside the account range, or membership in a
+// privileged group. dsmemberutil resolves nested and implicit membership.
+// localport never edits an existing account to fit.
+func checkAccountShape(ctx context.Context, run runner, acct Account) error {
+	out, err := run(ctx, dsclPath, ".", "-read", "/Users/"+AgentAccount)
+	if err != nil {
+		return errAccount.With(err, "read "+AgentAccount)
+	}
+	gids, err := run(ctx, dsclPath, ".", "-list", "/Groups", "PrimaryGroupID")
+	if err != nil {
+		return errAccount.With(err, "list groups")
+	}
+	rec := dsclRecord(out)
+	var unsafe []string
+	if _, ok := rec["AuthenticationAuthority"]; ok {
+		unsafe = append(unsafe, "it has an AuthenticationAuthority")
+	}
+	if !slices.Equal(rec["Password"], []string{accountPassword}) {
+		unsafe = append(unsafe, "its Password is not "+accountPassword)
+	}
+	if !slices.Equal(rec["UserShell"], []string{accountShell}) {
+		unsafe = append(unsafe, "its shell is not "+accountShell)
+	}
+	if gid, found := listedID(gids, AgentAccount); !found || gid != acct.GID {
+		unsafe = append(unsafe, "its primary group is not "+AgentAccount)
+	}
+	if !inAccountRange(acct.UID) {
+		unsafe = append(unsafe, fmt.Sprintf("its uid %d is outside %d-%d", acct.UID, accountIDFirst, accountIDLimit-1))
+	}
+	for _, g := range privilegedGroups {
+		member, err := isMember(ctx, run, g)
+		if err != nil {
+			return errAccount.With(err, "check membership in "+g)
+		}
+		if member {
+			unsafe = append(unsafe, "it is a member of "+g)
+		}
+	}
+	if len(unsafe) > 0 {
+		return errcode.New(errcode.AgentAccountUnsafe).With(nil, strings.Join(unsafe, "; "))
+	}
+	return nil
+}
+
+// isMember reports whether the agent account is a member of group, from
+// dsmemberutil's answer. Any other answer is an error.
+func isMember(ctx context.Context, run runner, group string) (bool, error) {
+	out, err := run(ctx, dsmemberutilPath, "checkmembership", "-U", AgentAccount, "-G", group)
+	if err != nil {
+		return false, err
+	}
+	switch strings.TrimSpace(out) {
+	case "user is a member of the group":
+		return true, nil
+	case "user is not a member of the group":
+		return false, nil
+	}
+	return false, fmt.Errorf("dsmemberutil answered %q", strings.TrimSpace(out))
+}
+
+// dsclRecord parses `dscl . -read <record>` output into its attributes. A
+// line is "Key: values" with values separated by spaces, or "Key:" followed
+// by lines indented with a space, one value each. A key with no values is
+// present with a nil slice.
+func dsclRecord(out string) map[string][]string {
+	rec := map[string][]string{}
+	key := ""
+	for line := range strings.SplitSeq(out, "\n") {
+		switch {
+		case line == "":
+		case line[0] == ' ':
+			if key != "" {
+				rec[key] = append(rec[key], strings.TrimSpace(line))
+			}
+		case strings.HasSuffix(line, ":"):
+			key = strings.TrimSuffix(line, ":")
+			if _, ok := rec[key]; !ok {
+				rec[key] = nil
+			}
+		default:
+			k, v, ok := strings.Cut(line, ": ")
+			if !ok {
+				key = ""
+				continue
+			}
+			key = k
+			rec[k] = append(rec[k], strings.Fields(v)...)
+		}
+	}
+	return rec
 }
 
 // accountRemoval is the dscl commands that delete the user and the group.
@@ -89,6 +256,12 @@ func listedID(out, name string) (id int, found bool) {
 		}
 	})
 	return id, found
+}
+
+// idListed reports whether any name in a dscl -list output holds id.
+func idListed(out string, id int) (listed bool) {
+	dsclIDs(out, func(_ string, i int) { listed = listed || i == id })
+	return listed
 }
 
 // freeSystemID returns the first id in [accountIDFirst, accountIDLimit) that

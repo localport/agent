@@ -48,7 +48,7 @@ or uninstaller is running (wait for it to finish, then run it again), and exit
 | AG025 | Terminal or files without logins | Name at least one login with `--logins`. |
 | AG026 | Desktop without target | Give desktop a target with `--rdp` or `--vnc`. |
 | AG027 | Files root missing | The files root must be an existing directory the agent can inspect; the message names the path and the reason. Mount or create it, or change it with `localport set`. |
-| AG029 | Logins with run_as_agent | A device with `run_as_agent: true` runs terminal and files sessions as the agent account `localport`, so it lists no logins. Remove `--logins`, or drop `--run-as-agent` on a host with usable logins. |
+| AG029 | Logins with run_as_agent | A device with `run_as_agent: true` runs terminal and files sessions as the agent account (`localport`, `_localport` on macOS), so it lists no logins. Remove `--logins`, or drop `--run-as-agent` on a host with usable logins. |
 | AG030 | Forwarding without terminal | SSH port forwarding rides an `ssh` connection, so it needs terminal on the same device. Enable both, for example `--enable terminal,forwarding`. |
 | AG028 | Invalid local config | The local config failed validation; the message names the field. Every command that reads it refuses the same way, `localport set` included, so correct `agent.yaml` by hand: in `$LOCALPORT_HOME` (or `~/.localport`), or as root in the machine-wide config directory. |
 | AG031 | No enrolled device | The machine-wide config lists no device. Enrol one with `sudo localport connect <join-token>`. |
@@ -57,8 +57,8 @@ or uninstaller is running (wait for it to finish, then run it again), and exit
 | AG034 | Flags conflict with stored settings | The flags of a repeated connect differ from the device's settings. Change the settings with `localport set`, or run connect without the conflicting flags. |
 | AG035 | Unexpected argument | connect takes one join token. Put every flag before the join token or right after it. |
 | AG036 | No default login | Terminal and files need a login, and the account running the command gives none. Name the accounts with `--logins`. |
-| AG037 | Agent account step failed | Root runs the device-store part of this command as the agent account `localport`, and that part failed. Its own error, printed above this line, says why. |
-| AG038 | Agent account step not started | Root could not start localport as the agent account `localport`. Check that the account exists (`id localport`) and that the localport executable is intact; reinstall localport if either is missing. |
+| AG037 | Agent account step failed | Root runs the device-store part of this command as the agent account (`localport`, `_localport` on macOS), and that part failed. Its own error, printed above this line, says why. |
+| AG038 | Agent account step not started | Root could not start localport as the agent account (`localport`, `_localport` on macOS). Check that the account exists (`id localport`, on macOS `id _localport`) and that the localport executable is intact; reinstall localport if either is missing. |
 | AG039 | Internal command | `__agent` is the command localport runs itself, as the agent account. Run the command you meant without it. |
 | AG041 | Foreign service definition | A service under the device service's name was not written by localport. Remove it as the message says, then retry. |
 | AG042 | Device service not installed | Nothing to remove. Install the service with `sudo localport service install`. |
@@ -129,13 +129,14 @@ or uninstaller is running (wait for it to finish, then run it again), and exit
 | AG134 | Sign-in expired | The sign-in was not approved before it expired, or the control plane could not be reached while waiting. Run `localport login` again. |
 | AG135 | Service manager failed | A service manager command or call (systemctl, rc-service, ubus, launchctl, or the Windows service control manager) failed; the message names the step. `--verbose` prints the tool's output. Check the service manager's own log, then run the command again. |
 | AG136 | Service definition not written | The device service definition file or its directory could not be read, written or removed; the message names the path. Fix the path's permissions or free space. |
-| AG137 | Agent account missing | The agent account `localport` does not exist. Run `sudo localport service install`, which creates it. |
-| AG138 | Agent account not changed | The agent account or group `localport` could not be created or looked up; the message names the step. On a host without useradd or adduser, install the localport package, which creates the account. |
+| AG137 | Agent account missing | The agent account (`localport`, `_localport` on macOS) does not exist. Run `sudo localport service install`, which creates it. On macOS a recreated account takes the user and group ids that own the device's `identity` directory when no other account holds them, so the stored credentials stay usable. |
+| AG138 | Agent account not changed | The agent account or group (`localport`, `_localport` on macOS) could not be created, looked up or inspected; the message names the step. On a host without useradd or adduser, install the localport package, which creates the account. |
 | AG139 | Needs root | Only root, or an elevated Administrator on Windows, changes the device config directory. Run the command with sudo, or from an elevated prompt. |
-| AG140 | Agent group missing | The `localport` group does not exist. Run `sudo localport service install`, which creates it. |
+| AG140 | Agent group missing | The agent group (`localport`, `_localport` on macOS) does not exist. Run `sudo localport service install`, which creates it. |
 | AG141 | Local config unusable | The local config (`agent.yaml`), its directory or its lock file cannot be located, read, secured or locked; the message names the path. Fix the path, or set `LOCALPORT_HOME` when there is no home directory. |
 | AG142 | Local config busy | Another localport command is changing the local config. Wait for it to finish, then run the command again. |
 | AG143 | Local config not written | The local config file could not be written; the message names it. Fix the directory's permissions or free space. |
 | AG144 | Invalid tunnel config | The tunnel config file given with `--config` cannot be read, or holds an invalid entry or an unset `${VAR}`; the message names the file and the entry. Fix the entry. |
 | AG145 | Log file unusable | `run --log-file` could not open its path as the agent's log: a link, a directory, or no permission. Fix the path; the service manager's own log holds this message. |
 | AG146 | Token file unreadable | The file a `*_FILE` variable names (such as `LOCALPORT_TOKEN_FILE`) cannot be read, or is a link, not owned by this account or readable by others. Fix the file: owned by this account, mode 0600. |
+| AG147 | Agent account unsafe | macOS only. The existing `_localport` account is not in the shape localport creates, and localport does not edit it to fit. The message names each problem: an `AuthenticationAuthority` or a password other than `*` (it could log in), a shell other than `/usr/bin/false`, a primary group other than `_localport`, a user id outside 450-499, or membership in `admin`, `wheel` or `staff` (staff reaches every user's home directory). Remove the account with `sudo dscl . -delete /Users/_localport`, then run `sudo localport service install`, which recreates it. |

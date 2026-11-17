@@ -37,7 +37,7 @@ func TestCreateAccountAfterAConcurrentGroupCreate(t *testing.T) {
 				userCreated = true
 				return "", nil
 			}
-			err := createAccount(context.Background(), run)
+			err := createAccount(context.Background(), run, "")
 			if userCreated != tc.wantUserCreate || (err == nil) != tc.wantUserCreate {
 				t.Fatalf("createAccount = %v, user created %v; want user created %v", err, userCreated, tc.wantUserCreate)
 			}

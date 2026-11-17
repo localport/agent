@@ -37,7 +37,7 @@ func TestFailedCommandIsCoded(t *testing.T) {
 	run := func(context.Context, string, ...string) (string, error) {
 		return execRun(context.Background(), fail[0], fail[1:]...)
 	}
-	_, err = ensureAccount(context.Background(), run, &fakeAccounts{})
+	_, err = ensureAccount(context.Background(), run, &fakeAccounts{}, "")
 	wantCode(t, err, errcode.AccountNotChanged)
 	if errors.Is(err, errcode.New(errcode.ServiceManagerFailed)) {
 		t.Fatalf("account create = %v, want AG138 only", err)
