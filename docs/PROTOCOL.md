@@ -305,6 +305,18 @@ asks the team to pay an overdue invoice, the second to resume its paused plan,
 the third to subscribe. The agent uses `limit_type` only to pick the hint it
 appends to `reason`. Whether it reconnects is decided by `retryable`.
 
+A Shutdown with `code` `SE040` (an admin disconnected the device, `retryable`
+true) is a drain: the edge keeps the connection, its session streams and the
+session mux open, and admits no new session, stream or consumer, so the device
+can end its sessions and deliver their recordings. The edge closes the
+connection when the agent does, or after 92 seconds. Every registration,
+renewal and key fetch is refused `SE040` until an admin reconnects the device.
+
+A Shutdown or refusal with `SE018` (the device was removed or its fleet
+deleted) or `SE041` (its certificate was revoked because the device was
+removed or enrolled again) is final: no later state makes that credential
+usable.
+
 ### Error (9)
 
 ```json
@@ -455,6 +467,8 @@ Public message families an agent may surface:
 | Token kind mismatch       | invalid token usage                            | no        |
 | Fleet token (`SE030`)     | Fleet tokens are retired. Create the device ... | no       |
 | Device certificate (`SE031`) | device certificate refused: enrol the device again ... | no |
+| Certificate revoked (`SE041`) | this device's certificate is revoked: enrol the device again ... | no |
+| Disconnected by an admin (`SE040`) | device disconnected by an admin; it reconnects when an admin reconnects it | **yes** |
 | Protocol / clock          | protocol error, update the agent ...           | no        |
 
 **Device limit** counts the devices a team has registered across all of its
@@ -465,7 +479,12 @@ service has no room for right now is reported as service unavailable and is
 retried.
 
 **Unknown fleet device** is non-retryable. Waiting cannot change the answer, and
-the message says what to do.
+the message says what to do. It is also the answer for a removed device and for
+a device whose fleet was deleted (its team's CA still signed it).
+
+**Disconnected by an admin** and **Certificate revoked** name the state of the
+device itself, so the edge and the control plane give them only to a caller that
+proved it holds the device key; anyone else gets the ordinary refusal.
 
 **Duplicate device name** is retryable. A fleet agent that restarts loses its
 resume id and collides with its own stale session until the edge clears it. Two
@@ -1825,6 +1844,13 @@ proof of `/v1/mtls/certs/renew`. An expired device certificate still renews
 there, so it is due at once. A `429` is retried after the longer of the
 backoff and its `Retry-After` (at most one hour), with jitter, so devices
 behind one address do not return in step.
+
+Once the device's signature verifies, `/v1/devices/keys` and
+`/v1/devices/renew` answer three refusals that name the device's state, each
+`403`: `SE040` an admin disconnected the device (retryable once an admin
+reconnects it), `SE041` its certificate was revoked because the device was
+removed or enrolled again, and `SE018` its fleet was deleted (both final). Any
+other refusal keeps its route's code.
 
 The control plane issues the renewed certificate as **pending** and keeps the
 current one live until the device registers with the pending one. The store
