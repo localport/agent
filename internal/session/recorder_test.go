@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -536,5 +537,98 @@ func TestRecorderPanicIsAHandoffFailure(t *testing.T) {
 	}
 	if h.done == nil || !h.done.Incomplete || h.done.Reason != recording.ReasonRecordingFailed {
 		t.Fatalf("completion %+v, want incomplete %s", h.done, recording.ReasonRecordingFailed)
+	}
+}
+
+// recordedEvent is one asciicast event line: its time from the recording
+// start in milliseconds, its code and its data.
+type recordedEvent struct {
+	at   int64
+	code string
+	data string
+}
+
+// recordedEvents parses the event lines after the header of an asciicast.
+func recordedEvents(t *testing.T, text string) []recordedEvent {
+	t.Helper()
+	var events []recordedEvent
+	var elapsed int64
+	for _, line := range bytes.Split(bytes.TrimSuffix([]byte(text), []byte("\n")), []byte("\n"))[1:] {
+		var ev []any
+		if err := json.Unmarshal(line, &ev); err != nil || len(ev) != 3 {
+			t.Fatalf("line %q: %v", line, err)
+		}
+		interval, _ := ev[0].(float64)
+		elapsed += int64(math.Round(interval * 1000))
+		code, _ := ev[1].(string)
+		data, _ := ev[2].(string)
+		events = append(events, recordedEvent{at: elapsed, code: code, data: data})
+	}
+	return events
+}
+
+// A session that closes without a shell exit ends with an "end" marker at
+// the close time, the time the completion carries.
+func TestRecorderEndsWithAnEndMarker(t *testing.T) {
+	h := &fakeHandoff{}
+	r, priv := newTestRecorder(t, RecPolicyBestEffort, h)
+	began := time.Now()
+	r.start(began, 80, 24)
+	r.output([]byte("hello\r\n"), nil)
+	time.Sleep(50 * time.Millisecond)
+	before := time.Since(began).Round(time.Millisecond).Milliseconds()
+	r.end()
+	after := time.Since(began).Round(time.Millisecond).Milliseconds()
+	if h.done == nil || !h.done.Final {
+		t.Fatalf("completion %+v, want a clean complete", h.done)
+	}
+	events := recordedEvents(t, decryptRecording(t, priv, r.sealer.WrappedDEK(), h.segs))
+	last := events[len(events)-1]
+	if len(events) != 2 || last.code != "m" || last.data != markerEnd {
+		t.Fatalf("events %+v, want the output then the end marker", events)
+	}
+	if last.at < before || last.at > after {
+		t.Fatalf("end marker at %d ms, want between %d and %d ms", last.at, before, after)
+	}
+	if ended := h.done.EndedAt.Sub(began).Round(time.Millisecond).Milliseconds(); last.at != ended {
+		t.Fatalf("end marker at %d ms, completion ended at %d ms", last.at, ended)
+	}
+}
+
+// A held partial UTF-8 sequence is flushed before the end marker.
+func TestRecorderFlushesThePartialSequenceBeforeTheEndMarker(t *testing.T) {
+	h := &fakeHandoff{}
+	r, priv := newTestRecorder(t, RecPolicyBestEffort, h)
+	r.start(time.Now(), 80, 24)
+	r.output([]byte("a\xe2\x82"), nil)
+	r.end()
+	events := recordedEvents(t, decryptRecording(t, priv, r.sealer.WrappedDEK(), h.segs))
+	if len(events) != 3 || events[0].data != "a" || events[1].code != "o" || events[1].data != "��" || events[2].code != "m" || events[2].data != markerEnd {
+		t.Fatalf("events %+v, want a, the flushed sequence as U+FFFD per byte, then the end marker", events)
+	}
+}
+
+// An open segment with no room for the end marker is sealed as a non-final
+// segment and the marker alone is the final one.
+func TestRecorderEndMarkerCutsAFullSegment(t *testing.T) {
+	h := &fakeHandoff{}
+	r, priv := newTestRecorder(t, RecPolicyBestEffort, h)
+	began := time.Now()
+	r.start(began, 80, 24)
+	// An ASCII output line under a second in is its data plus 15 bytes;
+	// the two outputs leave 5 bytes, fewer than the marker line needs.
+	header := len(recording.NewWriter(began, 80, 24).Header())
+	r.output(bytes.Repeat([]byte("x"), recording.MaxLine-15), nil)
+	r.output(bytes.Repeat([]byte("y"), 108-header), nil)
+	r.end()
+	if len(h.segs) != 2 || h.segs[0].Final || !h.segs[1].Final {
+		t.Fatalf("%d segments, want a non-final cut and the final segment", len(h.segs))
+	}
+	if final := decryptRecording(t, priv, r.sealer.WrappedDEK(), h.segs[1:]); !bytes.HasSuffix([]byte(final), []byte(`,"m","end"]`+"\n")) || bytes.Count([]byte(final), []byte("\n")) != 1 {
+		t.Fatalf("final segment %q, want only the end marker", final)
+	}
+	events := recordedEvents(t, decryptRecording(t, priv, r.sealer.WrappedDEK(), h.segs))
+	if len(events) != 3 || events[2].code != "m" {
+		t.Fatalf("events %+v, want x, y, end", events)
 	}
 }

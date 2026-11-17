@@ -111,7 +111,8 @@ func (w *Writer) Forward(at time.Time, event []byte) []byte {
 }
 
 // Marker returns the "m" line of an asciicast v3 marker labelled label: the
-// session recorder marks a connection's detach and attach with it.
+// session recorder marks a connection's detach and attach, and the close of
+// a recording whose shell did not exit ("end"), with it.
 func (w *Writer) Marker(at time.Time, label string) []byte {
 	return eventLine(w.interval(at), 'm', jsonString([]byte(label)))
 }

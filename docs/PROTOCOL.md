@@ -1149,32 +1149,37 @@ open fails within 5 s is refused (`recording_unavailable`) and other channels
 are unaffected; a Best effort one runs unrecorded. A recorded `shell` or `exec`
 writes `localport: this session is recorded` to its stderr before any helper
 output; an `sftp` channel, whose client shows no stderr, does not. The agent
-records the channel's output, resizes and exit, seals it in segments and
-delivers them over its session mux. The open carries the admitting certificate
-(`certificate`, base64url, at most 8 KiB), from which the control plane creates
-the recording; the edge forwards the open only for a connection its
-session mux carries and adds when it admitted that certificate, so a channel
-that starts after a short-lived certificate expired is still recorded. The
-spool's `meta.json` keeps the certificate and the session id so a resumed open
-after a restart sends them again. Code: `internal/recording/`,
+records the channel's output, resizes and exit (or the end marker), seals it
+in segments and delivers them over its session mux. The open carries the
+admitting certificate (`certificate`, base64url, at most 8 KiB), from which the
+control plane creates the recording; the edge forwards the open only for a
+connection its session mux carries and adds when it admitted that certificate,
+so a channel that starts after a short-lived certificate expired is still
+recorded. The spool's `meta.json` keeps the certificate and the session id so a
+resumed open after a restart sends them again. Code: `internal/recording/`,
 `internal/session/recorder.go`, `internal/tunnel/recording_client.go`.
 
 Format: the plaintext is asciicast v3, one JSON line per event (header, then `o`
-output, `r` resize, `f` file activity and `x` exit events; an `sftp` channel's
-header has the default size, 80 by 24). An `f` event's data is a JSON object
-string: `op` (`exec`, `read`, `write`, `mkdir`, `rmdir`, `remove`, `rename`,
-`setstat`, `symlink`, `link`, `list`), `path`, `target` (rename, symlink, link),
-`command` (exec, at most 2 KiB), `bytes` (read and write: one event when the
-handle closes, with the bytes moved) and `result` (`ok`, `no_such_file`,
-`permission_denied`, `file_exists` or `failure`; absent on `exec`). The agent
-writes the `exec` event from the request when the command starts; the SFTP
-server sends the others to the agent on its own pipe, and an event that fails
-validation ends the channel. `path` and `target` are at most 4 KiB: bytes that
-are not valid UTF-8, control characters and the backslash are written as `\xNN`,
-and a longer name is cut and ends with `...(truncated)`. An `sftp` channel's
-recording holds its `f` events only, never the protocol bytes it carries.
-Players skip codes they do not know, as asciicast v3 requires. A segment holds
-whole lines and is cut at 10 s or 256 KiB of plaintext, whichever comes first.
+output, `r` resize, `f` file activity, `p` port forward, `x` exit and `m`
+marker events; an `sftp` channel's header has the default size, 80 by 24). A
+recording whose shell did not exit (an `sftp` or forwards recording, a channel
+closed by the client) ends with the marker `end` at the time the channel
+closed, so its length is the channel's; a recording stopped early (spool full,
+disk low, failure) ends at its last delivered event. An `f` event's data is a
+JSON object string: `op` (`exec`, `read`, `write`, `mkdir`, `rmdir`, `remove`,
+`rename`, `setstat`, `symlink`, `link`, `list`), `path`, `target` (rename,
+symlink, link), `command` (exec, at most 2 KiB), `bytes` (read and write: one
+event when the handle closes, with the bytes moved) and `result` (`ok`,
+`no_such_file`, `permission_denied`, `file_exists` or `failure`; absent on
+`exec`). The agent writes the `exec` event from the request when the command
+starts; the SFTP server sends the others to the agent on its own pipe, and an
+event that fails validation ends the channel. `path` and `target` are at most
+4 KiB: bytes that are not valid UTF-8, control characters and the backslash are
+written as `\xNN`, and a longer name is cut and ends with `...(truncated)`. An
+`sftp` channel's recording holds its `f` events only, never the protocol bytes
+it carries. Players skip codes they do not know, as asciicast v3 requires. A
+segment holds whole lines and is cut at 10 s or 256 KiB of plaintext,
+whichever comes first.
 Each recording has a random 32-byte DEK, wrapped once with HPKE (ML-KEM-768 with
 X25519, HKDF-SHA256, ChaCha20-Poly1305, info `localport-recording-v1` followed
 by the id) to the team recording public key; the result is `wrapped_dek`. A

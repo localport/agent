@@ -372,10 +372,12 @@ func (r *sessionRecorder) exit(status uint32) {
 	r.enqueue(recEvent{kind: evExit, at: time.Now(), status: status})
 }
 
-// Marker labels of a resumable connection's stream changes.
+// Marker labels: a resumable connection's stream changes, and the close of a
+// recording whose shell did not exit.
 const (
 	markerDetach = "detach"
 	markerAttach = "attach"
+	markerEnd    = "end"
 )
 
 // marker queues an asciicast marker; it always fits, like resize.
@@ -413,7 +415,8 @@ func (r *sessionRecorder) poke() {
 }
 
 // end seals the final segment (what is queued and buffered, with the
-// partial-sequence flush when the shell did not exit, or an empty plaintext)
+// partial-sequence flush and the end marker when the shell did not exit, or
+// an empty plaintext)
 // and hands over the complete fields. It runs after the kind's last tap.
 func (r *sessionRecorder) end() { r.closeAndWait(recEnd) }
 
@@ -666,13 +669,19 @@ func (r *sessionRecorder) stop(reason string) {
 	}
 }
 
-// finish seals the final segment and hands over the complete fields.
+// finish seals the final segment and hands over the complete fields. When
+// the shell did not exit, the recording ends with the partial-sequence flush
+// and an end marker at the close time, so its length is the session's.
 func (r *sessionRecorder) finish(st *recorderState) {
+	at := time.Now()
 	var final []byte
 	if st.w != nil {
-		at := time.Now()
 		if !st.exited {
-			if line := st.w.Flush(at); line != nil {
+			lines := [][]byte{st.w.Flush(at), st.w.Marker(at, markerEnd)}
+			for _, line := range lines {
+				if line == nil {
+					continue
+				}
 				if cut := st.seg.Add(at, line); cut != nil && !r.seal(cut, false) {
 					return
 				}
@@ -684,7 +693,7 @@ func (r *sessionRecorder) finish(st *recorderState) {
 		return
 	}
 	if err := r.handoff.End(recording.Completion{
-		Segments: r.sealer.Sealed(), FinalHash: r.sealer.FinalHash(), EndedAt: time.Now(), Final: true,
+		Segments: r.sealer.Sealed(), FinalHash: r.sealer.FinalHash(), EndedAt: at, Final: true,
 	}); err != nil && !errors.Is(err, recording.ErrNoEntry) {
 		r.log("session: recording %s end: %v", r.sealer.ID(), err)
 	}
