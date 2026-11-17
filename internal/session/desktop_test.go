@@ -412,10 +412,13 @@ func TestTerminalRejectsDesktopChannels(t *testing.T) {
 	}
 }
 
-// idleClock is manualClock that also fires the idle timer on demand.
+// idleClock is manualClock that also fires the idle timer on demand. A timer
+// longer than detachTimeout is an idle timer; idleArmed records each one's
+// duration in order.
 type idleClock struct {
 	manualClock
-	idle []chan time.Time
+	idle      []chan time.Time
+	idleArmed []time.Duration
 }
 
 func (c *idleClock) NewTimer(d time.Duration) (<-chan time.Time, func() bool) {
@@ -425,6 +428,7 @@ func (c *idleClock) NewTimer(d time.Duration) (<-chan time.Time, func() bool) {
 	ch := make(chan time.Time, 1)
 	c.mu.Lock()
 	c.idle = append(c.idle, ch)
+	c.idleArmed = append(c.idleArmed, d)
 	c.mu.Unlock()
 	return ch, func() bool { return true }
 }
@@ -457,7 +461,7 @@ func TestDesktopIdle(t *testing.T) {
 		// The round trip settles the handshake's client bytes, which are
 		// activity, before the clock moves.
 		desktopPing(t, ch)
-		clock.advance(idleTimeout + time.Minute)
+		clock.advance(testIdleTimeout + time.Minute)
 		if _, err := server.Write([]byte{rfbServerBell}); err != nil {
 			t.Fatal(err)
 		}
@@ -484,7 +488,7 @@ func TestDesktopIdle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		clock.advance(idleTimeout - time.Minute)
+		clock.advance(testIdleTimeout - time.Minute)
 		desktopPing(t, ch)
 		clock.advance(2 * time.Minute)
 		clock.fireIdle()
@@ -739,7 +743,7 @@ func TestDesktopEndsWithItsChannel(t *testing.T) {
 			t.Fatal(err)
 		}
 		readFor(t, r, string(tsNego))
-		clock.advance(idleTimeout + time.Minute)
+		clock.advance(testIdleTimeout + time.Minute)
 		clock.fireIdle()
 		if reason := waitEndRequest(t, reqs); reason != CloseIdle {
 			t.Fatalf("end reason %q, want %q", reason, CloseIdle)

@@ -24,6 +24,7 @@ const (
 	optionResume     = "resume@localport.io"
 	optionFiles      = "files@localport.io"
 	optionClipboard  = "clipboard@localport.io"
+	optionIdle       = "idle@localport.io"
 	extKind          = "kind@localport.io"
 	extSubject       = "subject@localport.io"
 	extRec           = "rec@localport.io"
@@ -84,6 +85,27 @@ type admission struct {
 	// certificate: the directions its desktop channel may move clipboard
 	// text. Zero for every other kind, which has no desktop channel.
 	Clipboard clipboardAccess
+	// Idle is the idle@localport.io timeout: the time without client activity
+	// after which the connection ends with CloseIdle.
+	Idle time.Duration
+}
+
+// Bounds of an optionIdle value, the range the control plane mints.
+const (
+	minIdle = 5 * time.Minute
+	maxIdle = 240 * time.Minute
+)
+
+// parseIdle parses an optionIdle value: whole seconds in decimal without
+// leading zeros, within minIdle and maxIdle. The bounds are checked on the
+// seconds, before the conversion to a Duration can overflow.
+func parseIdle(v string) (time.Duration, bool) {
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || strconv.FormatInt(n, 10) != v ||
+		n < int64(minIdle/time.Second) || n > int64(maxIdle/time.Second) {
+		return 0, false
+	}
+	return time.Duration(n) * time.Second, true
 }
 
 // clipboardAccess is a clipboard@localport.io value: whether clipboard text
@@ -155,13 +177,13 @@ func refuseCert(format string, args ...any) error {
 // verifyCert checks a user certificate whose key possession userauth proved: a
 // user certificate signed by one of cas, with exactly the serial the edge
 // admitted, valid at now within certSkew, for principal user, with exactly the
-// critical options the device option (which must name device), for a files or
-// ssh certificate optionFiles, and for a vnc or rdp certificate
+// critical options the device option (which must name device), optionIdle,
+// for a files or ssh certificate optionFiles, and for a vnc or rdp certificate
 // optionClipboard. A resume certificate is refused (its resume option is
 // unknown here). It returns the certificate's claims; the caller applies the
 // local config.
 func verifyCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, device Device, serial uint64, now time.Time) (*admission, error) {
-	return checkCert(cert, user, cas, device, serial, now, []string{optionDevice})
+	return checkCert(cert, user, cas, device, serial, now, []string{optionDevice, optionIdle})
 }
 
 // verifyResumeCert checks a resume certificate in a resume prelude: as
@@ -175,7 +197,7 @@ func verifyResumeCert(cert *ssh.Certificate, cas []ed25519.PublicKey, device Dev
 	if cert.CriticalOptions[optionResume] != strconv.FormatUint(original, 16) {
 		return nil, refuseCert("resumes another connection")
 	}
-	return checkCert(cert, cert.ValidPrincipals[0], cas, device, serial, now, []string{optionDevice, optionResume})
+	return checkCert(cert, cert.ValidPrincipals[0], cas, device, serial, now, []string{optionDevice, optionIdle, optionResume})
 }
 
 func checkCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, device Device, serial uint64, now time.Time, options []string) (*admission, error) {
@@ -194,7 +216,7 @@ func checkCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, devi
 	}
 	// CheckCert refuses an option outside the list; the count refuses a
 	// missing one, so a certificate without its restriction never admits
-	// unrestricted SFTP or an unrestricted clipboard.
+	// unrestricted SFTP, an unrestricted clipboard or no idle end.
 	if len(cert.CriticalOptions) != len(options) {
 		return nil, refuseCert("want exactly the critical options %v", options)
 	}
@@ -230,7 +252,11 @@ func checkCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, devi
 	if d.Prefix != device.Prefix || d.SPKISHA256 != device.SPKISHA256 {
 		return nil, refuseCert("for device %q, not this device", d.Prefix)
 	}
-	a := &admission{Kind: kind, Login: user, Cert: cert.Marshal()}
+	idle, ok := parseIdle(cert.CriticalOptions[optionIdle])
+	if !ok {
+		return nil, refuseCert("idle option malformed")
+	}
+	a := &admission{Kind: kind, Login: user, Cert: cert.Marshal(), Idle: idle}
 	_, a.ForwardLocal = cert.Extensions[extForwardLocal]
 	_, a.ForwardRemote = cert.Extensions[extForwardRemote]
 	if carriesFiles(kind) {

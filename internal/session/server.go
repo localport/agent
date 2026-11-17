@@ -30,6 +30,7 @@ import (
 	"maps"
 	"net"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,7 +64,6 @@ const (
 	// connection has one.
 	maxChannels       = 4
 	keyRefreshTimeout = 3 * time.Second
-	idleTimeout       = 30 * time.Minute
 	// serverVersion is the SSH identification string.
 	serverVersion = "SSH-2.0-localport"
 )
@@ -102,6 +102,8 @@ const (
 	// certificate's clipboard@localport.io option permits that direction.
 	permClipboardCopy  = "clipboard-copy"
 	permClipboardPaste = "clipboard-paste"
+	// permIdle is the certificate's idle@localport.io timeout, in its wire form.
+	permIdle = "idle"
 )
 
 // ServerConfig is one device's session server configuration. Capabilities,
@@ -1068,7 +1070,8 @@ func (s *Server) caKeys() []ed25519.PublicKey {
 
 // permissions carries a into the connection's Permissions.
 func (a *admission) permissions() *ssh.Permissions {
-	ext := map[string]string{permKind: a.Kind, permSubject: a.Subject, permCert: base64.RawURLEncoding.EncodeToString(a.Cert)}
+	ext := map[string]string{permKind: a.Kind, permSubject: a.Subject, permCert: base64.RawURLEncoding.EncodeToString(a.Cert),
+		permIdle: strconv.FormatInt(int64(a.Idle/time.Second), 10)}
 	if a.Rec != nil {
 		ext[permRecPol], ext[permRecPub] = a.Rec.Policy, a.Rec.PubSHA256
 	}
@@ -1108,6 +1111,9 @@ func admissionOf(p *ssh.Permissions) *admission {
 	_, a.Files.Upload = ext[permFilesUpload]
 	_, a.Clipboard.Copy = ext[permClipboardCopy]
 	_, a.Clipboard.Paste = ext[permClipboardPaste]
+	// permissions wrote a value checkCert accepted. A value that does not
+	// parse leaves Idle zero, which ends the connection at its first idle check.
+	a.Idle, _ = parseIdle(ext[permIdle])
 	return a
 }
 
@@ -1292,8 +1298,11 @@ type conn struct {
 	// adm is the admission the connection runs under: the first connect's,
 	// replaced by each installed resume's (readmit). A reader loads it once
 	// per decision.
-	adm   atomic.Pointer[connAdmission]
-	login string
+	adm atomic.Pointer[connAdmission]
+	// readmitted receives, without blocking, after readmit stored a new
+	// admission, so run re-arms the idle timer for that admission's timeout.
+	readmitted chan struct{}
+	login      string
 	// password is a password login's password (connSecret), nil otherwise;
 	// each channel's launcher request gets its own copy.
 	password []byte
@@ -1345,6 +1354,10 @@ func (c *conn) active() { c.lastActivity.Store(c.s.cfg.clock.Now().UnixNano()) }
 func (c *conn) readmit(a *connAdmission) bool {
 	c.mu.Lock()
 	c.adm.Store(a)
+	select {
+	case c.readmitted <- struct{}{}:
+	default:
+	}
 	violated := c.fwd.recordingViolatedLocked(a)
 	conns, listeners, client := c.fwd.disallowedLocked()
 	channels := slices.Collect(maps.Keys(c.channels))
@@ -1393,7 +1406,7 @@ func (c *conn) fail(reason string) {
 // is dropped first, so nothing waits for a stream; the writes are bounded by
 // endWriteTimeout), closes the connection and joins the channels and forwards.
 func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request, adm *connAdmission, password []byte, e *resumable) {
-	c := &conn{s: s, login: sc.User(), password: password,
+	c := &conn{s: s, login: sc.User(), password: password, readmitted: make(chan struct{}, 1),
 		channels: map[*channel]struct{}{}, allClosed: make(chan struct{}, 1), failed: make(chan string, 1)}
 	var wg sync.WaitGroup
 	c.fwd = newForwarder(c, sc, &wg)
@@ -1429,7 +1442,18 @@ func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel
 		}
 	})
 
-	fire, stopTimer := s.cfg.clock.NewTimer(idleTimeout)
+	// The idle timeout is the current admission's: a resume's certificate
+	// replaces it, and readmitted re-arms the timer for the new value.
+	fire, stopTimer := s.cfg.clock.NewTimer(c.adm.Load().Idle)
+	idleEnded := func() bool {
+		timeout := c.adm.Load().Idle
+		idle := s.cfg.clock.Now().Sub(time.Unix(0, c.lastActivity.Load()))
+		if idle >= timeout {
+			return true
+		}
+		fire, stopTimer = s.cfg.clock.NewTimer(timeout - idle)
+		return false
+	}
 	var reason string
 wait:
 	for {
@@ -1447,12 +1471,16 @@ wait:
 		case reason = <-e.ended:
 			break wait
 		case <-fire:
-			idle := s.cfg.clock.Now().Sub(time.Unix(0, c.lastActivity.Load()))
-			if idle >= idleTimeout {
+			if idleEnded() {
 				reason = CloseIdle
 				break wait
 			}
-			fire, stopTimer = s.cfg.clock.NewTimer(idleTimeout - idle)
+		case <-c.readmitted:
+			stopTimer()
+			if idleEnded() {
+				reason = CloseIdle
+				break wait
+			}
 		}
 	}
 	stopTimer()

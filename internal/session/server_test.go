@@ -274,7 +274,17 @@ type certOpts struct {
 	// leaves the option out.
 	clipboard   *string
 	noClipboard bool
+	// idle replaces the idle option (default testIdle); noIdle leaves it out.
+	idle   *string
+	noIdle bool
 }
+
+// testIdle is the idle option value of a test certificate, in seconds, and
+// testIdleTimeout the same timeout as a duration.
+const (
+	testIdle        = "1800"
+	testIdleTimeout = 30 * time.Minute
+)
 
 func (f *sshFixture) defaults() certOpts {
 	return certOpts{serial: 42, kind: "terminal", login: testLogin, prefix: f.device.Prefix, spki: f.device.SPKISHA256,
@@ -310,6 +320,12 @@ func (f *sshFixture) mint(t *testing.T, o certOpts) (ssh.Signer, *ssh.Certificat
 	}
 	if o.extraCO {
 		cert.CriticalOptions["force-command"] = "/bin/true"
+	}
+	if !o.noIdle {
+		cert.CriticalOptions[optionIdle] = testIdle
+		if o.idle != nil {
+			cert.CriticalOptions[optionIdle] = *o.idle
+		}
 	}
 	if carriesFiles(o.kind) && !o.noFiles || o.files != nil {
 		cert.CriticalOptions[optionFiles] = "download,upload"
@@ -646,6 +662,13 @@ func TestUserauthRefusals(t *testing.T) {
 		{"files certificate without its files option", func(o *certOpts) { o.kind, o.noFiles = "files", true }, 0},
 		{"files option malformed", func(o *certOpts) { o.kind, o.files = "files", new("upload,download") }, 0},
 		{"terminal certificate with a files option", func(o *certOpts) { o.files = new("download") }, 0},
+		{"without the idle option", func(o *certOpts) { o.noIdle = true }, 0},
+		{"idle below 5 minutes", func(o *certOpts) { o.idle = new("299") }, 0},
+		{"idle above 240 minutes", func(o *certOpts) { o.idle = new("14401") }, 0},
+		{"idle with a leading zero", func(o *certOpts) { o.idle = new("01800") }, 0},
+		{"idle not in seconds", func(o *certOpts) { o.idle = new("30m") }, 0},
+		// 2^55 + 1800 seconds: in nanoseconds it wraps to exactly 1800 s.
+		{"idle that overflows into range", func(o *certOpts) { o.idle = new("36028797018965768") }, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o := f.defaults()

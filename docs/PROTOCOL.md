@@ -674,7 +674,7 @@ stream:
    | a user certificate whose serial is the notice's serial |
    | signed by a session CA key the agent holds (`ticket_keys.json`); an unknown CA key triggers one key fetch (at most 3 s, at most once per 5 minutes) and one retry |
    | valid now within 30 s of skew, for the user name as its principal |
-   | exactly the critical options `device@localport.io`, naming this device's prefix and registered key (`spki_sha256`), and for a `files` or `ssh` certificate `files@localport.io`: the file directions its SFTP channels may use, one of `""`, `download`, `upload`, `download,upload` (any other value, or a `files` or `ssh` certificate without it, is refused), and for a `vnc` or `rdp` certificate `clipboard@localport.io`: the clipboard directions of its desktop channel, one of `""`, `copy`, `paste`, `copy,paste` (any other value, a desktop certificate without it, or the option on another kind, is refused) |
+   | exactly the critical options `device@localport.io`, naming this device's prefix and registered key (`spki_sha256`), `idle@localport.io`: the connection's idle timeout in whole seconds, decimal without leading zeros, 300 to 14400 (the fleet's setting; any other value, or a certificate without it, is refused), and for a `files` or `ssh` certificate `files@localport.io`: the file directions its SFTP channels may use, one of `""`, `download`, `upload`, `download,upload` (any other value, or a `files` or `ssh` certificate without it, is refused), and for a `vnc` or `rdp` certificate `clipboard@localport.io`: the clipboard directions of its desktop channel, one of `""`, `copy`, `paste`, `copy,paste` (any other value, a desktop certificate without it, or the option on another kind, is refused) |
    | the kind (`kind@localport.io`) enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) and served by this agent (`terminal`, `ssh`, `files`, `rdp`, `vnc`) |
    | for `terminal`, `ssh` and `files`: the user name listed in the local `logins`; for `rdp` and `vnc`: the user name `localport-desktop` and no `rec@localport.io` (a desktop session is never recorded) |
    | a `rec@localport.io`, when present, naming the held team recording key; a mismatch triggers one key fetch, under the same floor, and one retry |
@@ -1009,8 +1009,10 @@ stream:
    cannot take ends the connection `recording_failed`.
 4. End: the agent closes the connection, after writing
    `localport: session ended: <reason>` to each open channel's stderr, for
-   `idle` (30 minutes without client channel data or a request; on a desktop
-   connection, without client channel data),
+   `idle` (the admitting certificate's `idle@localport.io` timeout without
+   client channel data or a request; on a desktop connection, without client
+   channel data; after a resume, the resume certificate's timeout applies at
+   once),
    `shutdown` (the control session is ending), `config_changed`
    (`localport set` changed the device's entry and the agent reloaded it; the
    device's other sessions end too), `exited` (the channel of a `terminal`

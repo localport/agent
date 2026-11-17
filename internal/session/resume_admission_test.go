@@ -165,7 +165,7 @@ func TestAResumeDuringAListenRefusesTheListener(t *testing.T) {
 	var bound uint32
 	hook := func(fw *forwarder, l *remoteListener) {
 		bound = l.port
-		fw.c.readmit(&connAdmission{admission: &admission{Kind: "ssh"}, sessionID: fw.c.adm.Load().sessionID})
+		fw.c.readmit(&connAdmission{admission: &admission{Kind: "ssh", Idle: testIdleTimeout}, sessionID: fw.c.adm.Load().sessionID})
 	}
 	beforeListenerRegistration.Store(&hook)
 	t.Cleanup(func() { beforeListenerRegistration.Store(nil) })

@@ -87,7 +87,7 @@ func TestDeviceSessionsUseTheRegisteredCertificate(t *testing.T) {
 			Key: client.PublicKey(), Serial: serial, CertType: ssh.UserCert, ValidPrincipals: []string{me.Username},
 			ValidAfter: uint64(time.Now().Add(-time.Minute).Unix()), ValidBefore: uint64(time.Now().Add(time.Minute).Unix()),
 			Permissions: ssh.Permissions{
-				CriticalOptions: map[string]string{"device@localport.io": string(dev)},
+				CriticalOptions: map[string]string{"device@localport.io": string(dev), "idle@localport.io": "1800"},
 				Extensions:      map[string]string{"kind@localport.io": "terminal", "subject@localport.io": `{"subject":"user:alice"}`},
 			},
 		}
