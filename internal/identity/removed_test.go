@@ -22,7 +22,7 @@ func refuseWith(t *testing.T, status int, code string) http.HandlerFunc {
 	}
 }
 
-// A renewal refused with SE018 reports the refused serial to OnRemoved and
+// A renewal refused with SE018 or SE041 reports the refused serial to OnRemoved and
 // ends the loop instead of retrying.
 func TestRenewerReportsARemovalRefusalAndEnds(t *testing.T) {
 	for _, code := range []string{CodeDeviceUnknown, CodeDeviceCertRevoked} {
@@ -343,5 +343,55 @@ func TestDeleteWithAnEnrolmentWaiting(t *testing.T) {
 				t.Fatalf("tombstone after the enrolment = %+v, %v; want none", tomb, err)
 			}
 		})
+	}
+}
+
+// A lock taken on a file deleted between its open and its lock is not held,
+// so a holder that opened the store lock before a purge deleted it never
+// believes it excludes the next purge; the next attempt locks a fresh file.
+func TestLockOnADeletedFileIsNotHeld(t *testing.T) {
+	path := filepath.Join(t.TempDir(), storeLockFile)
+	deletes := 1
+	lockOpened = func(p string) {
+		if deletes > 0 {
+			deletes--
+			if err := os.Remove(p); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { lockOpened = nil })
+
+	if release, held, _ := tryLockFile(path, true); held {
+		release()
+		t.Fatal("a lock on a deleted file counts as held")
+	}
+	deletes = 1
+	release, err := waitLockFile(context.Background(), path, true, time.Second, errors.New("busy"), nil)
+	if err != nil {
+		t.Fatalf("waitLockFile after a deletion = %v, want the fresh file locked", err)
+	}
+	release()
+}
+
+// A credential lock wanted while a purge holds the store lock is refused with
+// ErrStoreBusy, not as a renewal in progress.
+func TestStoreLockHeldByAPurgeIsStoreBusy(t *testing.T) {
+	ca := newTestCA(t)
+	store, _ := savedDevice(t, ca, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
+	path, err := store.storeLockPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, held, err := tryLockFile(path, false)
+	if err != nil || !held {
+		t.Fatalf("taking the store lock as a purge does = %v, %v", held, err)
+	}
+	defer release()
+	if _, _, err := store.tryLock(deviceRef); !errors.Is(err, ErrStoreBusy) {
+		t.Fatalf("tryLock during a purge = %v, want ErrStoreBusy", err)
+	}
+	if _, err := store.waitLock(context.Background(), deviceRef, 50*time.Millisecond); !errors.Is(err, ErrStoreBusy) {
+		t.Fatalf("waitLock during a purge = %v, want ErrStoreBusy", err)
 	}
 }

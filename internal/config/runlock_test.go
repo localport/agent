@@ -89,7 +89,7 @@ func TestLockRunRecordsTheHolderPID(t *testing.T) {
 
 // Release clears the record before unlocking, so a process that takes the
 // lock next never shows its predecessor's PID before it records its own:
-// connect's check would otherwise match a stopped service's PID that its
+// up's check would otherwise match a stopped service's PID that its
 // manager still reports.
 func TestLockRunReleaseClearsTheHolderPID(t *testing.T) {
 	f := testRunFile(t)

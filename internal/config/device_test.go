@@ -413,3 +413,18 @@ func TestUserLocalConfigNeedsADevice(t *testing.T) {
 		t.Fatalf("LoadLocal(no devices) = %v, want the refusal naming the rule", err)
 	}
 }
+
+// A config lists at most MaxDevices devices.
+func TestValidateBoundsTheDeviceCount(t *testing.T) {
+	c := &LocalConfig{}
+	for i := range MaxDevices + 1 {
+		c.Devices = append(c.Devices, LocalDevice{Identity: identity.Ref{Team: "01kpq7x2abcd34", Kind: identity.KindDevice, Identity: fmt.Sprintf("tun12345.gw-%02d", i)}})
+	}
+	if err := c.Validate(); !errors.Is(err, ErrInvalidLocalConfig) {
+		t.Fatalf("Validate with %d devices = %v, want ErrInvalidLocalConfig", len(c.Devices), err)
+	}
+	c.Devices = c.Devices[:MaxDevices]
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate with %d devices = %v", len(c.Devices), err)
+	}
+}

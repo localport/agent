@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -112,15 +113,15 @@ func chooseCredential(in io.Reader, out io.Writer, store *identity.Store, refs [
 // pickerTTY reports whether up and down may ask which device; tests replace it.
 var pickerTTY = func() bool { return ui.IsTTY(os.Stdin) && ui.IsTTY(os.Stderr) }
 
-// selectDevices returns the indexes of devices that up or down (command, as
-// shown in an error) acts on: every one with all; the one selector names
-// (identity, <team>/<prefix>, <tunnel>.<prefix> or a unique prefix); with no
-// selector the only device, or with several a choice from a numbered list in
-// a terminal, or else an error listing each exact command. It never reads
+// selectDevices returns the indexes of devices that command (up or down) acts
+// on: every one with all; the one selector names (identity, <team>/<prefix>,
+// <tunnel>.<prefix> or a unique prefix); with no selector the only device, or
+// with several a choice from a numbered list in a terminal, or else an error
+// listing each exact command. No device at all is errNoDevice. It never reads
 // stdin without a terminal.
 func selectDevices(devices []config.LocalDevice, facts map[identity.Ref]deviceFact, selector string, all bool, command string) ([]int, error) {
 	if len(devices) == 0 {
-		return nil, errcode.New(errcode.DeviceNotFound).With(nil, "no device is enrolled on this machine")
+		return nil, errNoDevice
 	}
 	switch {
 	case all:
@@ -164,15 +165,20 @@ func matchDevice(devices []config.LocalDevice, selector string) (int, error) {
 	return findDevice(devices, selector)
 }
 
-// ambiguousDevices lists one exact command per device and the --all form.
+// ambiguousDevices lists the exact command for each device and the --all
+// form. command is the subcommand, up or down.
 func ambiguousDevices(devices []config.LocalDevice, command string) error {
+	prefix := "sudo localport " + command
 	var b strings.Builder
-	b.WriteString("several devices are enrolled on this machine; name one:\n")
-	for _, d := range devices {
-		b.WriteString("    sudo " + command + " " + d.Identity.String() + "\n")
+	if runtime.GOOS == "windows" {
+		prefix = "localport " + command
+		b.WriteString("from an elevated prompt:")
 	}
-	b.WriteString("    sudo " + command + " --all")
-	return errcode.New(errcode.DeviceAmbiguous).With(nil, b.String())
+	for _, d := range devices {
+		fmt.Fprintf(&b, "\n    %s %s", prefix, d.Identity)
+	}
+	fmt.Fprintf(&b, "\n    %s --all", prefix)
+	return errcode.New(errcode.DeviceNotNamed).With(nil, b.String())
 }
 
 // chooseDevices asks on out and reads the answer from in: a number, or a for
@@ -203,7 +209,7 @@ func chooseDevices(in io.Reader, out io.Writer, devices []config.LocalDevice, fa
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			fmt.Fprintln(out)
-			return nil, errors.New("no device chosen")
+			return nil, errcode.New(errcode.NoDeviceChosen)
 		}
 		answer := strings.TrimSpace(line)
 		if answer == "a" {

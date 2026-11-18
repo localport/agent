@@ -86,6 +86,10 @@ const (
 // MaxLogins bounds the logins one device accepts.
 const MaxLogins = 16
 
+// MaxDevices bounds the devices one machine runs, so the status document
+// and the devices child's output of a full config fit their 64 KiB frames.
+const MaxDevices = 64
+
 // MaxLoginLen bounds a login in bytes, as the control plane does.
 const MaxLoginLen = 255
 
@@ -393,7 +397,7 @@ func ensureSystemDir(f LocalConfigFile) (int, error) {
 
 // EnsureSystemRunLock creates or secures the system config directory and its
 // run.lock (root:security.AgentGroup 0660), so the agent account can lock it. Root
-// only; install and connect run it before the agent service starts.
+// only; install and up run it before the agent service starts.
 func EnsureSystemRunLock(f LocalConfigFile) error {
 	lock, err := openLock(f, f.RunLockPath())
 	if err != nil {
@@ -440,6 +444,9 @@ func (c *LocalConfig) Validate() error {
 }
 
 func (c *LocalConfig) validate(goos string) error {
+	if len(c.Devices) > MaxDevices {
+		return errcode.Invalidf("the config lists %d devices; a machine runs at most %d", len(c.Devices), MaxDevices)
+	}
 	seen := make(map[identity.Ref]struct{}, len(c.Devices))
 	for _, d := range c.Devices {
 		if _, dup := seen[d.Identity]; dup {
@@ -637,9 +644,10 @@ const localLockWait = 2 * time.Minute
 
 // LockLocal takes the local config's write lock, agent.yaml.lock beside it,
 // creating the directory owner-only when missing (for the system config, root
-// only, see openLock). set holds it across its read-modify-write, and connect
-// from its re-read after enrolment to its write, so neither drops the other's
-// entry. It waits up to localLockWait. A process that also holds run.lock takes
+// only, see openLock). set, up and down hold it across their read-modify-write,
+// `up <join-token>` from before the token spend to its write, and service
+// uninstall --purge while it deletes the config, so none drops another's entry.
+// It waits up to localLockWait. A process that also holds run.lock takes
 // run.lock first (see LockRun).
 func LockLocal(f LocalConfigFile) (release func(), err error) {
 	lock, held, err := lockBeside(context.Background(), f, f.LockPath(), localLockWait)
@@ -652,7 +660,7 @@ func LockLocal(f LocalConfigFile) (release func(), err error) {
 	return func() { _ = unlockAndClose(lock) }, nil
 }
 
-// ErrRunLocked means another process holds run.lock: a privileged run, connect
+// ErrRunLocked means another process holds run.lock: a privileged run, up
 // --foreground or service uninstall --purge on this config's devices.
 var ErrRunLocked = errcode.New(errcode.RunLocked)
 

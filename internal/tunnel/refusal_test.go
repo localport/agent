@@ -121,7 +121,7 @@ func (r *refusalRun) sawState(s State) bool {
 
 // A device refused with a retry_after hint keeps retrying, waiting within the
 // hint's window and publishing the code, and runs once a registration is
-// accepted; it never reaches its credential or ends.
+// accepted; it never reports the refusal to its credential and never ends.
 func TestHintedRefusalKeepsADeviceRetrying(t *testing.T) {
 	cred := &fakeCredential{presentation: &identity.Presentation{Serial: "aa"}}
 	r := startRefusalRun(t, Options{Kind: proto.KindDevice, Credential: cred, DisableMux: true})
@@ -234,8 +234,8 @@ func TestDisconnectShutdownDrainsThenWaits(t *testing.T) {
 	r.register(t, proto.RegisterAckPayload{Success: true, SessionID: "s2"})
 }
 
-// drain ends the handler's sessions before the recordings flush runs, with
-// the mux still published, and stop does not shut the handler down again.
+// drain ends the handler's sessions before the recordings flush runs, and
+// stop does not shut the handler down again.
 func TestSessionMuxDrainOrder(t *testing.T) {
 	edge := newFakeSessionEdge(t)
 	d := &pipeSessionDial{edge: edge}
@@ -245,10 +245,7 @@ func TestSessionMuxDrainOrder(t *testing.T) {
 	edge.expectAccept(t)
 
 	var shutdownsAtFlush int32 = -1
-	m.drain(func(ctx context.Context) {
-		if _, ok := ctx.Deadline(); !ok {
-			t.Error("the flush runs without a bound")
-		}
+	m.drain(t.Context(), func(context.Context) {
 		shutdownsAtFlush = h.shutdownCalls.Load()
 	})
 	if shutdownsAtFlush != 1 {
@@ -257,5 +254,82 @@ func TestSessionMuxDrainOrder(t *testing.T) {
 	m.stop()
 	if n := h.shutdownCalls.Load(); n != 1 {
 		t.Fatalf("Shutdown ran %d times after drain and stop, want 1", n)
+	}
+}
+
+// A drain's recordings flush is bounded and ends when the tunnel stops.
+func TestDrainSessionsEndsOnStop(t *testing.T) {
+	edge := newFakeSessionEdge(t)
+	d := &pipeSessionDial{edge: edge}
+	m := newSessionMux(context.Background(), "test", newStreamEchoHandler(), d.dial)
+	m.start()
+	edge.expectAccept(t)
+	defer m.stop()
+
+	flushing := make(chan struct{})
+	tn := New(Options{Kind: proto.KindDevice, FlushRecordings: func(ctx context.Context) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("the flush runs without a bound")
+		}
+		close(flushing)
+		<-ctx.Done()
+	}})
+	tn.sessionMux.Store(m)
+	done := make(chan struct{})
+	go func() {
+		tn.drainSessions(t.Context())
+		close(done)
+	}()
+	<-flushing
+	tn.Stop()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the drain outlived Stop")
+	}
+}
+
+// Entering a wait notifies OnStatus once; a repeated wait notifies again.
+func TestSetWaitingNotifiesOncePerChange(t *testing.T) {
+	var notified int
+	tn := New(Options{Kind: proto.KindDevice, OnStatus: func(Status) { notified++ }})
+	tn.setWaiting("SE040", time.Now())
+	if notified != 1 {
+		t.Fatalf("entering a wait notified %d times, want 1", notified)
+	}
+	tn.setWaiting("SE040", time.Now().Add(time.Minute))
+	if notified != 2 {
+		t.Fatalf("a repeated wait notified %d times in all, want 2", notified)
+	}
+}
+
+// A hinted Shutdown read by the reader of an ended session neither records a
+// kick nor ends the current session; one of the current session does both.
+func TestKickFromAnEndedSessionIsIgnored(t *testing.T) {
+	tn := New(Options{Kind: proto.KindDevice})
+	ended := make(chan struct{})
+	tn.mu.Lock()
+	current := make(chan struct{})
+	tn.disconnected = current
+	tn.mu.Unlock()
+
+	tn.kickSession(&kick{code: "SE040", drain: true}, ended)
+	if tn.kicked.Load() != nil {
+		t.Fatal("an ended session's Shutdown recorded a kick")
+	}
+	select {
+	case <-current:
+		t.Fatal("an ended session's Shutdown ended the current session")
+	default:
+	}
+
+	tn.kickSession(&kick{code: "SE040", drain: true}, current)
+	if tn.kicked.Load() == nil {
+		t.Fatal("the current session's Shutdown recorded no kick")
+	}
+	select {
+	case <-current:
+	default:
+		t.Fatal("the current session's Shutdown did not end it")
 	}
 }

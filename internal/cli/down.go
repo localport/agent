@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/errcode"
@@ -52,7 +53,7 @@ func runPause(command string, args []string, pause bool) (err error) {
 		return errExtraArgument.With(nil, fmt.Sprintf("%q", security.SanitizeDisplay(rest[0])))
 	}
 	if *all && selector != "" {
-		return fmt.Errorf("name a device or give --all, not both")
+		return errExtraArgument.With(nil, "name a device or give --all, not both")
 	}
 
 	who := currentInvoker(false)
@@ -108,11 +109,10 @@ const (
 var readDocument = status.Read
 
 // awaitDeviceStates polls the status endpoint until every device of refs
-// leaves connecting and, for down, is paused, for up is running or reports a
-// state entered at applied or later (so a parked device is not read from the
-// document before its retry), at most awaitStatesFor, then prints each
-// device's state. A timeout prints the last states with a note; the config is
-// written either way.
+// leaves connecting and, for down, is paused; for up, is not paused and, when
+// parked, parked again at applied or later (so the refusal read is the one
+// after up's retry). It waits at most awaitStatesFor, then prints each
+// device's state, with a note on a timeout. The config is written either way.
 func awaitDeviceStates(w io.Writer, refs []identity.Ref, pause bool, applied time.Time) {
 	if len(refs) == 0 {
 		return
@@ -154,7 +154,8 @@ func statesSettled(doc *status.Document, refs []identity.Ref, pause bool, applie
 			}
 		case row.State == status.StatePaused:
 			return false
-		case row.State != status.StateRunning && row.Since.Before(applied):
+		case row.State == status.StateParked && row.Since.Before(applied):
+			// up retries a parked device; until then the row is the old refusal.
 			return false
 		}
 	}
@@ -200,16 +201,22 @@ func applyPause(pause bool) (running bool, err error) {
 		return false, nil
 	case pid == 0:
 		if err := m.Restart(context.Background()); err != nil {
-			return false, err
+			return false, notApplied(err)
 		}
 		fmt.Fprintf(os.Stderr, "  started the device service\n")
 		return true, nil
 	}
 	if err := m.Reload(context.Background()); err != nil {
-		return false, errcode.WithRemedy(errcode.New(errcode.SettingsNotApplied).With(err, ""), "apply them with: "+serviceInstallCommand)
+		return false, notApplied(err)
 	}
 	fmt.Fprintf(os.Stderr, "  reloaded the device service\n")
 	return true, nil
+}
+
+// notApplied is a service start or reload that failed after the config was
+// written.
+func notApplied(err error) error {
+	return errcode.WithRemedy(errcode.New(errcode.SettingsNotApplied).With(err, ""), "apply them with: "+serviceInstallCommand)
 }
 
 // setPaused writes paused on the selected devices under the local config's
@@ -232,7 +239,11 @@ func setPaused(file config.LocalConfigFile, who invoker, selector string, all, p
 		return nil, nil, err
 	}
 	pruned := pruneRemoved(local, facts)
-	idx, err := selectDevices(local.Devices, facts, selector, all, "localport "+map[bool]string{true: "down", false: "up"}[pause])
+	command := "up"
+	if pause {
+		command = "down"
+	}
+	idx, err := selectDevices(local.Devices, facts, selector, all, command)
 	if err != nil {
 		return nil, nil, errors.Join(err, writePruned(file, local, pruned))
 	}
@@ -324,13 +335,60 @@ func runDevicesChild(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	enc := json.NewEncoder(w)
+	facts := make([]deviceFact, 0, len(local.Devices))
 	for _, d := range local.Devices {
-		if err := enc.Encode(storeFact(store, d.Identity)); err != nil {
+		facts = append(facts, storeFact(store, d.Identity))
+	}
+	return writeDeviceFacts(w, facts)
+}
+
+// writeDeviceFacts writes one JSON line per fact. HTML characters stay
+// unescaped, so a line's size is bounded by its strings' bounds.
+func writeDeviceFacts(w io.Writer, facts []deviceFact) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	for _, f := range facts {
+		if err := enc.Encode(f); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// Bounds on a fact's strings, which the control plane sets, so the output of a
+// full config (config.MaxDevices) fits maxDeviceFacts.
+const (
+	maxHostName    = 253 // a DNS name
+	maxTeamDisplay = 128
+)
+
+// validHostName reports whether host is at most maxHostName bytes of DNS name
+// characters, which JSON writes unescaped.
+func validHostName(host string) bool {
+	if host == "" || len(host) > maxHostName {
+		return false
+	}
+	for i := range len(host) {
+		switch c := host[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// truncateDisplay cuts s to at most n bytes on a rune boundary, marking a cut
+// with an ellipsis.
+func truncateDisplay(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n - len("…")
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 // storeFact reads ref's fact from store. A tombstone counts only when the
@@ -339,10 +397,11 @@ func storeFact(store *identity.Store, ref identity.Ref) deviceFact {
 	f := deviceFact{Version: deviceFactsVersion, Ref: ref.String()}
 	m, err := store.Load(ref)
 	if err == nil {
-		if m.Meta.Device != nil {
+		if m.Meta.Device != nil && validHostName(m.Meta.Device.Host) {
 			f.Host = m.Meta.Device.Host
 		}
-		f.Team = m.Meta.DisplayTeam()
+		team := security.SanitizeDisplay(strings.ToValidUTF8(m.Meta.DisplayTeam(), ""))
+		f.Team = truncateDisplay(team, maxTeamDisplay)
 		return f
 	}
 	if _, statErr := os.Stat(store.Dir(ref)); errors.Is(statErr, os.ErrNotExist) {
@@ -378,12 +437,18 @@ func readDeviceFacts(file config.LocalConfigFile, who invoker, devices []config.
 		return facts, nil
 	}
 	out := &cappedBuffer{max: maxDeviceFacts}
-	if err := runDevicesStorePart([]string{"devices"}, nil, out); err != nil {
-		return nil, errcode.New(errcode.AgentChildFailed).With(err, "read the enrolled devices")
+	runErr := runDevicesStorePart([]string{"devices"}, nil, out)
+	// Over the cap the child dies on its next write, so the overflow, not its
+	// exit status, says what failed.
+	if out.overflowed {
+		return nil, errcode.New(errcode.AgentChildOutput).With(errOutputTooLarge, "read the enrolled devices")
+	}
+	if runErr != nil {
+		return nil, runErr
 	}
 	parsed, err := decodeDeviceFacts(out.Bytes())
 	if err != nil {
-		return nil, errcode.New(errcode.AgentChildFailed).With(err, "read the enrolled devices")
+		return nil, errcode.New(errcode.AgentChildOutput).With(err, "read the enrolled devices")
 	}
 	for _, d := range devices {
 		if f, ok := parsed[d.Identity]; ok {
@@ -394,7 +459,8 @@ func readDeviceFacts(file config.LocalConfigFile, who invoker, devices []config.
 }
 
 // decodeDeviceFacts decodes the devices child's lines strictly: unknown
-// fields, another version or an invalid ref refuse the whole output.
+// fields, data after the object, another version, an invalid ref or an
+// unexpected removal code refuse the whole output.
 func decodeDeviceFacts(raw []byte) (map[identity.Ref]deviceFact, error) {
 	facts := map[identity.Ref]deviceFact{}
 	sc := bufio.NewScanner(bytes.NewReader(raw))
@@ -405,6 +471,9 @@ func decodeDeviceFacts(raw []byte) (map[identity.Ref]deviceFact, error) {
 		var f deviceFact
 		if err := dec.Decode(&f); err != nil {
 			return nil, err
+		}
+		if _, err := dec.Token(); err != io.EOF {
+			return nil, errors.New("device facts: data after the object on a line")
 		}
 		if f.Version != deviceFactsVersion {
 			return nil, fmt.Errorf("device facts version %d, this agent reads %d", f.Version, deviceFactsVersion)
@@ -425,15 +494,18 @@ func decodeDeviceFacts(raw []byte) (map[identity.Ref]deviceFact, error) {
 // errOutputTooLarge refuses child output past its cap.
 var errOutputTooLarge = errors.New("output over its size limit")
 
-// cappedBuffer collects writes and refuses one past max. It wraps rather than
-// embeds bytes.Buffer, so no promoted WriteString or ReadFrom bypasses the cap.
+// cappedBuffer collects writes and refuses one past max, recording that it
+// did. It wraps rather than embeds bytes.Buffer, so no promoted WriteString or
+// ReadFrom bypasses the cap.
 type cappedBuffer struct {
-	buf bytes.Buffer
-	max int
+	buf        bytes.Buffer
+	max        int
+	overflowed bool
 }
 
 func (b *cappedBuffer) Write(p []byte) (int, error) {
 	if b.buf.Len()+len(p) > b.max {
+		b.overflowed = true
 		return 0, errOutputTooLarge
 	}
 	return b.buf.Write(p)
@@ -449,6 +521,7 @@ func usagePause(command string, fs *flag.FlagSet) {
 		verb, detail = "Resume", "A paused device connects again, and a device the agent stopped after a refusal retries."
 	}
 	fmt.Fprintf(os.Stderr, `Usage: sudo localport %[1]s [<device> | --all]
+  On Windows, run localport %[1]s from an elevated prompt.
 
   %[2]s an enrolled device and apply it to the running device service.
   %[3]s

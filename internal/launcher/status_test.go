@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/localport/agent/internal/security"
 )
 
 // serveStatus runs s.ServeStatus on a socket in a short temporary directory
@@ -157,7 +159,8 @@ func TestStatusReaderAuthorization(t *testing.T) {
 		reads bool
 	}{
 		{"root", 0, []uint32{0}, true},
-		{"agent account", agentUID, []uint32{agentGID}, true},
+		// Outside the agent group, so only the uid admits it.
+		{"agent account", agentUID, []uint32{20}, true},
 		{"agent group member", 501, []uint32{20, agentGID}, true},
 		{"other account", 501, []uint32{20, 12}, false},
 	} {
@@ -202,6 +205,13 @@ func TestStatusReaderCapAtAccept(t *testing.T) {
 	path := serveStatus(t, s)
 	if got := readRaw(t, path); string(got) != "doc" {
 		t.Fatalf("under the cap read %q, want doc", got)
+	}
+	// The first reader's slot is released after its connection closes; set
+	// the cap only once it has been, or the release lowers it again.
+	for deadline := time.Now().Add(5 * time.Second); s.status.readers.Load() != 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the first reader's slot was never released")
+		}
 	}
 	s.status.readers.Store(maxStatusReaders)
 	if got := readRaw(t, path); len(got) != 0 {
@@ -328,6 +338,58 @@ func TestStatusClientTrust(t *testing.T) {
 				t.Fatalf("checkStatusSocket = %v, want ErrStatusUntrusted", err)
 			}
 		})
+	}
+
+	// A reader that may not search the endpoint's directory, as a non-member
+	// under a 0750 root:localport directory, is denied rather than told the
+	// launcher is down.
+	t.Run("directory not searchable", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root searches any directory")
+		}
+		dir, path := setup(t)
+		must(t, os.Chmod(dir, 0))
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+		if err := checkStatusSocket(path); !errors.Is(err, ErrStatusDenied) {
+			t.Fatalf("checkStatusSocket = %v, want ErrStatusDenied", err)
+		}
+	})
+
+	// With no agent group the service was never installed: unavailable.
+	t.Run("no agent group", func(t *testing.T) {
+		_, path := setup(t)
+		statusTrustedIDs = func() (uint32, uint32, error) { return 0, 0, security.ErrAgentGroupMissing }
+		t.Cleanup(func() { statusTrustedIDs = func() (uint32, uint32, error) { return uid, gid, nil } })
+		if err := checkStatusSocket(path); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("checkStatusSocket = %v, want ErrUnavailable", err)
+		}
+	})
+}
+
+// A reader the socket's mode shuts out is denied rather than told the
+// launcher is down.
+func TestReadStatusDeniedBySocketMode(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root connects to any socket")
+	}
+	dir, err := os.MkdirTemp("/tmp", "lp-deny-")
+	must(t, err)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	must(t, os.Chmod(dir, 0o755))
+	path := filepath.Join(dir, "status.sock")
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	must(t, err)
+	defer ln.Close()
+	// Mode 0 passes the trust check (no wider than 0660) and refuses connect
+	// to this owner as 0660 refuses a non-member.
+	must(t, os.Chmod(path, 0))
+	prevPath, prevIDs := statusSocket, statusTrustedIDs
+	gid := socketGroup(t)
+	statusSocket = path
+	statusTrustedIDs = func() (uint32, uint32, error) { return uint32(os.Getuid()), gid, nil }
+	t.Cleanup(func() { statusSocket, statusTrustedIDs = prevPath, prevIDs })
+	if _, err := ReadStatus(ctx(t)); !errors.Is(err, ErrStatusDenied) {
+		t.Fatalf("ReadStatus = %v, want ErrStatusDenied", err)
 	}
 }
 

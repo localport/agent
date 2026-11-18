@@ -3,6 +3,7 @@ package status
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,39 @@ func TestDecodeRefusesInvalidDocuments(t *testing.T) {
 	} {
 		if _, err := Decode([]byte(raw)); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: Decode = %v, want ErrInvalid", name, err)
+		}
+	}
+}
+
+// A full board of the longest rows fits one frame: config.MaxDevices devices
+// (64; the status package does not import config), each with a 129-byte
+// identity, the longest state, a code and both times.
+func TestFullBoardFitsAFrame(t *testing.T) {
+	const maxDevices, maxIdentity = 64, 64 + 1 + 64
+	b := NewBoard(1 << 30)
+	next := t0.Add(time.Hour)
+	for i := range maxDevices {
+		id := fmt.Sprintf("%03d%s", i, strings.Repeat("x", maxIdentity-3))
+		b.Set(Device{Identity: id, State: StateDisconnected, Code: "SE040", Since: t0.Add(time.Nanosecond), NextRetry: &next})
+	}
+	if n := len(b.Latest()); n > MaxFrame {
+		t.Fatalf("a full board encodes to %d bytes, over %d", n, MaxFrame)
+	}
+}
+
+// A code not in the refusal code shape never reaches a row, and Decode refuses
+// one.
+func TestRowCodesHaveTheRefusalCodeShape(t *testing.T) {
+	b := NewBoard(1)
+	b.Set(Device{Identity: "a", State: StateWaiting, Code: strings.Repeat("A", 4096), Since: t0})
+	doc, err := Decode(b.Latest())
+	if err != nil || doc.Devices[0].Code != "" {
+		t.Fatalf("row = %+v, %v; want the code dropped", doc, err)
+	}
+	for _, code := range []string{"se040", "SE04", "SE0400", "S1040", "SEA40"} {
+		raw := fmt.Sprintf(`{"version":1,"pid":1,"devices":[{"identity":"a","state":"waiting","code":%q,"since":"2026-11-17T12:00:00Z"}]}`, code)
+		if _, err := Decode([]byte(raw)); !errors.Is(err, ErrInvalid) {
+			t.Errorf("Decode with code %q = %v, want ErrInvalid", code, err)
 		}
 	}
 }

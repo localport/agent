@@ -485,6 +485,9 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		t.disconnected = sessionDone
 		t.mu.Unlock()
 		t.closing.Store(false)
+		// A kick stored between Run's Swap and the channel change above
+		// belongs to the previous session; kickSession stores none later.
+		t.kicked.Store(nil)
 
 		t.setState(StateConnecting)
 
@@ -547,7 +550,8 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		t.runSession(ctx, sessionDone)
 		kicked := t.kicked.Swap(nil)
 		if kicked != nil && kicked.drain {
-			t.drainSessions()
+			t.setState(StateDraining)
+			t.drainSessions(ctx)
 		}
 		stopSessionMux()
 		stopMux()
@@ -1034,7 +1038,7 @@ func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 		if armed != 0 {
 			t.fastProbeAt.CompareAndSwap(armed, 0)
 		}
-		t.dispatch(msgType, body)
+		t.dispatch(msgType, body, sessionDone)
 	}
 }
 
@@ -1063,7 +1067,8 @@ func (t *Tunnel) interruptReader() {
 	}
 }
 
-func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
+// dispatch handles one message of the control session that sessionDone ends.
+func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte, sessionDone <-chan struct{}) {
 	switch msgType {
 	case proto.MsgNewConnection:
 		nc, err := proto.ParseNewConnection(body)
@@ -1129,11 +1134,7 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte) {
 		if k := t.kickOf(sd); k != nil {
 			// The control plane lifts it without local action: close this
 			// session, after a drain on an admin's Disconnect, and retry.
-			t.kicked.Store(k)
-			if k.drain {
-				t.setState(StateDraining)
-			}
-			t.signalDisconnected()
+			t.kickSession(k, sessionDone)
 			return
 		}
 		if sd != nil && sd.Retryable != nil && !*sd.Retryable {
@@ -1489,6 +1490,22 @@ func (t *Tunnel) closeConn() {
 	t.conn = nil
 }
 
+// kickSession records k for Run and ends the control session, only while
+// sessionDone is still the current session's channel: a reader that outlived
+// its session never kicks the next one. Run replaces the channel under mu.
+func (t *Tunnel) kickSession(k *kick, sessionDone <-chan struct{}) {
+	t.mu.Lock()
+	current := (<-chan struct{})(t.disconnected) == sessionDone
+	if current {
+		t.kicked.Store(k)
+		safeClose(t.disconnected)
+	}
+	t.mu.Unlock()
+	if current {
+		t.interruptReader()
+	}
+}
+
 func (t *Tunnel) signalDisconnected() {
 	t.mu.Lock()
 	safeClose(t.disconnected)
@@ -1498,22 +1515,27 @@ func (t *Tunnel) signalDisconnected() {
 	t.interruptReader()
 }
 
-func (t *Tunnel) setState(s State) {
+// setState enters s and reports whether the state changed. A change sets
+// Since and notifies the handler and OnStatus.
+func (t *Tunnel) setState(s State) bool {
+	// statusMu orders the change with Status, so it never pairs the new state
+	// with the old Since.
+	t.statusMu.Lock()
+	old := State(t.state.Load())
 	// Once stopped, never transition back to a transient state. This keeps
 	// late-arriving events from re-arming a tunnel that should stay dead.
-	if State(t.state.Load()) == StateStopped && s != StateStopped {
-		return
-	}
-	old := State(t.state.Swap(int32(s)))
-	if old != s {
-		t.statusMu.Lock()
-		t.stateSince = time.Now()
+	if old == s || old == StateStopped {
 		t.statusMu.Unlock()
-		if h := t.opts.Handler; h != nil {
-			h.OnStateChange(t.EventKey(), old, s)
-		}
-		t.notifyStatus()
+		return false
 	}
+	t.state.Store(int32(s))
+	t.stateSince = t.now()
+	t.statusMu.Unlock()
+	if h := t.opts.Handler; h != nil {
+		h.OnStateChange(t.EventKey(), old, s)
+	}
+	t.notifyStatus()
+	return true
 }
 
 func (t *Tunnel) setTerminalError(err error) {

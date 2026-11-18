@@ -127,7 +127,7 @@ func (e *CommandError) Error() string {
 func (e *CommandError) Unwrap() error { return e.Err }
 
 // commandTimeout bounds each command, so a hung systemctl, launchctl or
-// useradd never stalls connect, set or uninstall.
+// useradd never stalls up, set or uninstall.
 const commandTimeout = 60 * time.Second
 
 // runner runs one service manager or account tool command, given by absolute

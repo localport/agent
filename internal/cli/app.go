@@ -107,7 +107,11 @@ func (a *App) Run(args []string) error {
 		// Flags or a protocol start the flat tunnel form; any other word is
 		// not a command.
 		if !strings.HasPrefix(args[0], "-") && !isTunnelProto(args[0]) {
-			return errcode.New(errcode.UnknownCommand).With(nil, fmt.Sprintf("%q", security.SanitizeDisplay(args[0])))
+			remedy := "run localport help for the list"
+			if args[0] == "connect" {
+				remedy = "a device enrols with: localport up <join-token>"
+			}
+			return errcode.WithRemedy(errcode.New(errcode.UnknownCommand).With(nil, fmt.Sprintf("%q", security.SanitizeDisplay(args[0]))), remedy)
 		}
 		return runTunnel(a.version, args)
 	}

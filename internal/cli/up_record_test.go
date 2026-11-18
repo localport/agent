@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -79,7 +81,7 @@ func TestFlaglessReEnrolKeepsTheStoredSettings(t *testing.T) {
 	stored := storedDevice(t)
 	file := storedConfig(t, stored)
 	fs, flags := parseDeviceFlags(t)
-	inForce, err := recordDevice(file, fs, flags, piInvoker, stored.Identity, config.LocalDevice{})
+	inForce, err := recordDevice(file, fs, flags, piInvoker, stored.Identity, config.LocalDevice{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +98,7 @@ func TestReEnrolFlagsOverrideTheStoredSettings(t *testing.T) {
 	stored := storedDevice(t)
 	file := storedConfig(t, stored)
 	fs, flags := parseDeviceFlags(t, "--allow-ports", "80")
-	inForce, err := recordDevice(file, fs, flags, piInvoker, stored.Identity, config.LocalDevice{})
+	inForce, err := recordDevice(file, fs, flags, piInvoker, stored.Identity, config.LocalDevice{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +124,7 @@ func TestAnInvalidMergeKeepsTheStoredEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	fs, flags := parseDeviceFlags(t, "--enable", "terminal")
-	inForce, err := recordDevice(file, fs, flags, piInvoker, stored.Identity, config.LocalDevice{})
+	inForce, err := recordDevice(file, fs, flags, piInvoker, stored.Identity, config.LocalDevice{}, nil)
 	if kept, readErr := os.ReadFile(credential); readErr != nil || string(kept) != "saved" {
 		t.Fatalf("the saved credential was touched: %v", readErr)
 	}
@@ -148,7 +150,7 @@ func TestANewIdentityAppends(t *testing.T) {
 		t.Fatal(err)
 	}
 	newRef := deviceRef("factory.gw-02")
-	if _, err := recordDevice(file, fs, flags, piInvoker, newRef, fresh); err != nil {
+	if _, err := recordDevice(file, fs, flags, piInvoker, newRef, fresh, nil); err != nil {
 		t.Fatal(err)
 	}
 	got := reload(t, file)
@@ -188,7 +190,7 @@ func TestAMergeWriteFailureIsNotAConflict(t *testing.T) {
 	writeLocal = func(config.LocalConfigFile, *config.LocalConfig, identity.Ref) error { return failing }
 	t.Cleanup(func() { writeLocal = config.WriteLocal })
 	fs, flags := parseDeviceFlags(t, "--allow-ports", "80")
-	inForce, err := recordDevice(file, fs, flags, piInvoker, stored.Identity, config.LocalDevice{})
+	inForce, err := recordDevice(file, fs, flags, piInvoker, stored.Identity, config.LocalDevice{}, nil)
 	if errors.Is(err, errMergeConflict) || !errors.Is(err, failing) || !strings.Contains(err.Error(), joinTokenSpent) {
 		t.Fatalf("recordDevice = %v, want the write error with the spent-token remedy", err)
 	}
@@ -201,7 +203,7 @@ func TestAMergeWriteFailureIsNotAConflict(t *testing.T) {
 }
 
 // A new identity whose entry cannot be written is reported as unrecorded, and
-// up removes its credential, so no credential is left that nothing uses.
+// up removes its credential, so no credential is left without a config entry.
 func TestAnAppendWriteFailureForgetsTheNewCredential(t *testing.T) {
 	stored := storedDevice(t)
 	file := storedConfig(t, stored)
@@ -210,7 +212,7 @@ func TestAnAppendWriteFailureForgetsTheNewCredential(t *testing.T) {
 	t.Cleanup(func() { writeLocal = config.WriteLocal })
 	flagSet, flags := parseDeviceFlags(t)
 	newRef := deviceRef("factory.gw-02")
-	_, err := recordDevice(file, flagSet, flags, piInvoker, newRef, config.LocalDevice{})
+	_, err := recordDevice(file, flagSet, flags, piInvoker, newRef, config.LocalDevice{}, nil)
 	if !isDeviceNotRecorded(err) || !errors.Is(err, failing) {
 		t.Fatalf("recordDevice = %v, want deviceNotRecorded wrapping the write error", err)
 	}
@@ -252,12 +254,12 @@ func TestAMissingStoredFilesRootIsNotAFlagConflict(t *testing.T) {
 	// Nothing changes: the config is not rewritten, so the missing root is
 	// not even checked.
 	fs, flags := parseDeviceFlags(t)
-	if _, err := recordDevice(file, fs, flags, piInvoker, stored.Identity, config.LocalDevice{}); err != nil {
+	if _, err := recordDevice(file, fs, flags, piInvoker, stored.Identity, config.LocalDevice{}, nil); err != nil {
 		t.Fatalf("an unchanged re-enrolment = %v, want no write and no error", err)
 	}
 
 	fs, flags = parseDeviceFlags(t, "--allow-ports", "80")
-	_, err := recordDevice(file, fs, flags, piInvoker, stored.Identity, config.LocalDevice{})
+	_, err := recordDevice(file, fs, flags, piInvoker, stored.Identity, config.LocalDevice{}, nil)
 	if !errors.Is(err, config.ErrFilesRootMissing) || errors.Is(err, errMergeConflict) || strings.Contains(err.Error(), "flags conflict") ||
 		strings.Contains(err.Error(), joinTokenSpent) {
 		t.Fatalf("recordDevice = %v, want ErrFilesRootMissing, no flag conflict and no spent-token remedy", err)
@@ -356,5 +358,86 @@ func TestUpForgetsTheCredentialWhenTheConfigWriteFails(t *testing.T) {
 	store := &identity.Store{Root: filepath.Join(os.Getenv(identity.HomeEnv), "identity")}
 	if _, err := os.Lstat(store.Dir(ref)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("credential directory after the failed config write: %v", err)
+	}
+}
+
+// up holds the config lock from before the token spend through recording the
+// device, so a concurrent down cannot prune its entry on a tombstone read
+// before the enrolment replaced it.
+func TestUpHoldsTheConfigLockAcrossTheEnrolment(t *testing.T) {
+	t.Setenv(identity.HomeEnv, t.TempDir())
+	ref := deviceRef("factory.gw-03")
+	fakeEnrol(t, ref)
+	file, err := currentInvoker(false).localConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevServe := serveEnrolled
+	t.Cleanup(func() { serveEnrolled = prevServe })
+	serveEnrolled = func(context.Context, string, *identity.Store, []config.LocalDevice, bool, bool, func() ([]config.LocalDevice, error)) error {
+		return nil
+	}
+	var heldDuringSave bool
+	saveIssued = func(*identity.Store, context.Context, identity.Material) (identity.Ref, error) {
+		f, err := security.OpenLockFile(file.LockPath())
+		if err != nil {
+			return identity.Ref{}, err
+		}
+		defer f.Close()
+		took, err := security.TryLockFile(f)
+		if took {
+			_ = security.UnlockFile(f)
+		}
+		heldDuringSave = err == nil && !took
+		return ref, err
+	}
+	if err := runUp("test", upArgs); err != nil {
+		t.Fatal(err)
+	}
+	if !heldDuringSave {
+		t.Fatal("the config lock was free while up saved the credential")
+	}
+}
+
+// The enrol child's output is untrusted: bounded, decoded strictly and, when
+// refused, reported as such with the spent token named; a failed child's own
+// error is returned as is.
+func TestEnrolAsAgentReadsTheResultStrictly(t *testing.T) {
+	prev := runEnrolStorePart
+	t.Cleanup(func() { runEnrolStorePart = prev })
+	child := func(out string, err error) {
+		runEnrolStorePart = func(_ []string, _ io.Reader, w io.Writer) error {
+			if _, werr := io.WriteString(w, out); werr != nil {
+				return werr
+			}
+			return err
+		}
+	}
+	ref := deviceRef("factory.gw-03")
+	good, err := json.Marshal(enrolResult{Ref: ref, Host: "gw-03.factory.eu.localport.dev"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child(string(good)+"\n", nil)
+	if res, err := enrolAsAgent(enrolRequest{JoinToken: "lpj_x"}); err != nil || res.Ref != ref {
+		t.Fatalf("enrolAsAgent = %+v, %v; want %s", res, err, ref)
+	}
+	for name, out := range map[string]string{
+		"not JSON":      "refused",
+		"unknown field": strings.TrimSuffix(string(good), "}") + `,"key":"x"}`,
+		"trailing data": string(good) + ` {}`,
+		"invalid ref":   `{"ref":{"Team":"t/../x","Kind":"device","Identity":"a.b"}}`,
+		"over the cap":  strings.Repeat(" ", maxEnrolResult+1),
+	} {
+		child(out, nil)
+		_, err := enrolAsAgent(enrolRequest{JoinToken: "lpj_x"})
+		if !errors.Is(err, errcode.New(errcode.AgentChildOutput)) || !strings.Contains(err.Error(), joinTokenSpent) {
+			t.Errorf("%s: enrolAsAgent = %v, want %s naming the spent token", name, err, errcode.AgentChildOutput)
+		}
+	}
+	failed := errcode.New(errcode.AgentChildFailed).With(nil, "localport enrol")
+	child("", failed)
+	if _, err := enrolAsAgent(enrolRequest{JoinToken: "lpj_x"}); err != failed {
+		t.Fatalf("failed child: enrolAsAgent = %v, want %v unwrapped", err, failed)
 	}
 }

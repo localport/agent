@@ -27,16 +27,14 @@ const (
 
 // listeners returns the sockets launchd bound from the plist's Sockets
 // entries (launch_activate_socket(3)); launchd owns their paths, owners and
-// modes.
-func listeners(uint32) (session, status *net.UnixListener, err error) {
+// modes. Only the launcher socket is required: without the status endpoint
+// status is nil and statusErr says why.
+func listeners(uint32) (session, status *net.UnixListener, statusErr, err error) {
 	if session, err = activatedSocket(launchdSocketName); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	if status, err = activatedSocket(launchdStatusName); err != nil {
-		session.Close()
-		return nil, nil, err
-	}
-	return session, status, nil
+	status, statusErr = activatedSocket(launchdStatusName)
+	return session, status, statusErr, nil
 }
 
 func activatedSocket(key string) (*net.UnixListener, error) {

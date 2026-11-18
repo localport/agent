@@ -63,7 +63,8 @@ type desktopPin struct {
 // in others (`localport set --rdp-reset-pin`, `--vnc-reset-pin`) never lose a
 // write. .pins.lock is taken alone, never with .renew.lock or .keys.lock, and
 // is held across file I/O only. The file goes with the identity directory
-// (Store.Remove, Store.PurgeDevices), which is never recreated here.
+// (Store.Remove, Store.Forget, Store.PurgeDevices), which is never recreated
+// here.
 //
 // Obtain it with Store.DesktopPins; each Store holds one instance per
 // identity directory.

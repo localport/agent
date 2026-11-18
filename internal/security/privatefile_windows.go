@@ -367,7 +367,7 @@ func privateSecurityAttributes(path string, dir bool) (*windows.SecurityAttribut
 //
 // For a path under the device identity directory, a privileged process grants
 // the device service's virtual account instead of its own user, so the
-// elevated Administrator that runs connect and the service that runs the
+// elevated Administrator that runs up and the service that runs the
 // renewer can each read and replace what the other wrote. An elevated process
 // also names Administrators as the owner there, which the service accepts;
 // the service cannot assign an owner but itself.

@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/errcode"
@@ -190,24 +192,31 @@ func TestSelectDevices(t *testing.T) {
 	t.Cleanup(func() { pickerTTY = prev })
 	pickerTTY = func() bool { return false }
 
-	if idx, err := selectDevices(devices[:1], nil, "", false, "localport down"); err != nil || len(idx) != 1 {
+	if idx, err := selectDevices(devices[:1], nil, "", false, "down"); err != nil || len(idx) != 1 {
 		t.Fatalf("one device = %v, %v; want it", idx, err)
 	}
 	for _, sel := range []string{"gw-02", "factory.gw-02", gw02.String(), gw02.Team + "/gw-02"} {
-		if idx, err := selectDevices(devices, nil, sel, false, "localport down"); err != nil || len(idx) != 1 || idx[0] != 1 {
+		if idx, err := selectDevices(devices, nil, sel, false, "down"); err != nil || len(idx) != 1 || idx[0] != 1 {
 			t.Errorf("selector %q = %v, %v; want gw-02", sel, idx, err)
 		}
 	}
-	if _, err := selectDevices(devices, nil, "gw-09", false, "localport down"); !errors.Is(err, errcode.New(errcode.DeviceNotFound)) {
+	if _, err := selectDevices(devices, nil, "gw-09", false, "down"); !errors.Is(err, errcode.New(errcode.DeviceNotFound)) {
 		t.Errorf("unknown selector = %v, want %s", err, errcode.DeviceNotFound)
 	}
-	if idx, err := selectDevices(devices, nil, "", true, "localport down"); err != nil || len(idx) != 2 {
+	if idx, err := selectDevices(devices, nil, "", true, "down"); err != nil || len(idx) != 2 {
 		t.Errorf("--all = %v, %v; want both", idx, err)
 	}
-	_, err := selectDevices(devices, nil, "", false, "localport down")
-	if !errors.Is(err, errcode.New(errcode.DeviceAmbiguous)) || !strings.Contains(err.Error(), "sudo localport down "+gw01.String()) ||
-		!strings.Contains(err.Error(), "sudo localport down --all") {
+	prefix := "sudo localport down "
+	if runtime.GOOS == "windows" {
+		prefix = "localport down "
+	}
+	_, err := selectDevices(devices, nil, "", false, "down")
+	if !errors.Is(err, errcode.New(errcode.DeviceNotNamed)) || !strings.Contains(err.Error(), prefix+gw01.String()) ||
+		!strings.Contains(err.Error(), prefix+"--all") {
 		t.Errorf("several without a terminal = %v, want each exact command", err)
+	}
+	if _, err := selectDevices(nil, nil, "", false, "down"); !errors.Is(err, errNoDevice) {
+		t.Errorf("no device = %v, want %v", err, errNoDevice)
 	}
 }
 
@@ -233,9 +242,9 @@ func TestChooseDevices(t *testing.T) {
 }
 
 // Root reads the store through the devices child and trusts nothing it
-// prints: unknown fields, another version, an invalid removal code and output
-// past the cap are refused; refs outside root's config are ignored; strings
-// are sanitized.
+// prints: unknown fields, another version, an invalid removal code, data after
+// the object and output past the cap are refused; refs outside root's config
+// are ignored; strings are sanitized.
 func TestDeviceFactsFromTheChild(t *testing.T) {
 	prevRoot, prevChild := agentChildRoot, runDevicesStorePart
 	t.Cleanup(func() { agentChildRoot, runDevicesStorePart = prevRoot, prevChild })
@@ -267,11 +276,19 @@ func TestDeviceFactsFromTheChild(t *testing.T) {
 		"another version": strings.Replace(line(gw01, ""), `"version":1`, `"version":2`, 1),
 		"removal code":    line(gw01, `,"removed":"SE031"`),
 		"over the cap":    strings.Repeat(line(gw01, ""), maxDeviceFacts/len(line(gw01, ""))+1),
+		"trailing data":   strings.TrimSuffix(line(gw01, ""), "\n") + ` {"version":1}` + "\n",
 	} {
 		child(out)
-		if _, err := readDeviceFacts(file, invoker{}, []config.LocalDevice{{Identity: gw01}}); !errors.Is(err, errcode.New(errcode.AgentChildFailed)) {
-			t.Errorf("%s: readDeviceFacts = %v, want %s", name, err, errcode.AgentChildFailed)
+		if _, err := readDeviceFacts(file, invoker{}, []config.LocalDevice{{Identity: gw01}}); !errors.Is(err, errcode.New(errcode.AgentChildOutput)) {
+			t.Errorf("%s: readDeviceFacts = %v, want %s", name, err, errcode.AgentChildOutput)
 		}
+	}
+
+	// A failed child has printed its own error; its AG037 is returned as is.
+	failed := errcode.New(errcode.AgentChildFailed).With(nil, "localport devices")
+	runDevicesStorePart = func([]string, io.Reader, io.Writer) error { return failed }
+	if _, err := readDeviceFacts(file, invoker{}, []config.LocalDevice{{Identity: gw01}}); err != failed {
+		t.Errorf("failed child: readDeviceFacts = %v, want %v unwrapped", err, failed)
 	}
 }
 
@@ -324,5 +341,128 @@ func TestStatusAccountLine(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("account line %q, want %q", out.String(), want)
 		}
+	}
+}
+
+// For up a device settles once it leaves connecting and paused, and a parked
+// one only once it parked again after up's retry; for down a device settles
+// once paused.
+func TestStatesSettled(t *testing.T) {
+	applied := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	before, after := applied.Add(-time.Hour), applied.Add(time.Second)
+	for _, c := range []struct {
+		name  string
+		pause bool
+		row   *status.Device
+		want  bool
+	}{
+		{"up: no row", false, nil, false},
+		{"up: connecting", false, &status.Device{State: status.StateConnecting, Since: after}, false},
+		{"up: still paused", false, &status.Device{State: status.StatePaused, Since: before}, false},
+		{"up: running", false, &status.Device{State: status.StateRunning, Since: before}, true},
+		{"up: disconnected by an admin before", false, &status.Device{State: status.StateDisconnected, Since: before}, true},
+		{"up: waiting before", false, &status.Device{State: status.StateWaiting, Since: before}, true},
+		{"up: parked before the retry", false, &status.Device{State: status.StateParked, Since: before}, false},
+		{"up: parked after the retry", false, &status.Device{State: status.StateParked, Since: after}, true},
+		{"down: running", true, &status.Device{State: status.StateRunning, Since: after}, false},
+		{"down: paused", true, &status.Device{State: status.StatePaused, Since: after}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			doc := &status.Document{Version: status.Version}
+			if c.row != nil {
+				row := *c.row
+				row.Identity = gw01.Identity
+				doc.Devices = append(doc.Devices, row)
+			}
+			if got := statesSettled(doc, []identity.Ref{gw01}, c.pause, applied); got != c.want {
+				t.Fatalf("statesSettled = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// A device name beside an enrolment flag is refused locally, never sent to
+// the control plane as a join token.
+func TestUpRefusesADeviceNameAsAJoinToken(t *testing.T) {
+	t.Setenv(identity.HomeEnv, t.TempDir())
+	calls := fakeEnrol(t, gw01)
+	for _, args := range [][]string{{"gw-01", "--foreground"}, {"--enable", "terminal", "gw-01"}} {
+		if err := runUp("test", args); !errors.Is(err, errNotJoinToken) {
+			t.Errorf("up %q = %v, want %v", args, err, errNotJoinToken)
+		}
+	}
+	if *calls != 0 {
+		t.Fatalf("the control plane was called %d times", *calls)
+	}
+}
+
+// The devices child's output for a full config of the longest facts fits its
+// cap and decodes.
+func TestFullDeviceFactsFitTheCap(t *testing.T) {
+	facts := make([]deviceFact, config.MaxDevices)
+	for i := range facts {
+		ref := identity.Ref{Team: strings.Repeat("t", 64), Kind: identity.KindDevice,
+			Identity: fmt.Sprintf("%03d%s.%s", i, strings.Repeat("a", 61), strings.Repeat("p", 64))}
+		facts[i] = deviceFact{Version: deviceFactsVersion, Ref: ref.String(), Host: strings.Repeat("h", maxHostName),
+			Team: strings.Repeat(`"`, maxTeamDisplay), Removed: "SE041"}
+	}
+	var out cappedBuffer
+	out.max = maxDeviceFacts
+	if err := writeDeviceFacts(&out, facts); err != nil {
+		t.Fatalf("writeDeviceFacts = %v; %d facts of the longest strings must fit %d bytes", err, len(facts), maxDeviceFacts)
+	}
+	if got, err := decodeDeviceFacts(out.Bytes()); err != nil || len(got) != len(facts) {
+		t.Fatalf("decodeDeviceFacts = %d facts, %v", len(got), err)
+	}
+}
+
+func TestTruncateDisplay(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"Factory", 128, "Factory"},
+		{"abcdef", 5, "ab…"},
+		{"aé€x", 7, "aé€x"},
+		{"aé€x", 6, "aé…"},
+		{"aé€x", 5, "a…"},
+	} {
+		if got := truncateDisplay(c.in, c.n); got != c.want || len(got) > c.n {
+			t.Errorf("truncateDisplay(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
+		}
+	}
+}
+
+// up refuses before the spend when the config is full, unless a removed
+// device's entry would be pruned.
+func TestUpRefusesAFullConfigBeforeTheSpend(t *testing.T) {
+	t.Setenv(identity.HomeEnv, t.TempDir())
+	calls := fakeEnrol(t, gw01)
+	file, err := currentInvoker(false).localConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := &config.LocalConfig{}
+	for i := range config.MaxDevices {
+		local.Devices = append(local.Devices, config.LocalDevice{Identity: deviceRef(fmt.Sprintf("factory.gw-%02d", i))})
+	}
+	if err := config.WriteLocal(file, local, identity.Ref{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runUp("test", upArgs); !errors.Is(err, errcode.New(errcode.DeviceLimit)) {
+		t.Fatalf("up on a full config = %v, want %s", err, errcode.DeviceLimit)
+	}
+	if *calls != 0 {
+		t.Fatalf("the join token was spent %d times", *calls)
+	}
+	prev := readFacts
+	t.Cleanup(func() { readFacts = prev })
+	removed := local.Devices[0].Identity
+	readFacts = func(config.LocalConfigFile, invoker, []config.LocalDevice) (map[identity.Ref]deviceFact, error) {
+		return map[identity.Ref]deviceFact{removed: {Ref: removed.String(), Removed: "SE018"}}, nil
+	}
+	if _, err := refuseFullConfig(file, currentInvoker(false)); err != nil {
+		t.Fatalf("a full config with a removed device = %v, want room", err)
 	}
 }

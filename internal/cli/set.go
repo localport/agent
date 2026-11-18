@@ -99,8 +99,7 @@ func applySettings(who invoker) error {
 	reloaded, err := reloadDeviceService()
 	switch {
 	case err != nil:
-		// Installing the service again applies the saved settings.
-		return errcode.WithRemedy(errcode.New(errcode.SettingsNotApplied).With(err, ""), "apply them with: "+serviceInstallCommand)
+		return notApplied(err)
 	case reloaded:
 		fmt.Fprintf(os.Stderr, "  reloaded the device service\n")
 	default:

@@ -37,9 +37,10 @@ const agentChildCommand = "__agent"
 // makes currentInvoker privileged, so the command uses the system paths.
 var asAgentChild bool
 
-// agentChildCommands are the commands a child runs whole, with root's argv;
-// enrol, purge, set-pins and devices are the parts of up, service uninstall
-// --purge, set, and up, down and set that touch the store.
+// agentChildCommands are the commands a child runs whole, with root's argv,
+// and the store parts of root commands: enrol of `up <join-token>`, purge of
+// `service uninstall --purge`, set-pins of `set`, devices of `up`, `down` and
+// `set`.
 var agentChildCommands = []string{"run", "status", "identity", "login", "setup", "access", "enrol", "purge", "set-pins", "devices"}
 
 // storePartCommands are the agentChildCommands that are a part of a root
@@ -199,15 +200,51 @@ func enrolAsAgent(req enrolRequest) (enrolResult, error) {
 	if err != nil {
 		return enrolResult{}, err
 	}
-	var out bytes.Buffer
-	if err := runAsAgentAccount([]string{"enrol"}, bytes.NewReader(raw), &out); err != nil {
-		return enrolResult{}, err
+	out := &cappedBuffer{max: maxEnrolResult}
+	runErr := runEnrolStorePart([]string{"enrol"}, bytes.NewReader(raw), out)
+	if out.overflowed {
+		return enrolResult{}, enrolOutputRefused(errOutputTooLarge)
 	}
-	var res enrolResult
-	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
-		return enrolResult{}, errcode.New(errcode.AgentChildFailed).With(err, "read the enrolment result; "+joinTokenSpent)
+	if runErr != nil {
+		return enrolResult{}, runErr
+	}
+	res, err := decodeEnrolResult(out.Bytes())
+	if err != nil {
+		return enrolResult{}, enrolOutputRefused(err)
 	}
 	return res, nil
+}
+
+// maxEnrolResult bounds the enrol child's output root reads.
+const maxEnrolResult = 4 << 10
+
+// runEnrolStorePart is runAsAgentAccount for the enrol store part; tests
+// replace it.
+var runEnrolStorePart = runAsAgentAccount
+
+// decodeEnrolResult decodes the enrol child's output strictly: one object, no
+// unknown field, no data after it, a valid device ref.
+func decodeEnrolResult(raw []byte) (enrolResult, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var res enrolResult
+	if err := dec.Decode(&res); err != nil {
+		return enrolResult{}, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return enrolResult{}, errors.New("enrolment result: data after the object")
+	}
+	if _, err := identity.ParseDeviceRef(res.Ref.String()); err != nil {
+		return enrolResult{}, err
+	}
+	res.Host = security.SanitizeDisplay(res.Host)
+	return res, nil
+}
+
+// enrolOutputRefused is a refused enrolment result: the child has spent the
+// join token by then.
+func enrolOutputRefused(err error) error {
+	return errcode.WithRemedy(errcode.New(errcode.AgentChildOutput).With(err, "read the enrolment result"), joinTokenSpent)
 }
 
 // runPurgeChild deletes the device credentials and the recording spool of

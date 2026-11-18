@@ -13,8 +13,9 @@ import (
 	"github.com/localport/agent/internal/security"
 )
 
-// Codes the control plane and the edge refuse a device with when it no longer
-// exists for them; the device forgets its credential on either.
+// Codes the control plane and the edge refuse a device with. SE018 and SE041
+// mean the device no longer exists for them, and the device forgets its
+// credential on either; SE040 does not.
 const (
 	// CodeDeviceUnknown (SE018): the device was removed, or its fleet deleted.
 	CodeDeviceUnknown = "SE018"

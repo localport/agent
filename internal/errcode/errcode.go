@@ -195,6 +195,12 @@ const (
 	TokenFileUnreadable     Code = "AG146"
 	AgentAccountUnsafe      Code = "AG147"
 	UnknownCommand          Code = "AG148"
+	StoreBusy               Code = "AG149"
+	DeviceNotNamed          Code = "AG150"
+	NoDeviceChosen          Code = "AG151"
+	AgentChildOutput        Code = "AG152"
+	NotJoinToken            Code = "AG153"
+	DeviceLimit             Code = "AG154"
 )
 
 // NewJoinCommand is the remedy for every lost or unusable device credential.
@@ -326,7 +332,13 @@ var registry = []Entry{
 	{LogFileUnusable, "Log file unusable", "the --log-file path cannot be opened as the agent's log"},
 	{TokenFileUnreadable, "Token file unreadable", "the token file named by the _FILE variable cannot be read"},
 	{AgentAccountUnsafe, "Agent account unsafe", "the agent account " + agentaccount.Name + " can log in or reaches other users' files; remove it, then run: sudo localport service install"},
-	{UnknownCommand, "Unknown command", "no such localport command; run localport help for the list"},
+	{UnknownCommand, "Unknown command", "no such localport command"},
+	{StoreBusy, "Credential store busy", "localport service uninstall --purge is deleting the device credentials; retry when it finishes"},
+	{DeviceNotNamed, "Device not named", "several devices are enrolled on this machine; name one, or give --all"},
+	{NoDeviceChosen, "No device chosen", "no device was chosen"},
+	{AgentChildOutput, "Agent account step output refused", "the step localport runs as the agent account returned output localport does not accept; retry, and reinstall localport if it persists"},
+	{NotJoinToken, "Not a join token", "the argument is not a join token"},
+	{DeviceLimit, "Device limit reached", "this machine already has the maximum number of devices"},
 }
 
 // New returns the sentinel of a registered code. An unregistered code is a

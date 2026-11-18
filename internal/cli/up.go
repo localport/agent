@@ -20,8 +20,8 @@ import (
 	"github.com/localport/agent/internal/ui"
 )
 
-// joinTokenPrefix starts every join token (the control plane's
-// device_enrol.go); it tells `up <join-token>` from `up <device>`.
+// joinTokenPrefix starts every join token the dashboard issues; it tells
+// `up <join-token>` from `up <device>`.
 const joinTokenPrefix = "lpj_"
 
 // runUp enrols this machine as a fleet device with a single-use join token
@@ -82,6 +82,12 @@ func runUp(version string, args []string) (retErr error) {
 	if joinToken == "" {
 		fs.Usage()
 		return errors.New("join token required: create the device in the dashboard and run the command it shows")
+	}
+	// A device name beside an enrolment flag lands here; it is no token, so it
+	// must not reach the control plane.
+	if !strings.HasPrefix(joinToken, joinTokenPrefix) {
+		return errcode.WithRemedy(errNotJoinToken.With(nil, fmt.Sprintf("%q", security.SanitizeDisplay(joinToken))),
+			"enrolment flags apply only with a join token; resume a device "+elevatedCommand("up <device>"))
 	}
 	if err := refuseGiven(fs, "apply only with --config", "no-inspect", "log-requests"); err != nil {
 		return err
@@ -144,9 +150,6 @@ func runUp(version string, args []string) (retErr error) {
 				return err
 			}
 		}
-		if res, err = enrolAsAgent(req); err != nil {
-			return err
-		}
 	} else {
 		if store, err = who.store(); err != nil {
 			return err
@@ -158,13 +161,33 @@ func runUp(version string, args []string) (retErr error) {
 			}
 			defer func() { retErr = errors.Join(retErr, release()) }()
 		}
-		if res, err = enrolInStore(store, req); err != nil {
-			return err
-		}
+	}
+	// The config lock, taken after run.lock as every holder of both does,
+	// covers the enrolment through recordDevice: a concurrent up or down reads
+	// the store facts under it, so none prunes this entry on a tombstone the
+	// enrolment is about to replace.
+	unlockConfig, err := config.LockLocal(file)
+	if err != nil {
+		return err
+	}
+	facts, err := refuseFullConfig(file, who)
+	if err != nil {
+		unlockConfig()
+		return err
+	}
+	if viaChild {
+		res, err = enrolAsAgent(req)
+	} else {
+		res, err = enrolInStore(store, req)
+	}
+	if err != nil {
+		unlockConfig()
+		return err
 	}
 	ref := res.Ref
 
-	inForce, err := recordDevice(file, fs, device, who, ref, d)
+	inForce, err := recordDevice(file, fs, device, who, ref, d, facts)
+	unlockConfig()
 	if isDeviceNotRecorded(err) {
 		return errors.Join(err, forgetUnrecorded(store, viaChild, ref))
 	}
@@ -468,18 +491,35 @@ func forgetUnrecorded(store *identity.Store, viaChild bool, ref identity.Ref) er
 	return nil
 }
 
-// recordDevice records an enrolled device in the local config, under its
-// lock. A stored entry with the same identity takes the flags given as set
-// does (each given flag overrides, the rest keep their stored values); a new
-// identity appends fresh, the entry the flags alone describe. When the merge
-// is invalid the config is left unchanged and the error wraps
-// errMergeConflict. It returns the entry in force.
-func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFlags, who invoker, ref identity.Ref, fresh config.LocalDevice) (config.LocalDevice, error) {
-	unlock, err := config.LockLocal(file)
-	if err != nil {
-		return config.LocalDevice{}, errcode.WithRemedy(err, joinTokenSpent)
+// refuseFullConfig refuses an enrolment before the token is spent when the
+// config already lists config.MaxDevices devices that recordDevice would not
+// prune. It returns the store facts it read for a full config, which hold
+// under the config's lock the caller keeps until recordDevice; nil otherwise.
+func refuseFullConfig(file config.LocalConfigFile, who invoker) (map[identity.Ref]deviceFact, error) {
+	local, err := loadLocalOrEmpty(file)
+	if err != nil || len(local.Devices) < config.MaxDevices {
+		return nil, err
 	}
-	defer unlock()
+	facts, err := readFacts(file, who, local.Devices)
+	if err != nil {
+		return nil, err
+	}
+	if len(local.Devices)-len(pruneRemoved(local, facts)) < config.MaxDevices {
+		return facts, nil
+	}
+	return nil, errcode.WithRemedy(errcode.New(errcode.DeviceLimit).With(nil, fmt.Sprintf("%d devices", config.MaxDevices)),
+		"remove a device from this machine in the dashboard, then run up again")
+}
+
+// recordDevice records an enrolled device in the local config. The caller
+// holds the config's lock (config.LockLocal). A stored entry with the same
+// identity takes the flags given as set does (each given flag overrides, the
+// rest keep their stored values); a new identity appends fresh, the entry the
+// flags alone describe. When the merge is invalid the config is left
+// unchanged and the error wraps errMergeConflict. facts, when not nil, are
+// the store facts read under the same lock hold before the enrolment;
+// otherwise they are read here. It returns the entry in force.
+func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFlags, who invoker, ref identity.Ref, fresh config.LocalDevice, facts map[identity.Ref]deviceFact) (config.LocalDevice, error) {
 	local, err := loadLocalOrEmpty(file)
 	if err != nil {
 		return config.LocalDevice{}, errcode.WithRemedy(err, joinTokenSpent)
@@ -487,9 +527,15 @@ func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFl
 	// Entries of forgotten devices go with this write. The credential is kept
 	// whatever happens here, so a failed read only skips the pruning.
 	var pruned []deviceFact
-	if facts, factsErr := readDeviceFacts(file, who, local.Devices); factsErr != nil {
-		fmt.Fprintf(os.Stderr, "  warning: removed devices were not pruned from the config: %s\n", userText(factsErr))
-	} else {
+	if facts == nil {
+		var factsErr error
+		if facts, factsErr = readFacts(file, who, local.Devices); factsErr != nil {
+			fmt.Fprintf(os.Stderr, "  warning: removed devices were not pruned from the config: %s\n", userText(factsErr))
+		}
+	}
+	if facts != nil {
+		// The enrolment replaced ref's credential and tombstone.
+		delete(facts, ref)
 		pruned = pruneRemoved(local, facts)
 	}
 	// keepPruned writes the pruning alone when the entry itself is not
@@ -583,6 +629,9 @@ const joinTokenSpent = "the join token is spent: create a new join token for thi
 // errExtraArgument refuses an argument beyond the one join token.
 var errExtraArgument = errcode.New(errcode.ExtraArgument)
 
+// errNotJoinToken refuses a first argument that is not a join token.
+var errNotJoinToken = errcode.New(errcode.NotJoinToken)
+
 // prepareDevice builds and validates the device's local settings from the
 // flags alone before any join token is spent: the identity, and so any stored
 // entry, is unknown until enrolment. A refusal a stored entry might have
@@ -657,7 +706,7 @@ func usageUp(fs *flag.FlagSet) {
                     [--files-root DIR] [--rdp[=HOST:PORT]] [--vnc[=HOST:PORT]]
                     [--host HOST] [--allow-ports LIST] [--foreground]
        localport up --config localport.yaml
-       sudo localport up [<device> | --all]
+       sudo localport up [<device> | --all]   (from an elevated prompt on Windows)
 
   Enrol this machine as a fleet device. Create the device in the dashboard;
   it shows the command with a single-use join token. The machine keeps a

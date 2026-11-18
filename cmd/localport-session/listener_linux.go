@@ -16,37 +16,40 @@ import (
 	"github.com/localport/agent/internal/launcher"
 )
 
+// errNoStatusSocket is a service whose units pass no status socket.
+var errNoStatusSocket = errors.New("systemd passed no socket named " + fdNameStatus)
+
 // listeners returns the launcher socket and the status endpoint: the sockets
 // systemd passed (localport-session.socket and localport-status.socket,
 // matched by FileDescriptorName), or both bound by the launcher itself
 // (OpenRC, procd): inside a root-owned 0750 directory of group gid, mode
-// 0660, created with the umask set before bind so it is never wider.
-func listeners(gid uint32) (session, status *net.UnixListener, err error) {
+// 0660, created with the umask set before bind so it is never wider. Only
+// the launcher socket is required: without the status endpoint status is nil
+// and statusErr says why.
+func listeners(gid uint32) (session, status *net.UnixListener, statusErr, err error) {
 	fds, err := systemdFDs(os.Getenv("LISTEN_PID"), os.Getenv("LISTEN_FDS"), os.Getenv("LISTEN_FDNAMES"), os.Getpid())
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if fds != nil {
 		os.Unsetenv("LISTEN_PID")
 		os.Unsetenv("LISTEN_FDS")
 		os.Unsetenv("LISTEN_FDNAMES")
 		if session, err = passedListener(fds[fdNameSession], "localport-session.socket"); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		if status, err = passedListener(fds[fdNameStatus], "localport-status.socket"); err != nil {
-			session.Close()
-			return nil, nil, err
+		fd, ok := fds[fdNameStatus]
+		if !ok {
+			return session, nil, errNoStatusSocket, nil
 		}
-		return session, status, nil
+		status, statusErr = passedListener(fd, "localport-status.socket")
+		return session, status, statusErr, nil
 	}
 	if session, err = bindSocket(launcher.SocketPath, gid); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	if status, err = bindSocket(launcher.StatusSocketPath, gid); err != nil {
-		session.Close()
-		return nil, nil, err
-	}
-	return session, status, nil
+	status, statusErr = bindSocket(launcher.StatusSocketPath, gid)
+	return session, status, statusErr, nil
 }
 
 func passedListener(fd int, name string) (*net.UnixListener, error) {

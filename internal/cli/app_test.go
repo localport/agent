@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"testing"
@@ -87,13 +88,17 @@ func TestAppConfigRefusesEndpointFlags(t *testing.T) {
 	}
 }
 
-// A word that is neither a command nor a tunnel protocol, the removed
-// `connect` included, is an unknown command, never the flat tunnel form.
+// A word that is neither a command nor a tunnel protocol, `connect` included,
+// is an unknown command, never the flat tunnel form; `connect` points to up.
 func TestAppRefusesAnUnknownCommand(t *testing.T) {
 	app := New("1.2.3", "abc123", "2026-04-13")
 	for _, args := range [][]string{{"connect"}, {"connect", "lpj_x"}, {"connect", "--config", "x.yaml"}, {"bogus", "3000"}} {
-		if err := app.Run(args); !errors.Is(err, errcode.New(errcode.UnknownCommand)) {
+		err := app.Run(args)
+		if !errors.Is(err, errcode.New(errcode.UnknownCommand)) {
 			t.Errorf("%v = %v, want %s", args, err, errcode.UnknownCommand)
+		}
+		if points := strings.Contains(fmt.Sprint(err), "localport up <join-token>"); points != (args[0] == "connect") {
+			t.Errorf("%v = %v; names up: %v", args, err, points)
 		}
 	}
 }

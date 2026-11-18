@@ -83,13 +83,8 @@ func publishOn(ctx context.Context, b *Board, conn io.ReadWriteCloser) error {
 		if deadline != nil {
 			_ = deadline.SetWriteDeadline(time.Now().Add(publishWriteTimeout))
 		}
-		err := launcher.WriteStatusFrame(conn, doc)
-		if errors.Is(err, launcher.ErrStatusFrame) {
-			// Too many devices for one frame: readers keep the last document
-			// that fit until the board shrinks.
-			err = nil
-		}
-		if err != nil {
+		// A full board fits a frame (config.MaxDevices, TestFullBoardFitsAFrame).
+		if err := launcher.WriteStatusFrame(conn, doc); err != nil {
 			return err
 		}
 		select {
@@ -119,7 +114,8 @@ var ErrNoDocument = errors.New("no status document")
 
 // Read reads and decodes the status document from the launcher's status
 // endpoint. Errors wrap launcher.ErrUnavailable (launcher not running),
-// launcher.ErrStatusUntrusted, ErrNoDocument or ErrInvalid.
+// launcher.ErrStatusUntrusted, launcher.ErrStatusDenied,
+// launcher.ErrStatusFrame, ErrNoDocument or ErrInvalid.
 func Read(ctx context.Context) (*Document, error) {
 	raw, err := readStatus(ctx)
 	if err != nil {

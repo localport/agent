@@ -95,9 +95,8 @@ func testDeviceRef() identity.Ref {
 	return identity.Ref{Team: "01kpq7x2abcd34", Kind: identity.KindDevice, Identity: "tun12345.gw-01"}
 }
 
-// The service keeps running with no device that can start: it waits for a
-// reload instead of exiting for its manager to restart it. A foreground run
-// still refuses (TestRunRefusesWhenNoDeviceCanStart).
+// The service keeps running with no device that can start and waits for a
+// reload. A foreground run refuses (TestRunRefusesWhenNoDeviceCanStart).
 func TestServiceIdlesWithNoDeviceThatCanStart(t *testing.T) {
 	h := serveOneDevice(t, config.LocalDevice{Identity: testDeviceRef()}, false)
 	h.alive(t)
@@ -108,8 +107,7 @@ func TestServiceIdlesWithNoDeviceThatCanStart(t *testing.T) {
 
 // A removal refusal (SE018) of the device's last tunnel forgets its
 // credential and leaves a tombstone; the service keeps running. Its tunnel is
-// stopped, its loops ended and its sessions lock released before the
-// credential is deleted.
+// stopped and its sessions lock released before the credential is deleted.
 func TestRemovedDeviceIsForgottenAndTheServiceKeepsRunning(t *testing.T) {
 	d := config.LocalDevice{Identity: testDeviceRef(), Enable: []config.Capability{config.CapabilityDesktop}, RDP: "127.0.0.1:3389"}
 	h := serveOneDevice(t, d, true)
@@ -156,7 +154,7 @@ func TestRemovedDeviceIsForgottenAndTheServiceKeepsRunning(t *testing.T) {
 	}
 }
 
-// A refusal of another certificate than the stored one (a re-enrolment
+// A removal refusal of a certificate other than the stored one (a re-enrolment
 // replaced it) deletes nothing.
 func TestRemovalOfAReplacedCertificateKeepsTheCredential(t *testing.T) {
 	h := serveOneDevice(t, config.LocalDevice{Identity: testDeviceRef()}, true)

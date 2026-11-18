@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync/atomic"
@@ -112,7 +113,7 @@ func TestBoardNeverBlocksOnAStalledLauncher(t *testing.T) {
 	set := make(chan struct{})
 	go func() {
 		for i := range 100 {
-			b.Set(Device{Identity: "d", State: StateWaiting, Code: string(rune('A' + i%26)), Since: time.Now()})
+			b.Set(Device{Identity: "d", State: StateWaiting, Code: fmt.Sprintf("SE%03d", i), Since: time.Now()})
 		}
 		close(set)
 	}()

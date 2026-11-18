@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -189,10 +190,10 @@ func (s *Store) Promote(ref Ref, serial string) error {
 // tryLock takes the credential's renewal lock without blocking. It lives in
 // the credential's lock directory (LockDir), so it is scoped to one credential
 // and exists whether or not the credential does, and the OS releases it if
-// the holder dies.
+// the holder dies. It returns ErrStoreBusy while a purge holds the store lock.
 func (s *Store) tryLock(ref Ref) (release func(), held bool, err error) {
-	unshare, held, err := s.tryShareStore()
-	if err != nil || !held {
+	unshare, err := s.tryShareStore()
+	if err != nil {
 		return nil, false, err
 	}
 	path, err := s.lockFileAt(ref.Path(), lockFile)
@@ -209,11 +210,13 @@ func (s *Store) tryLock(ref Ref) (release func(), held bool, err error) {
 }
 
 // lockCredential takes the store lock shared, then the lock file name of the
-// credential at rel (a path relative to Root), each waiting up to wait and
-// returning busy when still held then. The returned func releases both.
+// credential at rel (a path relative to Root), each waiting up to wait. It
+// returns ErrStoreBusy when a purge still holds the store lock then, and busy
+// when another writer holds the credential lock. The returned func releases
+// both.
 // onAttempt, when set, runs after each attempt on the credential lock.
 func (s *Store) lockCredential(ctx context.Context, rel, name string, wait time.Duration, busy error, onAttempt func(held bool)) (func(), error) {
-	unshare, err := s.shareStore(ctx, wait, busy)
+	unshare, err := s.shareStore(ctx, wait)
 	if err != nil {
 		return nil, err
 	}
@@ -246,6 +249,10 @@ func (s *Store) waitLockAt(ctx context.Context, rel string, wait time.Duration) 
 	return func() { s.renewLockReleasing(); release() }, nil
 }
 
+// lockOpened, when set, runs between a lock file's open and its lock; tests
+// delete the file there.
+var lockOpened func(path string)
+
 // tryLockFile takes the file lock at path without blocking, shared or
 // exclusive. The lock is per open file, so two holders in one process exclude
 // each other too.
@@ -253,6 +260,9 @@ func tryLockFile(path string, shared bool) (release func(), held bool, err error
 	f, err := security.OpenLockFile(path)
 	if err != nil {
 		return nil, false, errStoreUnusable.With(err, "open the lock "+filepath.Base(path))
+	}
+	if lockOpened != nil {
+		lockOpened(path)
 	}
 	if shared {
 		held, err = security.TryLockFileShared(f)
@@ -263,10 +273,34 @@ func tryLockFile(path string, shared bool) (release func(), held bool, err error
 		f.Close()
 		return nil, false, err
 	}
-	return func() {
+	release = func() {
 		_ = security.UnlockFile(f)
 		f.Close()
-	}, true, nil
+	}
+	// PurgeDevices may have deleted the file between the open and the lock;
+	// a lock on the unlinked file excludes nobody, so it counts as not held.
+	current, err := lockStillLinked(f, path)
+	if err != nil || !current {
+		release()
+		return nil, false, err
+	}
+	return release, true, nil
+}
+
+// lockStillLinked reports whether path still names the open file f.
+func lockStillLinked(f *os.File, path string) (bool, error) {
+	held, err := f.Stat()
+	if err != nil {
+		return false, errStoreUnusable.With(err, "stat the lock "+filepath.Base(path))
+	}
+	named, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, errStoreUnusable.With(err, "stat the lock "+filepath.Base(path))
+	}
+	return os.SameFile(held, named), nil
 }
 
 // WaitLockFile takes the file lock at path, retrying for up to wait. It

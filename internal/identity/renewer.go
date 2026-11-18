@@ -291,8 +291,7 @@ func (r *Renewer) Run(ctx context.Context) {
 				}
 				continue
 			}
-			var removed *RemovedError
-			if errors.As(err, &removed) && r.OnRemoved != nil {
+			if removed, ok := errors.AsType[*RemovedError](err); ok && r.OnRemoved != nil {
 				r.log("identity: %s: renewal refused: %v", r.Ref, err)
 				r.OnRemoved(removed)
 				return

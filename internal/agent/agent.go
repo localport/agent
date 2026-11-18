@@ -17,8 +17,8 @@ type Agent struct {
 	cfg *config.Config
 
 	// KeepIdle keeps Run running with no tunnel left, until ctx ends, and
-	// makes it return nil: the device service idles instead of exiting, and
-	// OnDeviceEnd handles each end. Set before Run.
+	// makes it return nil, so the device service idles; OnDeviceEnd handles
+	// each end. Set before Run.
 	KeepIdle bool
 	// OnDeviceEnd, optional, receives each device tunnel whose Run returned an
 	// error, after it returned. It runs on that tunnel's goroutine and must

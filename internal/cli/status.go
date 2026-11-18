@@ -163,7 +163,10 @@ func describeRow(row *status.Device) string {
 	if row == nil {
 		return "not reported by the device service"
 	}
-	code := security.SanitizeDisplay(row.Code)
+	refusal := "refused"
+	if code := security.SanitizeDisplay(row.Code); code != "" {
+		refusal = "refused with " + code
+	}
 	retry := ""
 	if row.NextRetry != nil {
 		retry = ", next try " + row.NextRetry.Local().Format(time.TimeOnly)
@@ -178,22 +181,27 @@ func describeRow(row *status.Device) string {
 	case status.StateDraining:
 		return "disconnected by an admin, ending its sessions"
 	case status.StateDisconnected:
-		return "disconnected by an admin; it reconnects when an admin reconnects it in the dashboard" + retry
+		return "disconnected by an admin until an admin reconnects it in the dashboard" + retry
 	case status.StateWaiting:
-		return "waiting: refused with " + code + "; it retries on its own" + retry
+		return "waiting: " + refusal + "; it retries on its own" + retry
 	case status.StateParked:
-		return "stopped: refused with " + code + "; fix the cause, then retry " + elevatedCommand("up")
+		return "stopped: " + refusal + "; fix the cause, then retry " + elevatedCommand("up")
 	case status.StateRemoved:
-		return "removed: refused with " + code + " (removed or enrolled again); enrol it again " + elevatedCommand("up <join-token>")
+		return "removed: " + refusal + " (removed or enrolled again); enrol it again " + elevatedCommand("up <join-token>")
 	}
 	return security.SanitizeDisplay(row.State)
 }
+
+// statusReaders names who may read the device status.
+const statusReaders = "root or group " + security.AgentGroup + "; an elevated prompt on Windows"
 
 // statusUnavailable explains a failed status read.
 func statusUnavailable(err error) string {
 	switch {
 	case errors.Is(err, status.ErrNoDocument):
-		return "the device service is not running, or this account may not read its status (root or group " + security.AgentGroup + "; an elevated prompt on Windows)"
+		return "the device service is not running, or this account may not read its status (" + statusReaders + ")"
+	case errors.Is(err, launcher.ErrStatusDenied):
+		return "this account may not read the device status (" + statusReaders + ")"
 	case errors.Is(err, launcher.ErrUnavailable):
 		return "status unavailable: the session launcher is not running"
 	}

@@ -245,7 +245,7 @@ func (r *deviceRunner) reload(ctx context.Context, a *agent.Agent, devices []con
 		}
 		return specs
 	})
-	// build marked the removed devices; their recordings are no longer taken.
+	// build marked the removed devices; the uploader takes no recordings of them.
 	r.storeConfigured(devices)
 	if err != nil {
 		r.logEvent(fmt.Sprintf("reload: %v", err))
@@ -320,7 +320,7 @@ func (r *deviceRunner) publishTunnel(identifier string, st tunnel.Status) {
 }
 
 // queueEnd hands ev to the owner goroutine. It never blocks: it runs on
-// tunnel, renewal and key refresh goroutines the end seam waits for.
+// tunnel, renewal and key refresh goroutines that handleEnd waits for.
 func (r *deviceRunner) queueEnd(ev deviceEnd) {
 	r.endsMu.Lock()
 	r.ends = append(r.ends, ev)
@@ -331,7 +331,7 @@ func (r *deviceRunner) queueEnd(ev deviceEnd) {
 	}
 }
 
-// handleEnds runs the end seam for every queued end. Owner goroutine only.
+// handleEnds runs handleEnd for every queued end. Owner goroutine only.
 func (r *deviceRunner) handleEnds(ctx context.Context, a *agent.Agent) {
 	r.endsMu.Lock()
 	ends := r.ends
@@ -389,7 +389,7 @@ func (r *deviceRunner) handleEnd(ctx context.Context, a *agent.Agent, ev deviceE
 		})
 	default:
 		s.removed, s.code = true, code
-		r.logEvent(fmt.Sprintf("device %s: removed from its fleet (%s); its credential and recordings are deleted. Enrol it again %s", ref, code, elevatedCommand("up <join-token>")))
+		r.logEvent(fmt.Sprintf("device %s: refused with %s (removed or enrolled again); its credential and recordings are deleted. Enrol it again %s", ref, code, elevatedCommand("up <join-token>")))
 		if devices := r.configured.Load(); devices != nil {
 			r.storeConfigured(*devices)
 		}
@@ -403,12 +403,10 @@ func (r *deviceRunner) handleEnd(ctx context.Context, a *agent.Agent, ev deviceE
 // endAction classifies a device end: a removal refusal forgets the credential
 // with serial; anything else parks with the edge's code.
 func endAction(err error) (code, serial string, forget bool) {
-	var removed *identity.RemovedError
-	if errors.As(err, &removed) {
+	if removed, ok := errors.AsType[*identity.RemovedError](err); ok {
 		return removed.Code, removed.Serial, true
 	}
-	var regErr *tunnel.RegistrationError
-	if errors.As(err, &regErr) {
+	if regErr, ok := errors.AsType[*tunnel.RegistrationError](err); ok {
 		return regErr.Code, regErr.Serial, identity.IsRemovalCode(regErr.Code)
 	}
 	return "", "", false
@@ -433,10 +431,10 @@ func (r *deviceRunner) isConfigured(identifier string) bool {
 // notifyReload subscribes to reload signals; tests replace it.
 var notifyReload = reloadSignals
 
-// watchReload is the owner goroutine of the served devices: it runs the end
-// seam for each queued device end and, with load set, reload on every reload
-// signal, until ctx ends. A config
-// that fails to load keeps the running devices and is logged. It subscribes
+// watchReload is the owner goroutine of the served devices: it runs
+// handleEnds for queued device ends and, with load set, reloads on every
+// reload signal, until ctx ends. A config that fails to load keeps the running
+// devices and is logged. It subscribes
 // first, so a signal sent before the agent runs is queued (not lost, and on
 // Unix not the default SIGHUP exit), and handles it once the agent has
 // started.

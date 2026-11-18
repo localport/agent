@@ -13,7 +13,7 @@ const (
 	// refusalBackoffBase is the first wait of a device refused with a
 	// retry_after hint; each refusal doubles it.
 	refusalBackoffBase = 30 * time.Second
-	// maxRefusalWait caps that wait and the hint (Tailscale's maxRetryWindow).
+	// maxRefusalWait caps that wait and the hint.
 	maxRefusalWait = 5 * time.Minute
 	// recordingDrainBound bounds the wait, on an admin's Disconnect, for the
 	// device's recordings to reach the server before the connection closes.
@@ -49,9 +49,9 @@ func refusalWait(hint time.Duration, n int) time.Duration {
 }
 
 // waitRefused records the refusal with code in the tunnel's status and waits
-// before the next registration. A network change does not end the wait: the
-// control plane, not the link, decides when the refusal lifts. It returns
-// false when the tunnel stops first.
+// before the next registration. A network change does not end the wait: only
+// the control plane lifts the refusal. It returns false when the tunnel stops
+// first.
 func (t *Tunnel) waitRefused(ctx context.Context, code string, hint time.Duration, n int) bool {
 	d := refusalWait(hint, n)
 	t.setWaiting(code, t.now().Add(d))
@@ -70,10 +70,10 @@ func (t *Tunnel) setWaiting(code string, next time.Time) {
 	t.statusMu.Lock()
 	t.waitCode, t.nextRetry = code, next
 	t.statusMu.Unlock()
-	t.setState(StateWaiting)
-	// setState notifies only on a change; a repeated wait changes the code
-	// or the retry time.
-	t.notifyStatus()
+	// A repeated wait keeps the state but changes the code or the retry time.
+	if !t.setState(StateWaiting) {
+		t.notifyStatus()
+	}
 }
 
 // Status returns the tunnel's current state for the status endpoint.

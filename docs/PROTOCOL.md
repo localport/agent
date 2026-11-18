@@ -295,9 +295,7 @@ a refusal the control plane can lift without any action on the device: `SE040`
 (disconnected by an admin), `BL005` and `BL010` (plan limit or feature),
 `BL007` (bandwidth for the cycle), `BL011` (payment due), `BL012` (plan
 paused), `SE019` (fleet device limit), `RS002` (resource limit) and `SE001`
-(IP not allowed), each with 60. The edge does not count such a failed
-registration against its registration rate limit, so devices behind one
-address are never banned for it. A device tunnel that gets one stays in its
+(IP not allowed), each with 60. A device tunnel that gets one stays in its
 retry loop and never parks: it waits a uniformly random time in
 `[0, min(5 min, max(retry_after, backoff)))`, the backoff starting at 30 s and
 doubling for each consecutive refusal. An interactive tunnel prints the
@@ -334,10 +332,10 @@ renewal and key fetch is refused `SE040` until an admin reconnects the device.
 A Shutdown or refusal with `SE018` (the device was removed or its fleet
 deleted) or `SE041` (its certificate was revoked because the device was
 removed or enrolled again) is final: no later state makes that credential
-usable. The device stops the tunnel, ends its sessions and releases them,
-then deletes the credential and its spooled recordings and writes the
-tombstone `identity/<team>/device-<id>.removed` (the code and the time only)
-when the stored certificate is the refused one; a credential a re-enrolment
+usable. The device stops the tunnel and ends its sessions; then, when the
+stored certificate is the refused one, it writes the tombstone
+`identity/<team>/device-<id>.removed` (the code and the time only), deletes
+the credential and drops its spooled recordings. A credential a re-enrolment
 replaced is kept. A renewal or key fetch refused the same way does the same.
 
 ### Error (9)
@@ -1729,8 +1727,10 @@ The lock files live outside the credential directory, so a credential is
 deleted whole while its writers' lock is held. Only `service uninstall
 --purge` deletes lock files: it holds `.store.lock` exclusively, so no lock
 below it is held or awaited, deletes `.locks`, and deletes `.store.lock` when
-nothing else remains. The hashed directory name carries no team or device
-identifier.
+nothing else remains. A process that takes a lock checks afterwards that the
+path still names the file it locked, and opens it again when a purge deleted
+it in between. A lock wanted while a purge runs is refused with `AG149`. The
+hashed directory name carries no team or device identifier.
 
 Before every read and write, each directory from the base (`LOCALPORT_HOME`,
 `~/.localport` or the machine-wide config directory) down to the credential is
@@ -1947,8 +1947,8 @@ A second `up` for an enrolled device checks its flags before the spend
 without the stored entry, since the identity is unknown until enrolment; a flag
 that needs the stored entry (`--logins` alone, `--enable desktop` relying on a
 stored target) is refused with the remedy: re-enrol without it, then
-`localport set`. After enrolment it takes the local config lock, re-reads the
-config and merges the flags onto the stored entry as `set` does: each flag
+`localport set`. Before the spend it takes the local config lock and holds it
+through enrolment; it then re-reads the config and merges the flags onto the stored entry as `set` does: each flag
 given overrides, the rest keep their stored values. A new identity appends an
 entry. It prints the settings in force, and a re-enrolment that changes nothing
 does not rewrite the config. When the flags conflict with the stored entry,

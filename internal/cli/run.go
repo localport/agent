@@ -141,12 +141,13 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 	return serveDevicesOn(parent, version, store, devices, noUI, noMux, reload, nil)
 }
 
-// serveDevices runs the enrolled devices until a signal or until parent ends,
-// with the renewal loop of each renewable device credential. A device whose
-// credential is missing or unreadable is logged and skipped. A foreground run
-// refuses to start when no device can and returns when the last one ends; the
-// service (reload set) keeps running with none until it stops. A device
-// refused for good is forgotten (SE018, SE041) or parked (deviceRunner.handleEnd). noMux serves every inbound connection over its
+// serveDevicesOn runs the enrolled devices until a signal or until parent
+// ends, with the renewal loop of each renewable device credential. A device
+// whose credential is missing or unreadable is logged and skipped. A
+// foreground run refuses to start when no device can and returns when the
+// last one ends; the service (reload set) keeps running with none until it
+// stops. A device refused for good is forgotten (SE018, SE041) or parked
+// (deviceRunner.handleEnd). noMux serves every inbound connection over its
 // own connection, so the devices serve no sessions. With reload set, each
 // reload signal (SIGHUP on Unix) re-reads the devices through it and applies
 // the changed ones only (deviceRunner.reload). board, when set, receives each

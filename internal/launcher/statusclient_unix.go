@@ -51,10 +51,15 @@ func (c Client) OpenStatus(ctx context.Context) (io.ReadWriteCloser, error) {
 // statusReadTimeout bounds a status read.
 const statusReadTimeout = 3 * time.Second
 
-// ErrStatusUntrusted refuses a status endpoint that is not the launcher's:
-// a link, not a socket, or a socket or directory that root does not own or
-// others may write.
-var ErrStatusUntrusted = errors.New("the status endpoint is not owned by root")
+// ErrStatusUntrusted refuses a status endpoint that is not the launcher's: a
+// link or anything other than a socket, a socket not owned by root and the
+// agent group or open to others, or a directory root does not own or its
+// group or others may write.
+var ErrStatusUntrusted = errors.New("the status endpoint is not the launcher's")
+
+// ErrStatusDenied is the status endpoint refusing this account: only root,
+// the agent account and members of the agent group may read it.
+var ErrStatusDenied = errors.New("this account may not read the device status")
 
 // statusSocket is StatusSocketPath; tests point it at their own socket.
 var statusSocket = StatusSocketPath
@@ -77,8 +82,9 @@ func agentGroup() (uint32, error) {
 // ReadStatus reads the status document from the launcher's status endpoint
 // after checking that root owns it: at most MaxStatusFrame bytes within
 // statusReadTimeout. Empty means the device service publishes none: it is
-// not running, or this account may not read it. ErrUnavailable means the
-// endpoint does not answer.
+// not running, or the launcher refused this account. ErrUnavailable means
+// the endpoint does not exist or does not answer, ErrStatusDenied that this
+// account may not reach it.
 func ReadStatus(ctx context.Context) ([]byte, error) {
 	if err := checkStatusSocket(statusSocket); err != nil {
 		return nil, err
@@ -86,6 +92,9 @@ func ReadStatus(ctx context.Context) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, statusReadTimeout)
 	defer cancel()
 	conn, err := (Client{Path: statusSocket}).dial(ctx)
+	if errors.Is(err, fs.ErrPermission) {
+		return nil, ErrStatusDenied
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -105,14 +114,20 @@ func ReadStatus(ctx context.Context) ([]byte, error) {
 // the trusted uid owns that neither group nor others can write.
 func checkStatusSocket(path string) error {
 	uid, gid, err := statusTrustedIDs()
+	if errors.Is(err, security.ErrAgentGroupMissing) {
+		// No agent group: the service was never installed here.
+		return fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
 	if err != nil {
 		return err
 	}
 	fi, err := os.Lstat(path)
-	if errors.Is(err, fs.ErrNotExist) {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("%w: %w", ErrUnavailable, err)
-	}
-	if err != nil {
+	case errors.Is(err, fs.ErrPermission):
+		return ErrStatusDenied
+	case err != nil:
 		return err
 	}
 	st := fi.Sys().(*syscall.Stat_t)
@@ -121,6 +136,9 @@ func checkStatusSocket(path string) error {
 	}
 	dir := filepath.Dir(path)
 	di, err := os.Lstat(dir)
+	if errors.Is(err, fs.ErrPermission) {
+		return ErrStatusDenied
+	}
 	if err != nil {
 		return err
 	}

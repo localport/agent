@@ -381,7 +381,7 @@ func TestDispatchBoundsInFlightDataConnections(t *testing.T) {
 	tn.opts.Handler = handlerFunc{onError: func(_ string, err error) { refused = append(refused, err) }}
 
 	before := runtime.NumGoroutine()
-	tn.dispatch(proto.MsgNewConnection, []byte(`{"connection_id":"conn_over","remote_addr":"203.0.113.9:1"}`))
+	tn.dispatch(proto.MsgNewConnection, []byte(`{"connection_id":"conn_over","remote_addr":"203.0.113.9:1"}`), nil)
 
 	if len(refused) != 1 {
 		t.Fatalf("got %d error events, want exactly 1 refusal", len(refused))

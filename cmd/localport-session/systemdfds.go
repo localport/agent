@@ -17,8 +17,8 @@ const (
 
 // systemdFDs maps the descriptors systemd passed to their
 // FileDescriptorName, from LISTEN_PID, LISTEN_FDS and LISTEN_FDNAMES. It
-// returns nil when systemd passed none to pid. Both names must be present
-// once each; any other name is refused.
+// returns nil when systemd passed none to pid. The session name must be
+// present and the status name may be, each once; any other name is refused.
 func systemdFDs(listenPID, listenFDs, fdNames string, pid int) (map[string]int, error) {
 	if listenPID != strconv.Itoa(pid) {
 		return nil, nil
@@ -41,10 +41,8 @@ func systemdFDs(listenPID, listenFDs, fdNames string, pid int) (map[string]int, 
 		}
 		fds[name] = systemdListenFD + i
 	}
-	for _, name := range []string{fdNameSession, fdNameStatus} {
-		if _, ok := fds[name]; !ok {
-			return nil, fmt.Errorf("systemd passed no socket named %q; reinstall the service: sudo localport service install", name)
-		}
+	if _, ok := fds[fdNameSession]; !ok {
+		return nil, fmt.Errorf("systemd passed no socket named %q; reinstall the service: sudo localport service install", fdNameSession)
 	}
 	return fds, nil
 }

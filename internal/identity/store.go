@@ -130,7 +130,7 @@ type Material struct {
 
 	// DeviceKeys is the key set a device enrolment or renewal response
 	// carried; nil otherwise. The Store's credential writes ignore it: the
-	// enrolling caller (cli connect) and Renewer pass it to TicketKeys.Replace
+	// enrolling caller (cli up) and Renewer pass it to TicketKeys.Replace
 	// after the credential is stored. It is never written to meta.json or
 	// pending.json.
 	DeviceKeys *DeviceKeys
@@ -197,7 +197,7 @@ func SystemStore(dir string) (*Store, error) {
 }
 
 // EnsureRoot creates the store directory owner-only when missing and refuses
-// one that fails the private directory walk. connect, setup and login run it
+// one that fails the private directory walk. up, setup and login run it
 // before spending their one-time secret.
 func (s *Store) EnsureRoot() error {
 	base, follow := s.StateRoot()
@@ -327,18 +327,18 @@ func (s *Store) removeCredential(ctx context.Context, ref Ref) error {
 }
 
 // PurgeDevices deletes every device credential directory and tombstone,
-// readable or not, then runs also, and returns the deleted paths. Other
-// credentials and their team directories stay. It does this holding the store
-// lock exclusively, so no credential lock is held or awaited, waiting up to
-// saveLockWait for the holders of credential locks (ErrRenewalInProgress).
-// Under that hold it deletes the lock directory and, when Root then holds
+// readable or not, then calls also, and returns the deleted paths. Other
+// credentials and their team directories stay. It first takes the store lock
+// exclusively, waiting up to saveLockWait for the holders of credential locks
+// to release their shared holds (ErrRenewalInProgress), so no credential lock
+// is held or awaited while it runs. Under that hold it deletes the lock directory and, when Root then holds
 // nothing else, the store lock file itself, so an emptied Root can be removed.
 // Purges never overlap (the one caller, `service uninstall --purge`, holds
 // run.lock and agent.yaml.lock) and every other holder takes the store lock
-// shared. A holder that opened the store lock before its deletion can still
-// take the deleted file shared after the release, unseen by a later purge;
-// it then only writes a credential, as a command run beside that purge would.
-// A missing Root is left missing: only also runs. Local only, as Remove.
+// shared. A holder that opened the store lock before its deletion finds the
+// path no longer names its file once locked, and opens it again.
+// A missing Root is left missing and only also is called. Local only, as
+// Remove.
 func (s *Store) PurgeDevices(ctx context.Context, also func() error) ([]string, error) {
 	if _, err := os.Lstat(s.Root); errors.Is(err, fs.ErrNotExist) {
 		if also != nil {
@@ -400,31 +400,38 @@ func (s *Store) storeLockPath() (string, error) {
 	return filepath.Join(s.Root, storeLockFile), nil
 }
 
-// shareStore takes the store lock shared, waiting up to wait, and returns busy
-// when a purge still holds it then.
-func (s *Store) shareStore(ctx context.Context, wait time.Duration, busy error) (func(), error) {
+// ErrStoreBusy means PurgeDevices holds the store lock.
+var ErrStoreBusy = errcode.New(errcode.StoreBusy)
+
+// shareStore takes the store lock shared, waiting up to wait, and returns
+// ErrStoreBusy when a purge still holds it then.
+func (s *Store) shareStore(ctx context.Context, wait time.Duration) (func(), error) {
 	path, err := s.storeLockPath()
 	if err != nil {
 		return nil, err
 	}
-	return waitLockFile(ctx, path, true, wait, busy, s.storeShareAttempt)
+	return waitLockFile(ctx, path, true, wait, ErrStoreBusy, s.storeShareAttempt)
 }
 
 // tryShareStore is shareStore without waiting.
-func (s *Store) tryShareStore() (func(), bool, error) {
+func (s *Store) tryShareStore() (func(), error) {
 	path, err := s.storeLockPath()
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return tryLockFile(path, true)
+	release, held, err := tryLockFile(path, true)
+	if err == nil && !held {
+		err = ErrStoreBusy
+	}
+	return release, err
 }
 
 // ShareStore takes the store lock shared, waiting up to saveLockWait, for a
 // caller that keeps a lock file in LockDir: it holds the returned hold for as
-// long as it holds that lock. It returns ErrRenewalInProgress while a purge
-// runs past the wait.
+// long as it holds that lock. It returns ErrStoreBusy while a purge runs past
+// the wait.
 func (s *Store) ShareStore(ctx context.Context) (func(), error) {
-	return s.shareStore(ctx, saveLockWait, ErrRenewalInProgress)
+	return s.shareStore(ctx, saveLockWait)
 }
 
 // LockDir creates ref's lock directory and returns its path. Every lock file

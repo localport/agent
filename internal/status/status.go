@@ -82,8 +82,27 @@ func Decode(raw []byte) (*Document, error) {
 		if !slices.Contains(validStates, d.State) {
 			return nil, fmt.Errorf("%w: state %q", ErrInvalid, d.State)
 		}
+		if d.Code != "" && !validCode(d.Code) {
+			return nil, fmt.Errorf("%w: code %q", ErrInvalid, d.Code)
+		}
 	}
 	return &doc, nil
+}
+
+// validCode reports whether code has the shape of a refusal code, two
+// uppercase letters and three digits (SE040). Codes arrive from the network,
+// so a row carries nothing else in their place, which also bounds its size.
+func validCode(code string) bool {
+	if len(code) != 5 {
+		return false
+	}
+	for i := range 5 {
+		c := code[i]
+		if i < 2 && (c < 'A' || c > 'Z') || i >= 2 && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // Board holds the latest state of each device and its encoded document. Set
@@ -107,8 +126,11 @@ func NewBoard(pid int) *Board {
 }
 
 // Set replaces the row of d.Identity. A row whose state and code are unchanged
-// keeps its Since.
+// keeps its Since. A code not in the refusal code shape is dropped.
 func (b *Board) Set(d Device) {
+	if !validCode(d.Code) {
+		d.Code = ""
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if prev, ok := b.devices[d.Identity]; ok && prev.State == d.State && prev.Code == d.Code {

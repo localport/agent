@@ -184,7 +184,7 @@ func (r *DeviceRegistrar) promote() {
 	case err == nil && already:
 	case err == nil:
 		r.log("identity: %s now registers with its renewed certificate", r.ref)
-	case errors.Is(err, ErrRenewalInProgress):
+	case errors.Is(err, ErrRenewalInProgress), errors.Is(err, ErrStoreBusy):
 	case done:
 		r.log("identity: %s: renewed certificate not promoted: %v", r.ref, err)
 	default:
