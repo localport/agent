@@ -19,13 +19,16 @@ import (
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/launcher"
 	"github.com/localport/agent/internal/security"
+	"github.com/localport/agent/internal/service"
 	"github.com/localport/agent/internal/status"
 )
 
 // runDown pauses enrolled devices: it sets paused on each selected entry of
-// the system config and reloads the device service, which stops their
-// tunnels. The pause lasts across restarts until `localport up`.
+// the system config and makes the process serving the devices reload
+// (applyConfig), which stops their tunnels. The pause lasts across restarts
+// until `localport up`.
 func runDown(args []string) error { return runPause("down", args, true) }
 
 // runPause is `down` (pause) and `up` without a join token (resume). Root
@@ -60,6 +63,9 @@ func runPause(command string, args []string, pause bool) (err error) {
 	if !who.privileged {
 		return errcode.WithRemedy(config.ErrSystemNotRoot.With(nil, command), "run it "+elevatedCommand(command))
 	}
+	// The reload may end the terminal session this runs in (a localport
+	// session on this device): run to the end and record the outcome.
+	ignoreHangup()
 	defer func() { logOutcome(append([]string{command}, args...), err, true) }()
 	file, err := who.localConfigFile()
 	if err != nil {
@@ -81,13 +87,39 @@ func runPause(command string, args []string, pause bool) (err error) {
 	// up also retries parked devices and starts a stopped service, so it
 	// applies even when no entry changed.
 	applied := time.Now()
-	running, err := applyPause(pause)
-	if err != nil || !running {
+	target, err := applyConfig(!pause)
+	if err != nil || target == appliedNowhere {
 		return err
 	}
 	selected := append(slices.Clone(changed), unchanged...)
-	awaitDeviceStates(os.Stderr, selected, pause, applied)
+	awaitDeviceStates(os.Stderr, selected, pause, applied, target)
 	return nil
+}
+
+// elevatedLocalport is how a command that needs root or an elevated
+// Administrator starts on this OS, and elevatedNote the help text's hint for
+// it ("" on Unix, where sudo says it).
+func elevatedLocalport() string {
+	if runtime.GOOS == "windows" {
+		return "localport"
+	}
+	return "sudo localport"
+}
+
+func elevatedNote() string {
+	if runtime.GOOS == "windows" {
+		return " (from an elevated prompt)"
+	}
+	return ""
+}
+
+// elevatedStop is the command that stops the device service m, as an
+// administrator runs it on this OS.
+func elevatedStop(m service.Manager) string {
+	if runtime.GOOS == "windows" {
+		return m.StopCommand() + elevatedNote()
+	}
+	return "sudo " + m.StopCommand()
 }
 
 // elevatedCommand names how to run command with the privilege it needs on
@@ -113,7 +145,10 @@ var readDocument = status.Read
 // parked, parked again at applied or later (so the refusal read is the one
 // after up's retry). It waits at most awaitStatesFor, then prints each
 // device's state, with a note on a timeout. The config is written either way.
-func awaitDeviceStates(w io.Writer, refs []identity.Ref, pause bool, applied time.Time) {
+// A foreground run publishes to the session launcher only when the device
+// service installed it, so with target a foreground run and no launcher it
+// stops at once and points to the run's terminal.
+func awaitDeviceStates(w io.Writer, refs []identity.Ref, pause bool, applied time.Time, target applyTarget) {
 	if len(refs) == 0 {
 		return
 	}
@@ -124,6 +159,10 @@ func awaitDeviceStates(w io.Writer, refs []identity.Ref, pause bool, applied tim
 		doc, err = readDocument(context.Background())
 		if err == nil && statesSettled(doc, refs, pause, applied) {
 			break
+		}
+		if target == appliedByForegroundRun && errors.Is(err, launcher.ErrUnavailable) {
+			fmt.Fprintf(w, "  the foreground run shows the devices' states in its terminal\n")
+			return
 		}
 		if time.Now().After(deadline) {
 			break
@@ -138,7 +177,7 @@ func awaitDeviceStates(w io.Writer, refs []identity.Ref, pause bool, applied tim
 		fmt.Fprintf(w, "  %s %s\n", ref, describeRow(rowOf(doc, ref)))
 	}
 	if !statesSettled(doc, refs, pause, applied) {
-		fmt.Fprintf(w, "  the device service has not applied it yet; check with: localport status\n")
+		fmt.Fprintf(w, "  the run has not applied it yet; check with: localport status\n")
 	}
 }
 
@@ -178,39 +217,69 @@ func pausedWord(pause bool) string {
 	return "resumed"
 }
 
-// applyPause reloads the running device service. A stopped one is started by
-// up (resume) and left stopped by down (pause), which applies at its next
-// start. It reports whether the service runs the change now. With no service
-// installed it says so.
-func applyPause(pause bool) (running bool, err error) {
+// applyTarget is the run that applied a config change.
+type applyTarget int
+
+const (
+	appliedNowhere applyTarget = iota // applies at the devices' next start
+	appliedByService
+	appliedByForegroundRun
+)
+
+// requestReload is launcher.RequestReload; tests replace it.
+var requestReload = launcher.RequestReload
+
+// applyConfig makes the run serving the system devices apply a config change.
+// A foreground run is asked through its control endpoint first, so a stopped
+// service is never started beside it; one that holds run.lock but has not yet
+// read the config reads the change with it, so it applies when the run starts
+// serving (launcher.ErrRunStarting). Otherwise the installed device service
+// is reloaded; a stopped one is started when start is set (up) and otherwise
+// left to apply the change when it starts. It prints what it did and returns
+// the run that applies the change now.
+func applyConfig(start bool) (applyTarget, error) {
+	switch err := requestReload(context.Background()); {
+	case err == nil:
+		fmt.Fprintf(os.Stderr, "  reloaded the foreground run\n")
+		return appliedByForegroundRun, nil
+	case errors.Is(err, launcher.ErrRunStarting):
+		fmt.Fprintf(os.Stderr, "  saved; the foreground run applies it when it starts\n")
+		return appliedNowhere, nil
+	case errors.Is(err, launcher.ErrControlUntrusted):
+		return appliedNowhere, errcode.WithRemedy(errcode.New(errcode.SettingsNotApplied).With(err, "ask the foreground run to reload"),
+			"a foreground run's control endpoint is root's (SYSTEM and Administrators' on Windows) and closed to everyone else; find what created this one and remove it")
+	case !errors.Is(err, launcher.ErrNoForegroundRun):
+		return appliedNowhere, errcode.WithRemedy(errcode.New(errcode.SettingsNotApplied).With(err, "ask the foreground run to reload"),
+			"stop the foreground run and start it again")
+	}
 	m, installed, err := installedDeviceService()
 	if err != nil {
-		return false, err
+		return appliedNowhere, err
 	}
 	if !installed {
-		fmt.Fprintf(os.Stderr, "  no device service is installed; install it with: %s\n", serviceInstallCommand)
-		return false, nil
+		fmt.Fprintf(os.Stderr, "  no device service is installed and no foreground run serves the devices; it applies when they next run (install the service with: %s)\n", serviceInstallCommand)
+		return appliedNowhere, nil
 	}
 	pid, err := m.MainPID(context.Background())
 	if err != nil {
-		return false, err
+		return appliedNowhere, err
 	}
 	switch {
-	case pid == 0 && pause:
+	case pid == 0 && !start:
 		fmt.Fprintf(os.Stderr, "  the device service is not running; it applies this when it starts\n")
-		return false, nil
+		return appliedNowhere, nil
 	case pid == 0:
 		if err := m.Restart(context.Background()); err != nil {
-			return false, notApplied(err)
+			return appliedNowhere, notApplied(err)
 		}
 		fmt.Fprintf(os.Stderr, "  started the device service\n")
-		return true, nil
+		return appliedByService, nil
 	}
 	if err := m.Reload(context.Background()); err != nil {
-		return false, notApplied(err)
+		return appliedNowhere, notApplied(err)
 	}
 	fmt.Fprintf(os.Stderr, "  reloaded the device service\n")
-	return true, nil
+	return appliedByService, nil
 }
 
 // notApplied is a service start or reload that failed after the config was
@@ -222,9 +291,56 @@ func notApplied(err error) error {
 // setPaused writes paused on the selected devices under the local config's
 // lock, which also covers reading the store facts, so a concurrent `up
 // <join-token>` cannot be pruned by a tombstone read before its enrolment. It
-// drops entries of removed devices. It returns the devices it changed and the
-// selected ones already in that state.
+// drops entries of removed devices. A choice asked in the terminal is made
+// with no lock held, then applied to the config as read again under the lock
+// (pauseLocked), so a prompt left open never blocks up, set or a purge. It
+// returns the devices it changed and the selected ones already in that state.
 func setPaused(file config.LocalConfigFile, who invoker, selector string, all, pause bool) (changed, unchanged []identity.Ref, err error) {
+	command := "up"
+	if pause {
+		command = "down"
+	}
+	// chosen is the terminal's choice, asked with no lock held; the write
+	// then applies it to the config as read again under the lock.
+	var chosen []identity.Ref
+	for {
+		changed, unchanged, err = pauseLocked(file, who, selector, all, pause, command, chosen)
+		var ask *choiceNeeded
+		if !errors.As(err, &ask) {
+			return changed, unchanged, err
+		}
+		idx, err := askDevices(ask.devices, ask.facts)
+		if err != nil {
+			// Removed devices' entries go even when no device was chosen, as
+			// every other refused selection drops them.
+			_, _, pruneErr := pauseLocked(file, who, selector, all, pause, command, []identity.Ref{})
+			return nil, nil, errors.Join(err, pruneErr)
+		}
+		chosen = make([]identity.Ref, 0, len(idx))
+		for _, i := range idx {
+			chosen = append(chosen, ask.devices[i].Identity)
+		}
+	}
+}
+
+// askDevices asks the terminal which devices to act on; tests replace it.
+var askDevices = func(devices []config.LocalDevice, facts map[identity.Ref]deviceFact) ([]int, error) {
+	return chooseDevices(os.Stdin, os.Stderr, devices, facts)
+}
+
+// choiceNeeded carries what pauseLocked read for the terminal's choice.
+type choiceNeeded struct {
+	devices []config.LocalDevice
+	facts   map[identity.Ref]deviceFact
+}
+
+func (*choiceNeeded) Error() string { return errChoiceNeeded.Error() }
+
+// pauseLocked is one pass of setPaused under the config's lock: with chosen
+// set it acts on those devices, a chosen one gone since the choice being
+// DeviceNotFound; otherwise on selectDevices' answer, returning choiceNeeded
+// when the terminal must choose.
+func pauseLocked(file config.LocalConfigFile, who invoker, selector string, all, pause bool, command string, chosen []identity.Ref) (changed, unchanged []identity.Ref, err error) {
 	unlock, err := config.LockLocal(file)
 	if err != nil {
 		return nil, nil, err
@@ -239,11 +355,16 @@ func setPaused(file config.LocalConfigFile, who invoker, selector string, all, p
 		return nil, nil, err
 	}
 	pruned := pruneRemoved(local, facts)
-	command := "up"
-	if pause {
-		command = "down"
+	var idx []int
+	if chosen != nil {
+		idx, err = indexesOf(local.Devices, chosen)
+	} else {
+		idx, err = selectDevices(local.Devices, selector, all, command)
 	}
-	idx, err := selectDevices(local.Devices, facts, selector, all, command)
+	if errors.Is(err, errChoiceNeeded) {
+		// The pruned entries are written by the pass after the choice.
+		return nil, nil, &choiceNeeded{devices: local.Devices, facts: facts}
+	}
 	if err != nil {
 		return nil, nil, errors.Join(err, writePruned(file, local, pruned))
 	}
@@ -264,6 +385,20 @@ func setPaused(file config.LocalConfigFile, who invoker, selector string, all, p
 	}
 	reportPruned(pruned)
 	return changed, unchanged, nil
+}
+
+// indexesOf returns the index in devices of each of refs; one no longer
+// there is DeviceNotFound.
+func indexesOf(devices []config.LocalDevice, refs []identity.Ref) ([]int, error) {
+	idx := make([]int, 0, len(refs))
+	for _, ref := range refs {
+		i := slices.IndexFunc(devices, func(d config.LocalDevice) bool { return d.Identity == ref })
+		if i < 0 {
+			return nil, errcode.New(errcode.DeviceNotFound).With(nil, fmt.Sprintf("%s left the local config while it was chosen", ref))
+		}
+		idx = append(idx, i)
+	}
+	return idx, nil
 }
 
 // pruneRemoved drops the entries of devices the store forgot (a tombstone and
@@ -520,16 +655,18 @@ func usagePause(command string, fs *flag.FlagSet) {
 	if command == "up" {
 		verb, detail = "Resume", "A paused device connects again, and a device the agent stopped after a refusal retries."
 	}
-	fmt.Fprintf(os.Stderr, `Usage: sudo localport %[1]s [<device> | --all]
-  On Windows, run localport %[1]s from an elevated prompt.
+	fmt.Fprintf(os.Stderr, `Usage: %[4]s %[1]s [<device> | --all]%[5]s
 
-  %[2]s an enrolled device and apply it to the running device service.
+  %[2]s an enrolled device and apply it at once: a localport run or up
+  --foreground in a terminal reloads, else the running device service does.
+  up starts a stopped service; down leaves it to apply the pause when it
+  starts.
   %[3]s
   With one device enrolled, it acts on that one. With several, name it by
   its identity, <team>/<prefix>, or a unique prefix; in a terminal with no
   argument, it asks which.
 
 Flags:
-`, command, verb, detail)
+`, command, verb, detail, elevatedLocalport(), elevatedNote())
 	fs.PrintDefaults()
 }

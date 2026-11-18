@@ -32,12 +32,44 @@ func runStatus(args []string) error {
 }
 
 func printStatus(ctx context.Context, w io.Writer) error {
+	// Root's status prints these itself (runRootStatus): the account check
+	// reads /etc/shadow, which the agent account cannot.
+	if !asAgentChild {
+		if err := printStatusHeader(ctx, w); err != nil {
+			return err
+		}
+	}
+	return printStatusDevices(ctx, w)
+}
+
+// printStatusHeader prints the service state and, on Linux and macOS, the
+// agent account's check.
+func printStatusHeader(ctx context.Context, w io.Writer) error {
 	if err := printServiceState(ctx, w); err != nil {
 		return err
 	}
 	if runtime.GOOS != "windows" {
 		printAccount(ctx, w)
 	}
+	return nil
+}
+
+// runRootStatus is status for root on the system layout: root prints the
+// header, then runs the rest as the agent account, which owns the device
+// keys (printStatusDevices in the agent child).
+func runRootStatus(args []string) error {
+	if len(args) > 1 {
+		return runAsAgentAccount(args, os.Stdin, os.Stdout)
+	}
+	if err := printStatusHeader(context.Background(), os.Stdout); err != nil {
+		return err
+	}
+	return runAsAgentAccount(args, os.Stdin, os.Stdout)
+}
+
+// printStatusDevices prints the config, its devices and the launcher's state
+// to an account that can read the system config.
+func printStatusDevices(ctx context.Context, w io.Writer) error {
 	file, err := systemLocalConfig()
 	if err != nil {
 		return err
@@ -59,10 +91,11 @@ func printStatus(ctx context.Context, w io.Writer) error {
 		fmt.Fprintf(w, "states     %s; showing the config's\n", statusUnavailable(docErr))
 	}
 	// Tombstones are readable only where the store is: in process, or as the
-	// agent account root's status runs as.
+	// agent account root's status runs as. An unprivileged reader of the
+	// system config has its own store, which holds none of these devices.
 	var store *identity.Store
-	if !needsAgentChild(file) {
-		store, _ = currentInvoker(false).store()
+	if who := currentInvoker(false); !needsAgentChild(file) && who.privileged {
+		store, _ = who.store()
 	}
 	for _, d := range cfg.Devices {
 		enable := make([]string, len(d.Enable))
@@ -120,8 +153,31 @@ func printServiceState(ctx context.Context, w io.Writer) error {
 		fmt.Fprintf(w, "service    %s, installed, not running\n", m.Name())
 		return nil
 	}
-	fmt.Fprintf(w, "service    %s, running, pid %d\n", m.Name(), pid)
+	fmt.Fprintf(w, "service    %s, running, pid %d%s\n", m.Name(), pid, standbyNote(pid))
 	return nil
+}
+
+// standbyNote is ", waiting: ..." when the running service with main process
+// servicePID stands by because another process holds the run lock
+// (holdServiceRunLock), and "" otherwise or when this account cannot tell.
+// The holder's PID counts only while the lock is held, as a holder that died
+// leaves its PID behind.
+func standbyNote(servicePID int) string {
+	file, err := systemLocalConfig()
+	if err != nil {
+		return ""
+	}
+	if held, err := config.RunLockHeld(file); err != nil || !held {
+		return ""
+	}
+	holder, err := config.RunLockHolder(file)
+	if err != nil || holder == servicePID {
+		return ""
+	}
+	if holder == 0 {
+		return ", waiting: another process serves the devices"
+	}
+	return fmt.Sprintf(", waiting: a foreground run (pid %d) serves the devices", holder)
 }
 
 // checkAccount is service.CheckAccount; tests replace it.
@@ -131,6 +187,10 @@ var checkAccount = service.CheckAccount
 // device service as.
 func printAccount(ctx context.Context, w io.Writer) {
 	acct, err := checkAccount(ctx)
+	if errors.Is(err, service.ErrPasswordUnchecked) {
+		fmt.Fprintf(w, "account    %s, uid %d, ok except the password, which only root can check\n", security.AgentGroup, acct.UID)
+		return
+	}
 	if err != nil {
 		fmt.Fprintf(w, "account    %s: %s\n", security.AgentGroup, userText(err))
 		return

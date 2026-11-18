@@ -10,10 +10,10 @@ import (
 )
 
 const (
-	// refusalBackoffBase is the first wait of a device refused with a
-	// retry_after hint; each refusal doubles it.
+	// refusalBackoffBase is the first jitter window of a device refused with
+	// a retry_after hint; each refusal doubles it.
 	refusalBackoffBase = 30 * time.Second
-	// maxRefusalWait caps that wait and the hint.
+	// maxRefusalWait caps the hint and, separately, the jitter window.
 	maxRefusalWait = 5 * time.Minute
 	// recordingDrainBound bounds the wait, on an admin's Disconnect, for the
 	// device's recordings to reach the server before the connection closes.
@@ -39,13 +39,14 @@ type kick struct {
 	drain      bool
 }
 
-// refusalWait is the Full Jitter wait before the n-th consecutive retry of a
-// hinted refusal: uniform in [0, min(maxRefusalWait, max(hint, backoff))),
-// the backoff doubling from refusalBackoffBase.
+// refusalWait is the wait before the n-th consecutive retry of a hinted
+// refusal. The hint is a minimum, as HTTP Retry-After is: the wait is the
+// hint plus a uniform random part in [0, backoff), so devices kicked together
+// do not retry together. Both are capped at maxRefusalWait; the backoff
+// doubles from refusalBackoffBase.
 func refusalWait(hint time.Duration, n int) time.Duration {
-	backoff := refusalBackoffBase << min(max(n-1, 0), 4)
-	upper := min(maxRefusalWait, max(hint, backoff))
-	return rand.N(upper)
+	backoff := min(maxRefusalWait, refusalBackoffBase<<min(max(n-1, 0), 4))
+	return min(hint, maxRefusalWait) + rand.N(backoff)
 }
 
 // waitRefused records the refusal with code in the tunnel's status and waits

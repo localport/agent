@@ -157,8 +157,20 @@ func inspectPrivateDir(path string, follow, secure bool) error {
 
 // openLockNoFollow opens or creates path with FILE_FLAG_OPEN_REPARSE_POINT and
 // refuses a reparse point or directory from the handle attributes, so there is
-// no window between check and use.
+// no window between check and use. The file can be deleted while open.
 func openLockNoFollow(path string) (*os.File, error) {
+	return openLockNoFollowShared(path, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+}
+
+// OpenPinnedLockFile is OpenLockFile for a lock that must not be sidestepped
+// by deleting its file: while the handle is open the file cannot be deleted
+// or renamed (lockFileShare).
+func OpenPinnedLockFile(path string) (*os.File, error) {
+	return openLockNoFollowShared(path, lockFileShare)
+}
+
+// openLockNoFollowShared is openLockNoFollow with the share mode share.
+func openLockNoFollowShared(path string, share uint32) (*os.File, error) {
 	sa, err := privateSecurityAttributes(path, false)
 	if err != nil {
 		return nil, err
@@ -169,7 +181,7 @@ func openLockNoFollow(path string) (*os.File, error) {
 	}
 	h, err := windows.CreateFile(p,
 		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		share,
 		sa,
 		windows.OPEN_ALWAYS,
 		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,

@@ -31,11 +31,15 @@ const accountHome = "/nonexistent"
 // identityDir is the device identity directory: on macOS a recreated account
 // takes the ids that own it when they are free (createAccount). An account
 // that can log in or reaches other users' files is refused with
-// AgentAccountUnsafe on macOS. It is idempotent, as the packages' postinstall
+// AgentAccountUnsafe on Linux and macOS. It is idempotent, as the packages' postinstall
 // is, which creates the same account.
 func EnsureAccount(ctx context.Context, identityDir string) (Account, error) {
 	return ensureAccount(ctx, execRun, hostAccounts{}, identityDir)
 }
+
+// ErrPasswordUnchecked is CheckAccount on Linux for a caller that cannot read
+// /etc/shadow: every other rule passed, and only root can check the password.
+var ErrPasswordUnchecked = errors.New("the agent account's password can be checked only as root")
 
 // LookupAccount returns the agent account's ids, or an error naming it when
 // it does not exist.
@@ -43,14 +47,17 @@ func LookupAccount() (Account, error) { return lookupAccount(hostAccounts{}) }
 
 // CheckAccount looks up the agent account and checks its shape as
 // EnsureAccount does, changing nothing: AccountMissing when it does not
-// exist, AgentAccountUnsafe (macOS) when it can log in or reaches other
-// users' files.
+// exist, AgentAccountUnsafe (Linux and macOS) when it can log in or reaches
+// other users' files, and on Linux ErrPasswordUnchecked when only the
+// password could not be checked because the caller cannot read /etc/shadow.
 func CheckAccount(ctx context.Context) (Account, error) {
 	acct, err := lookupAccount(hostAccounts{})
 	if err != nil {
 		return Account{}, err
 	}
-	if err := checkShape(ctx, execRun, acct); err != nil {
+	if err := checkShape(ctx, execRun, acct); errors.Is(err, ErrPasswordUnchecked) {
+		return acct, err
+	} else if err != nil {
 		return Account{}, err
 	}
 	return acct, nil
@@ -105,7 +112,10 @@ func ensureAccount(ctx context.Context, run runner, db accounts, identityDir str
 	if err != nil {
 		return Account{}, err
 	}
-	if err := checkShape(ctx, run, acct); err != nil {
+	if err := checkShape(ctx, run, acct); errors.Is(err, ErrPasswordUnchecked) {
+		// Root reads /etc/shadow; a denial here is a policy refusing root.
+		return Account{}, errAccount.With(err, "read /etc/shadow")
+	} else if err != nil {
 		return Account{}, err
 	}
 	return acct, nil

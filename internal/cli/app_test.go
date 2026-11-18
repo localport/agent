@@ -107,7 +107,7 @@ func TestAppRefusesAnUnknownCommand(t *testing.T) {
 // and fails on the missing token.
 func TestAppUpNeedsAToken(t *testing.T) {
 	app := New("1.2.3", "abc123", "2026-04-13")
-	if err := app.Run([]string{"up", "--enable", "terminal"}); err == nil || !strings.Contains(err.Error(), "join token required") {
+	if err := app.Run([]string{"up", "--enable", "terminal"}); err == nil || !errors.Is(err, errcode.New(errcode.JoinTokenRequired)) {
 		t.Fatalf("up --enable without a token = %v, want join token required", err)
 	}
 }

@@ -63,6 +63,12 @@ func (a *App) Run(args []string) error {
 		return runAgentChild(a, args[1:])
 	}
 	if rootRunsAsAgent(args[0]) {
+		switch args[0] {
+		case "run":
+			return runRunAsAgent(args, os.Stdin, os.Stdout)
+		case "status":
+			return runRootStatus(args)
+		}
 		return runAsAgentAccount(args, os.Stdin, os.Stdout)
 	}
 	switch args[0] {
@@ -118,7 +124,7 @@ func (a *App) Run(args []string) error {
 }
 
 func printMainUsage(w io.Writer) {
-	fmt.Fprint(w, `Usage: localport <command> [flags]
+	fmt.Fprintf(w, `Usage: localport <command> [flags]
 
 Commands:
   up        Enrol this machine as a fleet device, resume a paused one, or run a config file
@@ -150,15 +156,15 @@ Examples:
   # Run several tunnels from one config file:
   localport up --config localport.yaml
 
-  # Enrol this machine as a fleet device with the command the dashboard shows:
-  sudo localport up <join-token> --enable terminal,files --logins pi
+  # Enrol this machine as a fleet device with the command the dashboard shows%[2]s:
+  %[1]s up <join-token> --enable terminal,files --logins pi
 
-  # A device serving another machine on this network (ports are set in the dashboard):
-  sudo localport up <join-token> --host 192.168.1.100 --allow-ports 502,80
+  # A device serving another machine on this network (ports are set in the dashboard)%[2]s:
+  %[1]s up <join-token> --host 192.168.1.100 --allow-ports 502,80
 
-  # Take a device offline until you bring it back:
-  sudo localport down
-  sudo localport up
+  # Take a device offline until you bring it back%[2]s:
+  %[1]s down
+  %[1]s up
 
   # Reach a device's ports with your client certificate:
   localport access plc-01-factory.ap.localport.dev -L 5020:502 -L 8080:80
@@ -173,5 +179,5 @@ Examples:
 
   # See what this machine holds:
   localport identity list
-`)
+`, elevatedLocalport(), elevatedNote())
 }

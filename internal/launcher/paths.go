@@ -16,4 +16,9 @@ const (
 	// DarwinStatusSocketPath: launchd binds it from the io.localport.session
 	// Sockets entry Status.
 	DarwinStatusSocketPath = "/var/run/localport/status.sock"
+
+	// LinuxControlSocketPath is a foreground run's control endpoint, which
+	// that run binds (control_unix.go); DarwinControlSocketPath likewise.
+	LinuxControlSocketPath  = "/run/localport/control.sock"
+	DarwinControlSocketPath = "/var/run/localport/control.sock"
 )

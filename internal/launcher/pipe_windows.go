@@ -19,8 +19,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// PipePath is the launcher's named pipe.
-const PipePath = `\\.\pipe\localport-session`
+// PipePath is the launcher's named pipe. Only SYSTEM and Administrators can
+// create a pipe under ProtectedPrefix\Administrators, so no other account can
+// take the name before the launcher starts.
+const PipePath = `\\.\pipe\ProtectedPrefix\Administrators\Localport\session`
 
 // pipeClientAccess is what a pipe's DACL grants its one client: read and
 // write data, read attributes and the security descriptor. It leaves out

@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,14 +16,21 @@ import (
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/security"
+	"github.com/localport/agent/internal/session"
 )
 
-// set as root reloads the installed device service; it never restarts it.
+// set as root reloads the running device service; it never restarts it, and
+// leaves a stopped one to apply the settings when it starts.
 func TestSetReloadsTheDeviceService(t *testing.T) {
-	m := &fakeManager{installed: true}
-	file := asRoot(t, m)
+	stopped := &fakeManager{installed: true}
+	file := asRoot(t, stopped)
 	writeDevices(t, file)
-	if err := runSet([]string{"factory.gw-01", "--allow-ports", "80"}); err != nil {
+	if err := runSet([]string{"factory.gw-01", "--allow-ports", "80"}); err != nil || stopped.reloads != 0 || stopped.restarts != 0 {
+		t.Fatalf("set with the service stopped = %v, reloads %d, restarts %d; want nil and none", err, stopped.reloads, stopped.restarts)
+	}
+	m := &fakeManager{installed: true, mainPID: 1}
+	writeDevices(t, asRoot(t, m))
+	if err := runSet([]string{"factory.gw-01", "--allow-ports", "81"}); err != nil {
 		t.Fatalf("set = %v", err)
 	}
 	if m.reloads != 1 {
@@ -173,7 +181,7 @@ func TestSetResetsTheDesktopKeyPin(t *testing.T) {
 	for kind, other := range map[string]string{"rdp": "vnc", "vnc": "rdp"} {
 		t.Run(kind, func(t *testing.T) {
 			flag := "--" + kind + "-reset-pin"
-			m := &fakeManager{installed: true}
+			m := &fakeManager{installed: true, mainPID: 1}
 			file := asRoot(t, m)
 			writeDevices(t, file)
 			store, err := identity.SystemStore(file.Base)
@@ -245,5 +253,38 @@ func TestSetResetsTheDesktopKeyPin(t *testing.T) {
 				t.Fatalf("set with a failing reset = %v, reloads %d; want the pin error and a second reload", err, m.reloads)
 			}
 		})
+	}
+}
+
+// A reload ends the sessions of every changed device at once under one
+// reloadSessionWait bound, so a reload of many devices waits one bound at
+// most: each fake end returns only once every device's end has started.
+func TestReloadEndsSessionsConcurrently(t *testing.T) {
+	refs := []identity.Ref{deviceRef("factory.a"), deviceRef("factory.b"), deviceRef("factory.c")}
+	prev := endSessionsForReload
+	t.Cleanup(func() { endSessionsForReload = prev })
+	var started atomic.Int32
+	all := make(chan struct{})
+	var timedOut atomic.Int32
+	endSessionsForReload = func(_ *session.Server, ctx context.Context) error {
+		if started.Add(1) == int32(len(refs)) {
+			close(all)
+		}
+		select {
+		case <-all:
+			return nil
+		case <-ctx.Done():
+			timedOut.Add(1)
+			return ctx.Err()
+		}
+	}
+	r := &deviceRunner{store: &identity.Store{Root: t.TempDir()}, logEvent: func(string) {}, probed: true, noMux: true,
+		served: map[identity.Ref]*servedDevice{}}
+	for _, ref := range refs {
+		r.served[ref] = &servedDevice{local: config.LocalDevice{Identity: ref}, sessions: &session.Server{}}
+	}
+	r.reload(context.Background(), agent.New(&config.Config{}), nil)
+	if timedOut.Load() != 0 || started.Load() != int32(len(refs)) {
+		t.Fatalf("%d of %d session ends started, %d waited out the bound; want all together and none", started.Load(), len(refs), timedOut.Load())
 	}
 }

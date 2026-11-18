@@ -48,9 +48,11 @@ func runRelayed(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer, hangup
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setsid = true
+	// The child holds its own copies of cmd.ExtraFiles once it starts.
+	extra := cmd.ExtraFiles
 	if term == nil {
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
-		return runWithSignals(cmd, nil, hangupIgnored)
+		return runWithSignals(cmd, nil, hangupIgnored, extra...)
 	}
 	master, slave, err := pty.Open()
 	if err != nil {
@@ -83,7 +85,7 @@ func runRelayed(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer, hangup
 		}
 		r.input, r.cancelR, r.cancelW = term, cr, cw
 	}
-	return runWithSignals(cmd, r, hangupIgnored, slave)
+	return runWithSignals(cmd, r, hangupIgnored, append([]*os.File{slave}, extra...)...)
 }
 
 // runWithSignals starts cmd, forwards root's signals to its process group,

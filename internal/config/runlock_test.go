@@ -5,8 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
+
+	"github.com/localport/agent/internal/security"
 )
 
 func testRunFile(t *testing.T) LocalConfigFile {
@@ -35,6 +38,52 @@ func TestLockRunRefusesASecondHolder(t *testing.T) {
 	}
 	if err := again(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Removing run.lock while a holder has it must not let a second process take
+// the devices. On Windows the removal fails (run.lock is open without delete
+// sharing); on Linux and macOS it succeeds, but the lock is on the config
+// directory, so the second LockRun is refused either way.
+func TestLockRunRefusedAfterTheLockFileIsRemoved(t *testing.T) {
+	f := testRunFile(t)
+	release, err := LockRun(f, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = release() }()
+	removable := runtime.GOOS != "windows"
+	if err := os.Remove(f.RunLockPath()); (err == nil) != removable {
+		t.Fatalf("remove %s while held = %v, want removable %v", f.RunLockPath(), err, removable)
+	}
+	second, err := LockRun(f, 0)
+	if err == nil {
+		_ = second()
+	}
+	if !errors.Is(err, ErrRunLocked) {
+		t.Fatalf("LockRun after run.lock was removed under its holder = %v, want ErrRunLocked", err)
+	}
+}
+
+// The config lock cannot be deleted while LockLocal holds it, so no second
+// writer can lock a new one beside the holder; the lock stays held.
+func TestLockLocalCannotBeRemovedWhileHeld(t *testing.T) {
+	f := testRunFile(t)
+	release, err := LockLocal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := os.Remove(f.LockPath()); err == nil {
+		t.Fatalf("removed %s while LockLocal held it", f.LockPath())
+	}
+	lock, err := os.Open(f.LockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if free, err := security.TryLockFile(lock); err != nil || free {
+		t.Fatalf("config lock after the removal attempt: free %v, %v; want held", free, err)
 	}
 }
 

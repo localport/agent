@@ -308,6 +308,60 @@ func (t *Tunnel) drainSessions(ctx context.Context) {
 	m.drain(ctx, t.opts.FlushRecordings)
 }
 
+// drainReadingControl drains the sessions (drainSessions) while it reads the
+// control connection, when readerDone says the receive loop no longer does. A
+// terminal Shutdown read meanwhile (a removal, teardown or revocation during
+// an admin's Disconnect) ends the drain at once and is returned; heartbeats are
+// acked and anything else read is dropped. The connection's read deadline ends
+// the reader.
+func (t *Tunnel) drainReadingControl(ctx context.Context, readerDone bool) *proto.ShutdownPayload {
+	raw, pc := t.snapshotConnPair()
+	if !readerDone || raw == nil || pc == nil {
+		t.drainSessions(ctx)
+		return nil
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// interruptReader left a past deadline when the session ended.
+	_ = raw.SetReadDeadline(time.Time{})
+	found := make(chan *proto.ShutdownPayload, 1)
+	reading := make(chan struct{})
+	go func() {
+		defer close(reading)
+		for {
+			msgType, body, err := pc.Recv()
+			if err != nil {
+				return
+			}
+			if msgType == proto.MsgHeartbeat {
+				// The edge drops a control connection silent past its read
+				// deadline, which would cut the drain short.
+				if hb, _ := proto.ParseHeartbeat(body); hb != nil {
+					_ = pc.SendHeartbeatAck(hb.Timestamp)
+				}
+				continue
+			}
+			if msgType != proto.MsgShutdown {
+				continue
+			}
+			if sd, _ := proto.ParseShutdown(body); t.kickOf(sd) == nil && terminalShutdown(sd) {
+				found <- sd
+				cancel()
+				return
+			}
+		}
+	}()
+	t.drainSessions(ctx)
+	_ = raw.SetReadDeadline(time.Now())
+	<-reading
+	select {
+	case sd := <-found:
+		return sd
+	default:
+		return nil
+	}
+}
+
 // shutdownHandler runs Shutdown and waits for it at most shutdownTimeout. A
 // Shutdown still running past the bound is waited for by run once the conn
 // has closed.

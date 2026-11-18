@@ -9,7 +9,8 @@ import (
 // that root writes and the unprivileged agent account reads through group
 // AgentGroup (localport, _localport on macOS): the directory is
 // root:AgentGroup 0750, agent.yaml root:AgentGroup 0640, run.lock
-// root:AgentGroup 0660 and agent.yaml.lock root-only 0600. Every
+// root:AgentGroup 0660 and the config lock root-only (the directory
+// agent.yaml.lock.d 0700 with a 0600 marker). Every
 // check runs on a descriptor opened without following a symlink, as for the
 // private files. Windows has the same set guarded by DACLs instead
 // (systemfile_windows.go); the gid arguments are unused there.

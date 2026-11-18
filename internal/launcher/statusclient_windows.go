@@ -122,10 +122,16 @@ func openStatusPipe(ctx context.Context) (*os.File, error) {
 	return os.NewFile(uintptr(h), StatusPipePath), nil
 }
 
-// checkStatusPipe refuses unless the owner is SYSTEM or Administrators and
-// every allow entry of the DACL names SYSTEM or Administrators. The owner
-// alone is not enough: an Administrators-owned pipe may still grant others.
+// checkStatusPipe is checkAdminPipe for the status pipe.
 func checkStatusPipe(sd *windows.SECURITY_DESCRIPTOR) error {
+	return checkAdminPipe(sd, ErrStatusUntrusted)
+}
+
+// checkAdminPipe refuses, with untrusted, unless the owner is SYSTEM or
+// Administrators and every allow entry of the DACL names SYSTEM or
+// Administrators. The owner alone is not enough: an Administrators-owned pipe
+// may still grant others.
+func checkAdminPipe(sd *windows.SECURITY_DESCRIPTOR, untrusted error) error {
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
 		return err
@@ -137,35 +143,35 @@ func checkStatusPipe(sd *windows.SECURITY_DESCRIPTOR) error {
 	trusted := func(sid *windows.SID) bool { return sid.Equals(system) || sid.Equals(admins) }
 	owner, _, err := sd.Owner()
 	if err != nil {
-		return fmt.Errorf("read the status pipe owner: %w", err)
+		return fmt.Errorf("read the pipe owner: %w", err)
 	}
 	if !trusted(owner) {
-		return fmt.Errorf("%w: owned by %s", ErrStatusUntrusted, owner)
+		return fmt.Errorf("%w: owned by %s", untrusted, owner)
 	}
 	dacl, _, err := sd.DACL()
 	if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) {
-		return fmt.Errorf("%w: no DACL admits everyone", ErrStatusUntrusted)
+		return fmt.Errorf("%w: no DACL admits everyone", untrusted)
 	}
 	if err != nil {
-		return fmt.Errorf("read the status pipe DACL: %w", err)
+		return fmt.Errorf("read the pipe DACL: %w", err)
 	}
 	if dacl == nil {
-		return fmt.Errorf("%w: no DACL admits everyone", ErrStatusUntrusted)
+		return fmt.Errorf("%w: no DACL admits everyone", untrusted)
 	}
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
-			return fmt.Errorf("read the status pipe DACL: %w", err)
+			return fmt.Errorf("read the pipe DACL: %w", err)
 		}
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
 			if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
 				continue
 			}
-			return fmt.Errorf("%w: entry type %d", ErrStatusUntrusted, ace.Header.AceType)
+			return fmt.Errorf("%w: entry type %d", untrusted, ace.Header.AceType)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		if !trusted(sid) {
-			return fmt.Errorf("%w: grants %s", ErrStatusUntrusted, sid)
+			return fmt.Errorf("%w: grants %s", untrusted, sid)
 		}
 	}
 	return nil

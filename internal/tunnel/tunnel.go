@@ -41,6 +41,11 @@ const (
 	sessionDrainTimeout   = 5 * time.Second
 	maxBackoff            = 30 * time.Second
 	maxRedirectHops       = 5
+	// controlStableAfter is how long a control session stays up before its
+	// end starts the reconnect backoff over, as the muxes do
+	// (sessionMuxStableAfter): an edge that accepts each registration and
+	// drops it at once is redialled at a growing backoff.
+	controlStableAfter = sessionMuxStableAfter
 
 	// copyBufferSize is the per-direction proxy buffer, the io.Copy default.
 	copyBufferSize = 32 * 1024
@@ -287,10 +292,11 @@ type Tunnel struct {
 
 	// newDialers builds the dialers of one connect attempt.
 	newDialers func(transport.Options) []transport.Dialer
-	// now and sleep pace the port mux re-establishment.
+	// now and sleep pace the port mux re-establishment; now also times how
+	// long a control session stayed up (Run).
 	now   func() time.Time
 	sleep func(context.Context, time.Duration) bool
-	// after times a hinted refusal's wait; tests replace it.
+	// after times the reconnect and hinted refusal waits; tests replace it.
 	after func(time.Duration) <-chan time.Time
 	// rolloverEvery is how often a device session checks for a pending
 	// certificate to register with.
@@ -354,6 +360,10 @@ type Tunnel struct {
 
 	shutdown     chan struct{}
 	disconnected chan struct{}
+	// endCause is why the current control session ended: the cause the first
+	// signalDisconnected of the session gave. Guarded by mu; Run clears it
+	// with each new disconnected channel.
+	endCause error
 	// retryNow ends a reconnect backoff wait. OnNetworkChange signals it while
 	// disconnected.
 	retryNow chan struct{}
@@ -482,7 +492,7 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		// t.disconnected.
 		t.mu.Lock()
 		sessionDone := make(chan struct{})
-		t.disconnected = sessionDone
+		t.disconnected, t.endCause = sessionDone, nil
 		t.mu.Unlock()
 		t.closing.Store(false)
 		// A kick stored between Run's Swap and the channel change above
@@ -538,8 +548,8 @@ func (t *Tunnel) Run(ctx context.Context) error {
 			continue
 		}
 
-		attempt, refusals = 0, 0
 		failingSince = time.Time{}
+		upAt := t.now()
 		t.setState(StateActive)
 		t.emitConnected()
 
@@ -547,11 +557,14 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		stopMux := t.startMux(ctx)
 		stopSessionMux := t.startSessionMux(ctx)
 
-		t.runSession(ctx, sessionDone)
+		readerDone := t.runSession(ctx, sessionDone)
 		kicked := t.kicked.Swap(nil)
 		if kicked != nil && kicked.drain {
 			t.setState(StateDraining)
-			t.drainSessions(ctx)
+			if sd := t.drainReadingControl(ctx, readerDone); sd != nil {
+				// A removal, teardown or revocation during the drain.
+				t.endOnShutdown(sd)
+			}
 		}
 		stopSessionMux()
 		stopMux()
@@ -561,7 +574,16 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		}
 
 		t.closeConn()
-		t.emitDisconnected(nil)
+		t.mu.RLock()
+		cause := t.endCause
+		t.mu.RUnlock()
+		t.emitDisconnected(cause)
+		// Only a session that stayed up starts the backoffs over, so an edge
+		// that accepts each registration and drops it is not redialled at the
+		// first backoff forever.
+		if t.now().Sub(upAt) >= controlStableAfter {
+			attempt, refusals = 0, 0
+		}
 
 		if kicked != nil {
 			refusals++
@@ -908,7 +930,7 @@ func (t *Tunnel) rolloverLoop(sessionDone <-chan struct{}) {
 				continue
 			}
 			t.rollover.Store(true)
-			t.signalDisconnected()
+			t.signalDisconnected(errRollover)
 			return
 		}
 	}
@@ -928,11 +950,12 @@ func (t *Tunnel) liveSessions() int {
 	return t.opts.SessionHandler.LiveSessions()
 }
 
-// runSession serves one registered session and returns when it ends.
-// sessionDone is a parameter because Run replaces t.disconnected on each
-// iteration. The local wait group covers the session loops. Data goroutines end
-// through closeActiveConns.
-func (t *Tunnel) runSession(ctx context.Context, sessionDone <-chan struct{}) {
+// runSession serves one registered session and returns when it ends,
+// reporting whether its loops all returned within sessionDrainTimeout (the
+// receive loop no longer reads the connection). sessionDone is a parameter
+// because Run replaces t.disconnected on each iteration. The local wait group
+// covers the session loops. Data goroutines end through closeActiveConns.
+func (t *Tunnel) runSession(ctx context.Context, sessionDone <-chan struct{}) bool {
 	var loops sync.WaitGroup
 	loops.Go(func() { t.heartbeatLoop(sessionDone) })
 	loops.Go(func() { t.receiveLoop(sessionDone) })
@@ -948,7 +971,7 @@ func (t *Tunnel) runSession(ctx context.Context, sessionDone <-chan struct{}) {
 
 	// The loops select on sessionDone and shutdown, not ctx, so signal them
 	// here. This also wakes the reader.
-	t.signalDisconnected()
+	t.signalDisconnected(nil)
 
 	// Close live proxy sockets so their copy loops return. A proxyData still
 	// dialing has no activeConn yet and ends within dialTimeout.
@@ -958,7 +981,9 @@ func (t *Tunnel) runSession(ctx context.Context, sessionDone <-chan struct{}) {
 	go func() { loops.Wait(); close(done) }()
 	select {
 	case <-done:
+		return true
 	case <-time.After(sessionDrainTimeout):
+		return false
 	}
 }
 
@@ -978,7 +1003,7 @@ func (t *Tunnel) heartbeatLoop(sessionDone <-chan struct{}) {
 				return
 			}
 			if err := c.SendHeartbeat(); err != nil {
-				t.signalDisconnected()
+				t.signalDisconnected(fmt.Errorf("send a heartbeat to the edge: %w", err))
 				return
 			}
 		}
@@ -1022,16 +1047,16 @@ func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 				// Deadline reached by expiry or interrupt. The probe window
 				// counts from arming, so silence before it is ignored.
 				if at := t.fastProbeAt.Load(); at != 0 && time.Since(time.Unix(0, at)) > netChangeProbeWindow {
-					t.signalDisconnected()
+					t.signalDisconnected(fmt.Errorf("the edge did not answer within %v of a network change", netChangeProbeWindow))
 					return
 				}
 				if time.Since(lastInbound) > edgeIdleTimeout {
-					t.signalDisconnected()
+					t.signalDisconnected(fmt.Errorf("nothing from the edge for %v", edgeIdleTimeout))
 					return
 				}
 				continue
 			}
-			t.signalDisconnected()
+			t.signalDisconnected(controlReadFailed(err))
 			return
 		}
 		lastInbound = time.Now()
@@ -1134,28 +1159,14 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte, sessionDone <-
 		if k := t.kickOf(sd); k != nil {
 			// The control plane lifts it without local action: close this
 			// session, after a drain on an admin's Disconnect, and retry.
-			t.kickSession(k, sessionDone)
+			t.kickSession(k, sessionDone, shutdownCause(sd))
 			return
 		}
-		if sd != nil && sd.Retryable != nil && !*sd.Retryable {
-			reason := sd.Reason
-			if reason == "" {
-				reason = "edge closed the tunnel"
-			}
-			t.mu.RLock()
-			presented := t.presented
-			t.mu.RUnlock()
-			t.setTerminalError(&RegistrationError{
-				Message:   reason,
-				Code:      sd.Code,
-				LimitType: sd.LimitType,
-				Serial:    presentedSerial(presented),
-			})
-			t.emitShutdown(reason, sd.Code, sd.LimitType, false)
-			t.Stop()
+		if terminalShutdown(sd) {
+			t.endOnShutdown(sd)
 			return
 		}
-		t.signalDisconnected()
+		t.signalDisconnected(shutdownCause(sd))
 
 	case proto.MsgError:
 		ep, _ := proto.ParseError(body)
@@ -1490,14 +1501,20 @@ func (t *Tunnel) closeConn() {
 	t.conn = nil
 }
 
-// kickSession records k for Run and ends the control session, only while
-// sessionDone is still the current session's channel: a reader that outlived
-// its session never kicks the next one. Run replaces the channel under mu.
-func (t *Tunnel) kickSession(k *kick, sessionDone <-chan struct{}) {
+// kickSession records k for Run and ends the control session with cause, only
+// while sessionDone is still the current session's channel: a reader that
+// outlived its session never kicks the next one. Run replaces the channel
+// under mu. As signalDisconnected, it keeps a cause recorded first.
+func (t *Tunnel) kickSession(k *kick, sessionDone <-chan struct{}, cause error) {
 	t.mu.Lock()
 	current := (<-chan struct{})(t.disconnected) == sessionDone
 	if current {
 		t.kicked.Store(k)
+		select {
+		case <-t.disconnected:
+		default:
+			t.endCause = cause
+		}
 		safeClose(t.disconnected)
 	}
 	t.mu.Unlock()
@@ -1506,8 +1523,71 @@ func (t *Tunnel) kickSession(k *kick, sessionDone <-chan struct{}) {
 	}
 }
 
-func (t *Tunnel) signalDisconnected() {
+// terminalShutdown reports whether sd, once kickOf has taken a device's
+// hinted Shutdown, ends the tunnel: it is not retryable.
+func terminalShutdown(sd *proto.ShutdownPayload) bool {
+	return sd != nil && sd.Retryable != nil && !*sd.Retryable
+}
+
+// errRollover ends a device session so the next one presents the renewed
+// certificate.
+var errRollover = errors.New("reconnecting with the renewed certificate")
+
+// shutdownCause is the disconnect cause of a retryable Shutdown sd (nil when
+// it did not parse), its wire text stripped of terminal controls.
+func shutdownCause(sd *proto.ShutdownPayload) error {
+	msg := "the edge ended the session"
+	if sd == nil {
+		return errors.New(msg)
+	}
+	if reason := sanitizeDisplay(sd.Reason); reason != "" {
+		msg += ": " + reason
+	}
+	if code := sanitizeDisplay(sd.Code); code != "" {
+		msg += " [" + code + "]"
+	}
+	return errors.New(msg)
+}
+
+// controlReadFailed is the disconnect cause of a failed control read: the
+// edge closing the connection reads as io.EOF.
+func controlReadFailed(err error) error {
+	if errors.Is(err, io.EOF) {
+		return errors.New("the edge closed the control connection")
+	}
+	return fmt.Errorf("read the control connection: %w", err)
+}
+
+// endOnShutdown records the terminal Shutdown sd as the tunnel's error,
+// reports it and stops the tunnel.
+func (t *Tunnel) endOnShutdown(sd *proto.ShutdownPayload) {
+	reason := sd.Reason
+	if reason == "" {
+		reason = "edge closed the tunnel"
+	}
+	t.mu.RLock()
+	presented := t.presented
+	t.mu.RUnlock()
+	t.setTerminalError(&RegistrationError{
+		Message:   reason,
+		Code:      sd.Code,
+		LimitType: sd.LimitType,
+		Serial:    presentedSerial(presented),
+	})
+	t.emitShutdown(reason, sd.Code, sd.LimitType, false)
+	t.Stop()
+}
+
+// signalDisconnected ends the current control session with cause, the reason
+// OnDisconnected reports; only the first cause of a session is kept, and a
+// nil cause (a teardown already under way) records none.
+func (t *Tunnel) signalDisconnected(cause error) {
 	t.mu.Lock()
+	select {
+	case <-t.disconnected:
+	default:
+		t.endCause = cause
+	}
 	safeClose(t.disconnected)
 	t.mu.Unlock()
 	// Wake a reader parked on a long deadline so it observes the signal
@@ -1611,7 +1691,7 @@ func (t *Tunnel) wait(ctx context.Context, d time.Duration) bool {
 		return false
 	case <-t.retryNow:
 		return true
-	case <-time.After(d):
+	case <-t.after(d):
 		return true
 	}
 }

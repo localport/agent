@@ -98,7 +98,7 @@ func fetchGitHubActionsToken(ctx context.Context, audience string) (string, erro
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return "", errCIToken.With(&responseReadError{path: "GitHub Actions OIDC token", err: err}, service+" could not be reached")
+		return "", errCIToken.With(&responseReadError{what: "the GitHub Actions OIDC token response", err: err}, service+" could not be reached")
 	}
 	// The status stays in the cause (--verbose); the body can echo the
 	// request token and is never included.

@@ -43,6 +43,8 @@ type systemd struct {
 
 func (s systemd) Name() string { return SystemdUnit }
 
+func (s systemd) StopCommand() string { return "systemctl stop " + SystemdUnit }
+
 // units are the unit names this manager writes and the path of each.
 func (s systemd) units() []struct{ name, path string } {
 	dir := filepath.Dir(s.unitPath)

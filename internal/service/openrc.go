@@ -52,6 +52,8 @@ type openrc struct {
 
 func (o openrc) Name() string { return OpenRCService }
 
+func (o openrc) StopCommand() string { return "rc-service " + OpenRCService + " stop" }
+
 func (o openrc) script(name string) string { return filepath.Join(o.initDir, name) }
 
 func (o openrc) paths() []string {

@@ -46,7 +46,7 @@ func runUp(version string, args []string) (retErr error) {
 		noMux       = fs.Bool("no-mux", false, "send each inbound connection over its own connection instead of multiplexing them; a device then serves no browser or CLI sessions; as Administrator on Windows only with --foreground or --config, as root on Linux and macOS only with --config")
 		noInspect   = fs.Bool("no-inspect", false, "do not inspect HTTP requests (--config)")
 		logRequests = fs.Bool("log-requests", false, "log one line per HTTP request in headless mode (--config)")
-		foreground  = fs.Bool("foreground", false, "run the device in this terminal instead of installing the service (root or Administrator); as root on Linux and macOS it runs every device in the machine-wide config")
+		foreground  = fs.Bool("foreground", false, "run the devices in this terminal instead of installing the service (root or Administrator): every device in the machine-wide config")
 	)
 	device := addDeviceFlags(fs)
 	fs.Usage = func() { usageUp(fs) }
@@ -72,7 +72,7 @@ func runUp(version string, args []string) (retErr error) {
 
 	if *configPath != "" {
 		if joinToken != "" {
-			return errors.New("a join token cannot be combined with --config")
+			return errcode.New(errcode.JoinTokenWithConfig)
 		}
 		if err := refuseBesideConfig(fs, *configPath, "enable", "logins", "files-root", "host", "allow-ports", "rdp", "vnc", "api", "wait", "foreground"); err != nil {
 			return err
@@ -81,7 +81,7 @@ func runUp(version string, args []string) (retErr error) {
 	}
 	if joinToken == "" {
 		fs.Usage()
-		return errors.New("join token required: create the device in the dashboard and run the command it shows")
+		return errcode.New(errcode.JoinTokenRequired)
 	}
 	// A device name beside an enrolment flag lands here; it is no token, so it
 	// must not reach the control plane.
@@ -121,7 +121,7 @@ func runUp(version string, args []string) (retErr error) {
 	// enrolment and the foreground run happen in agent-account children.
 	viaChild := needsAgentChild(file)
 	if viaChild && *noMux {
-		return errors.New("--no-mux is not available to a device enrolled as root; run it as an ordinary user, or leave it out")
+		return errcode.New(errcode.NoMuxAsRoot)
 	}
 	if needsSystemLayout(file) {
 		// First: the service check below locks run.lock, which needs the
@@ -139,27 +139,42 @@ func runUp(version string, args []string) (retErr error) {
 	req := enrolRequest{JoinToken: joinToken, APIURL: resolveAPIURL(*apiURL), Wait: *wait}
 	var store *identity.Store
 	var res enrolResult
+	// A privileged up --foreground holds run.lock from before the token spend
+	// and opens its control endpoint right after, so up, down and set reach
+	// the run while it enrols. heldRun and heldControl are the lock and the
+	// socket the child run serves the devices under (runHeldAsAgent);
+	// heldReloads are the requests this process serves the devices with.
+	var heldRun *os.File
+	var heldControl *startingControl
+	var heldReloads reloadSource
 	if viaChild {
 		if *foreground {
-			// The child run holds run.lock; refuse a holder before the spend.
-			release, err := holdRunLock(context.Background(), file, "up --foreground", false)
+			lock, release, err := holdRunLock(context.Background(), file, "up --foreground", false)
 			if err != nil {
 				return err
 			}
-			if err := release(); err != nil {
+			defer func() { retErr = errors.Join(retErr, release()) }()
+			heldRun = lock
+			if heldControl, err = openStartingControl(); err != nil {
 				return err
 			}
+			defer func() { retErr = errors.Join(retErr, heldControl.Close()) }()
 		}
 	} else {
 		if store, err = who.store(); err != nil {
 			return err
 		}
 		if who.privileged && *foreground {
-			release, err := holdRunLock(context.Background(), file, "up --foreground", false)
+			_, release, err := holdRunLock(context.Background(), file, "up --foreground", false)
 			if err != nil {
 				return err
 			}
 			defer func() { retErr = errors.Join(retErr, release()) }()
+			var stop func()
+			if heldReloads, stop, err = openRunControl(); err != nil {
+				return err
+			}
+			defer stop()
 		}
 	}
 	// The config lock, taken after run.lock as every holder of both does,
@@ -221,7 +236,12 @@ func runUp(version string, args []string) (retErr error) {
 		if *noUI {
 			args = append(args, "--noui")
 		}
-		return runAsAgentAccount(args, os.Stdin, os.Stdout)
+		return runHeldAsAgent(args, os.Stdin, os.Stdout, heldRun, heldControl)
+	}
+	if who.privileged {
+		// This process holds run.lock and serves the control endpoint (above)
+		// and serves every device of the system config, as the relayed run does.
+		return serveHeld(context.Background(), version, who, file, *noUI, *noMux, heldReloads)
 	}
 	return serveEnrolled(context.Background(), version, store, []config.LocalDevice{inForce}, *noUI, *noMux, nil)
 }
@@ -260,19 +280,20 @@ type deviceService struct {
 
 // newServiceManager is service.Default, checkServiceBinary is
 // security.CheckServiceBinary, enrolDevice and saveIssued are the enrolment
-// and credential save of up, and serveEnrolled is serveDevices; tests
-// replace them.
+// and credential save of up, serveEnrolled is serveDevices and serveHeld is
+// serveHeldDevices; tests replace them.
 var (
 	newServiceManager  = service.Default
 	checkServiceBinary = security.CheckServiceBinary
 	enrolDevice        = (*identity.Client).EnrolDevice
 	saveIssued         = (*identity.Store).SaveIssued
 	serveEnrolled      = serveDevices
+	serveHeld          = serveHeldDevices
 )
 
 // serviceInstallCommand installs the device service for the enrolled
 // devices without a join token.
-const serviceInstallCommand = "sudo localport service install (an elevated prompt on Windows)"
+var serviceInstallCommand = elevatedLocalport() + " service install" + elevatedNote()
 
 // prepareService refuses before the spend what would stop the install after
 // it, or what the service must not run: no supported service manager, a
@@ -340,37 +361,85 @@ func refuseManualRun(file config.LocalConfigFile, m service.Manager) error {
 	return errcode.WithRemedy(err, fmt.Sprintf("held by process %d, which is not the running device service %s\n  stop a localport run or up --foreground serving the devices; when the service is starting, stopping or restarting, retry in a few seconds", holder, m.Name()))
 }
 
-// serviceRunLockWait bounds how long `run --service` waits for run.lock: a
-// restarting service manager can start the new process before the old one
-// has released it. A variable so tests can shorten it.
+// serviceRunLockWait is how long `run --service` waits for run.lock before it
+// reads the holder as a foreground run: a restarting service manager can
+// start the new process before the old one has released it. A variable so
+// tests can shorten it.
 var serviceRunLockWait = 30 * time.Second
 
-// holdRunLock takes run.lock for a privileged run or up --foreground.
-// With asService (run --service) it waits up to serviceRunLockWait, ending
-// with ctx, and on giving up returns a service.ExitError with
-// service.ExitRunLocked. Any other caller is refused at once while the lock
-// is held, naming the device service when one carrying the marker is
-// installed. The caller holds the lock until it exits and calls release.
-func holdRunLock(ctx context.Context, file config.LocalConfigFile, command string, asService bool) (release func() error, err error) {
-	wait := time.Duration(0)
+// standbyRetry is each run.lock wait of a standing-by service; the wait
+// repeats until the lock is free or the service stops.
+const standbyRetry = time.Hour
+
+// runLockedRemedy follows a refusal because another process serves the
+// devices.
+const runLockedRemedy = "another localport run or up --foreground serves them"
+
+// holdRunLock takes run.lock for a privileged run or up --foreground. With
+// asService (run --service) it stands by for the lock (holdServiceRunLock).
+// Any other caller is refused at once while the lock is held, naming the
+// device service when one carrying the marker is installed. The caller holds
+// the lock until it exits and calls release; lock is the locked file, for a
+// caller that passes it to the agent-account child serving the devices
+// (runHeldAsAgent).
+func holdRunLock(ctx context.Context, file config.LocalConfigFile, command string, asService bool) (lock *os.File, release func() error, err error) {
 	if asService {
-		wait = serviceRunLockWait
+		return holdServiceRunLock(ctx, file)
 	}
-	release, err = config.LockRunContext(ctx, file, wait)
+	lock, release, err = config.LockRunFile(ctx, file, 0)
 	if err == nil || !errors.Is(err, config.ErrRunLocked) {
-		return release, err
-	}
-	if asService {
-		return nil, &service.ExitError{Code: service.ExitRunLocked, Err: err}
+		return lock, release, err
 	}
 	m, installed, instErr := installedDeviceService()
 	if instErr != nil {
-		return nil, errors.Join(err, instErr)
+		return nil, nil, errors.Join(err, instErr)
 	}
 	if installed {
-		return nil, errcode.WithRemedy(err, fmt.Sprintf("the device service %s is installed: use it, or stop it before %s", m.Name(), command))
+		byService, checkErr := serviceHoldsRunLock(file, m)
+		if checkErr != nil {
+			return nil, nil, errors.Join(err, checkErr)
+		}
+		if byService {
+			return nil, nil, errcode.WithRemedy(err, fmt.Sprintf("the device service %s is installed: use it, or stop it with %s, then run %s again", m.Name(), elevatedStop(m), command))
+		}
 	}
-	return nil, errcode.WithRemedy(err, "another localport run or up --foreground serves them")
+	return nil, nil, errcode.WithRemedy(err, runLockedRemedy)
+}
+
+// serviceHoldsRunLock reports whether the running device service is the
+// recorded run.lock holder; a service standing by beside a foreground run is
+// not.
+func serviceHoldsRunLock(file config.LocalConfigFile, m service.Manager) (bool, error) {
+	holder, err := config.RunLockHolder(file)
+	if err != nil || holder == 0 {
+		return false, err
+	}
+	mainPID, err := m.MainPID(context.Background())
+	return err == nil && mainPID == holder, err
+}
+
+// holdServiceRunLock takes run.lock for `run --service`. It first waits up to
+// serviceRunLockWait for the previous process of a restart to exit; a lock
+// still held then belongs to a foreground run serving the devices (run, up
+// --foreground). The service then stands by: it logs that once and waits for
+// the lock with no deadline, so it takes the devices over when that run ends
+// and is never restarted in a loop by its manager. The wait ends with ctx
+// (the manager's Stop on Windows; on Linux and macOS the stop signal ends the
+// process).
+func holdServiceRunLock(ctx context.Context, file config.LocalConfigFile) (lock *os.File, release func() error, err error) {
+	lock, release, err = config.LockRunFile(ctx, file, serviceRunLockWait)
+	if !errors.Is(err, config.ErrRunLocked) {
+		return lock, release, err
+	}
+	holder := "another process"
+	if pid, pidErr := config.RunLockHolder(file); pidErr == nil && pid != 0 {
+		holder = fmt.Sprintf("process %d", pid)
+	}
+	logEventf("a foreground run (%s) holds %s and serves the devices; the device service waits and takes them over when it ends", holder, file.RunLockPath())
+	for errors.Is(err, config.ErrRunLocked) {
+		lock, release, err = config.LockRunFile(ctx, file, standbyRetry)
+	}
+	return lock, release, err
 }
 
 // unsafeBinaryRemedy follows a security.ErrUnsafeExecutable refusal.
@@ -508,7 +577,7 @@ func refuseFullConfig(file config.LocalConfigFile, who invoker) (map[identity.Re
 		return facts, nil
 	}
 	return nil, errcode.WithRemedy(errcode.New(errcode.DeviceLimit).With(nil, fmt.Sprintf("%d devices", config.MaxDevices)),
-		"remove a device from this machine in the dashboard, then run up again")
+		"remove a device from this machine in the dashboard, then run up again; enrolling a device this machine already serves again also needs a free place")
 }
 
 // recordDevice records an enrolled device in the local config. The caller
@@ -561,7 +630,7 @@ func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFl
 	merged := stored
 	if err := flags.apply(fs, &merged, who); err != nil {
 		keepPruned()
-		return stored, mergeConflict(ref, err)
+		return stored, mergeConflict(ref, stored, err)
 	}
 	merged.Paused = false
 	if merged.Equal(stored) {
@@ -574,10 +643,10 @@ func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFl
 		reportPruned(pruned)
 		return merged, nil
 	case errors.Is(err, config.ErrInvalidLocalConfig):
-		return stored, mergeConflict(ref, err)
+		return stored, mergeConflict(ref, stored, err)
 	case errors.Is(err, config.ErrFilesRootMissing):
-		return stored, errcode.WithRemedy(err, fmt.Sprintf("device %s keeps its new credential and its stored settings\n  mount or create its files root, or change it with: localport set %s --files-root DIR",
-			ref, ref.Identity))
+		return stored, errcode.WithRemedy(err, fmt.Sprintf("%s\n  mount or create its files root, or change it with: localport set %s --files-root DIR",
+			keptSettings(ref, stored), ref.Identity))
 	default:
 		return stored, errcode.WithRemedy(errcode.New(errcode.EnrolledNotRecorded).With(err, "device "+ref.String()), joinTokenSpent)
 	}
@@ -586,9 +655,19 @@ func recordDevice(file config.LocalConfigFile, fs *flag.FlagSet, flags *deviceFl
 // writeLocal is config.WriteLocal; tests replace it to force a write failure.
 var writeLocal = config.WriteLocal
 
-func mergeConflict(ref identity.Ref, err error) error {
-	return errMergeConflict.With(err, fmt.Sprintf("device %s keeps its new credential and its stored settings\n  change them with: localport set %s [flags]",
-		ref, ref.Identity))
+func mergeConflict(ref identity.Ref, stored config.LocalDevice, err error) error {
+	return errMergeConflict.With(err, fmt.Sprintf("%s\n  change them with: localport set %s [flags]",
+		keptSettings(ref, stored), ref.Identity))
+}
+
+// keptSettings says that a re-enrolled device whose settings could not be
+// merged keeps its stored ones, a pause included.
+func keptSettings(ref identity.Ref, stored config.LocalDevice) string {
+	kept := fmt.Sprintf("device %s keeps its new credential and its stored settings", ref)
+	if stored.Paused {
+		kept += fmt.Sprintf(", and stays paused until: %s up %s", elevatedLocalport(), ref.Identity)
+	}
+	return kept
 
 }
 
@@ -626,7 +705,7 @@ func printDeviceSettings(d config.LocalDevice) {
 // result could not be kept.
 const joinTokenSpent = "the join token is spent: create a new join token for this device in the dashboard and run up again"
 
-// errExtraArgument refuses an argument beyond the one join token.
+// errExtraArgument refuses an argument the command does not take.
 var errExtraArgument = errcode.New(errcode.ExtraArgument)
 
 // errNotJoinToken refuses a first argument that is not a join token.
@@ -694,7 +773,7 @@ func resumesDevices(args []string) bool {
 		if strings.HasPrefix(a, joinTokenPrefix) {
 			return false
 		}
-		if strings.HasPrefix(a, "-") && a != "--all" && a != "-all" {
+		if name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "="); strings.HasPrefix(a, "-") && name != "all" {
 			return false
 		}
 	}
@@ -702,11 +781,11 @@ func resumesDevices(args []string) bool {
 }
 
 func usageUp(fs *flag.FlagSet) {
-	fmt.Fprint(os.Stderr, `Usage: localport up <join-token> [--enable terminal,files,desktop] [--logins a,b]
+	fmt.Fprintf(os.Stderr, `Usage: localport up <join-token> [--enable terminal,files,desktop] [--logins a,b]
                     [--files-root DIR] [--rdp[=HOST:PORT]] [--vnc[=HOST:PORT]]
                     [--host HOST] [--allow-ports LIST] [--foreground]
        localport up --config localport.yaml
-       sudo localport up [<device> | --all]   (from an elevated prompt on Windows)
+       %[1]s up [<device> | --all]%[2]s
 
   Enrol this machine as a fleet device. Create the device in the dashboard;
   it shows the command with a single-use join token. The machine keeps a
@@ -734,7 +813,9 @@ func usageUp(fs *flag.FlagSet) {
   another process (the device service or a manual run) serves the devices.
   As root on Linux and macOS it runs every device in the machine-wide config,
   as localport run --system does, under the agent account; --no-mux is
-  not available there.
+  not available there. On Windows it also runs every device in the
+  machine-wide config. up, down and set reach that run through its control
+  endpoint.
 
   Without root, the device is recorded in $LOCALPORT_HOME/agent.yaml and runs
   in the foreground, and --logins may name only the user running the command.
@@ -750,6 +831,6 @@ func usageUp(fs *flag.FlagSet) {
 
 
 Flags:
-`)
+`, elevatedLocalport(), elevatedNote())
 	fs.PrintDefaults()
 }

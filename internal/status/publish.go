@@ -28,23 +28,31 @@ type Opener func(context.Context) (io.ReadWriteCloser, error)
 // opened with open, and each newer one as the board changes, until ctx ends;
 // it closes the connection before it returns. Changes made while a write is
 // in flight coalesce into the newest document. A failure to reach the
-// launcher is logged and retried with jittered backoff from 1 s to 1 min; it
-// never affects the devices.
+// launcher is retried with jittered backoff from 1 s to 1 min and logged once
+// per outage, since a run without the device service has no launcher at all;
+// it never affects the devices.
 func Publish(ctx context.Context, b *Board, open Opener, logf func(format string, args ...any)) {
 	backoff := publishRetryMin
+	unreachable := false
 	for ctx.Err() == nil {
 		conn, err := open(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			wait := backoff/2 + rand.N(backoff/2+1)
-			logf("status: cannot reach the session launcher, retrying in %s: %v", wait.Round(time.Second), err)
-			if !sleep(ctx, wait) {
+			if !unreachable {
+				logf("status: cannot reach the session launcher, so status shows the config only; retrying in the background: %v", err)
+				unreachable = true
+			}
+			if !sleep(ctx, backoff/2+rand.N(backoff/2+1)) {
 				return
 			}
 			backoff = min(2*backoff, publishRetryMax)
 			continue
+		}
+		if unreachable {
+			logf("status: publishing to the session launcher")
+			unreachable = false
 		}
 		backoff = publishRetryMin
 		err = publishOn(ctx, b, conn)

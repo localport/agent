@@ -109,14 +109,13 @@ type APIError struct {
 	retryAfter time.Duration
 }
 
+// Error is the control plane's message and code. It leaves out Path, which
+// names an internal endpoint, because logs and errors print it.
 func (e *APIError) Error() string {
-	if e.Message == "" {
-		return fmt.Sprintf("%s: unexpected status %d", e.Path, e.Status)
-	}
 	if e.Code != "" {
-		return fmt.Sprintf("%s: %s (%s)", e.Path, e.Message, e.Code)
+		return fmt.Sprintf("%s (%s)", e.RemoteMessage(), e.Code)
 	}
-	return fmt.Sprintf("%s: %s", e.Path, e.Message)
+	return e.RemoteMessage()
 }
 
 // RemoteMessage is the server's message, or, when it sent none, a text
@@ -175,13 +174,31 @@ func InFlight(err error) bool {
 // responseReadError is a failure reading a response body: a reset, an HTTP/2
 // stream reset or GOAWAY, or a truncated body. The request may have
 // completed, so only a retry under the same idempotency key is safe.
+// what names the response for a person, never an internal endpoint path,
+// since logs print the error.
 type responseReadError struct {
-	path string
+	what string
 	err  error
 }
 
-func (e *responseReadError) Error() string { return "read " + e.path + " response: " + e.err.Error() }
+func (e *responseReadError) Error() string { return "read " + e.what + ": " + e.err.Error() }
 func (e *responseReadError) Unwrap() error { return e.err }
+
+// transportError is a control-plane request that failed in transport. Its
+// text is the cause alone: the *url.Error it wraps names the endpoint URL,
+// which logs would otherwise carry. Retryable still finds the *url.Error.
+type transportError struct{ err *url.Error }
+
+func (e *transportError) Error() string { return e.err.Err.Error() }
+func (e *transportError) Unwrap() error { return e.err }
+
+// withoutURL wraps a *url.Error from an HTTP request in transportError.
+func withoutURL(err error) error {
+	if ue, ok := err.(*url.Error); ok {
+		return &transportError{err: ue}
+	}
+	return err
+}
 
 // Retryable reports whether a retry of a control-plane call could succeed:
 // a 429 or 5xx answer, the 409 for a request still in flight under the same
@@ -376,13 +393,13 @@ func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return errUnreachable.With(err, "")
+		return errUnreachable.With(withoutURL(err), "")
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return errUnreachable.With(&responseReadError{path: path, err: err}, "")
+		return errUnreachable.With(&responseReadError{what: "the control plane's response", err: err}, "")
 	}
 	if isRedirect(resp.StatusCode) {
 		// An APIError with the 3xx status is terminal for Retryable, so the

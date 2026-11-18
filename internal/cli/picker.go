@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -63,12 +62,11 @@ func resolveCredential(store *identity.Store, raw string, interactive, consumer 
 // a CI job blocked on a hidden prompt is worse than one that fails.
 func ambiguous(refs []identity.Ref) error {
 	var b strings.Builder
-	b.WriteString("several credentials on this machine; choose one with --identity:\n")
 	for _, r := range refs {
-		b.WriteString("    --identity " + r.String() + "\n")
+		b.WriteString("\n    --identity " + r.String())
 	}
-	b.WriteString("\n  (a bare name or <team>/<name> works too when it names only one)")
-	return fmt.Errorf("%s", b.String())
+	b.WriteString("\n\n  (a bare name or <team>/<name> works too when it names only one)")
+	return errcode.New(errcode.CredentialsAmbiguous).With(nil, b.String())
 }
 
 // chooseCredential asks. A numbered list off stdin: no raw-mode terminal
@@ -99,7 +97,7 @@ func chooseCredential(in io.Reader, out io.Writer, store *identity.Store, refs [
 			// EOF or a closed terminal. Abort rather than default to a principal
 			// nobody chose.
 			fmt.Fprintln(out)
-			return identity.Ref{}, errors.New("no credential chosen")
+			return identity.Ref{}, errcode.New(errcode.NoCredentialChosen)
 		}
 		n, convErr := strconv.Atoi(strings.TrimSpace(line))
 		if convErr != nil || n < 1 || n > len(refs) {
@@ -116,10 +114,10 @@ var pickerTTY = func() bool { return ui.IsTTY(os.Stdin) && ui.IsTTY(os.Stderr) }
 // selectDevices returns the indexes of devices that command (up or down) acts
 // on: every one with all; the one selector names (identity, <team>/<prefix>,
 // <tunnel>.<prefix> or a unique prefix); with no selector the only device, or
-// with several a choice from a numbered list in a terminal, or else an error
-// listing each exact command. No device at all is errNoDevice. It never reads
-// stdin without a terminal.
-func selectDevices(devices []config.LocalDevice, facts map[identity.Ref]deviceFact, selector string, all bool, command string) ([]int, error) {
+// with several and a terminal errChoiceNeeded (the caller asks with
+// chooseDevices once it holds no lock), or else an error listing each exact
+// command. No device at all is errNoDevice. It never reads stdin.
+func selectDevices(devices []config.LocalDevice, selector string, all bool, command string) ([]int, error) {
 	if len(devices) == 0 {
 		return nil, errNoDevice
 	}
@@ -141,8 +139,11 @@ func selectDevices(devices []config.LocalDevice, facts map[identity.Ref]deviceFa
 	case !pickerTTY():
 		return nil, ambiguousDevices(devices, command)
 	}
-	return chooseDevices(os.Stdin, os.Stderr, devices, facts)
+	return nil, errChoiceNeeded
 }
+
+// errChoiceNeeded is selectDevices asking for a choice from the terminal.
+var errChoiceNeeded = errors.New("a choice of device is needed")
 
 // matchDevice is findDevice that also accepts <team>/<prefix>.
 func matchDevice(devices []config.LocalDevice, selector string) (int, error) {
@@ -168,11 +169,10 @@ func matchDevice(devices []config.LocalDevice, selector string) (int, error) {
 // ambiguousDevices lists the exact command for each device and the --all
 // form. command is the subcommand, up or down.
 func ambiguousDevices(devices []config.LocalDevice, command string) error {
-	prefix := "sudo localport " + command
+	prefix := elevatedLocalport() + " " + command
 	var b strings.Builder
-	if runtime.GOOS == "windows" {
-		prefix = "localport " + command
-		b.WriteString("from an elevated prompt:")
+	if note := elevatedNote(); note != "" {
+		b.WriteString(strings.TrimSpace(note) + ":")
 	}
 	for _, d := range devices {
 		fmt.Fprintf(&b, "\n    %s %s", prefix, d.Identity)

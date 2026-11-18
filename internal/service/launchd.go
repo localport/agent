@@ -75,6 +75,10 @@ type job struct {
 
 func (l launchd) Name() string { return LaunchdLabel }
 
+// StopCommand unloads the job: KeepAlive restarts a job that is only killed
+// or stopped.
+func (l launchd) StopCommand() string { return "launchctl bootout " + target(LaunchdLabel) }
+
 func (l launchd) jobs() []job {
 	dir := filepath.Dir(l.plistPath)
 	return []job{

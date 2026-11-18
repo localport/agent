@@ -144,9 +144,6 @@ type LocalConfigFile struct {
 	System bool
 }
 
-// LockPath is the lock file LockLocal holds beside the config.
-func (f LocalConfigFile) LockPath() string { return f.Path + ".lock" }
-
 // SystemLocalConfig is the machine-wide config the service reads, owned by
 // root (Administrator on Windows).
 func SystemLocalConfig() (LocalConfigFile, error) {
@@ -642,20 +639,28 @@ func validDesktopTarget(value string) error {
 // localLockWait bounds how long LockLocal waits for another writer.
 const localLockWait = 2 * time.Minute
 
-// LockLocal takes the local config's write lock, agent.yaml.lock beside it,
-// creating the directory owner-only when missing (for the system config, root
-// only, see openLock). set, up and down hold it across their read-modify-write,
+// LockLocal takes the local config's write lock beside it (openConfigLock:
+// LockPath, which cannot be deleted while held), creating the directory
+// owner-only when missing (for the system config, root only). set, up and down hold it across their read-modify-write,
 // `up <join-token>` from before the token spend to its write, and service
 // uninstall --purge while it deletes the config, so none drops another's entry.
 // It waits up to localLockWait. A process that also holds run.lock takes
 // run.lock first (see LockRun).
 func LockLocal(f LocalConfigFile) (release func(), err error) {
-	lock, held, err := lockBeside(context.Background(), f, f.LockPath(), localLockWait)
+	lock, err := openConfigLock(f)
 	if err != nil {
 		return nil, errLocalUnusable.With(err, "lock "+f.Path)
 	}
-	if !held {
-		return nil, errcode.New(errcode.LocalConfigBusy).With(nil, f.Path)
+	held, err := waitLock(context.Background(), lock, localLockWait)
+	if err != nil || !held {
+		refusal := errcode.New(errcode.LocalConfigBusy).With(nil, f.Path)
+		if err != nil {
+			refusal = errLocalUnusable.With(err, "lock "+f.Path)
+		}
+		if closeErr := lock.Close(); closeErr != nil {
+			return nil, errors.Join(refusal, closeErr)
+		}
+		return nil, refusal
 	}
 	return func() { _ = unlockAndClose(lock) }, nil
 }
@@ -669,15 +674,18 @@ func (f LocalConfigFile) RunLockPath() string {
 	return filepath.Join(filepath.Dir(f.Path), "run.lock")
 }
 
-// LockRun takes the exclusive run.lock of the config directory, creating the
-// directory owner-only when missing (for the system config, root creates both
-// and the agent account opens the existing run.lock), so only one process
-// serves the devices of a config. It waits up to wait (zero tries once) and
-// then returns ErrRunLocked. The holder records its PID in the file
-// (RunLockHolder). The lock file is opened close-on-exec (not inheritable on
-// Windows), so session children never hold it. release unlocks, then closes the
-// file; the holder calls it before it exits. Lock order: run.lock before
-// agent.yaml.lock; a process holding agent.yaml.lock only tries run.lock.
+// LockRun takes the exclusive run lock of the config directory (openRunLock:
+// the directory itself on Linux and macOS, run.lock on Windows, neither of
+// which can be deleted while held), creating the directory owner-only when
+// missing (for the system config, root creates it and run.lock and the agent
+// account opens the existing run.lock), so only one process serves the
+// devices of a config. It waits up to wait (zero tries once) and then returns
+// ErrRunLocked. The holder records its PID in run.lock (RunLockHolder). The
+// descriptors are close-on-exec (not inheritable on Windows), so session
+// children never hold them. release clears the record, then unlocks and
+// closes; the holder calls it before it exits. Lock order: the run lock
+// before the config lock (LockLocal); a process holding the config lock only
+// tries the run lock.
 func LockRun(f LocalConfigFile, wait time.Duration) (release func() error, err error) {
 	return LockRunContext(context.Background(), f, wait)
 }
@@ -685,21 +693,44 @@ func LockRun(f LocalConfigFile, wait time.Duration) (release func() error, err e
 // LockRunContext is LockRun with a wait that also ends, with ctx's error,
 // when ctx ends.
 func LockRunContext(ctx context.Context, f LocalConfigFile, wait time.Duration) (release func() error, err error) {
+	_, release, err = LockRunFile(ctx, f, wait)
+	return release, err
+}
+
+// LockRunFile is LockRunContext that also returns the locked descriptor, for
+// a holder that passes the lock to the child serving the devices: a
+// duplicate descriptor shares the lock (flock(2)), and the child adopts it
+// (AdoptRunLock). The holder keeps lock open until it calls release.
+func LockRunFile(ctx context.Context, f LocalConfigFile, wait time.Duration) (lock *os.File, release func() error, err error) {
 	path := f.RunLockPath()
-	lock, held, err := lockBeside(ctx, f, path, wait)
+	lock, record, err := openRunLock(f)
 	if err != nil {
-		return nil, errLocalUnusable.With(err, "lock "+path)
+		return nil, nil, errLocalUnusable.With(err, "lock "+path)
 	}
-	if !held {
-		return nil, ErrRunLocked.With(nil, path+" is held")
+	closeRecord := func() error {
+		if record == lock {
+			return nil
+		}
+		return record.Close()
 	}
-	if err := recordHolder(lock); err != nil {
-		return nil, errors.Join(errLocalUnusable.With(err, "record the holder of "+path), unlockAndClose(lock))
+	held, err := waitLock(ctx, lock, wait)
+	if err != nil || !held {
+		refusal := ErrRunLocked.With(nil, "held by the process recorded in "+path)
+		if err != nil {
+			refusal = errLocalUnusable.With(err, "lock "+path)
+		}
+		if closeErr := errors.Join(closeRecord(), lock.Close()); closeErr != nil {
+			return nil, nil, errors.Join(refusal, closeErr)
+		}
+		return nil, nil, refusal
+	}
+	if err := recordHolder(record); err != nil {
+		return nil, nil, errors.Join(errLocalUnusable.With(err, "record the holder of "+path), closeRecord(), unlockAndClose(lock))
 	}
 	// The record is cleared while the lock is still held, so the next holder
 	// never shows this PID before it records its own. A holder that dies
 	// leaves its PID, which no manager reports as a running service.
-	return func() error { return errors.Join(lock.Truncate(0), unlockAndClose(lock)) }, nil
+	return lock, func() error { return errors.Join(record.Truncate(0), closeRecord(), unlockAndClose(lock)) }, nil
 }
 
 // runLockPIDOffset is where the holder writes its PID. Byte 0 is the range
@@ -743,43 +774,33 @@ func RunLockHolder(f LocalConfigFile) (int, error) {
 // bounded blocking form.
 const lockPoll = 200 * time.Millisecond
 
-// lockBeside opens path, a lock file in the config directory, and locks it
-// exclusively, retrying for up to wait or until ctx ends. held is false when
-// another process still holds the lock at the deadline; the file is then
-// closed.
-func lockBeside(ctx context.Context, f LocalConfigFile, path string, wait time.Duration) (lock *os.File, held bool, err error) {
-	lock, err = openLock(f, path)
-	if err != nil {
-		return nil, false, err
-	}
+// waitLock locks lock exclusively, retrying for up to wait or until ctx ends.
+// held is false when another process still holds the lock at the deadline.
+func waitLock(ctx context.Context, lock *os.File, wait time.Duration) (held bool, err error) {
 	deadline := time.Now().Add(wait)
 	for {
 		held, err := security.TryLockFile(lock)
-		if err != nil {
-			lock.Close()
-			return nil, false, err
-		}
-		if held {
-			return lock, true, nil
+		if err != nil || held {
+			return held, err
 		}
 		if !time.Now().Before(deadline) {
-			lock.Close()
-			return nil, false, nil
+			return false, nil
 		}
 		select {
 		case <-ctx.Done():
-			lock.Close()
-			return nil, false, ctx.Err()
+			return false, ctx.Err()
 		case <-time.After(lockPoll):
 		}
 	}
 }
 
-// openLock opens the lock file path beside the config. For the system config,
-// root (an elevated Administrator on Windows) creates or secures the
-// directory and the lock (run.lock root:security.AgentGroup 0660, agent.yaml.lock 0600;
-// on Windows the matching DACLs); any other account only checks the
-// directory and opens the existing run.lock.
+// openLock opens the lock file path beside the config: run.lock everywhere,
+// and the config lock file on Windows (openConfigLock). For the system
+// config, root (an elevated Administrator on Windows) creates or secures the
+// directory and the file (run.lock root:security.AgentGroup 0660, the config
+// lock 0600; on Windows the matching DACLs, opened without delete sharing);
+// any other account only checks the directory and opens the existing
+// run.lock.
 func openLock(f LocalConfigFile, path string) (*os.File, error) {
 	if !f.System {
 		if err := security.EnsurePrivateDir(f.Base, filepath.Dir(f.Path), f.FollowBase); err != nil {

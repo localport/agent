@@ -14,9 +14,10 @@ import (
 )
 
 // runSet edits one enrolled device's settings in the local config and, as root
-// or an elevated Administrator, reloads the installed device service so they
-// apply (Manager.Reload: SIGHUP on Unix, a parameter change on Windows; the
-// agent restarts only the changed devices). Besides a re-enrolment with
+// or an elevated Administrator, makes the run serving the devices apply them
+// (applyConfig: a foreground run's control endpoint, or Manager.Reload of the
+// device service, SIGHUP on Unix and a parameter change on Windows; the agent
+// restarts only the changed devices). Besides a re-enrolment with
 // up, it is the way to change what an enrolled device allows. As root it
 // records its outcome in the system log.
 func runSet(args []string) (err error) {
@@ -51,6 +52,11 @@ func runSet(args []string) (err error) {
 	}
 
 	who = currentInvoker(false)
+	if who.privileged {
+		// The reload may end the terminal session this runs in: run to the
+		// end and record the outcome.
+		ignoreHangup()
+	}
 	file, err := who.localConfigFile()
 	if err != nil {
 		return err
@@ -89,23 +95,16 @@ func runSet(args []string) (err error) {
 	return applyErr
 }
 
-// applySettings applies saved settings: as root it reloads the installed
-// device service, otherwise it tells the user to restart `localport run`.
+// applySettings applies saved settings: as root through applyConfig, which
+// does not start a stopped service; otherwise it tells the user to restart
+// `localport run`.
 func applySettings(who invoker) error {
 	if !who.privileged {
 		fmt.Fprintf(os.Stderr, "  restart `localport run` to apply it\n")
 		return nil
 	}
-	reloaded, err := reloadDeviceService()
-	switch {
-	case err != nil:
-		return notApplied(err)
-	case reloaded:
-		fmt.Fprintf(os.Stderr, "  reloaded the device service\n")
-	default:
-		fmt.Fprintf(os.Stderr, "  no device service is installed, so nothing was reloaded; restart `localport run` to apply it\n")
-	}
-	return nil
+	_, err := applyConfig(false)
+	return err
 }
 
 // updateDevice applies the flags to one device's entry under the local
@@ -125,7 +124,7 @@ func updateDevice(file config.LocalConfigFile, fs *flag.FlagSet, device *deviceF
 		return identity.Ref{}, err
 	}
 	pruned := pruneRemoved(local, facts)
-	i, err := findDevice(local.Devices, name)
+	i, err := matchDevice(local.Devices, name)
 	if err != nil {
 		// The pruning is kept even when the named device is among the removed.
 		return identity.Ref{}, errors.Join(err, writePruned(file, local, pruned))
@@ -149,7 +148,7 @@ func lookupDevice(file config.LocalConfigFile, name string) (identity.Ref, error
 	if err != nil {
 		return identity.Ref{}, err
 	}
-	i, err := findDevice(local.Devices, name)
+	i, err := matchDevice(local.Devices, name)
 	if err != nil {
 		return identity.Ref{}, err
 	}
@@ -203,19 +202,6 @@ func resetDesktopPins(who invoker, ref identity.Ref, kinds []string) error {
 	return nil
 }
 
-// reloadDeviceService reloads the device service when one carrying the
-// marker is installed, reporting whether it did.
-func reloadDeviceService() (bool, error) {
-	m, installed, err := installedDeviceService()
-	if err != nil || !installed {
-		return false, err
-	}
-	if err := m.Reload(context.Background()); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 // findDevice locates a device by its full identity, its
 // <tunnelIdentifier>.<prefix> form, or its prefix alone when that is unique.
 func findDevice(devices []config.LocalDevice, name string) (int, error) {
@@ -244,9 +230,10 @@ func usageSet(fs *flag.FlagSet) {
   Change what an enrolled device allows, in the local config. <device> is its
   identity, <fleet>.<device>, or the device name when unique. Only the flags
   given change; a list flag replaces the whole list. As root (Administrator on
-  Windows) set reloads the installed device service, which applies the
-  change: only the changed device restarts and its open sessions end. A
-  device run with localport run applies it
+  Windows) set makes the process serving the devices apply the change: a
+  localport run or up --foreground in a terminal, else the running device
+  service. Only the changed device restarts and its open sessions end. A
+  stopped service applies it when it starts; a run without root applies it
   when restarted.
 
   --rdp-reset-pin and --vnc-reset-pin forget the RDP server certificate key or

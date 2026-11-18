@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -173,6 +174,47 @@ func TestStatusReaderAuthorization(t *testing.T) {
 			got := readRaw(t, path)
 			if want := c.reads; (len(got) > 0) != want {
 				t.Fatalf("read %q, want a document: %v", got, want)
+			}
+		})
+	}
+}
+
+// A peer credential cut short at peerGroupsMax without the agent group is
+// decided by GroupMember; a shorter one is complete and GroupMember is never
+// asked.
+func TestStatusReaderBeyondTheCredentialGroups(t *testing.T) {
+	const agentUID, agentGID = 450, 450
+	full := make([]uint32, min(peerGroupsMax, 64))
+	for i := range full {
+		full[i] = uint32(1000 + i)
+	}
+	for _, c := range []struct {
+		name   string
+		gids   []uint32
+		member bool
+		reads  bool
+		asked  bool
+	}{
+		{"listed beyond a full credential", full, true, true, true},
+		{"not listed beyond a full credential", full, false, false, true},
+		{"short credential", []uint32{20, 12}, true, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if len(c.gids) < peerGroupsMax && c.asked {
+				t.Skip("this platform's credential lists every group")
+			}
+			var asked atomic.Bool
+			s := &Server{AgentUID: agentUID, AgentGID: agentGID, Log: t.Logf,
+				GroupMember: func(uid, gid uint32) (bool, error) {
+					asked.Store(true)
+					return uid == 501 && gid == agentGID && c.member, nil
+				}}
+			s.peerGroups = func(*net.UnixConn) (uint32, []uint32, error) { return 501, c.gids, nil }
+			s.status.claim()
+			s.status.set([]byte("doc"))
+			got := readRaw(t, serveStatus(t, s))
+			if (len(got) > 0) != c.reads || asked.Load() != c.asked {
+				t.Fatalf("read %q, asked %v; want a document %v, asked %v", got, asked.Load(), c.reads, c.asked)
 			}
 		})
 	}

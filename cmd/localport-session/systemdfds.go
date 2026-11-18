@@ -15,6 +15,10 @@ const (
 	fdNameStatus  = "status"  // localport-status.socket
 )
 
+// reinstallUnits is the remedy for socket units that do not match this
+// launcher: service install writes them again.
+const reinstallUnits = "reinstall the service: sudo localport service install"
+
 // systemdFDs maps the descriptors systemd passed to their
 // FileDescriptorName, from LISTEN_PID, LISTEN_FDS and LISTEN_FDNAMES. It
 // returns nil when systemd passed none to pid. The session name must be
@@ -29,20 +33,20 @@ func systemdFDs(listenPID, listenFDs, fdNames string, pid int) (map[string]int, 
 	}
 	names := strings.Split(fdNames, ":")
 	if len(names) != n {
-		return nil, fmt.Errorf("systemd passed %d sockets named %q; set FileDescriptorName on each socket unit", n, fdNames)
+		return nil, fmt.Errorf("systemd passed %d sockets named %q; %s", n, fdNames, reinstallUnits)
 	}
 	fds := make(map[string]int, n)
 	for i, name := range names {
 		if name != fdNameSession && name != fdNameStatus {
-			return nil, fmt.Errorf("systemd passed a socket named %q, want %s or %s", name, fdNameSession, fdNameStatus)
+			return nil, fmt.Errorf("systemd passed a socket named %q, want %s or %s; %s", name, fdNameSession, fdNameStatus, reinstallUnits)
 		}
 		if _, dup := fds[name]; dup {
-			return nil, fmt.Errorf("systemd passed two sockets named %q", name)
+			return nil, fmt.Errorf("systemd passed two sockets named %q; %s", name, reinstallUnits)
 		}
 		fds[name] = systemdListenFD + i
 	}
 	if _, ok := fds[fdNameSession]; !ok {
-		return nil, fmt.Errorf("systemd passed no socket named %q; reinstall the service: sudo localport service install", fdNameSession)
+		return nil, fmt.Errorf("systemd passed no socket named %q; %s", fdNameSession, reinstallUnits)
 	}
 	return fds, nil
 }

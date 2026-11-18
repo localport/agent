@@ -17,6 +17,7 @@ import (
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/launcher"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/service"
 )
@@ -32,6 +33,7 @@ type fakeManager struct {
 }
 
 func (f *fakeManager) Name() string                  { return "localport-device.service" }
+func (f *fakeManager) StopCommand() string           { return "systemctl stop localport-device.service" }
 func (f *fakeManager) Check() ([]string, error)      { return nil, f.checkErr }
 func (f *fakeManager) Installed() (bool, error)      { return f.installed, f.installedErr }
 func (f *fakeManager) Restart(context.Context) error { f.restarts++; return nil }
@@ -67,6 +69,7 @@ func asRoot(t *testing.T, m *fakeManager) config.LocalConfigFile {
 		func(p func(string) error) func() { return func() { checkServiceBinary = p } }(checkServiceBinary),
 		func(p func()) func() { return func() { ignoreHangup = p } }(ignoreHangup),
 		func(p func(bool, string)) func() { return func() { systemLog = p } }(systemLog),
+		func(p func(context.Context) error) func() { return func() { requestReload = p } }(requestReload),
 	}
 	t.Cleanup(func() {
 		for _, r := range restore {
@@ -79,6 +82,9 @@ func asRoot(t *testing.T, m *fakeManager) config.LocalConfigFile {
 	checkServiceBinary = func(string) error { return nil }
 	ignoreHangup = func() {}
 	systemLog = func(bool, string) {}
+	// No foreground run serves the devices unless a test says so; the real
+	// endpoint of the machine running the tests is never reached.
+	requestReload = func(context.Context) error { return launcher.ErrNoForegroundRun }
 	return file
 }
 
@@ -445,7 +451,7 @@ func TestPurgeDeletesTheConfigDeviceCredentialsAndRecordingSpoolOnly(t *testing.
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	if want := []string{"agent.yaml.lock", "identity", "notes.txt", "run.lock"}; err != nil || !slices.Equal(names, want) {
+	if want := []string{filepath.Base(file.LockPath()), "identity", "notes.txt", "run.lock"}; err != nil || !slices.Equal(names, want) {
 		t.Fatalf("directory after purge = %q, %v, want %q", names, err, want)
 	}
 	if _, err := os.Stat(filepath.Join(machine, "key.pem")); err != nil {
@@ -500,11 +506,13 @@ func TestPurgeRefusals(t *testing.T) {
 }
 
 // A user-launched privileged run is refused at once while run.lock is held,
-// naming the device service when it is installed; run --service waits and
-// starts once the holder releases it; every privileged run re-checks the
-// binary.
+// naming the device service when it is installed; run --service waits, past
+// the restart wait too (standby), and starts once the holder releases it;
+// every privileged run re-checks the binary.
 func TestPrivilegedRunHoldsRunLock(t *testing.T) {
-	m := &fakeManager{installed: true}
+	// The holder recorded in run.lock is this process, the service's main
+	// process here.
+	m := &fakeManager{installed: true, mainPID: os.Getpid()}
 	file := asRoot(t, m)
 	release, err := config.LockRun(file, 0)
 	if err != nil {
@@ -515,6 +523,17 @@ func TestPrivilegedRunHoldsRunLock(t *testing.T) {
 	if !errors.Is(err, config.ErrRunLocked) || !strings.Contains(err.Error(), m.Name()) {
 		t.Fatalf("run beside the holder = %v, want ErrRunLocked naming %s", err, m.Name())
 	}
+	var remedy *errcode.Remedy
+	if !errors.As(err, &remedy) || !strings.Contains(remedy.Text, elevatedStop(m)) {
+		t.Fatalf("run beside the holder = %v, want a remedy giving the stop command %q", err, elevatedStop(m))
+	}
+	// A service standing by beside a foreground run is not blamed.
+	m.mainPID = os.Getpid() + 1
+	err = runEnrolledDevices(context.Background(), "test", currentInvoker(false), false, true, func() {})
+	if !errors.As(err, &remedy) || remedy.Text != runLockedRemedy {
+		t.Fatalf("run beside a foreground holder with the service standing by = %v, want the remedy %q", err, runLockedRemedy)
+	}
+	m.mainPID = os.Getpid()
 
 	time.AfterFunc(300*time.Millisecond, func() { _ = release() })
 	started := false
@@ -537,16 +556,15 @@ func TestPrivilegedRunHoldsRunLock(t *testing.T) {
 		t.Fatalf("run --service stopped during the wait = %v (started %v), want context.Canceled after running", err, started)
 	}
 
-	// Giving up the wait exits with ExitRunLocked.
-	serviceRunLockWait = 300 * time.Millisecond
+	// A holder past the restart wait is a foreground run: the service stands
+	// by and takes the devices over when that run releases the lock.
+	serviceRunLockWait = 100 * time.Millisecond
 	t.Cleanup(func() { serviceRunLockWait = 30 * time.Second })
+	time.AfterFunc(700*time.Millisecond, func() { _ = held() })
+	start := time.Now()
 	err = runEnrolledDevices(context.Background(), "test", currentInvoker(true), true, true, func() {})
-	var exitErr *service.ExitError
-	if !errors.As(err, &exitErr) || exitErr.Code != service.ExitRunLocked || !errors.Is(err, config.ErrRunLocked) {
-		t.Fatalf("run --service past its wait = %v, want ExitError %d wrapping ErrRunLocked", err, service.ExitRunLocked)
-	}
-	if err := held(); err != nil {
-		t.Fatal(err)
+	if errors.Is(err, config.ErrRunLocked) || time.Since(start) < 700*time.Millisecond {
+		t.Fatalf("run --service beside a foreground run = %v after %v, want it past the lock once the run released it", err, time.Since(start))
 	}
 
 	checkServiceBinary = func(string) error { return security.ErrUnsafeExecutable }
@@ -554,5 +572,36 @@ func TestPrivilegedRunHoldsRunLock(t *testing.T) {
 		if err := runEnrolledDevices(context.Background(), "test", currentInvoker(false), asService, true, notRunning); !errors.Is(err, security.ErrUnsafeExecutable) {
 			t.Fatalf("run (service %v) with an unsafe binary = %v, want ErrUnsafeExecutable", asService, err)
 		}
+	}
+}
+
+// A privileged foreground run binds its control endpoint only while it holds
+// run.lock: a run refused the lock never binds it, and a run past the lock
+// binds it with the lock held.
+func TestForegroundRunListensOnlyWithTheRunLock(t *testing.T) {
+	file := asRoot(t, &fakeManager{})
+	prev := listenControl
+	t.Cleanup(func() { listenControl = prev })
+	listened, heldWhileListening := 0, false
+	refused := errors.New("stop after the bind")
+	listenControl = func() (*launcher.ControlListener, error) {
+		listened++
+		_, err := config.LockRun(file, 0)
+		heldWhileListening = errors.Is(err, config.ErrRunLocked)
+		return nil, refused
+	}
+
+	release, err := config.LockRun(file, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runEnrolledDevices(context.Background(), "test", currentInvoker(false), false, true, func() {}); !errors.Is(err, config.ErrRunLocked) || listened != 0 {
+		t.Fatalf("run refused run.lock = %v, binds %d; want ErrRunLocked and no bind", err, listened)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runEnrolledDevices(context.Background(), "test", currentInvoker(false), false, true, func() {}); !errors.Is(err, refused) || listened != 1 || !heldWhileListening {
+		t.Fatalf("run past run.lock = %v, binds %d, lock held while binding %v; want the bind with the lock held", err, listened, heldWhileListening)
 	}
 }

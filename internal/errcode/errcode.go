@@ -201,6 +201,12 @@ const (
 	AgentChildOutput        Code = "AG152"
 	NotJoinToken            Code = "AG153"
 	DeviceLimit             Code = "AG154"
+	JoinTokenWithConfig     Code = "AG155"
+	JoinTokenRequired       Code = "AG156"
+	NoMuxAsRoot             Code = "AG157"
+	NoCredentialChosen      Code = "AG158"
+	SystemRunNotPrivileged  Code = "AG159"
+	ControlEndpointFailed   Code = "AG160"
 )
 
 // NewJoinCommand is the remedy for every lost or unusable device credential.
@@ -297,7 +303,7 @@ var registry = []Entry{
 	{CurrentUserUnknown, "Current user unknown", "the account running this command cannot be looked up"},
 	{OpenSSHUnavailable, "OpenSSH client unavailable", "the OpenSSH client (ssh) cannot be run"},
 	{CredentialNotKept, "Credential not saved", "the issued credential could not be saved in the credential store"},
-	{SettingsNotApplied, "Settings saved but not applied", "the settings are saved, but the device service did not reload"},
+	{SettingsNotApplied, "Settings saved but not applied", "the settings are saved, but the run serving the devices did not apply them"},
 	{PinResetFailed, "Desktop key not forgotten", "the trusted desktop server key could not be forgotten"},
 	{DeviceAmbiguous, "Device name ambiguous", "the name matches more than one enrolled device"},
 	{DeviceNotFound, "Device not found", "the name matches no enrolled device"},
@@ -339,6 +345,12 @@ var registry = []Entry{
 	{AgentChildOutput, "Agent account step output refused", "the step localport runs as the agent account returned output localport does not accept; retry, and reinstall localport if it persists"},
 	{NotJoinToken, "Not a join token", "the argument is not a join token"},
 	{DeviceLimit, "Device limit reached", "this machine already has the maximum number of devices"},
+	{JoinTokenWithConfig, "Join token with --config", "a join token cannot be combined with --config"},
+	{JoinTokenRequired, "Join token required", "join token required: create the device in the dashboard and run the command it shows"},
+	{NoMuxAsRoot, "--no-mux not available as root", "--no-mux is not available to a device enrolled as root; run it as an ordinary user, or leave it out"},
+	{NoCredentialChosen, "No credential chosen", "no credential was chosen"},
+	{SystemRunNotPrivileged, "System run needs root", "run --system serves this machine's devices in the foreground only as root or an elevated Administrator: run sudo localport run, or on Windows localport run in an elevated shell"},
+	{ControlEndpointFailed, "Control endpoint unavailable", "the foreground run could not serve its control endpoint, which up, down and set use to apply settings"},
 }
 
 // New returns the sentinel of a registered code. An unregistered code is a

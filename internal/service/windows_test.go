@@ -285,12 +285,13 @@ func TestSetRequiredPrivilegesPassesTheList(t *testing.T) {
 
 // An ExitError's Code becomes the service-specific exit code.
 func TestExecuteReportsExitErrorCode(t *testing.T) {
+	const want = 3
 	h := &scmHandler{serve: func(context.Context, func()) error {
-		return &ExitError{Code: ExitRunLocked, Err: errors.New("run.lock is held")}
+		return &ExitError{Code: want, Err: errors.New("the run failed")}
 	}}
 	status := make(chan svc.Status, 4)
-	if specific, code := h.Execute(nil, make(chan svc.ChangeRequest), status); !specific || code != ExitRunLocked {
-		t.Fatalf("Execute = %v, %d, want a service-specific exit %d", specific, code, ExitRunLocked)
+	if specific, code := h.Execute(nil, make(chan svc.ChangeRequest), status); !specific || code != want {
+		t.Fatalf("Execute = %v, %d, want a service-specific exit %d", specific, code, want)
 	}
 }
 

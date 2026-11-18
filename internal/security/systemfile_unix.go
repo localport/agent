@@ -20,7 +20,8 @@ const (
 	systemFilePerm os.FileMode = 0o640
 	// SystemRunLockPerm is run.lock: root and the agent group lock it.
 	SystemRunLockPerm os.FileMode = 0o660
-	// SystemConfigLockPerm is agent.yaml.lock: only root writes the config.
+	// SystemConfigLockPerm is the config lock's marker file: only root
+	// writes the config.
 	SystemConfigLockPerm os.FileMode = 0o600
 )
 
@@ -69,7 +70,17 @@ func CheckSystemDir(dir string) error {
 // it root:gid 0750. Root only. A directory owned by anyone but root is
 // refused, not taken over: its owner could have placed links in it.
 func EnsureSystemDir(dir string, gid int) error {
-	if err := os.Mkdir(dir, systemDirPerm); err != nil && !os.IsExist(err) {
+	return ensureSystemDir(dir, gid, systemDirPerm)
+}
+
+// EnsureSystemLockDir is EnsureSystemDir for a lock directory only root may
+// open: root:gid 0700.
+func EnsureSystemLockDir(dir string, gid int) error {
+	return ensureSystemDir(dir, gid, 0o700)
+}
+
+func ensureSystemDir(dir string, gid int, perm os.FileMode) error {
+	if err := os.Mkdir(dir, perm); err != nil && !os.IsExist(err) {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
 	f, err := openSystemDir(dir)
@@ -87,7 +98,7 @@ func EnsureSystemDir(dir string, gid int) error {
 	if err := f.Chown(systemOwner, gid); err != nil {
 		return fmt.Errorf("secure %s: %w", dir, err)
 	}
-	if err := f.Chmod(systemDirPerm); err != nil {
+	if err := f.Chmod(perm); err != nil {
 		return fmt.Errorf("secure %s: %w", dir, err)
 	}
 	return nil
@@ -200,6 +211,14 @@ func OpenSystemRunLock(path string) (*os.File, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// OpenLockDir opens dir, without following a symlink, for a lock on the
+// directory itself (TryLockFile): unlike a lock file, a directory that holds
+// files cannot be removed, so the lock cannot be sidestepped by deleting it.
+// The descriptor is close-on-exec.
+func OpenLockDir(dir string) (*os.File, error) {
+	return openSystemDir(dir)
 }
 
 func openSystemDir(dir string) (*os.File, error) {

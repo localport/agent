@@ -29,7 +29,13 @@ func peerCred(conn *net.UnixConn) (uid uint32, pid int, err error) {
 }
 
 // maxPeerGroups bounds the supplementary groups read (NGROUPS_MAX is 65536).
-const maxPeerGroups = 65536
+// SO_PEERGROUPS never cuts a list short, so peerGroupsMax is one past the
+// longest list peerCredGroups returns (every supplementary group and the
+// primary gid).
+const (
+	maxPeerGroups = 65536
+	peerGroupsMax = maxPeerGroups + 2
+)
 
 // peerCredGroups returns the peer's uid and its groups as the kernel
 // recorded them at connect(2): the primary gid (SO_PEERCRED) and the

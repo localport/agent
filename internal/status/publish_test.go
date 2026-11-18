@@ -69,6 +69,40 @@ func TestPublishRetriesThenSendsEachChange(t *testing.T) {
 	}
 }
 
+// An unreachable launcher is logged once per outage, not on every retry, and
+// the end of the outage is logged.
+func TestPublishLogsAnOutageOnce(t *testing.T) {
+	b := NewBoard(7)
+	ours, launcherEnd := net.Pipe()
+	defer launcherEnd.Close()
+	var opens atomic.Int32
+	open := func(context.Context) (io.ReadWriteCloser, error) {
+		if opens.Add(1) <= 2 {
+			return nil, launcher.ErrUnavailable
+		}
+		return ours, nil
+	}
+	var lines []string
+	logged := make(chan string, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Publish(ctx, b, open, func(format string, args ...any) { logged <- fmt.Sprintf(format, args...) })
+	}()
+	_ = launcherEnd.SetDeadline(time.Now().Add(10 * time.Second))
+	readFrame(t, launcherEnd)
+	cancel()
+	<-done
+	close(logged)
+	for line := range logged {
+		lines = append(lines, line)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("logged %q over two failed opens and a success, want the outage once and its end", lines)
+	}
+}
+
 // A launcher that closes the connection (a restart) gets the document again
 // on a new connection without any board change.
 func TestPublishReconnectsWhenTheLauncherCloses(t *testing.T) {

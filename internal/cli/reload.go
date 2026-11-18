@@ -8,20 +8,27 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/localport/agent/internal/agent"
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/launcher"
 	"github.com/localport/agent/internal/recording"
 	"github.com/localport/agent/internal/session"
 	"github.com/localport/agent/internal/status"
 	"github.com/localport/agent/internal/tunnel"
 )
 
-// reloadSessionWait bounds how long a reload waits for the sessions of a
-// changed device to end before it stops the device's tunnel.
+// reloadSessionWait bounds how long a reload waits for the sessions of the
+// changed devices to end, all at once, before it stops their tunnels.
 const reloadSessionWait = 5 * time.Second
+
+// endSessionsForReload ends a changed device's sessions with config_changed;
+// tests replace it.
+var endSessionsForReload = (*session.Server).ShutdownConfigChanged
 
 // servedDevice is one running device: its config entry, its session server
 // (nil when sessions are off), its sessions lock, and its renewal and key
@@ -91,6 +98,8 @@ type deviceRunner struct {
 	// board receives each device's state for the status endpoint; nil
 	// publishes none.
 	board *status.Board
+	// reloads subscribes to the run's reload requests; nil is notifyReload.
+	reloads reloadSource
 
 	// forget is store.Forget; tests replace it to observe the end order.
 	forget func(ctx context.Context, ref identity.Ref, code, serial string) (bool, error)
@@ -196,6 +205,10 @@ func (r *deviceRunner) reload(ctx context.Context, a *agent.Agent, devices []con
 	}
 	var stop []*tunnel.Tunnel
 	var ended []*servedDevice
+	// The changed devices' sessions end concurrently under one bound, so a
+	// reload of many devices waits reloadSessionWait at most, not per device.
+	waitCtx, cancelWait := context.WithTimeout(ctx, reloadSessionWait)
+	var draining sync.WaitGroup
 	for ref, s := range r.served {
 		// A parked device is retried; a removed one stays until its entry
 		// changes or goes.
@@ -203,11 +216,11 @@ func (r *deviceRunner) reload(ctx context.Context, a *agent.Agent, devices []con
 			continue
 		}
 		if s.sessions != nil {
-			waitCtx, cancel := context.WithTimeout(ctx, reloadSessionWait)
-			if err := s.sessions.ShutdownConfigChanged(waitCtx); err != nil {
-				r.logEvent(fmt.Sprintf("reload: the sessions of %s did not end in time: %v", ref, err))
-			}
-			cancel()
+			draining.Go(func() {
+				if err := endSessionsForReload(s.sessions, waitCtx); err != nil {
+					r.logEvent(fmt.Sprintf("reload: the sessions of %s did not end in time: %v", ref, err))
+				}
+			})
 		}
 		if t := deviceTunnel(a.Tunnels(), ref.Identity); t != nil {
 			stop = append(stop, t)
@@ -218,6 +231,8 @@ func (r *deviceRunner) reload(ctx context.Context, a *agent.Agent, devices []con
 			r.board.Remove(ref.Identity)
 		}
 	}
+	draining.Wait()
+	cancelWait()
 	r.pruneTombstones(devices)
 	var added []config.LocalDevice
 	for _, d := range devices {
@@ -428,13 +443,90 @@ func (r *deviceRunner) isConfigured(identifier string) bool {
 	return devices != nil && slices.ContainsFunc(*devices, func(d config.LocalDevice) bool { return d.Identity.Identity == identifier })
 }
 
-// notifyReload subscribes to reload signals; tests replace it.
-var notifyReload = reloadSignals
+// reloadSource subscribes to reload requests, each delivered as a signal;
+// stop ends the subscription.
+type reloadSource func() (sig <-chan os.Signal, stop func())
+
+// notifyReload subscribes to the service manager's reload signals; tests
+// replace it.
+var notifyReload reloadSource = reloadSignals
+
+// logEventf writes an event line to stderr, as the devices' runner does.
+func logEventf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "  [event] "+format+"\n", args...)
+}
+
+// controlEndpointFailed codes a run's failure to serve its control endpoint.
+// A held endpoint (a Windows pipe another process created) is
+// config.ErrRunLocked, as a held run.lock is.
+func controlEndpointFailed(err error) error {
+	switch {
+	case errors.Is(err, launcher.ErrControlBusy):
+		// This process holds run.lock, so no run holds the pipe.
+		return errcode.WithRemedy(config.ErrRunLocked.With(err, ""),
+			"another process holds the control endpoint's pipe name; find and stop it, then start the run again")
+	case errors.Is(err, launcher.ErrControlUntrusted):
+		return errcode.WithRemedy(errcode.New(errcode.ControlEndpointFailed).With(err, ""),
+			"the control endpoint's directory or socket is not root's or is open to others: find what created it, remove it, and start the run again")
+	}
+	return errcode.WithRemedy(errcode.New(errcode.ControlEndpointFailed).With(err, ""), "start the run again; if it fails again, contact support with the output of localport --verbose run")
+}
+
+// controlReloads turns control requests into reload signals. Until the run
+// subscribes, right before it reads the config (serveHeldDevices), a request
+// is answered that the run is starting and queues nothing: the change is in
+// the config the run reads. Each later request queues a signal for the
+// devices' runner, coalescing those not yet handled.
+type controlReloads struct {
+	sig        chan os.Signal
+	subscribed atomic.Bool
+}
+
+func newControlReloads() *controlReloads {
+	return &controlReloads{sig: make(chan os.Signal, 1)}
+}
+
+// request is the control endpoint's reload callback: it reports whether the
+// reload was queued.
+func (c *controlReloads) request() bool {
+	if !c.subscribed.Load() {
+		return false
+	}
+	select {
+	case c.sig <- syscall.SIGHUP:
+	default:
+	}
+	return true
+}
+
+// subscribe is the reloadSource of the served devices; from its first call on
+// requests are queued.
+func (c *controlReloads) subscribe() (<-chan os.Signal, func()) {
+	c.subscribed.Store(true)
+	return c.sig, func() {}
+}
+
+// serveControl serves ctl until stop, which then closes it, with the requests
+// delivered on the returned source (controlReloads).
+func serveControl(ctl *launcher.ControlListener) (reloads reloadSource, stop func()) {
+	r := newControlReloads()
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		ctl.Serve(ctx, r.request, logEventf)
+	}()
+	return r.subscribe, func() {
+		cancel()
+		<-served
+		_ = ctl.Close()
+	}
+}
 
 // watchReload is the owner goroutine of the served devices: it runs
 // handleEnds for queued device ends and, with load set, reloads on every
-// reload signal, until ctx ends. A config that fails to load keeps the running
-// devices and is logged. It subscribes
+// reload request (r.reloads), until ctx ends. A config that fails to load keeps
+// the running devices and is logged. It subscribes
 // first, so a signal sent before the agent runs is queued (not lost, and on
 // Unix not the default SIGHUP exit), and handles it once the agent has
 // started.
@@ -442,7 +534,11 @@ func (r *deviceRunner) watchReload(ctx context.Context, a *agent.Agent, load fun
 	var sig <-chan os.Signal
 	if load != nil {
 		var stop func()
-		sig, stop = notifyReload()
+		subscribe := r.reloads
+		if subscribe == nil {
+			subscribe = notifyReload
+		}
+		sig, stop = subscribe()
 		defer stop()
 	}
 	select {

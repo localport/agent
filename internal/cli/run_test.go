@@ -18,7 +18,9 @@ import (
 
 	"github.com/localport/agent/internal/agent"
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/launcher"
 )
 
 // A device whose credential is missing is skipped; with none left, run
@@ -140,5 +142,44 @@ func TestDeviceSpecCarriesTheStoredDevice(t *testing.T) {
 	}
 	if spec.Credential == nil || !renews {
 		t.Fatalf("credential=%v renews=%v, want a registrar over a renewable credential", spec.Credential, renews)
+	}
+}
+
+// A foreground `run --system` without root (an elevated Administrator) is
+// refused before it serves anything: up, down and set could not reach it.
+func TestSystemRunNeedsPrivilege(t *testing.T) {
+	asRoot(t, &fakeManager{})
+	privilegedProcess = func() bool { return false }
+	prev := listenControl
+	t.Cleanup(func() { listenControl = prev })
+	listenControl = func() (*launcher.ControlListener, error) {
+		return nil, errors.New("the test reached the control endpoint")
+	}
+	if err := runRun("test", []string{"--system"}); !errors.Is(err, errcode.New(errcode.SystemRunNotPrivileged)) {
+		t.Fatalf("unprivileged run --system = %v, want AG159", err)
+	}
+}
+
+// Root opens the control endpoint only for a run that gets past its flags to
+// serve in the foreground: a help request or a flag error ends it first,
+// --service runs as the device service, and a flag value is never taken for a
+// flag.
+func TestRunServesInForeground(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"--system"}, true},
+		{[]string{"--log-file", "-h"}, true},
+		{[]string{"--help"}, false},
+		{[]string{"-h"}, false},
+		{[]string{"--nope"}, false},
+		{[]string{"extra"}, false},
+		{[]string{"--service"}, false},
+		{[]string{"--system", "--service"}, false},
+	} {
+		if got := runServesInForeground(c.args); got != c.want {
+			t.Errorf("runServesInForeground(%q) = %v, want %v", c.args, got, c.want)
+		}
 	}
 }

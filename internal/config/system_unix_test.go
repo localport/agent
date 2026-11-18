@@ -137,8 +137,11 @@ func TestSystemRunLock(t *testing.T) {
 		t.Fatalf("LockLocal as root: %v", err)
 	}
 	unlock()
-	if info, err := os.Stat(f.LockPath()); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("agent.yaml.lock = %v, %v; want mode 0600", info, err)
+	if info, err := os.Lstat(f.LockPath()); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("config lock directory = %v, %v; want a directory with mode 0700", info, err)
+	}
+	if info, err := os.Lstat(filepath.Join(f.LockPath(), configLockMarker)); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("config lock marker = %v, %v; want mode 0600", info, err)
 	}
 }
 

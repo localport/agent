@@ -30,6 +30,8 @@ type procd struct {
 
 func (p procd) Name() string { return ProcdService }
 
+func (p procd) StopCommand() string { return "/etc/init.d/" + ProcdService + " stop" }
+
 func (p procd) script(name string) string { return filepath.Join(p.initDir, name) }
 
 func (p procd) paths() []string {

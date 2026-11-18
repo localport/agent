@@ -134,17 +134,23 @@ func checkStatusSocket(path string) error {
 	if fi.Mode().Type() != fs.ModeSocket || st.Uid != uid || st.Gid != gid || fi.Mode().Perm()&^0o660 != 0 {
 		return fmt.Errorf("%w: %s", ErrStatusUntrusted, path)
 	}
-	dir := filepath.Dir(path)
-	di, err := os.Lstat(dir)
+	err = checkTrustedDir(filepath.Dir(path), uid, ErrStatusUntrusted)
 	if errors.Is(err, fs.ErrPermission) {
 		return ErrStatusDenied
 	}
+	return err
+}
+
+// checkTrustedDir refuses, with untrusted, unless dir is a directory (no
+// link) owned by uid that neither group nor others can write.
+func checkTrustedDir(dir string, uid uint32, untrusted error) error {
+	fi, err := os.Lstat(dir)
 	if err != nil {
 		return err
 	}
-	dst := di.Sys().(*syscall.Stat_t)
-	if !di.IsDir() || dst.Uid != uid || di.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%w: %s", ErrStatusUntrusted, dir)
+	st := fi.Sys().(*syscall.Stat_t)
+	if !fi.IsDir() || st.Uid != uid || fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%w: %s", untrusted, dir)
 	}
 	return nil
 }

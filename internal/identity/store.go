@@ -331,10 +331,12 @@ func (s *Store) removeCredential(ctx context.Context, ref Ref) error {
 // credentials and their team directories stay. It first takes the store lock
 // exclusively, waiting up to saveLockWait for the holders of credential locks
 // to release their shared holds (ErrRenewalInProgress), so no credential lock
-// is held or awaited while it runs. Under that hold it deletes the lock directory and, when Root then holds
-// nothing else, the store lock file itself, so an emptied Root can be removed.
+// is held or awaited while it runs. Under that hold it deletes the lock
+// directory and, except on Windows (purgeRemovesStoreLock), when Root then
+// holds nothing else the store lock file itself, so an emptied Root can be
+// removed.
 // Purges never overlap (the one caller, `service uninstall --purge`, holds
-// run.lock and agent.yaml.lock) and every other holder takes the store lock
+// the run lock and the config lock) and every other holder takes the store lock
 // shared. A holder that opened the store lock before its deletion finds the
 // path no longer names its file once locked, and opens it again.
 // A missing Root is left missing and only also is called. Local only, as
@@ -382,7 +384,7 @@ func (s *Store) PurgeDevices(ctx context.Context, also func() error) ([]string, 
 	if err != nil {
 		return paths, errStoreUnusable.With(err, "read "+s.Root)
 	}
-	if len(left) == 1 && left[0].Name() == storeLockFile {
+	if purgeRemovesStoreLock && len(left) == 1 && left[0].Name() == storeLockFile {
 		if err := os.Remove(path); err != nil {
 			return paths, errStoreUnusable.With(err, "remove the store lock")
 		}

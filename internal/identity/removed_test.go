@@ -197,7 +197,14 @@ func TestPurgeDevicesWithAnEnrolmentWaiting(t *testing.T) {
 		}
 	}
 	store.storeLockReleasing = func() {
-		for _, p := range []string{store.Dir(deviceRef), store.tombstonePath(deviceRef), filepath.Join(store.Root, LocksDir), filepath.Join(store.Root, storeLockFile)} {
+		gone := []string{store.Dir(deviceRef), store.tombstonePath(deviceRef), filepath.Join(store.Root, LocksDir)}
+		storeLock := filepath.Join(store.Root, storeLockFile)
+		if purgeRemovesStoreLock {
+			gone = append(gone, storeLock)
+		} else if _, err := os.Lstat(storeLock); err != nil {
+			t.Errorf("%s before the purge released the store lock: %v, want it kept", storeLock, err)
+		}
+		for _, p := range gone {
 			if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("%s before the purge released the store lock: %v, want deleted", p, err)
 			}

@@ -37,7 +37,11 @@ type Server struct {
 	HelperPath string
 	// Probe reports what this host offers sessions.
 	Probe func() Probe
-	Log   func(format string, args ...any)
+	// GroupMember, when set, reports whether the directory service lists a
+	// uid in a group. It decides a status reader whose peer credential may be
+	// truncated: on macOS an xucred carries at most 16 groups.
+	GroupMember func(uid, gid uint32) (bool, error)
+	Log         func(format string, args ...any)
 
 	slots  chan struct{}
 	wg     sync.WaitGroup
@@ -99,13 +103,28 @@ func (s *Server) serveStatusReader(conn *net.UnixConn) {
 		s.Log("launcher: status reader credentials: %v", err)
 		return
 	}
-	if uid != 0 && uid != s.AgentUID && !slices.Contains(gids, s.AgentGID) {
+	if uid != 0 && uid != s.AgentUID && !slices.Contains(gids, s.AgentGID) && !s.listedMember(uid, len(gids)) {
 		s.Log("launcher: refused a status reader of uid %d: not root, the agent account or the agent group", uid)
 		return
 	}
 	if err := s.status.writeTo(conn); err != nil {
 		s.Log("launcher: write the status document: %v", err)
 	}
+}
+
+// listedMember asks GroupMember whether uid is in the agent group, for a
+// peer credential of n groups that a platform limit may have cut short
+// (peerGroupsMax). False when GroupMember is unset or fails, which is logged.
+func (s *Server) listedMember(uid uint32, n int) bool {
+	if s.GroupMember == nil || n < peerGroupsMax {
+		return false
+	}
+	member, err := s.GroupMember(uid, s.AgentGID)
+	if err != nil {
+		s.Log("launcher: status reader group membership: %v", err)
+		return false
+	}
+	return member
 }
 
 // publish takes the publisher slot for conn, the agent account's KindStatus

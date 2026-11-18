@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/launcher"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/service"
 	"github.com/localport/agent/internal/status"
@@ -114,6 +116,22 @@ func TestPauseAppliesToTheService(t *testing.T) {
 	}
 }
 
+// configLockHeld reports whether a process holds f's config lock (LockLocal):
+// it opens the lock (the directory on Linux and macOS, the file on Windows)
+// and tries it, releasing it at once when free.
+func configLockHeld(f config.LocalConfigFile) (bool, error) {
+	lock, err := os.Open(f.LockPath())
+	if err != nil {
+		return false, err
+	}
+	defer lock.Close()
+	free, err := security.TryLockFile(lock)
+	if free {
+		_ = security.UnlockFile(lock)
+	}
+	return err == nil && !free, err
+}
+
 // The store facts are read under the same config lock as the write, so a
 // concurrent `up <join-token>` cannot be pruned by a stale read.
 func TestDeviceFactsAreReadUnderTheConfigLock(t *testing.T) {
@@ -122,16 +140,10 @@ func TestDeviceFactsAreReadUnderTheConfigLock(t *testing.T) {
 	t.Cleanup(func() { readFacts = prev })
 	var held bool
 	readFacts = func(f config.LocalConfigFile, who invoker, devices []config.LocalDevice) (map[identity.Ref]deviceFact, error) {
-		lock, err := security.OpenLockFile(f.LockPath())
-		if err != nil {
+		var err error
+		if held, err = configLockHeld(f); err != nil {
 			return nil, err
 		}
-		defer lock.Close()
-		got, err := security.TryLockFile(lock)
-		if got {
-			_ = security.UnlockFile(lock)
-		}
-		held = err == nil && !got
 		return prev(f, who, devices)
 	}
 	if err := runDown([]string{"gw-01"}); err != nil {
@@ -192,30 +204,30 @@ func TestSelectDevices(t *testing.T) {
 	t.Cleanup(func() { pickerTTY = prev })
 	pickerTTY = func() bool { return false }
 
-	if idx, err := selectDevices(devices[:1], nil, "", false, "down"); err != nil || len(idx) != 1 {
+	if idx, err := selectDevices(devices[:1], "", false, "down"); err != nil || len(idx) != 1 {
 		t.Fatalf("one device = %v, %v; want it", idx, err)
 	}
 	for _, sel := range []string{"gw-02", "factory.gw-02", gw02.String(), gw02.Team + "/gw-02"} {
-		if idx, err := selectDevices(devices, nil, sel, false, "down"); err != nil || len(idx) != 1 || idx[0] != 1 {
+		if idx, err := selectDevices(devices, sel, false, "down"); err != nil || len(idx) != 1 || idx[0] != 1 {
 			t.Errorf("selector %q = %v, %v; want gw-02", sel, idx, err)
 		}
 	}
-	if _, err := selectDevices(devices, nil, "gw-09", false, "down"); !errors.Is(err, errcode.New(errcode.DeviceNotFound)) {
+	if _, err := selectDevices(devices, "gw-09", false, "down"); !errors.Is(err, errcode.New(errcode.DeviceNotFound)) {
 		t.Errorf("unknown selector = %v, want %s", err, errcode.DeviceNotFound)
 	}
-	if idx, err := selectDevices(devices, nil, "", true, "down"); err != nil || len(idx) != 2 {
+	if idx, err := selectDevices(devices, "", true, "down"); err != nil || len(idx) != 2 {
 		t.Errorf("--all = %v, %v; want both", idx, err)
 	}
 	prefix := "sudo localport down "
 	if runtime.GOOS == "windows" {
 		prefix = "localport down "
 	}
-	_, err := selectDevices(devices, nil, "", false, "down")
+	_, err := selectDevices(devices, "", false, "down")
 	if !errors.Is(err, errcode.New(errcode.DeviceNotNamed)) || !strings.Contains(err.Error(), prefix+gw01.String()) ||
 		!strings.Contains(err.Error(), prefix+"--all") {
 		t.Errorf("several without a terminal = %v, want each exact command", err)
 	}
-	if _, err := selectDevices(nil, nil, "", false, "down"); !errors.Is(err, errNoDevice) {
+	if _, err := selectDevices(nil, "", false, "down"); !errors.Is(err, errNoDevice) {
 		t.Errorf("no device = %v, want %v", err, errNoDevice)
 	}
 }
@@ -297,6 +309,9 @@ func TestResumesDevices(t *testing.T) {
 		"":                  true,
 		"gw-01":             true,
 		"--all":             true,
+		"-all":              true,
+		"--all=true":        true,
+		"--allow-ports 22":  false,
 		"lpj_x":             false,
 		"--config x.yaml":   false,
 		"gw-01 --enable x":  false,
@@ -313,7 +328,8 @@ func TestResumesDevices(t *testing.T) {
 func TestDescribeRow(t *testing.T) {
 	for state, want := range map[string]string{
 		status.StateRunning:      "running",
-		status.StatePaused:       "sudo localport up",
+		status.StateConnecting:   "connecting",
+		status.StatePaused:       "localport up",
 		status.StateDisconnected: "disconnected by an admin",
 		status.StateDraining:     "ending its sessions",
 		status.StateWaiting:      "waiting: refused with BL011",
@@ -323,6 +339,9 @@ func TestDescribeRow(t *testing.T) {
 		if got := describeRow(&status.Device{State: state, Code: "BL011"}); !strings.Contains(got, want) {
 			t.Errorf("%s = %q, want it to contain %q", state, got, want)
 		}
+	}
+	if got := describeRow(nil); !strings.Contains(got, "not reported") {
+		t.Errorf("no row = %q, want it not reported", got)
 	}
 }
 
@@ -334,6 +353,7 @@ func TestStatusAccountLine(t *testing.T) {
 		"ok":    nil,
 		"AG137": errcode.New(errcode.AccountMissing).With(nil, ""),
 		"AG147": errcode.New(errcode.AgentAccountUnsafe).With(nil, "shell /bin/zsh"),
+		"ok except the password, which only root can check": service.ErrPasswordUnchecked,
 	} {
 		checkAccount = func(context.Context) (service.Account, error) { return service.Account{UID: 450}, err }
 		var out bytes.Buffer
@@ -385,6 +405,7 @@ func TestStatesSettled(t *testing.T) {
 // the control plane as a join token.
 func TestUpRefusesADeviceNameAsAJoinToken(t *testing.T) {
 	t.Setenv(identity.HomeEnv, t.TempDir())
+	asUnprivileged(t)
 	calls := fakeEnrol(t, gw01)
 	for _, args := range [][]string{{"gw-01", "--foreground"}, {"--enable", "terminal", "gw-01"}} {
 		if err := runUp("test", args); !errors.Is(err, errNotJoinToken) {
@@ -438,6 +459,7 @@ func TestTruncateDisplay(t *testing.T) {
 // device's entry would be pruned.
 func TestUpRefusesAFullConfigBeforeTheSpend(t *testing.T) {
 	t.Setenv(identity.HomeEnv, t.TempDir())
+	asUnprivileged(t)
 	calls := fakeEnrol(t, gw01)
 	file, err := currentInvoker(false).localConfigFile()
 	if err != nil {
@@ -459,10 +481,249 @@ func TestUpRefusesAFullConfigBeforeTheSpend(t *testing.T) {
 	prev := readFacts
 	t.Cleanup(func() { readFacts = prev })
 	removed := local.Devices[0].Identity
+	reads := 0
 	readFacts = func(config.LocalConfigFile, invoker, []config.LocalDevice) (map[identity.Ref]deviceFact, error) {
+		reads++
 		return map[identity.Ref]deviceFact{removed: {Ref: removed.String(), Removed: "SE018"}}, nil
 	}
 	if _, err := refuseFullConfig(file, currentInvoker(false)); err != nil {
 		t.Fatalf("a full config with a removed device = %v, want room", err)
+	}
+	// up spends the token and records the device with the facts the check
+	// read under the same lock hold: the removed entry goes, none are read again.
+	reads = 0
+	prevServe := serveEnrolled
+	t.Cleanup(func() { serveEnrolled = prevServe })
+	serveEnrolled = func(context.Context, string, *identity.Store, []config.LocalDevice, bool, bool, func() ([]config.LocalDevice, error)) error {
+		return nil
+	}
+	if err := runUp("test", upArgs); err != nil {
+		t.Fatalf("up on a full config with a removed device = %v", err)
+	}
+	after, err := config.LoadLocal(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reads != 1 || *calls != 1 || len(after.Devices) != config.MaxDevices-1 ||
+		slices.ContainsFunc(after.Devices, func(d config.LocalDevice) bool { return d.Identity == removed }) {
+		t.Fatalf("facts read %d times, enrolments %d, %d entries; want 1, 1 and %d without %s", reads, *calls, len(after.Devices), config.MaxDevices-1, removed)
+	}
+}
+
+// With a foreground run serving the devices, up and down ask it to reload
+// and never start or reload the installed service, which would wait on the
+// run's run.lock.
+func TestUpAndDownReachAForegroundRunFirst(t *testing.T) {
+	_, m := pauseFixture(t)
+	m.mainPID = 0
+	asked := 0
+	requestReload = func(context.Context) error { asked++; return nil }
+	if err := runDown([]string{"gw-01"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runUp("test", []string{"gw-01"}); err != nil {
+		t.Fatal(err)
+	}
+	if asked != 2 || m.restarts != 0 || m.reloads != 0 {
+		t.Fatalf("asked the foreground run %d times, service restarts %d, reloads %d; want 2, 0, 0", asked, m.restarts, m.reloads)
+	}
+}
+
+// A foreground run that holds run.lock but is still starting (enrolling, or
+// waiting for approval) gets the change when it starts: up and down neither
+// start nor reload the stopped service beside it, and wait for no states.
+func TestUpAndDownLeaveAStartingForegroundRunToApply(t *testing.T) {
+	_, m := pauseFixture(t)
+	m.mainPID = 0
+	asked := 0
+	requestReload = func(context.Context) error { asked++; return launcher.ErrRunStarting }
+	readDocument = func(context.Context) (*status.Document, error) {
+		t.Error("waited for the states of a run that is starting")
+		return nil, launcher.ErrUnavailable
+	}
+	if err := runDown([]string{"gw-01"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runUp("test", []string{"gw-01"}); err != nil {
+		t.Fatal(err)
+	}
+	if asked != 2 || m.restarts != 0 || m.reloads != 0 {
+		t.Fatalf("asked the starting run %d times, service restarts %d, reloads %d; want 2, 0, 0", asked, m.restarts, m.reloads)
+	}
+}
+
+// A control request is answered that the run is starting, and queues nothing,
+// until the devices' runner subscribes; after it, each request queues one
+// coalesced reload.
+func TestControlReloadsAnswerStartingUntilSubscribed(t *testing.T) {
+	r := newControlReloads()
+	if r.request() {
+		t.Fatal("a request before the runner subscribed was queued")
+	}
+	sig, stop := r.subscribe()
+	defer stop()
+	if len(sig) != 0 {
+		t.Fatal("a request before the runner subscribed left a reload signal")
+	}
+	for range 2 {
+		if !r.request() {
+			t.Fatal("a request after the subscription was answered as starting")
+		}
+	}
+	if len(sig) != 1 {
+		t.Fatalf("requests after the subscription: %d signals queued, want 1", len(sig))
+	}
+}
+
+// The run.lock holder subscribes to reload requests before it reads the
+// config: a foreground run stops answering `starting` and queues each later
+// request, and the service catches SIGHUP, so no change saved after the read
+// is lost. The config here fails to load, which ends the run at the read.
+func TestHeldRunSubscribesBeforeItReadsTheConfig(t *testing.T) {
+	file := asRoot(t, &fakeManager{})
+	if err := os.MkdirAll(filepath.Dir(file.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file.Path, []byte("devices: [unclosed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := newControlReloads()
+	if err := serveHeldDevices(context.Background(), "test", currentInvoker(true), file, true, false, r.subscribe); err == nil {
+		t.Fatal("serveHeldDevices loaded a malformed config")
+	}
+	if !r.request() {
+		t.Fatal("the foreground run read the config before it queued requests")
+	}
+
+	prev := notifyReload
+	t.Cleanup(func() { notifyReload = prev })
+	serviceSubscribed := false
+	notifyReload = func() (<-chan os.Signal, func()) {
+		serviceSubscribed = true
+		return make(chan os.Signal, 1), func() {}
+	}
+	if err := serveHeldDevices(context.Background(), "test", currentInvoker(true), file, true, false, nil); err == nil {
+		t.Fatal("serveHeldDevices loaded a malformed config")
+	}
+	if !serviceSubscribed {
+		t.Fatal("the service read the config before it subscribed to SIGHUP")
+	}
+}
+
+// A control endpoint that refuses or is untrusted is AG116; the service is
+// not touched.
+func TestAForegroundRunThatDoesNotAnswerIsNotApplied(t *testing.T) {
+	_, m := pauseFixture(t)
+	requestReload = func(context.Context) error { return launcher.ErrControlUntrusted }
+	err := runDown([]string{"gw-01"})
+	if !errors.Is(err, errcode.New(errcode.SettingsNotApplied)) || !errors.Is(err, launcher.ErrControlUntrusted) {
+		t.Fatalf("down = %v, want AG116 wrapping the refusal", err)
+	}
+	if m.reloads != 0 || m.restarts != 0 {
+		t.Fatalf("service reloads %d, restarts %d; want none", m.reloads, m.restarts)
+	}
+}
+
+// A foreground run with no session launcher publishes no states: down does
+// not wait the full poll for them.
+func TestForegroundRunWithoutALauncherIsNotPolled(t *testing.T) {
+	pauseFixture(t)
+	requestReload = func(context.Context) error { return nil }
+	readDocument = func(context.Context) (*status.Document, error) { return nil, launcher.ErrUnavailable }
+	start := time.Now()
+	if err := runDown([]string{"gw-01"}); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d >= awaitStatesFor/2 {
+		t.Fatalf("down took %v polling a launcher that does not exist", d)
+	}
+}
+
+// Without a row in the service's document a device's state comes from disk:
+// removed (a tombstone and no credential), paused, or configured. A row wins
+// over disk.
+func TestDeviceStateFallsBackToDisk(t *testing.T) {
+	t.Setenv(identity.HomeEnv, t.TempDir())
+	asUnprivileged(t)
+	store, err := currentInvoker(false).store()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureRoot(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(store.Dir(gw02)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Forget(context.Background(), gw02, identity.CodeDeviceUnknown, ""); err != nil {
+		t.Fatal(err)
+	}
+	empty := &status.Document{Version: status.Version}
+	for _, c := range []struct {
+		name string
+		doc  *status.Document
+		d    config.LocalDevice
+		want string
+	}{
+		{"no document, configured", nil, config.LocalDevice{Identity: gw01}, "configured"},
+		{"no row, paused", empty, config.LocalDevice{Identity: gw01, Paused: true}, "paused"},
+		{"no row, removed", empty, config.LocalDevice{Identity: gw02, Paused: true}, "removed: refused with SE018"},
+		{"row wins", &status.Document{Version: status.Version, Devices: []status.Device{{Identity: gw02.Identity, State: status.StateRunning}}},
+			config.LocalDevice{Identity: gw02}, "running"},
+	} {
+		if got := deviceState(c.doc, store, c.d); !strings.HasPrefix(got, c.want) {
+			t.Errorf("%s: %q, want it to start with %q", c.name, got, c.want)
+		}
+	}
+	if got := deviceState(nil, nil, config.LocalDevice{Identity: gw02}); got != "configured" {
+		t.Errorf("unreadable store: %q, want configured", got)
+	}
+}
+
+// With several devices and a terminal, down asks which one with the config's
+// lock free, then pauses the chosen device as read again under the lock.
+func TestDownAsksWithTheConfigLockFree(t *testing.T) {
+	file, _ := pauseFixture(t)
+	prevTTY, prevAsk := pickerTTY, askDevices
+	t.Cleanup(func() { pickerTTY, askDevices = prevTTY, prevAsk })
+	pickerTTY = func() bool { return true }
+	askDevices = func(devices []config.LocalDevice, _ map[identity.Ref]deviceFact) ([]int, error) {
+		if held, err := configLockHeld(file); err != nil || held {
+			t.Errorf("the config lock was held while down asked (%v, %v)", held, err)
+			return nil, errors.New("lock held")
+		}
+		return []int{slices.IndexFunc(devices, func(d config.LocalDevice) bool { return d.Identity == gw02 })}, nil
+	}
+	if err := runDown(nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := pausedOf(t, file); got[gw01] || !got[gw02] {
+		t.Fatalf("paused after choosing gw-02: %v, want gw-02 only", got)
+	}
+}
+
+// Root's status prints the service state and the account check itself; the
+// agent account's half, which cannot read /etc/shadow, prints neither.
+func TestAgentChildStatusLeavesTheAccountToRoot(t *testing.T) {
+	asRoot(t, &fakeManager{installed: true})
+	prevCheck, prevChild := checkAccount, asAgentChild
+	t.Cleanup(func() { checkAccount, asAgentChild = prevCheck, prevChild })
+	checks := 0
+	checkAccount = func(context.Context) (service.Account, error) { checks++; return service.Account{UID: 450}, nil }
+	asAgentChild = true
+	var out bytes.Buffer
+	if err := printStatus(context.Background(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if checks != 0 || strings.Contains(out.String(), "service ") || strings.Contains(out.String(), "account ") {
+		t.Fatalf("the agent child printed the header (%d account checks): %q", checks, out.String())
+	}
+	asAgentChild = false
+	out.Reset()
+	if err := printStatus(context.Background(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if checks != 1 || !strings.Contains(out.String(), "account ") {
+		t.Fatalf("an in-process status skipped the account line: %q", out.String())
 	}
 }

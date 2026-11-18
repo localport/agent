@@ -285,9 +285,11 @@ func (r *KeyRefresher) startLocked(ctx context.Context) *keyFetch {
 		// Emitted last, without mu and after waiters are released, so OnEvent
 		// may call RefreshNow or wait for another caller's RefreshNow.
 		if err != nil && ctx.Err() == nil {
-			r.log("identity: session CA key fetch for %s failed, retrying in %s: %v", r.Ref, retryIn.Round(time.Second), err)
 			if removed, ok := errors.AsType[*RemovedError](err); ok && r.OnRemoved != nil {
+				r.log("identity: session CA key fetch for %s refused: %v", r.Ref, err)
 				r.OnRemoved(removed)
+			} else {
+				r.log("identity: session CA key fetch for %s failed, retrying in %s: %v", r.Ref, retryIn.Round(time.Second), err)
 			}
 		}
 	}()

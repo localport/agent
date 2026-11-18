@@ -282,14 +282,15 @@ func AdoptSystemFile(path string) error {
 // OpenSystemLock opens or creates the lock file path and sets its owner and
 // DACL for perm (SystemRunLockPerm or SystemConfigLockPerm) through the
 // handle. A lock holds no trusted content, so one left by an earlier layout
-// is taken over.
+// is taken over. While the handle is open the file cannot be deleted
+// (lockFileShare).
 func OpenSystemLock(path string, _ int, perm os.FileMode) (*os.File, error) {
 	rights, _ := lockRights(perm)
 	sa, sd, err := systemSecurityAttributes(rights, false)
 	if err != nil {
 		return nil, err
 	}
-	h, err := openSystemHandle(path, windows.GENERIC_READ|windows.GENERIC_WRITE|windows.WRITE_DAC|windows.WRITE_OWNER, windows.OPEN_ALWAYS, sa, false)
+	h, err := openSystemHandleShared(path, windows.GENERIC_READ|windows.GENERIC_WRITE|windows.WRITE_DAC|windows.WRITE_OWNER, lockFileShare, windows.OPEN_ALWAYS, sa, false)
 	if err != nil {
 		return nil, err
 	}
@@ -305,9 +306,10 @@ func OpenSystemLock(path string, _ int, perm os.FileMode) (*os.File, error) {
 }
 
 // OpenSystemRunLock opens the existing run.lock for the device service and
-// refuses one whose owner or DACL is not the one OpenSystemLock sets.
+// refuses one whose owner or DACL is not the one OpenSystemLock sets. While
+// the handle is open the file cannot be deleted (lockFileShare).
 func OpenSystemRunLock(path string) (*os.File, error) {
-	h, err := openSystemHandle(path, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.OPEN_EXISTING, nil, false)
+	h, err := openSystemHandleShared(path, windows.GENERIC_READ|windows.GENERIC_WRITE, lockFileShare, windows.OPEN_EXISTING, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -326,6 +328,17 @@ func OpenSystemRunLock(path string) (*os.File, error) {
 // a reparse point; dir adds FILE_FLAG_BACKUP_SEMANTICS and requires a
 // directory, otherwise a directory is refused.
 func openSystemHandle(path string, access uint32, disposition uint32, sa *windows.SecurityAttributes, dir bool) (windows.Handle, error) {
+	return openSystemHandleShared(path, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, disposition, sa, dir)
+}
+
+// lockFileShare is the share mode of a lock file's handle: without
+// FILE_SHARE_DELETE the file cannot be deleted or renamed while any process
+// has it open, so a held lock cannot be sidestepped by deleting the file and
+// locking a new one.
+const lockFileShare = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE
+
+// openSystemHandleShared is openSystemHandle with the share mode share.
+func openSystemHandleShared(path string, access, share, disposition uint32, sa *windows.SecurityAttributes, dir bool) (windows.Handle, error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return 0, &fs.PathError{Op: "open", Path: path, Err: err}
@@ -334,7 +347,7 @@ func openSystemHandle(path string, access uint32, disposition uint32, sa *window
 	if dir {
 		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
 	}
-	h, err := windows.CreateFile(p, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, sa, disposition, flags, 0)
+	h, err := windows.CreateFile(p, access, share, sa, disposition, flags, 0)
 	if err != nil {
 		return 0, &fs.PathError{Op: "open", Path: path, Err: err}
 	}

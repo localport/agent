@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"sync"
@@ -13,15 +14,16 @@ import (
 	"github.com/localport/agent/internal/transport"
 )
 
-// The wait of a hinted refusal stays below min(5 min, max(hint, backoff)), the
-// backoff doubling from 30 s.
+// The wait of a hinted refusal is at least the hint (capped at 5 min) and
+// below the hint plus the backoff, which doubles from 30 s up to 5 min.
 func TestRefusalWaitBounds(t *testing.T) {
 	for n := 1; n <= 8; n++ {
+		backoff := min(maxRefusalWait, refusalBackoffBase<<min(n-1, 4))
 		for _, hint := range []time.Duration{0, time.Minute, 10 * time.Minute} {
-			upper := min(maxRefusalWait, max(hint, refusalBackoffBase<<min(n-1, 4)))
+			floor := min(hint, maxRefusalWait)
 			for range 200 {
-				if d := refusalWait(hint, n); d < 0 || d >= upper {
-					t.Fatalf("refusalWait(%v, %d) = %v, want in [0, %v)", hint, n, d, upper)
+				if d := refusalWait(hint, n); d < floor || d >= floor+backoff {
+					t.Fatalf("refusalWait(%v, %d) = %v, want in [%v, %v)", hint, n, d, floor, floor+backoff)
 				}
 			}
 		}
@@ -40,7 +42,7 @@ type refusalRun struct {
 	result   chan error
 }
 
-func startRefusalRun(t *testing.T, opts Options) *refusalRun {
+func startRefusalRun(t *testing.T, opts Options, setup ...func(*Tunnel)) *refusalRun {
 	t.Helper()
 	r := &refusalRun{dialer: &pipeDialer{edges: make(chan net.Conn, 1)}, waits: make(chan time.Duration, 8), result: make(chan error, 1)}
 	opts.Edge = "connect.eu.localport.dev:443"
@@ -56,6 +58,9 @@ func startRefusalRun(t *testing.T, opts Options) *refusalRun {
 		ch := make(chan time.Time, 1)
 		ch <- time.Now()
 		return ch
+	}
+	for _, f := range setup {
+		f(r.tn)
 	}
 	go func() { r.result <- r.tn.Run(context.Background()) }()
 	t.Cleanup(func() {
@@ -119,16 +124,16 @@ func (r *refusalRun) sawState(s State) bool {
 	return false
 }
 
-// A device refused with a retry_after hint keeps retrying, waiting within the
-// hint's window and publishing the code, and runs once a registration is
+// A device refused with a retry_after hint keeps retrying, waiting at least
+// the hint and publishing the code, and runs once a registration is
 // accepted; it never reports the refusal to its credential and never ends.
 func TestHintedRefusalKeepsADeviceRetrying(t *testing.T) {
 	cred := &fakeCredential{presentation: &identity.Presentation{Serial: "aa"}}
 	r := startRefusalRun(t, Options{Kind: proto.KindDevice, Credential: cred, DisableMux: true})
 
 	r.register(t, proto.RegisterAckPayload{Error: "plan is paused", ErrorCode: "BL012", Retryable: boolPtr(false), RetryAfter: 60})
-	if d := r.nextWait(t); d >= time.Minute {
-		t.Fatalf("first wait %v, want under the 60 s hint", d)
+	if d := r.nextWait(t); d < time.Minute || d >= time.Minute+refusalBackoffBase {
+		t.Fatalf("first wait %v, want the 60 s hint plus under 30 s", d)
 	}
 	if !r.sawWaiting("BL012") {
 		t.Fatal("the tunnel did not publish waiting with BL012")
@@ -313,9 +318,10 @@ func TestKickFromAnEndedSessionIsIgnored(t *testing.T) {
 	tn.disconnected = current
 	tn.mu.Unlock()
 
-	tn.kickSession(&kick{code: "SE040", drain: true}, ended)
-	if tn.kicked.Load() != nil {
-		t.Fatal("an ended session's Shutdown recorded a kick")
+	cause := errors.New("the edge ended the session: disconnected [SE040]")
+	tn.kickSession(&kick{code: "SE040", drain: true}, ended, cause)
+	if tn.kicked.Load() != nil || tn.endCause != nil {
+		t.Fatal("an ended session's Shutdown recorded a kick or a cause")
 	}
 	select {
 	case <-current:
@@ -323,13 +329,80 @@ func TestKickFromAnEndedSessionIsIgnored(t *testing.T) {
 	default:
 	}
 
-	tn.kickSession(&kick{code: "SE040", drain: true}, current)
-	if tn.kicked.Load() == nil {
-		t.Fatal("the current session's Shutdown recorded no kick")
+	tn.kickSession(&kick{code: "SE040", drain: true}, current, cause)
+	if tn.kicked.Load() == nil || tn.endCause != cause {
+		t.Fatalf("the current session's Shutdown recorded kick %v, cause %v; want the kick and %v", tn.kicked.Load(), tn.endCause, cause)
 	}
 	select {
 	case <-current:
 	default:
 		t.Fatal("the current session's Shutdown did not end it")
 	}
+}
+
+// While a device drains for an admin's Disconnect it keeps reading the
+// control connection: a terminal Shutdown (a teardown during the drain) ends
+// the drain at once and is returned; a hinted one is dropped.
+func TestDrainReadingControlEndsOnATerminalShutdown(t *testing.T) {
+	sessEdge := newFakeSessionEdge(t)
+	d := &pipeSessionDial{edge: sessEdge}
+	m := newSessionMux(context.Background(), "test", newStreamEchoHandler(), d.dial)
+	m.start()
+	sessEdge.expectAccept(t)
+	defer m.stop()
+
+	tn := New(Options{Kind: proto.KindDevice, FlushRecordings: func(ctx context.Context) { <-ctx.Done() }})
+	tn.sessionMux.Store(m)
+	agentSide, edgeSide := net.Pipe()
+	defer agentSide.Close()
+	defer edgeSide.Close()
+	tn.raw, tn.conn = agentSide, proto.NewConn(agentSide)
+	// The receive loop's interrupt left a past deadline.
+	_ = agentSide.SetReadDeadline(time.Now())
+	edge := &fakeEdge{conn: proto.NewConn(edgeSide)}
+
+	got := make(chan *proto.ShutdownPayload, 1)
+	go func() { got <- tn.drainReadingControl(t.Context(), true) }()
+	edge.send(t, proto.MsgShutdown, proto.ShutdownPayload{Code: "SE040", Retryable: boolPtr(true), RetryAfter: 60})
+	edge.send(t, proto.MsgShutdown, proto.ShutdownPayload{Reason: "tunnel has been deleted", Code: "SE018", Retryable: boolPtr(false)})
+	select {
+	case sd := <-got:
+		if sd == nil || sd.Code != "SE018" {
+			t.Fatalf("drainReadingControl = %+v, want the SE018 Shutdown", sd)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a terminal Shutdown did not end the drain")
+	}
+}
+
+// A draining device answers the edge's heartbeats: the edge drops a control
+// connection that stays silent past its read deadline, which would cut the
+// recording flush short.
+func TestDrainReadingControlAnswersHeartbeats(t *testing.T) {
+	sessEdge := newFakeSessionEdge(t)
+	d := &pipeSessionDial{edge: sessEdge}
+	m := newSessionMux(context.Background(), "test", newStreamEchoHandler(), d.dial)
+	m.start()
+	sessEdge.expectAccept(t)
+	defer m.stop()
+
+	tn := New(Options{Kind: proto.KindDevice, FlushRecordings: func(ctx context.Context) { <-ctx.Done() }})
+	tn.sessionMux.Store(m)
+	agentSide, edgeSide := net.Pipe()
+	defer agentSide.Close()
+	defer edgeSide.Close()
+	tn.raw, tn.conn = agentSide, proto.NewConn(agentSide)
+	_ = agentSide.SetReadDeadline(time.Now())
+	edge := &fakeEdge{conn: proto.NewConn(edgeSide)}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); tn.drainReadingControl(ctx, true) }()
+	edge.send(t, proto.MsgHeartbeat, proto.HeartbeatPayload{Timestamp: 42})
+	var ack proto.HeartbeatAckPayload
+	if err := json.Unmarshal(edge.expect(t, proto.MsgHeartbeatAck), &ack); err != nil || ack.Timestamp != 42 {
+		t.Fatalf("heartbeat ack %+v, %v; want timestamp 42", ack, err)
+	}
+	cancel()
+	<-done
 }

@@ -87,6 +87,10 @@ type scm struct{}
 
 func (scm) Name() string { return WindowsName }
 
+// StopCommand is sc.exe, which runs the same from cmd and PowerShell (where
+// "sc" alone is Set-Content).
+func (scm) StopCommand() string { return "sc.exe stop " + WindowsName }
+
 // open runs fn on the device service, or with nil when it does not exist.
 func (scm) open(fn func(*mgr.Mgr, *mgr.Service) error) error {
 	m, err := mgr.Connect()

@@ -29,8 +29,12 @@ func peerCred(conn *net.UnixConn) (uid uint32, pid int, err error) {
 	return cred.Uid, pid, nil
 }
 
+// peerGroupsMax is the most groups an xucred carries (NGROUPS): a peer with
+// more is cut short at it.
+const peerGroupsMax = len(unix.Xucred{}.Groups)
+
 // peerCredGroups returns the peer's uid and groups as of connect(2): the
-// xucred's cr_groups, the effective gid first, at most 16 (NGROUPS).
+// xucred's cr_groups, the effective gid first, at most peerGroupsMax.
 func peerCredGroups(conn *net.UnixConn) (uint32, []uint32, error) {
 	rc, err := conn.SyscallConn()
 	if err != nil {

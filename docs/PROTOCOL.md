@@ -296,9 +296,10 @@ a refusal the control plane can lift without any action on the device: `SE040`
 `BL007` (bandwidth for the cycle), `BL011` (payment due), `BL012` (plan
 paused), `SE019` (fleet device limit), `RS002` (resource limit) and `SE001`
 (IP not allowed), each with 60. A device tunnel that gets one stays in its
-retry loop and never parks: it waits a uniformly random time in
-`[0, min(5 min, max(retry_after, backoff)))`, the backoff starting at 30 s and
-doubling for each consecutive refusal. An interactive tunnel prints the
+retry loop and never parks: it waits `retry_after` (capped at 5 min) plus a
+uniformly random time in `[0, backoff)`, the backoff starting at 30 s and
+doubling for each consecutive refusal up to 5 min. `retry_after` is a minimum
+wait, as HTTP `Retry-After` is. An interactive tunnel prints the
 refusal and exits. A device refused for good without `retry_after` stops
 (parks) until `localport up`, a reload or a restart; `SE018` and `SE041` make
 it forget its credential (below).
@@ -326,8 +327,15 @@ A Shutdown with `code` `SE040` (an admin disconnected the device, `retryable`
 true) is a drain: the edge keeps the connection, its session streams and the
 session mux open, and admits no new session, stream or consumer, so the device
 can end its sessions and deliver their recordings. The edge closes the
-connection when the agent does, or after 92 seconds. Every registration,
-renewal and key fetch is refused `SE040` until an admin reconnects the device.
+connection when the agent does, or after 92 seconds. The device keeps reading
+the control connection while it drains and answers its heartbeats: a close
+with another code during the drain (a removal, teardown or revocation) sends
+its own Shutdown, and a non-retryable one ends the drain at once and is
+applied as below. A device whose control writes have stalled (its session
+loops do not end within 5 seconds) drains without reading, and a Shutdown
+sent meanwhile is read at its next attempt. Every
+registration, renewal and key fetch is refused `SE040` until an admin
+reconnects the device.
 
 A Shutdown or refusal with `SE018` (the device was removed or its fleet
 deleted) or `SE041` (its certificate was revoked because the device was
@@ -523,8 +531,10 @@ acceptable client certificate or the connection is refused.
    a failed `RegisterAck`.
 3. Unknown / opaque codes never change behavior; the agent relies on
    `retryable` and `limit_type` only.
-4. Backoff is exponential (1.5×), capped at 30 s, plus up to 25 % jitter. The
-   per-transport dial budget also escalates with consecutive failures
+4. Backoff is exponential (1.5×), capped at 30 s, plus up to 25 % jitter. It
+   starts over only after a registered control session stayed up 30 s, so a
+   session the edge accepts and drops at once is retried at a growing
+   backoff. The per-transport dial budget also escalates with consecutive failures
    (2 s doubling to 16 s) so high-latency links (2G, satellite) can
    complete the TLS handshake; an explicit dial-timeout setting is used
    verbatim.
@@ -1692,8 +1702,9 @@ directory grant SYSTEM, Administrators and that account, and only a
 privileged process, and only for paths under `identity\`, accepts that
 account as an owner or writer. The rest of the directory belongs to
 Administrators: the service may read the directory and `agent.yaml`, read and
-write `run.lock` (to lock it and record its PID), and cannot open
-`agent.yaml.lock`. The
+write `run.lock` (to lock it and record its PID; on Linux and macOS the lock
+is held on the directory), and cannot open the config lock
+(`agent.yaml.lock.d` on Linux and macOS, `agent.yaml.lock` on Windows). The
 machine-wide directory holds the devices' private keys; keep it out
 of backups and configuration management.
 
@@ -1726,8 +1737,10 @@ of backups and configuration management.
 The lock files live outside the credential directory, so a credential is
 deleted whole while its writers' lock is held. Only `service uninstall
 --purge` deletes lock files: it holds `.store.lock` exclusively, so no lock
-below it is held or awaited, deletes `.locks`, and deletes `.store.lock` when
-nothing else remains. A process that takes a lock checks afterwards that the
+below it is held or awaited, deletes `.locks`, and on Linux and macOS deletes
+`.store.lock` when nothing else remains. On Windows `.store.lock` stays: a
+deleted file there is delete pending while a handle is open, and opening it
+meanwhile fails instead of waiting. A process that takes a lock checks afterwards that the
 path still names the file it locked, and opens it again when a purge deleted
 it in between. A lock wanted while a purge runs is refused with `AG149`. The
 hashed directory name carries no team or device identifier.

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/errcode"
@@ -295,6 +296,7 @@ func TestUpChecksTheStoreAndConfigBeforeTheSpend(t *testing.T) {
 // refused beside a join token, before the spend.
 func TestUpRefusesInspectFlagsBesideAJoinToken(t *testing.T) {
 	t.Setenv(identity.HomeEnv, t.TempDir())
+	asUnprivileged(t)
 	calls := fakeEnrol(t, deviceRef("factory.gw-01"))
 	for _, flag := range []string{"--no-inspect", "--log-requests"} {
 		err := runUp("test", append(slices.Clone(upArgs), flag))
@@ -340,6 +342,7 @@ func TestUpNoMuxReachesTheDevice(t *testing.T) {
 // so no enrolled credential is left without a config entry.
 func TestUpForgetsTheCredentialWhenTheConfigWriteFails(t *testing.T) {
 	t.Setenv(identity.HomeEnv, t.TempDir())
+	asUnprivileged(t)
 	ref := deviceRef("factory.gw-03")
 	fakeEnrol(t, ref)
 	saveIssued = func(store *identity.Store, _ context.Context, _ identity.Material) (identity.Ref, error) {
@@ -366,6 +369,7 @@ func TestUpForgetsTheCredentialWhenTheConfigWriteFails(t *testing.T) {
 // before the enrolment replaced it.
 func TestUpHoldsTheConfigLockAcrossTheEnrolment(t *testing.T) {
 	t.Setenv(identity.HomeEnv, t.TempDir())
+	asUnprivileged(t)
 	ref := deviceRef("factory.gw-03")
 	fakeEnrol(t, ref)
 	file, err := currentInvoker(false).localConfigFile()
@@ -379,16 +383,8 @@ func TestUpHoldsTheConfigLockAcrossTheEnrolment(t *testing.T) {
 	}
 	var heldDuringSave bool
 	saveIssued = func(*identity.Store, context.Context, identity.Material) (identity.Ref, error) {
-		f, err := security.OpenLockFile(file.LockPath())
-		if err != nil {
-			return identity.Ref{}, err
-		}
-		defer f.Close()
-		took, err := security.TryLockFile(f)
-		if took {
-			_ = security.UnlockFile(f)
-		}
-		heldDuringSave = err == nil && !took
+		held, err := configLockHeld(file)
+		heldDuringSave = held
 		return ref, err
 	}
 	if err := runUp("test", upArgs); err != nil {
@@ -439,5 +435,56 @@ func TestEnrolAsAgentReadsTheResultStrictly(t *testing.T) {
 	child("", failed)
 	if _, err := enrolAsAgent(enrolRequest{JoinToken: "lpj_x"}); err != failed {
 		t.Fatalf("failed child: enrolAsAgent = %v, want %v unwrapped", err, failed)
+	}
+}
+
+// A privileged up --foreground that runs in this process (Windows, where root
+// never relays to the agent account) serves every device of the system config
+// as the run.lock holder, never the enrolled device alone. It opens the
+// control endpoint under run.lock before it spends the join token, so up,
+// down and set reach the run while it enrols, and serves its requests.
+func TestPrivilegedForegroundUpServesTheWholeConfig(t *testing.T) {
+	m := &fakeManager{}
+	file := asRoot(t, m)
+	stored := config.LocalDevice{Identity: deviceRef("factory.gw-01")}
+	if err := config.WriteLocal(file, &config.LocalConfig{Devices: []config.LocalDevice{stored}}, identity.Ref{}); err != nil {
+		t.Fatal(err)
+	}
+	fakeEnrol(t, deviceRef("factory.gw-02"))
+	prevOpen := openRunControl
+	t.Cleanup(func() { openRunControl = prevOpen })
+	opened, heldAtOpen, stopped := 0, false, false
+	reloads := reloadSource(func() (<-chan os.Signal, func()) { return nil, func() {} })
+	openRunControl = func() (reloadSource, func(), error) {
+		opened++
+		_, err := config.LockRun(file, 0)
+		heldAtOpen = errors.Is(err, config.ErrRunLocked)
+		return reloads, func() { stopped = true }, nil
+	}
+	prevEnrolDevice := enrolDevice
+	openAtSpend := 0
+	enrolDevice = func(c *identity.Client, ctx context.Context, token string, wait time.Duration, notice identity.RetryNotice) (*identity.Material, error) {
+		openAtSpend = opened
+		return prevEnrolDevice(c, ctx, token, wait, notice)
+	}
+	prevHeld, prevServe := serveHeld, serveEnrolled
+	t.Cleanup(func() { serveHeld, serveEnrolled = prevHeld, prevServe })
+	held := false
+	serveHeld = func(_ context.Context, _ string, who invoker, got config.LocalConfigFile, _, _ bool, served reloadSource) error {
+		held = who.privileged && got == file && served != nil && !stopped
+		return nil
+	}
+	serveEnrolled = func(context.Context, string, *identity.Store, []config.LocalDevice, bool, bool, func() ([]config.LocalDevice, error)) error {
+		t.Error("a privileged foreground up served the enrolled device alone")
+		return nil
+	}
+	if err := runUp("test", append(slices.Clone(upArgs), "--foreground")); err != nil {
+		t.Fatal(err)
+	}
+	if !held {
+		t.Fatal("a privileged foreground up did not serve the system config with its control endpoint")
+	}
+	if opened != 1 || !heldAtOpen || openAtSpend != 1 || !stopped {
+		t.Fatalf("control endpoint opened %d, run.lock held at open %v, open at the spend %d, stopped %v; want it opened once under run.lock before the spend and stopped at the end", opened, heldAtOpen, openAtSpend, stopped)
 	}
 }

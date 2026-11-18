@@ -525,3 +525,38 @@ func TestDefinitiveRefusal(t *testing.T) {
 		}
 	}
 }
+
+// A promotion refused because a purge holds the store lock logs nothing and
+// stays pending; Tick promotes it once the purge released the lock.
+func TestRegistrarIsQuietWhileAPurgeHoldsTheStore(t *testing.T) {
+	store, _, next := renewedDevice(t)
+	var events []string
+	reg := NewDeviceRegistrar(store, deviceRef, func(e string) { events = append(events, e) })
+	p, err := reg.Present()
+	if err != nil || !p.Pending {
+		t.Fatalf("Present = %+v, %v; want the pending certificate", p, err)
+	}
+	path, err := store.storeLockPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, held, err := tryLockFile(path, false)
+	if err != nil || !held {
+		t.Fatalf("taking the store lock as a purge does = %v, %v", held, err)
+	}
+	reg.Registered(p)
+	if len(events) != 0 {
+		t.Fatalf("events while the store was busy: %q, want none", events)
+	}
+	if cur, err := store.Load(deviceRef); err != nil || cur.Meta.Serial == next.Meta.Serial {
+		t.Fatalf("current serial %v, %v; want it not promoted yet", cur, err)
+	}
+	release()
+	reg.Tick(nil, time.Now())
+	if cur, err := store.Load(deviceRef); err != nil || cur.Meta.Serial != next.Meta.Serial {
+		t.Fatalf("after the purge: %v, %v; want %s promoted", cur, err, next.Meta.Serial)
+	}
+	if len(events) != 1 || !strings.Contains(events[0], "now registers with its renewed certificate") {
+		t.Fatalf("events = %q, want one promotion line", events)
+	}
+}

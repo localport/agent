@@ -32,9 +32,10 @@ func accountRemoval() (usr, group []string) {
 	return deleteCommandsFor(tool, shadow)
 }
 
-// checkAccountShape accepts any account: the packages and useradd --system
-// create it, and a shape check would need the host's shadow and PAM rules.
-func checkAccountShape(context.Context, runner, Account) error { return nil }
+// checkAccountShape is linuxAccountShape (account_shape.go).
+func checkAccountShape(_ context.Context, _ runner, acct Account) error {
+	return linuxAccountShape(acct)
+}
 
 // createAccount creates the group, when missing, and the user with the
 // host's tool. The identity directory does not choose the ids: useradd

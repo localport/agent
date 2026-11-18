@@ -4,11 +4,13 @@
 ; localport_t           the network agent (localport-device.service, user localport)
 ; localport_session_t   localport-session: the launcher daemon and the per-session
 ;                       helper (PAM, identity change, pty, utmp, user transition)
-; localport_etc_t       the device dir /etc/localport-device (root-owned config)
+; localport_etc_t       the device dir /etc/localport-device (root-owned config),
+;                       which the agent flocks as the run lock
 ; localport_state_t     the identity dir /etc/localport-device/identity (agent state)
 ; localport_lock_t      /etc/localport-device/run.lock, the one file there the agent
-;                       locks and writes
-; localport_var_run_t   /run/localport (the launcher socket)
+;                       writes (the run lock holder's PID)
+; localport_var_run_t   /run/localport (the launcher's session and status sockets
+;                       and a foreground run's control socket)
 ;
 ; The agent domain has no transition rights and no access to user domains; only
 ; localport_session_t enters a user's domain, through pam_selinux, the way
@@ -128,7 +130,7 @@
 (allow localport_session_t var_run_t (dir (getattr search)))
 (allow localport_t devlog_t (sock_file (write getattr)))
 (allow localport_session_t devlog_t (sock_file (write getattr)))
-(allow localport_t localport_etc_t (dir (getattr search read open)))
+(allow localport_t localport_etc_t (dir (getattr search read open lock)))
 (allow localport_t localport_etc_t (file (getattr read open)))
 (allow localport_session_t localport_etc_t (dir (getattr search read open)))
 (allow localport_session_t localport_etc_t (file (getattr read open)))

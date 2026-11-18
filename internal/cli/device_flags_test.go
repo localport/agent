@@ -30,6 +30,7 @@ func parseDeviceFlags(t *testing.T, args ...string) (*flag.FlagSet, *deviceFlags
 func TestUpRefusesAnArgumentBeyondTheJoinToken(t *testing.T) {
 	// A regression must not touch the real home store or config.
 	t.Setenv(identity.HomeEnv, t.TempDir())
+	asUnprivileged(t)
 	for _, args := range [][]string{
 		{"--allow-ports", "502", "lpj_x", "--host", "10.0.0.5"},
 		{"lpj_x", "--enable", "files", "extra"},

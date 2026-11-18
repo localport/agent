@@ -43,6 +43,10 @@ const stopBudgetSeconds = int(StopBudget / time.Second)
 type Manager interface {
 	// Name is the service's name in its service manager.
 	Name() string
+	// StopCommand is the service manager's own command that stops the
+	// service until it is started again, for a remedy an administrator runs
+	// (with sudo on Linux and macOS, elevated on Windows).
+	StopCommand() string
 	// Check refuses, with ErrForeignUnit, when a definition under the
 	// service's name exists without Marker. It returns the drop-in files
 	// that extend the definition (systemd only), which install accepts and
@@ -90,11 +94,6 @@ var (
 	// removed.
 	errDefinition = errcode.New(errcode.ServiceDefinitionFailed)
 )
-
-// ExitRunLocked is the exit status of `run --service` when run.lock stays
-// held past its wait. It differs from a failure (1), so a restart that only
-// overlapped the previous process is not counted as a crash.
-const ExitRunLocked = 3
 
 // ExitError ends the process with Code: the process exit status, or the
 // Windows service-specific exit code under the service control manager.

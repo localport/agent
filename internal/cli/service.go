@@ -149,8 +149,8 @@ func uninstallService(who invoker, purge bool) error {
 // the config's lock, through the deletion, so no run serves and no set or
 // up writes meanwhile. On Windows it also deletes both services' crash
 // directories (service.CrashRoot), which only a purge removes; the services
-// are gone by then, so nothing writes there. agent.yaml.lock, run.lock and
-// the directory stay, so a concurrent command never locks an unlinked config
+// are gone by then, so nothing writes there. The config lock (LockPath),
+// run.lock and the directory stay, so a concurrent command never locks an unlinked config
 // lock; the store's credential lock files go under its store lock
 // (identity.Store.PurgeDevices). A missing directory is left missing.
 func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duration) (retErr error) {
@@ -181,7 +181,7 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 			return err
 		}
 		if installed {
-			return errServiceInstalled.With(nil, m.Name()+"; remove it and the devices together with: sudo localport service uninstall --purge")
+			return errServiceInstalled.With(nil, m.Name()+"; remove it and the devices together "+elevatedCommand("service uninstall --purge"))
 		}
 	}
 	releaseRun, err := config.LockRun(file, runLockWait)
@@ -260,8 +260,8 @@ const serviceUsage = `Usage: localport service install
   the device credentials under identity/ and the recording spool
   recordings/, with the recordings not yet uploaded. Machine credentials
   from setup and sign-in credentials stay with their store lock
-  identity/.store.lock, as do the lock files agent.yaml.lock and run.lock
-  and the directory. On Linux and macOS, when
+  identity/.store.lock, as do the config lock (agent.yaml.lock.d on Linux
+  and macOS, agent.yaml.lock on Windows), run.lock and the directory. On Linux and macOS, when
   identity/ is then empty, it and the agent's log directory
   /var/log/localport are removed too. The agent account and group
   always stay, since files elsewhere may belong to them; --purge prints the

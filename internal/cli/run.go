@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -25,24 +26,54 @@ import (
 	"github.com/localport/agent/internal/ui"
 )
 
+// runFlags are run's flags.
+type runFlags struct {
+	noUI, system, asService *bool
+	logFile                 *string
+}
+
+// newRunFlags is run's flag set, shared by runRun and by root's check that a
+// relayed run will serve devices (runRunAsAgent).
+func newRunFlags() (*flag.FlagSet, runFlags) {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	return fs, runFlags{
+		noUI:      fs.Bool("noui", false, "disable the live view and emit plain logs (auto-enabled when stderr is not a TTY)"),
+		system:    fs.Bool("system", false, "serve the machine-wide config and credentials (root or an elevated Administrator)"),
+		asService: fs.Bool("service", false, "run as the installed device service (implies --system)"),
+		logFile:   fs.String("log-file", "", "write stdout and stderr to this file and rotate it (launchd, OpenRC)"),
+	}
+}
+
+// runServesInForeground reports whether `run` with args gets past its flags
+// to serve devices in the foreground: a help request or a flag error ends it
+// first, and --service runs as the device service.
+func runServesInForeground(args []string) bool {
+	fs, f := newRunFlags()
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
+	return fs.Parse(args) == nil && fs.NArg() == 0 && !*f.asService
+}
+
 // runRun runs every device enrolled in the local config. Every generated
 // service definition runs it with --service. Started by the Windows service
 // control manager, it runs under the manager's control loop and stops when
 // the manager stops the service.
 func runRun(version string, args []string) error {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs, f := newRunFlags()
 	fs.SetOutput(os.Stderr)
-	noUI := fs.Bool("noui", false, "disable the live view and emit plain logs (auto-enabled when stderr is not a TTY)")
-	system := fs.Bool("system", false, "use the machine-wide config and credentials whatever the account")
-	asService := fs.Bool("service", false, "run as the installed device service (implies --system)")
-	logFile := fs.String("log-file", "", "write stdout and stderr to this file and rotate it (launchd, OpenRC)")
 	fs.Usage = usageRun
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	noUI, system, asService, logFile := f.noUI, f.system, f.asService, f.logFile
 	if fs.NArg() > 0 {
 		usageRun()
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	// A foreground run of the system devices must be one up, down and set can
+	// reach, which only root's (an elevated Administrator's) is.
+	if *system && !*asService && !asAgentChild && !privilegedProcess() {
+		return errcode.New(errcode.SystemRunNotPrivileged)
 	}
 	if *logFile != "" {
 		// Rotation runs for the life of the process.
@@ -65,8 +96,9 @@ func runRun(version string, args []string) error {
 // runEnrolledDevices loads the local config and serves its devices. A
 // privileged process first re-checks that only root or Administrators can
 // replace its binary, then holds run.lock until it returns (see
-// holdRunLock); the config is loaded only once the lock is held. running is
-// called after the binary check, before the run.lock wait.
+// holdRunLock) and serves the devices with serveHeldDevices; the config is
+// loaded only once the lock is held. running is called after the binary
+// check, before the run.lock wait.
 func runEnrolledDevices(ctx context.Context, version string, who invoker, asService, noUI bool, running func()) (retErr error) {
 	file, err := who.localConfigFile()
 	if err != nil {
@@ -80,19 +112,79 @@ func runEnrolledDevices(ctx context.Context, version string, who invoker, asServ
 	// Before the run.lock wait: under the Windows service control manager the
 	// service then accepts Stop, which ends the wait through ctx.
 	running()
-	var board *status.Board
-	if who.privileged {
-		release, err := holdRunLock(ctx, file, "localport run", asService)
+	if !who.privileged {
+		cfg, err := config.LoadLocal(file)
 		if err != nil {
 			return err
 		}
-		defer func() { retErr = errors.Join(retErr, release()) }()
-		// The one process holding run.lock publishes the devices' states to
-		// the session launcher; the connection closes before the release.
-		board = status.NewBoard(os.Getpid())
-		stopPublishing := startPublishing(ctx, board)
-		defer stopPublishing()
+		store, err := who.store()
+		if err != nil {
+			return err
+		}
+		return serveDevicesOn(ctx, version, store, cfg.Devices, noUI, false, nil, nil, nil)
 	}
+	var release func() error
+	if asAgentChild && !asService {
+		// Root holds run.lock for this run and passed it (runHeldAsAgent).
+		release, err = inheritedRunLock(file)
+	} else {
+		_, release, err = holdRunLock(ctx, file, "localport run", asService)
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, release()) }()
+	var reloads reloadSource
+	if !asService {
+		var stop func()
+		if reloads, stop, err = openRunControl(); err != nil {
+			return err
+		}
+		defer stop()
+	}
+	return serveHeldDevices(ctx, version, who, file, noUI, false, reloads)
+}
+
+// openRunControl serves the control endpoint of a foreground run that holds
+// run.lock (serveControl), right after it takes the lock: a run root relays as
+// the agent account accepts on the socket root passed (runHeldAsAgent, socket
+// activation), any other opens the endpoint itself. stop closes it; the caller
+// calls stop before releasing run.lock. A variable so tests can replace it.
+var openRunControl = func() (reloads reloadSource, stop func(), err error) {
+	var ctl *launcher.ControlListener
+	if asAgentChild {
+		ctl, err = inheritedControl()
+	} else {
+		ctl, err = listenControl()
+	}
+	if err != nil {
+		return nil, nil, controlEndpointFailed(err)
+	}
+	reloads, stop = serveControl(ctl)
+	return reloads, stop, nil
+}
+
+// serveHeldDevices serves every device of file, the system config, for the
+// process holding its run.lock: it publishes the devices' states to the
+// session launcher and reloads the config on each reload request. A
+// foreground run passes reloads, the requests from its control endpoint
+// (openRunControl); the service passes nil and takes them from its manager
+// (SIGHUP on Unix, a parameter change on Windows). It subscribes to the
+// requests before it reads the config, so a request from then on is queued
+// for the devices' runner, never lost: a foreground run answers `starting`
+// only before this point (controlReloads), and on Unix the service's SIGHUP
+// never takes its default exit.
+func serveHeldDevices(ctx context.Context, version string, who invoker, file config.LocalConfigFile, noUI, noMux bool, reloads reloadSource) error {
+	// The connection closes before run.lock is released.
+	board := status.NewBoard(os.Getpid())
+	stopPublishing := startPublishing(ctx, board)
+	defer stopPublishing()
+	if reloads == nil {
+		reloads = notifyReload
+	}
+	sig, stopReloads := reloads()
+	defer stopReloads()
+	subscribed := func() (<-chan os.Signal, func()) { return sig, func() {} }
 	cfg, err := config.LoadLocal(file)
 	if err != nil {
 		return err
@@ -101,20 +193,18 @@ func runEnrolledDevices(ctx context.Context, version string, who invoker, asServ
 	if err != nil {
 		return err
 	}
-	// Only the service reloads on SIGHUP: a run in a terminal keeps ending on
-	// the terminal's hangup.
-	var reload func() ([]config.LocalDevice, error)
-	if asService {
-		reload = func() ([]config.LocalDevice, error) {
-			cfg, err := config.LoadLocal(file)
-			if err != nil {
-				return nil, err
-			}
-			return cfg.Devices, nil
+	load := func() ([]config.LocalDevice, error) {
+		cfg, err := config.LoadLocal(file)
+		if err != nil {
+			return nil, err
 		}
+		return cfg.Devices, nil
 	}
-	return serveDevicesOn(ctx, version, store, cfg.Devices, noUI, false, reload, board)
+	return serveDevicesOn(ctx, version, store, cfg.Devices, noUI, noMux, load, subscribed, board)
 }
+
+// listenControl is launcher.ListenControl; tests replace it.
+var listenControl = launcher.ListenControl
 
 // openStatus opens the launcher's status publication; tests replace it.
 var openStatus status.Opener = launcher.DefaultClient().OpenStatus
@@ -126,9 +216,7 @@ func startPublishing(ctx context.Context, board *status.Board) (stop func()) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		status.Publish(ctx, board, openStatus, func(format string, args ...any) {
-			fmt.Fprintf(os.Stderr, "  [event] "+format+"\n", args...)
-		})
+		status.Publish(ctx, board, openStatus, logEventf)
 	}()
 	return func() {
 		cancel()
@@ -138,27 +226,28 @@ func startPublishing(ctx context.Context, board *status.Board) (stop func()) {
 
 // serveDevices is serveDevicesOn without a status board.
 func serveDevices(parent context.Context, version string, store *identity.Store, devices []config.LocalDevice, noUI, noMux bool, reload func() ([]config.LocalDevice, error)) error {
-	return serveDevicesOn(parent, version, store, devices, noUI, noMux, reload, nil)
+	return serveDevicesOn(parent, version, store, devices, noUI, noMux, reload, nil, nil)
 }
 
 // serveDevicesOn runs the enrolled devices until a signal or until parent
 // ends, with the renewal loop of each renewable device credential. A device
-// whose credential is missing or unreadable is logged and skipped. A
-// foreground run refuses to start when no device can and returns when the
-// last one ends; the service (reload set) keeps running with none until it
-// stops. A device refused for good is forgotten (SE018, SE041) or parked
-// (deviceRunner.handleEnd). noMux serves every inbound connection over its
-// own connection, so the devices serve no sessions. With reload set, each
-// reload signal (SIGHUP on Unix) re-reads the devices through it and applies
-// the changed ones only (deviceRunner.reload). board, when set, receives each
-// device's state for the status endpoint.
-func serveDevicesOn(parent context.Context, version string, store *identity.Store, devices []config.LocalDevice, noUI, noMux bool, reload func() ([]config.LocalDevice, error), board *status.Board) error {
+// whose credential is missing or unreadable is logged and skipped. Without
+// reload, the run refuses to start when no device can and returns when the
+// last one ends; with it (the run.lock holder, serveHeldDevices) the run keeps
+// going with none until it stops. A device refused for good is forgotten
+// (SE018, SE041) or parked (deviceRunner.handleEnd). noMux serves every
+// inbound connection over its own connection, so the devices serve no
+// sessions. With reload set, each request from reloads (notifyReload when nil)
+// re-reads the devices through it and applies the changed ones only
+// (deviceRunner.reload). board, when set, receives each device's state for the
+// status endpoint.
+func serveDevicesOn(parent context.Context, version string, store *identity.Store, devices []config.LocalDevice, noUI, noMux bool, reload func() ([]config.LocalDevice, error), reloads reloadSource, board *status.Board) error {
 	// Each line names its own topic (identity, session, reload).
 	logEvent := func(line string) { fmt.Fprintf(os.Stderr, "  [event] %s\n", line) }
 	cfg := &config.Config{AgentVersion: version, NoMux: noMux}
 	var a *agent.Agent
 	runner := &deviceRunner{parent: parent, store: store, logEvent: logEvent, served: map[identity.Ref]*servedDevice{},
-		forget: store.Forget, endWake: make(chan struct{}, 1), board: board}
+		forget: store.Forget, endWake: make(chan struct{}, 1), board: board, reloads: reloads}
 	runner.configured.Store(&devices)
 	// The uploader runs only after a is set.
 	runner.uploads = openUploader(store, runner.isConfigured, func(identifier string) (recording.Client, error) {
@@ -182,8 +271,8 @@ func serveDevicesOn(parent context.Context, version string, store *identity.Stor
 	}
 	runner.storeConfigured(devices)
 	runner.pruneTombstones(devices)
-	// The service (reload set) idles with no device to run, until a reload
-	// starts one or the service stops.
+	// The run.lock holder (reload set) idles with no device to run, until a
+	// reload starts one or the run stops.
 	if len(cfg.Devices) == 0 && reload == nil {
 		return errNoDeviceStarts
 	}
@@ -543,9 +632,11 @@ func usageRun() {
 
 Flags:
   --noui      disable the live view and emit plain logs
-  --system    use the machine-wide config and credentials whatever the account
+  --system    serve the machine-wide config and credentials; needs root or an
+              elevated Administrator (AG159 otherwise)
   --service   run as the installed device service: implies --system, and
-              waits up to 30 s for run.lock while a restarting service stops
+              waits for run.lock while a restarting service stops or a
+              foreground run serves the devices, then serves them
   --log-file  write stdout and stderr to PATH and rotate it by size (Linux
               and macOS; the launchd and OpenRC definitions pass it)
 
@@ -553,5 +644,8 @@ Flags:
   re-reads the local config and restarts only the devices whose entry
   changed, was added or was removed; their open sessions end with
   config_changed. A config that fails to load keeps the running devices.
+  A privileged run without --service reloads the same way when up, down or
+  set asks it through its control endpoint (root or elevated Administrators
+  only), and keeps running with no device to serve.
 `)
 }
