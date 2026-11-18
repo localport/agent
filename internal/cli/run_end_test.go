@@ -132,8 +132,11 @@ func TestRemovedDeviceIsForgottenAndTheServiceKeepsRunning(t *testing.T) {
 				_ = lock.Close()
 			}
 		}
+		// Reported once Forget returns, so the test checks a finished
+		// removal.
+		forgot, forgetErr := h.store.Forget(ctx, ref, code, serial)
 		order <- err
-		return h.store.Forget(ctx, ref, code, serial)
+		return forgot, forgetErr
 	}
 	h.runner.queueEnd(deviceEnd{identifier: h.ref.Identity, tunnel: tn,
 		err: &tunnel.RegistrationError{Code: identity.CodeDeviceUnknown, Serial: "07"}})

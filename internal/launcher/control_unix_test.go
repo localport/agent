@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -80,7 +81,8 @@ func TestControlReloadRoundTrip(t *testing.T) {
 }
 
 // A peer that is not the owner is closed without a byte and queues no
-// reload.
+// reload. Linux resets a connection closed with its request unread, macOS
+// ends it; the client reads either as no answer.
 func TestControlRefusesAnotherPeer(t *testing.T) {
 	path := controlAt(t)
 	ctl, err := ListenControl()
@@ -96,7 +98,7 @@ func TestControlRefusesAnotherPeer(t *testing.T) {
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	_, _ = io.WriteString(c, controlReload)
-	if b, err := io.ReadAll(c); err != nil || len(b) != 0 {
+	if b, err := io.ReadAll(c); (err != nil && !errors.Is(err, syscall.ECONNRESET)) || len(b) != 0 {
 		t.Fatalf("another peer read %q, %v; want a close without a byte", b, err)
 	}
 	if reloads.Load() != 0 {
