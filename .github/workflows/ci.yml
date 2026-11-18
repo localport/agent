@@ -253,8 +253,11 @@ jobs:
             want="type_transition $c localport_etc_t:file localport_lock_t run.lock;" expect -T -s "$c" -t localport_etc_t -c file
           done
           want="allow localport_t localport_lock_t:file { getattr lock open read write };" expect -A -s localport_t -t localport_lock_t -c file
+          want="allow localport_t localport_etc_t:dir { getattr lock open read search };" expect -A -s localport_t -t localport_etc_t -c dir
           denied="$(sesearch -A -s localport_t -t localport_etc_t -c file -p write,append,lock,setattr,create,unlink,rename "$policy")"
           if [ -n "$denied" ]; then echo "localport_t can modify localport_etc_t files:"; echo "$denied"; exit 1; fi
+          denied="$(sesearch -A -s localport_t -t localport_etc_t -c dir -p write,add_name,remove_name,rmdir,setattr "$policy")"
+          if [ -n "$denied" ]; then echo "localport_t can modify the localport_etc_t directory:"; echo "$denied"; exit 1; fi
 
   # systemd's exposure score of the generated device unit (the golden file
   # TestSystemdAgentUnitMatchesGolden pins) and of the documented example
