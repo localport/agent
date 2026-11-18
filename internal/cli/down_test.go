@@ -159,12 +159,12 @@ func TestDeviceFactsAreReadUnderTheConfigLock(t *testing.T) {
 func TestPauseNeedsRoot(t *testing.T) {
 	file, m := pauseFixture(t)
 	asUnprivileged(t)
-	for _, run := range []func() error{
-		func() error { return runDown([]string{"gw-01"}) },
-		func() error { return runUp("test", []string{"gw-01"}) },
+	for command, run := range map[string]func() error{
+		"down": func() error { return runDown([]string{"gw-01"}) },
+		"up":   func() error { return runUp("test", []string{"gw-01"}) },
 	} {
-		if err := run(); !errors.Is(err, config.ErrSystemNotRoot) || !strings.Contains(err.Error(), "sudo localport") {
-			t.Fatalf("unprivileged = %v, want %s naming sudo", err, errcode.SystemNeedsRoot)
+		if err := run(); !errors.Is(err, config.ErrSystemNotRoot) || !strings.Contains(err.Error(), elevatedCommand(command)) {
+			t.Fatalf("unprivileged %s = %v, want %s naming %q", command, err, errcode.SystemNeedsRoot, elevatedCommand(command))
 		}
 	}
 	if got := pausedOf(t, file); got[gw01] || m.reloads != 0 {
@@ -723,7 +723,9 @@ func TestAgentChildStatusLeavesTheAccountToRoot(t *testing.T) {
 	if err := printStatus(context.Background(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if checks != 1 || !strings.Contains(out.String(), "account ") {
-		t.Fatalf("an in-process status skipped the account line: %q", out.String())
+	// Windows has no agent account to check (printStatusHeader).
+	wantAccount := runtime.GOOS != "windows"
+	if hasAccount := strings.Contains(out.String(), "account "); hasAccount != wantAccount || (checks == 1) != wantAccount {
+		t.Fatalf("an in-process status printed the account line %t after %d checks, want %t: %q", hasAccount, checks, wantAccount, out.String())
 	}
 }
