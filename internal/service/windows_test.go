@@ -100,6 +100,9 @@ func TestExecuteAcceptsStopOnceRunningAndCancelsServe(t *testing.T) {
 // fakeService is a stopped service that records the install calls.
 type fakeService struct {
 	cfg                         mgr.Config
+	owner                       string
+	setOwnerErr                 error
+	deleted                     bool
 	updateErr, changeNothingErr error
 	privileges                  []string
 	preshutdown                 time.Duration
@@ -108,6 +111,18 @@ type fakeService struct {
 }
 
 func (f *fakeService) Config() (mgr.Config, error) { return f.cfg, nil }
+func (f *fakeService) ManagedBy() (string, error)  { return f.owner, nil }
+func (f *fakeService) SetManagedBy() error {
+	if f.setOwnerErr != nil {
+		return f.setOwnerErr
+	}
+	f.owner = ManagedBy
+	return nil
+}
+func (f *fakeService) Delete() error {
+	f.deleted = true
+	return nil
+}
 func (f *fakeService) UpdateConfig(c mgr.Config) error {
 	f.updated, f.cfg = true, c
 	return f.updateErr
@@ -137,7 +152,7 @@ func (f *fakeService) ChangeNothing() error { return f.changeNothingErr }
 // so it is still running while the agent ends its sessions.
 func TestInstallSetsThePreshutdownTimeout(t *testing.T) {
 	for name, d := range map[string]serviceDef{"agent": agentDef(`C:\l.exe`), "launcher": launcherDef(`C:\l.exe`)} {
-		for _, existing := range []*fakeService{nil, {cfg: mgr.Config{Description: d.description}}} {
+		for _, existing := range []*fakeService{nil, {owner: ManagedBy}} {
 			created := &fakeService{}
 			create := func(mgr.Config) (winService, func(), error) { return created, func() {}, nil }
 			var current winService
@@ -156,6 +171,24 @@ func TestInstallSetsThePreshutdownTimeout(t *testing.T) {
 				t.Fatalf("%s (existing %v): preshutdown %v, calls %q; want %v, %q", name, existing != nil, got.preshutdown, got.calls, want, wantCalls)
 			}
 		}
+	}
+}
+
+// Install records ManagedBy on a service it creates, and deletes the service
+// again when the record fails, so no untagged service is left under the name.
+func TestInstallRecordsTheOwner(t *testing.T) {
+	created := &fakeService{}
+	create := func(mgr.Config) (winService, func(), error) { return created, func() {}, nil }
+	if err := installService(context.Background(), `C:\l.exe`, nil, create); err != nil || created.owner != ManagedBy {
+		t.Fatalf("create = %v, owner %q; want %q", err, created.owner, ManagedBy)
+	}
+	failed := &fakeService{setOwnerErr: windows.ERROR_ACCESS_DENIED}
+	create = func(mgr.Config) (winService, func(), error) { return failed, func() {}, nil }
+	if err := installService(context.Background(), `C:\l.exe`, nil, create); err == nil || !failed.deleted || slices.Contains(failed.calls, "start") {
+		t.Fatalf("create with a failed record = %v, deleted %v, calls %q; want an error and the service deleted unstarted", err, failed.deleted, failed.calls)
+	}
+	if _, err := installedState(&fakeService{owner: "someone-else"}); !errors.Is(err, ErrForeignUnit) {
+		t.Fatalf("installed state with another owner = %v, want ErrForeignUnit", err)
 	}
 }
 
@@ -217,7 +250,7 @@ func TestExecutePreShutdownStops(t *testing.T) {
 func TestInstallSetsTheRequiredPrivileges(t *testing.T) {
 	created := &fakeService{}
 	create := func(mgr.Config) (winService, func(), error) { return created, func() {}, nil }
-	existing := &fakeService{cfg: mgr.Config{Description: windowsDescription}}
+	existing := &fakeService{owner: ManagedBy}
 	for name, tc := range map[string]struct {
 		existing winService
 		got      *fakeService
@@ -239,18 +272,17 @@ func TestMarkedForDeleteIsReported(t *testing.T) {
 	if err := installService(context.Background(), `C:\l.exe`, nil, create); !errors.Is(err, ErrMarkedForDelete) {
 		t.Fatalf("create = %v, want ErrMarkedForDelete", err)
 	}
-	existing := &fakeService{cfg: mgr.Config{Description: windowsDescription}, updateErr: marked}
+	existing := &fakeService{owner: ManagedBy, updateErr: marked}
 	if err := installService(context.Background(), `C:\l.exe`, existing, nil); !errors.Is(err, ErrMarkedForDelete) {
 		t.Fatalf("update = %v, want ErrMarkedForDelete", err)
 	}
-	owned := mgr.Config{Description: windowsDescription}
-	if installed, err := installedState(&fakeService{cfg: owned, changeNothingErr: marked}); !installed || !errors.Is(err, ErrMarkedForDelete) {
+	if installed, err := installedState(&fakeService{owner: ManagedBy, changeNothingErr: marked}); !installed || !errors.Is(err, ErrMarkedForDelete) {
 		t.Fatalf("installed state = %v, %v, want true with ErrMarkedForDelete", installed, err)
 	}
-	if installed, err := installedState(&fakeService{cfg: owned}); !installed || err != nil {
+	if installed, err := installedState(&fakeService{owner: ManagedBy}); !installed || err != nil {
 		t.Fatalf("installed state of a live service = %v, %v, want true", installed, err)
 	}
-	if _, err := installedState(&fakeService{cfg: owned, changeNothingErr: windows.ERROR_ACCESS_DENIED}); err == nil || errors.Is(err, ErrMarkedForDelete) {
+	if _, err := installedState(&fakeService{owner: ManagedBy, changeNothingErr: windows.ERROR_ACCESS_DENIED}); err == nil || errors.Is(err, ErrMarkedForDelete) {
 		t.Fatalf("installed state on access denied = %v, want that error", err)
 	}
 	if installed, err := installedState(&fakeService{}); installed || !errors.Is(err, ErrForeignUnit) {

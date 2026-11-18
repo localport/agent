@@ -76,8 +76,43 @@ func setPreshutdownTimeout(h windows.Handle, timeout time.Duration) error {
 	return changeServiceConfig2(h, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO, (*byte)(unsafe.Pointer(&info)))
 }
 
-// windowsDescription carries Marker, the Windows form of a marker line.
-const windowsDescription = "Localport fleet device agent. " + Marker
+// managedByValue is the string value of a service's Parameters key that
+// records ManagedBy. Only Administrators and SYSTEM can write the key, and
+// DeleteService removes it with the service.
+const managedByValue = "ManagedBy"
+
+// parametersKey is the Parameters key of service name under HKLM.
+func parametersKey(name string) string {
+	return `SYSTEM\CurrentControlSet\Services\` + name + `\Parameters`
+}
+
+// managedBy returns the ManagedBy value of service name, "" when it has
+// none.
+func managedBy(name string) (string, error) {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, parametersKey(name), registry.QUERY_VALUE)
+	if errors.Is(err, registry.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	defer k.Close()
+	v, _, err := k.GetStringValue(managedByValue)
+	if errors.Is(err, registry.ErrNotExist) || errors.Is(err, registry.ErrUnexpectedType) {
+		return "", nil
+	}
+	return v, err
+}
+
+// setManagedBy records ManagedBy on service name.
+func setManagedBy(name string) error {
+	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, parametersKey(name), registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+	return k.SetStringValue(managedByValue, ManagedBy)
+}
 
 // Default is the Windows service control manager.
 func Default() (Manager, error) { return scm{}, nil }
@@ -111,13 +146,20 @@ func (scm) open(fn func(*mgr.Mgr, *mgr.Service) error) error {
 
 // ownedService refuses a service under name this package did not create,
 // and returns its configuration.
-func ownedService(name string, s interface{ Config() (mgr.Config, error) }) (mgr.Config, error) {
+func ownedService(name string, s interface {
+	Config() (mgr.Config, error)
+	ManagedBy() (string, error)
+}) (mgr.Config, error) {
+	owner, err := s.ManagedBy()
+	if err != nil {
+		return mgr.Config{}, errManager.With(err, "read service "+name)
+	}
+	if owner != ManagedBy {
+		return mgr.Config{}, ErrForeignUnit.With(nil, fmt.Sprintf("Windows service %q; remove it (sc.exe delete %s), then run the command again", name, name))
+	}
 	cfg, err := s.Config()
 	if err != nil {
 		return cfg, errManager.With(err, "read service "+name)
-	}
-	if !strings.Contains(cfg.Description, Marker) {
-		return cfg, ErrForeignUnit.With(nil, fmt.Sprintf("Windows service %q; remove it (sc.exe delete %s), then run the command again", name, name))
 	}
 	return cfg, nil
 }
@@ -131,7 +173,7 @@ func (c scm) Check() ([]string, error) {
 			if s == nil {
 				return nil
 			}
-			if _, err := ownedService(name, s); err != nil {
+			if _, err := ownedService(name, scmService{s}); err != nil {
 				return err
 			}
 			if name == LauncherName {
@@ -165,6 +207,7 @@ func (c scm) Installed() (bool, error) {
 // deleted but still held, and true otherwise.
 func installedState(s interface {
 	Config() (mgr.Config, error)
+	ManagedBy() (string, error)
 	ChangeNothing() error
 }) (bool, error) {
 	if _, err := ownedService(WindowsName, s); err != nil {
@@ -248,6 +291,9 @@ func removeEventSource(name string) error {
 // restart and stop paths use. scmService implements it; tests fake it.
 type winService interface {
 	Config() (mgr.Config, error)
+	ManagedBy() (string, error)
+	SetManagedBy() error
+	Delete() error
 	UpdateConfig(mgr.Config) error
 	SetRequiredPrivileges(privileges []string) error
 	SetPreshutdownTimeout(timeout time.Duration) error
@@ -258,9 +304,13 @@ type winService interface {
 	Start(args ...string) error
 }
 
-// scmService adds the required privileges and preshutdown calls x/sys lacks
-// to *mgr.Service.
+// scmService adds the required privileges and preshutdown calls x/sys lacks,
+// and the ManagedBy record, to *mgr.Service.
 type scmService struct{ *mgr.Service }
+
+func (s scmService) ManagedBy() (string, error) { return managedBy(s.Name) }
+
+func (s scmService) SetManagedBy() error { return setManagedBy(s.Name) }
 
 func (s scmService) SetRequiredPrivileges(privileges []string) error {
 	return setRequiredPrivileges(s.Handle, privileges)
@@ -293,12 +343,12 @@ type serviceDef struct {
 }
 
 func agentDef(exe string) serviceDef {
-	return serviceDef{name: WindowsName, display: "Localport device", description: windowsDescription, account: windowsAccount,
+	return serviceDef{name: WindowsName, display: "Localport device", description: "Localport fleet device agent.", account: windowsAccount,
 		exe: exe, args: []string{"run", "--service"}, privileges: serviceRequiredPrivileges, preshutdown: StopBudget}
 }
 
 func launcherDef(exe string) serviceDef {
-	return serviceDef{name: LauncherName, display: "Localport session launcher", description: "Localport session launcher. " + Marker, account: "LocalSystem",
+	return serviceDef{name: LauncherName, display: "Localport session launcher", description: "Localport session launcher.", account: "LocalSystem",
 		exe: SessionExecutable(exe), args: []string{"launcher"}, privileges: launcherRequiredPrivileges}
 }
 
@@ -373,6 +423,12 @@ func installDefinition(ctx context.Context, d serviceDef, existing winService, c
 			return markedForDelete(errManager.With(err, "create service "+d.name))
 		}
 		defer closeCreated()
+		// Without the record the next install refuses the service as
+		// foreign, so a failed write takes the service back out.
+		if err := created.SetManagedBy(); err != nil {
+			_ = created.Delete()
+			return errManager.With(err, "record the owner of service "+d.name)
+		}
 		s = created
 	} else {
 		cfg, err := ownedService(d.name, s)
@@ -444,7 +500,7 @@ func (c scm) Uninstall(ctx context.Context) error {
 				}
 				return nil
 			}
-			if _, err := ownedService(name, s); err != nil {
+			if _, err := ownedService(name, scmService{s}); err != nil {
 				return err
 			}
 			if err := stop(ctx, name, scmService{s}); err != nil {
@@ -528,7 +584,7 @@ func StopOwned(ctx context.Context) ([]string, error) {
 			if s == nil {
 				return nil
 			}
-			if _, err := ownedService(name, s); err != nil {
+			if _, err := ownedService(name, scmService{s}); err != nil {
 				return err
 			}
 			status, err := s.Query()
@@ -566,7 +622,7 @@ func StartOwned(names []string) error {
 			if s == nil {
 				return nil
 			}
-			if _, err := ownedService(name, s); err != nil {
+			if _, err := ownedService(name, scmService{s}); err != nil {
 				return err
 			}
 			if err := s.Start(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
@@ -598,7 +654,10 @@ func ForeignServicesIn(dir string) ([]string, error) {
 		}
 		cfg, err := s.Config()
 		s.Close()
-		if err != nil || strings.Contains(cfg.Description, Marker) {
+		if err != nil {
+			continue
+		}
+		if owner, err := managedBy(name); err != nil || owner == ManagedBy {
 			continue
 		}
 		if imageInside(cfg.BinaryPathName, dir) {

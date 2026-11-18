@@ -64,12 +64,12 @@ func (s systemd) paths() []string {
 	return paths
 }
 
-// Check refuses a unit file without Marker, and a unit systemd loads from
+// Check refuses a unit file without the ManagedBy marker, and a unit systemd loads from
 // another fragment, a /dev/null mask included. Drop-ins (systemctl edit
 // overrides, type-level service.d/ files) are accepted and returned: install
 // never writes one, and only root can.
 func (s systemd) Check() (dropIns []string, err error) {
-	if err := checkOwned(s.paths()...); err != nil {
+	if err := checkOwned(systemdMarker, s.paths()...); err != nil {
 		return nil, err
 	}
 	for _, u := range s.units() {
@@ -90,7 +90,7 @@ func (s systemd) Check() (dropIns []string, err error) {
 	return dropIns, nil
 }
 
-func (s systemd) Installed() (bool, error) { return owned(s.unitPath) }
+func (s systemd) Installed() (bool, error) { return owned(s.unitPath, systemdMarker) }
 
 // MainPID reads MainPID and ActiveState; a unit in any state but active
 // (activating, deactivating, auto-restart, failed, inactive) reports 0.
@@ -126,11 +126,11 @@ func (s systemd) Install(ctx context.Context, exe string) error {
 	if err != nil {
 		return err
 	}
-	if err := checkOwned(s.paths()...); err != nil {
+	if err := checkOwned(systemdMarker, s.paths()...); err != nil {
 		return err
 	}
 	for _, u := range s.units() {
-		if err := writeOwned(u.path, files[u.name]); err != nil {
+		if err := writeOwned(u.path, systemdMarker, files[u.name]); err != nil {
 			return err
 		}
 	}
@@ -160,10 +160,10 @@ func (s systemd) Reload(ctx context.Context) error {
 // four units. Running sessions end with the agent: their helpers read the
 // end of the channel.
 func (s systemd) Uninstall(ctx context.Context) error {
-	if err := checkOwned(s.paths()...); err != nil {
+	if err := checkOwned(systemdMarker, s.paths()...); err != nil {
 		return err
 	}
-	exists, err := owned(s.unitPath)
+	exists, err := owned(s.unitPath, systemdMarker)
 	if err != nil {
 		return err
 	}
@@ -178,7 +178,7 @@ func (s systemd) Uninstall(ctx context.Context) error {
 		return err
 	}
 	for _, u := range s.units() {
-		if err := removeOwned(u.path); err != nil && !errors.Is(err, ErrNotInstalled) {
+		if err := removeOwned(u.path, systemdMarker); err != nil && !errors.Is(err, ErrNotInstalled) {
 			return err
 		}
 	}
@@ -209,12 +209,13 @@ func systemdUnits(exe string) (map[string][]byte, error) {
 	identityDir := filepath.Join(systemdDeviceDir, "identity")
 	runLock := filepath.Join(systemdDeviceDir, "run.lock")
 	return map[string][]byte{
-		SystemdUnit: fmt.Appendf(nil, `# %[1]s
+		SystemdUnit: fmt.Appendf(nil, `# localport service uninstall removes this service.
 # Configure the devices with localport set; %[2]s/agent.yaml
 # holds their settings and %[3]s their private keys,
 # so keep that directory out of backups and configuration management.
 
 [Unit]
+%[1]s
 Description=Localport fleet device agent
 Documentation=https://localport.io/docs
 After=network-online.target %[6]s
@@ -267,11 +268,12 @@ SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target
-`, Marker, systemdDeviceDir, identityDir, exe, runLock, SystemdLauncherSocket, agentaccount.Linux, stopBudgetSeconds),
+`, systemdMarker, systemdDeviceDir, identityDir, exe, runLock, SystemdLauncherSocket, agentaccount.Linux, stopBudgetSeconds),
 
-		SystemdLauncherSocket: fmt.Appendf(nil, `# %[1]s
+		SystemdLauncherSocket: fmt.Appendf(nil, `# localport service uninstall removes this service.
 
 [Unit]
+%[1]s
 Description=Localport session launcher socket
 Documentation=https://localport.io/docs
 
@@ -287,11 +289,12 @@ DirectoryMode=0755
 
 [Install]
 WantedBy=sockets.target
-`, Marker, launcher.LinuxSocketPath, agentaccount.Linux),
+`, systemdMarker, launcher.LinuxSocketPath, agentaccount.Linux),
 
-		SystemdStatusSocket: fmt.Appendf(nil, `# %[1]s
+		SystemdStatusSocket: fmt.Appendf(nil, `# localport service uninstall removes this service.
 
 [Unit]
+%[1]s
 Description=Localport device status socket
 Documentation=https://localport.io/docs
 
@@ -306,11 +309,12 @@ Service=%[4]s
 
 [Install]
 WantedBy=sockets.target
-`, Marker, launcher.LinuxStatusSocketPath, agentaccount.Linux, SystemdLauncherService),
+`, systemdMarker, launcher.LinuxStatusSocketPath, agentaccount.Linux, SystemdLauncherService),
 
-		SystemdLauncherService: fmt.Appendf(nil, `# %[1]s
+		SystemdLauncherService: fmt.Appendf(nil, `# localport service uninstall removes this service.
 
 [Unit]
+%[1]s
 Description=Localport session launcher
 Documentation=https://localport.io/docs
 Requires=%[3]s %[4]s
@@ -327,6 +331,6 @@ Restart=on-failure
 KillMode=process
 # No sandboxing: every session inherits the launcher's, and a session must
 # reach the network, devices and setuid programs as a login does.
-`, Marker, session, SystemdLauncherSocket, SystemdStatusSocket),
+`, systemdMarker, session, SystemdLauncherSocket, SystemdStatusSocket),
 	}, nil
 }

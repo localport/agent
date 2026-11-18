@@ -78,7 +78,7 @@ func TestSystemdUnits(t *testing.T) {
 	}
 	for name, want := range map[string][]string{
 		SystemdUnit: {
-			"# " + Marker,
+			systemdMarker,
 			"User=localport",
 			"Group=localport",
 			"ExecStart=" + exe + " run --service",
@@ -105,7 +105,7 @@ func TestSystemdUnits(t *testing.T) {
 			"WantedBy=multi-user.target",
 		},
 		SystemdLauncherSocket: {
-			"# " + Marker,
+			systemdMarker,
 			"ListenStream=" + launcher.LinuxSocketPath,
 			"FileDescriptorName=session",
 			"SocketUser=root",
@@ -114,7 +114,7 @@ func TestSystemdUnits(t *testing.T) {
 			"WantedBy=sockets.target",
 		},
 		SystemdStatusSocket: {
-			"# " + Marker,
+			systemdMarker,
 			"ListenStream=" + launcher.LinuxStatusSocketPath,
 			"FileDescriptorName=status",
 			"SocketUser=root",
@@ -124,7 +124,7 @@ func TestSystemdUnits(t *testing.T) {
 			"WantedBy=sockets.target",
 		},
 		SystemdLauncherService: {
-			"# " + Marker,
+			systemdMarker,
 			"ExecStart=/usr/local/bin/localport-session launcher",
 			"KillMode=process",
 			"Requires=" + SystemdLauncherSocket + " " + SystemdStatusSocket,
@@ -265,6 +265,24 @@ func TestSystemdCommandFailureIsSurfaced(t *testing.T) {
 	}
 }
 
+// A definition is ours only when the marker is a whole line of it.
+func TestOwnedMatchesTheWholeMarkerLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), SystemdUnit)
+	for content, mine := range map[string]bool{
+		"[Unit]\n" + systemdMarker + "\n":        true,
+		"[Unit]\r\n" + systemdMarker + "\r\n":    true,
+		"[Unit]\n" + systemdMarker:               true,
+		"# " + systemdMarker + "\n":              false,
+		"[Unit]\n" + systemdMarker + "-fork\n":   false,
+		"[Unit]\nX-Managed-By=localport-other\n": false,
+	} {
+		writeFile(t, path, content)
+		if _, err := owned(path, systemdMarker); mine != (err == nil) || (!mine && !errors.Is(err, ErrForeignUnit)) {
+			t.Errorf("owned(%q) = %v, want ours %v", content, err, mine)
+		}
+	}
+}
+
 // A foreign launcher unit stops the install before any unit is written.
 func TestSystemdInstallRefusesAForeignLauncherUnitFirst(t *testing.T) {
 	r := &recorder{}
@@ -289,6 +307,7 @@ func newLaunchd(t *testing.T, r *recorder) launchd {
 		logDir:    filepath.Join(dir, "log"),
 		account:   func() (Account, error) { return Account{UID: os.Getuid(), GID: os.Getgid()}, nil },
 		run:       r.run,
+		app:       testApp(t, nil),
 	}
 }
 
@@ -398,7 +417,7 @@ func TestLaunchdPlists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(agent, []byte(Marker)) {
+	if !hasLine(agent, plistMarker) {
 		t.Error("agent plist lacks the marker")
 	}
 	if !bytes.Contains(agent, []byte("<string>run</string>\n    <string>--service</string>\n    <string>--log-file</string>")) {
@@ -468,6 +487,7 @@ func TestLaunchdInstallSequence(t *testing.T) {
 	r := &recorder{fail: notLoaded(LaunchdLabel, LaunchdLauncherLabel)}
 	l := newLaunchd(t, r)
 	launcherPlist := filepath.Join(filepath.Dir(l.plistPath), LaunchdLauncherLabel+".plist")
+	exe := testAppExe(t)
 	if err := l.Install(context.Background(), exe); err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +551,7 @@ func TestLaunchdPrintFailureThatIsNotAnExitIsSurfaced(t *testing.T) {
 	timedOut := &CommandError{ExitCode: -1, Err: context.DeadlineExceeded}
 	r := &recorder{fail: map[string]error{printCmd(LaunchdLauncherLabel): timedOut}}
 	l := newLaunchd(t, r)
-	if err := l.Install(context.Background(), exe); !errors.Is(err, context.DeadlineExceeded) {
+	if err := l.Install(context.Background(), testAppExe(t)); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Install = %v, want the print timeout", err)
 	}
 	if len(r.calls) != 1 {
@@ -546,7 +566,7 @@ func TestLaunchdUninstall(t *testing.T) {
 	if err := l.Uninstall(context.Background()); !errors.Is(err, ErrNotInstalled) {
 		t.Fatalf("Uninstall with nothing installed = %v, want ErrNotInstalled", err)
 	}
-	if err := l.Install(context.Background(), exe); err != nil {
+	if err := l.Install(context.Background(), testAppExe(t)); err != nil {
 		t.Fatal(err)
 	}
 	r.calls = nil
@@ -565,6 +585,9 @@ func TestLaunchdUninstall(t *testing.T) {
 		if _, err := os.Stat(j.plist); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%s still there: %v", j.plist, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Dir(l.app.path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the app directory is still there: %v", err)
 	}
 }
 

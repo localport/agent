@@ -45,7 +45,7 @@ func TestFailedCommandIsCoded(t *testing.T) {
 }
 
 func TestUnwritableDefinitionIsCoded(t *testing.T) {
-	err := writeOwned(filepath.Join(t.TempDir(), "missing", "localport-device.service"), []byte("x"))
+	err := writeOwned(filepath.Join(t.TempDir(), "missing", "localport-device.service"), systemdMarker, []byte("x"))
 	wantCode(t, err, errcode.ServiceDefinitionFailed)
 }
 

@@ -60,11 +60,11 @@ func (o openrc) paths() []string {
 	return []string{o.script(OpenRCLauncherService), o.script(OpenRCService)}
 }
 
-// Check refuses an init script without Marker. OpenRC loads a service only
+// Check refuses an init script without the ManagedBy marker. OpenRC loads a service only
 // from its script in /etc/init.d, so the file is the whole definition.
-func (o openrc) Check() ([]string, error) { return nil, checkOwned(o.paths()...) }
+func (o openrc) Check() ([]string, error) { return nil, checkOwned(scriptMarker, o.paths()...) }
 
-func (o openrc) Installed() (bool, error) { return owned(o.script(OpenRCService)) }
+func (o openrc) Installed() (bool, error) { return owned(o.script(OpenRCService), scriptMarker) }
 
 // MainPID asks the agent's script for the child pid supervise-daemon
 // records. A status that reports the service not started (openrcNotRunning)
@@ -97,7 +97,7 @@ func (o openrc) MainPID(ctx context.Context) (int, error) {
 // an upgraded binary takes effect; supervise-daemon signals only its child,
 // so open sessions keep running.
 func (o openrc) Install(ctx context.Context, exe string) error {
-	if err := checkOwned(o.paths()...); err != nil {
+	if err := checkOwned(scriptMarker, o.paths()...); err != nil {
 		return err
 	}
 	scripts, err := openrcScripts(exe)
@@ -112,7 +112,7 @@ func (o openrc) Install(ctx context.Context, exe string) error {
 		return err
 	}
 	for _, name := range []string{OpenRCLauncherService, OpenRCService} {
-		if err := writeOwnedMode(o.script(name), scripts[name], 0o755); err != nil {
+		if err := writeOwnedMode(o.script(name), scriptMarker, scripts[name], 0o755); err != nil {
 			return err
 		}
 	}
@@ -144,10 +144,10 @@ func (o openrc) Reload(ctx context.Context) error {
 // Uninstall stops both services, removes them from every runlevel and
 // deletes their scripts.
 func (o openrc) Uninstall(ctx context.Context) error {
-	if err := checkOwned(o.paths()...); err != nil {
+	if err := checkOwned(scriptMarker, o.paths()...); err != nil {
 		return err
 	}
-	exists, err := owned(o.script(OpenRCService))
+	exists, err := owned(o.script(OpenRCService), scriptMarker)
 	if err != nil {
 		return err
 	}
@@ -167,7 +167,7 @@ func (o openrc) Uninstall(ctx context.Context) error {
 				return err
 			}
 		}
-		if err := removeOwned(o.script(name)); err != nil && !errors.Is(err, ErrNotInstalled) {
+		if err := removeOwned(o.script(name), scriptMarker); err != nil && !errors.Is(err, ErrNotInstalled) {
 			return err
 		}
 	}
@@ -206,7 +206,8 @@ func openrcScripts(exe string) (map[string][]byte, error) {
 	}
 	return map[string][]byte{
 		OpenRCService: fmt.Appendf(nil, `#!/sbin/openrc-run
-# %[1]s
+%[1]s
+# localport service uninstall removes this service.
 # Configure the devices with localport set; /etc/localport-device/agent.yaml
 # holds their settings and /etc/localport-device/identity their private keys,
 # so keep that directory out of backups and configuration management.
@@ -242,10 +243,11 @@ reload() {
 mainpid() {
 	service_get_value child_pid
 }
-`, Marker, exe, openrcAgentLog, agentaccount.Linux, OpenRCLauncherService, stopBudgetSeconds),
+`, scriptMarker, exe, openrcAgentLog, agentaccount.Linux, OpenRCLauncherService, stopBudgetSeconds),
 
 		OpenRCLauncherService: fmt.Appendf(nil, `#!/sbin/openrc-run
-# %[1]s
+%[1]s
+# localport service uninstall removes this service.
 
 description="Localport session launcher"
 supervisor=supervise-daemon
@@ -256,6 +258,6 @@ respawn_max=0
 # Sessions are children of the launcher. supervise-daemon stops only its
 # child, so a stop or restart leaves them running, each with its own channel
 # to the agent. The launcher binds its socket itself.
-`, Marker, SessionExecutable(exe), openrcLauncherLog),
+`, scriptMarker, SessionExecutable(exe), openrcLauncherLog),
 	}, nil
 }

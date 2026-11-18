@@ -66,6 +66,8 @@ type launchd struct {
 	// account resolves the agent account's ids (LookupAccount).
 	account func() (Account, error)
 	run     runner
+	// app is the launcher bundle the launcher plist runs.
+	app sessionApp
 }
 
 // job is one daemon this manager installs.
@@ -97,14 +99,14 @@ func (l launchd) plists() []string {
 
 func target(label string) string { return "system/" + label }
 
-// Check refuses a plist without Marker, and a loaded job whose plist is not
+// Check refuses a plist without the ManagedBy marker, and a loaded job whose plist is not
 // ours.
 func (l launchd) Check() ([]string, error) {
-	if err := checkOwned(l.plists()...); err != nil {
+	if err := checkOwned(plistMarker, l.plists()...); err != nil {
 		return nil, err
 	}
 	for _, j := range l.jobs() {
-		if exists, _ := owned(j.plist); exists {
+		if exists, _ := owned(j.plist, plistMarker); exists {
 			continue
 		}
 		loaded, err := l.loaded(context.Background(), j.label)
@@ -118,12 +120,13 @@ func (l launchd) Check() ([]string, error) {
 	return nil, nil
 }
 
-func (l launchd) Installed() (bool, error) { return owned(l.plistPath) }
+func (l launchd) Installed() (bool, error) { return owned(l.plistPath, plistMarker) }
 
-// Install writes both plists and boots each daemon out and in again, the
-// launcher first, so the agent's first session finds its socket.
+// Install installs the launcher bundle beside exe (sessionApp.install),
+// writes both plists and boots each daemon out and in again, the launcher
+// first, so the agent's first session finds its socket.
 func (l launchd) Install(ctx context.Context, exe string) error {
-	if err := checkOwned(l.plists()...); err != nil {
+	if err := checkOwned(plistMarker, l.plists()...); err != nil {
 		return err
 	}
 	acct, err := l.account()
@@ -134,14 +137,17 @@ func (l launchd) Install(ctx context.Context, exe string) error {
 	if plists[LaunchdLabel], err = launchdAgentPlist(exe); err != nil {
 		return err
 	}
-	if plists[LaunchdLauncherLabel], err = launchdLauncherPlist(SessionExecutable(exe), acct.GID); err != nil {
+	if plists[LaunchdLauncherLabel], err = launchdLauncherPlist(l.app.executable(), acct.GID); err != nil {
 		return err
 	}
 	if err := prepareLogDir(l.logDir, acct); err != nil {
 		return err
 	}
+	if err := l.app.install(ctx, exe); err != nil {
+		return err
+	}
 	for _, j := range l.jobs() {
-		if err := writeOwned(j.plist, plists[j.label]); err != nil {
+		if err := writeOwned(j.plist, plistMarker, plists[j.label]); err != nil {
 			return err
 		}
 	}
@@ -173,12 +179,13 @@ func (l launchd) Reload(ctx context.Context) error {
 	return err
 }
 
-// Uninstall boots both daemons out and removes their plists.
+// Uninstall boots both daemons out and removes their plists and the
+// launcher bundle.
 func (l launchd) Uninstall(ctx context.Context) error {
-	if err := checkOwned(l.plists()...); err != nil {
+	if err := checkOwned(plistMarker, l.plists()...); err != nil {
 		return err
 	}
-	exists, err := owned(l.plistPath)
+	exists, err := owned(l.plistPath, plistMarker)
 	if err != nil {
 		return err
 	}
@@ -189,11 +196,11 @@ func (l launchd) Uninstall(ctx context.Context) error {
 		if err := l.bootoutIfLoaded(ctx, j.label); err != nil {
 			return err
 		}
-		if err := removeOwned(j.plist); err != nil && !errors.Is(err, ErrNotInstalled) {
+		if err := removeOwned(j.plist, plistMarker); err != nil && !errors.Is(err, ErrNotInstalled) {
 			return err
 		}
 	}
-	return nil
+	return l.app.uninstall()
 }
 
 // MainPID reads the `state =` and `pid =` lines of launchctl print. A label
@@ -326,7 +333,8 @@ func launchdAgentPlist(exe string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return fmt.Appendf(nil, plistHeader+`<!-- %s
+	return fmt.Appendf(nil, plistHeader+`%s
+<!-- localport service uninstall removes this service.
      Configure the devices with localport set. /Library/Application Support/localport-device
      holds their settings and, under identity/, their private keys. -->
 <plist version="1.0">
@@ -366,7 +374,7 @@ func launchdAgentPlist(exe string) ([]byte, error) {
   </dict>
 </dict>
 </plist>
-`, Marker, LaunchdLabel, program, launchdAgentLog, agentaccount.MacOS, agentaccount.MacOS, stopBudgetSeconds), nil
+`, plistMarker, LaunchdLabel, program, launchdAgentLog, agentaccount.MacOS, agentaccount.MacOS, stopBudgetSeconds), nil
 }
 
 // launchdLauncherPlist is the launcher's daemon definition: root, with the
@@ -377,7 +385,8 @@ func launchdLauncherPlist(session string, gid int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return fmt.Appendf(nil, plistHeader+`<!-- %s -->
+	return fmt.Appendf(nil, plistHeader+`%s
+<!-- localport service uninstall removes this service. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -419,6 +428,6 @@ func launchdLauncherPlist(session string, gid int) ([]byte, error) {
   <true/>
 </dict>
 </plist>
-`, Marker, LaunchdLauncherLabel, program, launchdLauncherLog, launchdSocketName, launcher.DarwinSocketPath, gid,
+`, plistMarker, LaunchdLauncherLabel, program, launchdLauncherLog, launchdSocketName, launcher.DarwinSocketPath, gid,
 		launchdStatusSocketName, launcher.DarwinStatusSocketPath, gid), nil
 }

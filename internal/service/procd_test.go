@@ -26,7 +26,7 @@ func TestProcdScripts(t *testing.T) {
 	for name, want := range map[string][]string{
 		ProcdService: {
 			"#!/bin/sh /etc/rc.common",
-			"# " + Marker,
+			scriptMarker,
 			"USE_PROCD=1",
 			"START=96",
 			"\tprocd_set_param command " + exe + " run --service",
@@ -39,7 +39,7 @@ func TestProcdScripts(t *testing.T) {
 		},
 		ProcdLauncherService: {
 			"#!/bin/sh /etc/rc.common",
-			"# " + Marker,
+			scriptMarker,
 			"START=95",
 			"\tprocd_set_param command /usr/local/bin/localport-session launcher",
 			// An upgrade changes the binary's checksum, which makes start

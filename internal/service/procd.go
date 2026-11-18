@@ -38,10 +38,10 @@ func (p procd) paths() []string {
 	return []string{p.script(ProcdLauncherService), p.script(ProcdService)}
 }
 
-// Check refuses an init script without Marker.
-func (p procd) Check() ([]string, error) { return nil, checkOwned(p.paths()...) }
+// Check refuses an init script without the ManagedBy marker.
+func (p procd) Check() ([]string, error) { return nil, checkOwned(scriptMarker, p.paths()...) }
 
-func (p procd) Installed() (bool, error) { return owned(p.script(ProcdService)) }
+func (p procd) Installed() (bool, error) { return owned(p.script(ProcdService), scriptMarker) }
 
 // procdList is the part of `ubus call service list` this package reads.
 type procdList map[string]struct {
@@ -77,7 +77,7 @@ func (p procd) MainPID(ctx context.Context) (int, error) {
 // procd kills an instance's cgroup whenever the instance exits, so a launcher
 // restart or stop ends the sessions it started.
 func (p procd) Install(ctx context.Context, exe string) error {
-	if err := checkOwned(p.paths()...); err != nil {
+	if err := checkOwned(scriptMarker, p.paths()...); err != nil {
 		return err
 	}
 	scripts, err := procdScripts(exe)
@@ -85,7 +85,7 @@ func (p procd) Install(ctx context.Context, exe string) error {
 		return err
 	}
 	for _, name := range []string{ProcdLauncherService, ProcdService} {
-		if err := writeOwnedMode(p.script(name), scripts[name], 0o755); err != nil {
+		if err := writeOwnedMode(p.script(name), scriptMarker, scripts[name], 0o755); err != nil {
 			return err
 		}
 	}
@@ -117,10 +117,10 @@ func (p procd) Reload(ctx context.Context) error {
 
 // Uninstall stops and disables both services and deletes their scripts.
 func (p procd) Uninstall(ctx context.Context) error {
-	if err := checkOwned(p.paths()...); err != nil {
+	if err := checkOwned(scriptMarker, p.paths()...); err != nil {
 		return err
 	}
-	exists, err := owned(p.script(ProcdService))
+	exists, err := owned(p.script(ProcdService), scriptMarker)
 	if err != nil {
 		return err
 	}
@@ -129,14 +129,14 @@ func (p procd) Uninstall(ctx context.Context) error {
 	}
 	for _, name := range []string{ProcdService, ProcdLauncherService} {
 		script := p.script(name)
-		if exists, _ := owned(script); exists {
+		if exists, _ := owned(script, scriptMarker); exists {
 			for _, action := range []string{"stop", "disable"} {
 				if _, err := p.run(ctx, script, action); err != nil {
 					return err
 				}
 			}
 		}
-		if err := removeOwned(script); err != nil && !errors.Is(err, ErrNotInstalled) {
+		if err := removeOwned(script, scriptMarker); err != nil && !errors.Is(err, ErrNotInstalled) {
 			return err
 		}
 	}
@@ -151,7 +151,8 @@ func procdScripts(exe string) (map[string][]byte, error) {
 	}
 	return map[string][]byte{
 		ProcdService: fmt.Appendf(nil, `#!/bin/sh /etc/rc.common
-# %[1]s
+%[1]s
+# localport service uninstall removes this service.
 # Configure the devices with localport set; /etc/localport-device/agent.yaml
 # holds their settings and /etc/localport-device/identity their private keys.
 
@@ -179,10 +180,11 @@ start_service() {
 reload_service() {
 	procd_send_signal %[4]s '*' HUP
 }
-`, Marker, exe, agentaccount.Linux, ProcdService, stopBudgetSeconds),
+`, scriptMarker, exe, agentaccount.Linux, ProcdService, stopBudgetSeconds),
 
 		ProcdLauncherService: fmt.Appendf(nil, `#!/bin/sh /etc/rc.common
-# %[1]s
+%[1]s
+# localport service uninstall removes this service.
 # The launcher binds its socket itself. Sessions are its children, in its
 # instance cgroup.
 
@@ -199,6 +201,6 @@ start_service() {
 	procd_set_param stderr 1
 	procd_close_instance
 }
-`, Marker, SessionExecutable(exe)),
+`, scriptMarker, SessionExecutable(exe)),
 	}, nil
 }

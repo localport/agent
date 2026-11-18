@@ -1,9 +1,10 @@
-# Managed by localport up; localport service uninstall removes it.
+# localport service uninstall removes this service.
 # Configure the devices with localport set; /etc/localport-device/agent.yaml
 # holds their settings and /etc/localport-device/identity their private keys,
 # so keep that directory out of backups and configuration management.
 
 [Unit]
+X-Managed-By=localport
 Description=Localport fleet device agent
 Documentation=https://localport.io/docs
 After=network-online.target localport-session.socket

@@ -32,7 +32,7 @@ func TestOpenRCScripts(t *testing.T) {
 	for name, want := range map[string][]string{
 		OpenRCService: {
 			"#!/sbin/openrc-run",
-			"# " + Marker,
+			scriptMarker,
 			"supervisor=supervise-daemon",
 			`command="` + exe + `"`,
 			`command_args="run --service --log-file ` + openrcAgentLog + `"`,
@@ -48,7 +48,7 @@ func TestOpenRCScripts(t *testing.T) {
 		},
 		OpenRCLauncherService: {
 			"#!/sbin/openrc-run",
-			"# " + Marker,
+			scriptMarker,
 			"supervisor=supervise-daemon",
 			`command="/usr/local/bin/localport-session"`,
 			`command_args="launcher --log-file ` + openrcLauncherLog + `"`,

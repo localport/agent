@@ -6,9 +6,11 @@
 // definitions run `<session binary> launcher`. Service managers run by
 // absolute path, never through PATH.
 //
-// A definition this package writes carries Marker. An existing file or
-// Windows service under the same name without it belongs to someone else and
-// is never overwritten or removed (ErrForeignUnit).
+// A definition this package writes records ManagedBy: an exact marker line
+// in a unit file, plist or init script, and the ManagedBy value of the
+// service's Parameters registry key on Windows. An existing definition under
+// the same name without it belongs to someone else and is never overwritten
+// or removed (ErrForeignUnit).
 package service
 
 import (
@@ -28,8 +30,17 @@ import (
 	"github.com/localport/agent/internal/security"
 )
 
-// Marker identifies a service definition this package wrote.
-const Marker = "Managed by localport up; localport service uninstall removes it."
+// ManagedBy is the owner every definition this package writes records. It
+// is a fixed token, independent of command names and help text.
+const ManagedBy = "localport"
+
+// The marker line of each definition format, matched as a whole line.
+// systemd ignores keys prefixed X-; the others are comments.
+const (
+	systemdMarker = "X-Managed-By=" + ManagedBy
+	scriptMarker  = "# Managed-By: " + ManagedBy
+	plistMarker   = "<!-- Managed-By: " + ManagedBy + " -->"
+)
 
 // StopBudget is how long every service manager lets the agent stop after
 // SIGTERM, a Windows stop or a Windows preshutdown before it kills it. It
@@ -48,11 +59,11 @@ type Manager interface {
 	// (with sudo on Linux and macOS, elevated on Windows).
 	StopCommand() string
 	// Check refuses, with ErrForeignUnit, when a definition under the
-	// service's name exists without Marker. It returns the drop-in files
+	// service's name exists without the ManagedBy marker. It returns the drop-in files
 	// that extend the definition (systemd only), which install accepts and
 	// lists. It changes nothing.
 	Check() (dropIns []string, err error)
-	// Installed reports whether a definition carrying Marker exists.
+	// Installed reports whether a definition recording ManagedBy exists.
 	Installed() (bool, error)
 	// MainPID is the process ID of the service's main process while the
 	// manager reports it running, and 0 otherwise: stopped, not installed,
@@ -204,8 +215,9 @@ func SessionExecutable(exe string) string {
 	return filepath.Join(filepath.Dir(exe), "localport-session"+filepath.Ext(exe))
 }
 
-// owned reports whether path exists, and refuses one without Marker.
-func owned(path string) (bool, error) {
+// owned reports whether path exists, and refuses one without the line
+// marker.
+func owned(path, marker string) (bool, error) {
 	content, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
@@ -213,17 +225,29 @@ func owned(path string) (bool, error) {
 	if err != nil {
 		return false, errDefinition.With(err, "read "+path)
 	}
-	if !bytes.Contains(content, []byte(Marker)) {
+	if !hasLine(content, marker) {
 		return true, ErrForeignUnit.With(nil, fmt.Sprintf("%s; move it aside or remove it, then run the command again", path))
 	}
 	return true, nil
 }
 
+// hasLine reports whether content holds line as a whole line, LF or CRLF
+// terminated.
+func hasLine(content []byte, line string) bool {
+	for l := range bytes.Lines(content) {
+		if string(bytes.TrimRight(l, "\r\n")) == line {
+			return true
+		}
+	}
+	return false
+}
+
 // checkOwned refuses, before anything is written, when any of paths exists
-// without Marker, so an install never leaves a partial set of definitions.
-func checkOwned(paths ...string) error {
+// without the line marker, so an install never leaves a partial set of
+// definitions.
+func checkOwned(marker string, paths ...string) error {
 	for _, p := range paths {
-		if _, err := owned(p); err != nil {
+		if _, err := owned(p, marker); err != nil {
 			return err
 		}
 	}
@@ -231,13 +255,15 @@ func checkOwned(paths ...string) error {
 }
 
 // writeOwned replaces path with content, mode 0644, after owned accepts it.
-func writeOwned(path string, content []byte) error { return writeOwnedMode(path, content, 0o644) }
+func writeOwned(path, marker string, content []byte) error {
+	return writeOwnedMode(path, marker, content, 0o644)
+}
 
 // writeOwnedMode replaces path with content and mode after owned accepts it.
 // The write goes through a temporary file in the same directory and a rename,
 // so the service manager never reads a partial definition.
-func writeOwnedMode(path string, content []byte, mode os.FileMode) error {
-	if _, err := owned(path); err != nil {
+func writeOwnedMode(path, marker string, content []byte, mode os.FileMode) error {
+	if _, err := owned(path, marker); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".localport-device-*")
@@ -268,8 +294,8 @@ func writeOwnedMode(path string, content []byte, mode os.FileMode) error {
 
 // removeOwned deletes path after owned accepts it; ErrNotInstalled when it
 // does not exist.
-func removeOwned(path string) error {
-	exists, err := owned(path)
+func removeOwned(path, marker string) error {
+	exists, err := owned(path, marker)
 	if err != nil {
 		return err
 	}

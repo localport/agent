@@ -40,7 +40,7 @@ func SnapshotOwned() ([]ServiceSnapshot, error) {
 			if s == nil {
 				return nil
 			}
-			cfg, err := ownedService(name, s)
+			cfg, err := ownedService(name, scmService{s})
 			if err != nil {
 				return err
 			}
@@ -105,7 +105,7 @@ func restoreOne(ctx context.Context, snap ServiceSnapshot, programAt func(string
 	}
 	err = openService(snap.Name, func(m *mgr.Mgr, s *mgr.Service) error {
 		if s != nil {
-			if _, err := ownedService(snap.Name, s); err != nil {
+			if _, err := ownedService(snap.Name, scmService{s}); err != nil {
 				return err
 			}
 			if err := stop(ctx, snap.Name, scmService{s}); err != nil {
@@ -132,6 +132,10 @@ func restoreOne(ctx context.Context, snap ServiceSnapshot, programAt func(string
 				return markedForDelete(fmt.Errorf("create service %s: %w", snap.Name, err))
 			}
 			defer created.Close()
+			if err := setManagedBy(snap.Name); err != nil {
+				_ = created.Delete()
+				return fmt.Errorf("record the owner of service %s: %w", snap.Name, err)
+			}
 			s = created
 		}
 		if err := s.UpdateConfig(snap.Config); err != nil {
