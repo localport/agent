@@ -741,9 +741,28 @@ stream:
    and every global request other than the port forwarding requests below. Each
    `shell`, `exec` or `subsystem` is one launcher request of kind `terminal`,
    `exec` or `sftp`; an `sftp` request serves the SFTP protocol (version 3) as
-   the login, confined to the device's `files_root` or the login's home, opening
-   only regular files and directories and writing in place at the requested
-   offsets. The request carries the certificate's `files@localport.io` access
+   the login, opening only regular files and directories and writing in place at
+   the requested offsets. With the device's `files_root` the client sees that
+   directory as `/` and no `..`, absolute name or symlink leaves it; relative
+   paths start at `/`. Without it the client sees the whole file system as the
+   login, the login's OS permissions the only boundary, symlinks followed as the
+   OS follows them, and relative paths (and `realpath .`) start at the login's
+   home with its symlinks resolved; a home that is missing or not a directory
+   refuses the request. On Windows `/` is then a read-only list of the drives
+   Win32-OpenSSH lists (local, removable, network and optical; not RAM disks or
+   drives without a root) as `c:`, `d:`, and `/c:/Users/x` is `C:\Users\x`
+   (drive letter in any case, shown lower case); a backslash in a request path
+   is a separator, as in Win32-OpenSSH. A colon past the drive (an alternate
+   data stream), a UNC, device or `\??\` path, a DOS device name (`NUL`, `COM1`;
+   with an extension only before Windows 11), and a backslash in a symlink's
+   target text are `SSH_FX_FAILURE`; readlink answers in `/c:/` form, and a
+   target with no such form (UNC, volume) is `SSH_FX_FAILURE`; a rename or link
+   across drives is `SSH_FX_FAILURE` (the OS refuses it; nothing is copied).
+   `statvfs@openssh.com` answers for the file system holding the path, a file or
+   a directory, through symlinks, junctions and mounted folders (`files_root`'s
+   with one; none for the Windows `/`); a missing path is `SSH_FX_NO_SUCH_FILE`.
+   On Windows the available blocks are those the login's quota allows. The
+   request carries the certificate's `files@localport.io` access
    (`files_download`, `files_upload`; only an `sftp` request may): without
    download an open for reading is refused `SSH_FX_PERMISSION_DENIED`, a
    read-write open needs both directions, and without upload every change (open

@@ -19,9 +19,8 @@ import (
 // package in blocks of ten.
 type Code string
 
-// Error is a coded error. Its sentinels come from New; With adds the local
-// detail the user sees and the cause. errors.Is matches any Error with the
-// same Code.
+// Error is a coded error. New makes its sentinels; With adds the detail the
+// user sees and the cause. errors.Is matches any Error with the same Code.
 type Error struct {
 	Code Code
 	Msg  string
@@ -84,6 +83,7 @@ const (
 	UntrustedPath            Code = "AG012"
 	PackageManagerExecutable Code = "AG013"
 
+	RunAsAgentFiles      Code = "AG020"
 	RunLocked            Code = "AG021"
 	SessionsNeedService  Code = "AG022"
 	HostCapability       Code = "AG023"
@@ -228,6 +228,7 @@ var registry = []Entry{
 	{UntrustedPath, "Untrusted path", "a credential or system file path is a link, has the wrong owner, or is too open"},
 	{PackageManagerExecutable, "Package manager executable", "a localport installed by a package manager cannot run as the device service"},
 
+	{RunAsAgentFiles, "Files with run_as_agent", "files on a device that runs sessions as the agent account needs a files root: set one with --files-root DIR"},
 	{RunLocked, "Devices already running", "localport is already running the devices of this config"},
 	{SessionsNeedService, "Sessions need the device service", "terminal and files sessions run only under the installed device service, because the session launcher serves only its account"},
 	{HostCapability, "Terminal, files or forwarding with a host", "terminal, files and forwarding act on this machine only and cannot be enabled with a host"},

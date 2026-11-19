@@ -78,9 +78,26 @@ func newFilesHarnessWith(t *testing.T, access FilesAccess) *filesHarness {
 	if err := os.WriteFile(filepath.Join(base, "secret"), []byte("outside"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return serveFilesHarness(t, dir, dir, "", access)
+}
+
+// newHomeFilesHarness serves the whole file system as the test's user with
+// home, a new directory, as the start of relative paths; dir is that home.
+func newHomeFilesHarness(t *testing.T) *filesHarness {
+	t.Helper()
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.Mkdir(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return serveFilesHarness(t, home, "", home, FilesAccess{Download: true, Upload: true})
+}
+
+// serveFilesHarness runs ServeFiles with root and home over a pipe to a client.
+func serveFilesHarness(t *testing.T, dir, root, home string, access FilesAccess) *filesHarness {
+	t.Helper()
 	serverSide, clientSide := net.Pipe()
 	h := &filesHarness{dir: dir, events: &eventSink{}, done: make(chan error, 1)}
-	go func() { h.done <- ServeFiles(serverSide, dir, access, h.events) }()
+	go func() { h.done <- ServeFiles(serverSide, root, home, access, h.events) }()
 	c, err := sftp.NewClientPipe(clientSide, clientSide)
 	if err != nil {
 		t.Fatal(err)

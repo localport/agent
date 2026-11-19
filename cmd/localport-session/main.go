@@ -1,15 +1,13 @@
 //go:build cgo && (linux || darwin)
 
-// Command localport-session is the root session launcher and its
-// per-session helper.
+// Command localport-session is the root session launcher and its per-session helper.
 //
 //	localport-session launcher                  the daemon the service manager starts
 //	localport-session helper                    one session; started only by the launcher
-//	localport-session files-server <root>       one file session as the login; started only by a helper
+//	localport-session files-server <access> <root> <home>  one file session as the login; started only by a helper
 //	localport-session forward-server            one connection's port forwards as the login; started only by a helper
 //
-// See internal/launcher for the protocol and internal/sessionhelper for the
-// session setup.
+// Protocol: internal/launcher. Session setup: internal/sessionhelper.
 package main
 
 import (
@@ -45,21 +43,20 @@ func main() {
 	// The file server runs as the login, not as root: the helper starts it
 	// with the event pipe on descriptor 3.
 	if os.Args[1] == sessionhelper.FilesServerMode {
-		if len(os.Args) != 4 {
+		if len(os.Args) != 5 {
 			os.Exit(2)
 		}
 		access, ok := sessionhelper.ParseFilesAccess(os.Args[2])
 		if !ok {
 			os.Exit(2)
 		}
-		if err := sessionhelper.ServeFiles(stdio{}, os.Args[3], access, os.NewFile(3, "file-events")); err != nil {
+		if err := sessionhelper.ServeFiles(stdio{}, os.Args[3], os.Args[4], access, os.NewFile(3, "file-events")); err != nil {
 			logger.Printf("localport-session: files: %v", err)
 			os.Exit(1)
 		}
 		os.Exit(0)
 	}
-	// The forward server runs as the login with the forward channel on
-	// descriptor 3.
+	// The forward server runs as the login; the forward channel is descriptor 3.
 	if os.Args[1] == sessionhelper.ForwardServerMode {
 		if len(os.Args) != 2 {
 			os.Exit(2)

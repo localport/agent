@@ -6,13 +6,15 @@ import (
 	"io/fs"
 	"os"
 	"syscall"
+	"unsafe"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/sys/windows"
 )
 
-// openNonblock has no Windows counterpart; opens do not block on a pipe name
-// inside a root, which os.Root resolves as a file path.
+// openNonblock has no Windows counterpart; opens do not block on a pipe or
+// device name: inside a root os.Root resolves it as a file path, and without
+// one winPath refuses UNC and device paths and DOS device names.
 const openNonblock = 0
 
 // checkOpened refuses a handle that is not a disk file (a pipe, a console, a
@@ -28,18 +30,48 @@ func checkOpened(f *os.File) error {
 	return nil
 }
 
-// statVFS reports dir's volume in 4 KiB blocks; Windows has no inode counts.
-func statVFS(dir string) (*sftp.StatVFS, error) {
-	name, err := windows.UTF16PtrFromString(dir)
+var procNtQueryVolumeInformationFile = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtQueryVolumeInformationFile")
+
+// fileFsFullSizeInformation is FILE_FS_FULL_SIZE_INFORMATION, information
+// class 7 (FileFsFullSizeInformation).
+type fileFsFullSizeInformation struct {
+	TotalAllocationUnits           int64
+	CallerAvailableAllocationUnits int64
+	ActualAvailableAllocationUnits int64
+	SectorsPerAllocationUnit       uint32
+	BytesPerSector                 uint32
+}
+
+const fileFsFullSizeInformationClass = 7
+
+// statVFS reports the volume holding name's data, as statvfs(2) does: name
+// is opened as the login, following symlinks, junctions and mounted folders.
+// Bavail is the login's quota. Windows has no inode counts.
+func statVFS(name string) (*sftp.StatVFS, error) {
+	p, err := windows.UTF16PtrFromString(name)
 	if err != nil {
-		return nil, err
+		return nil, &fs.PathError{Op: "statvfs", Path: name, Err: err}
 	}
-	var avail, total, free uint64
-	if err := windows.GetDiskFreeSpaceEx(name, &avail, &total, &free); err != nil {
-		return nil, err
+	// FILE_FLAG_BACKUP_SEMANTICS opens a directory; without
+	// FILE_FLAG_OPEN_REPARSE_POINT the open follows reparse points.
+	h, err := windows.CreateFile(p, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return nil, &fs.PathError{Op: "statvfs", Path: name, Err: err}
 	}
-	const block = 4096
+	defer func() { _ = windows.CloseHandle(h) }()
+	var iosb windows.IO_STATUS_BLOCK
+	var info fileFsFullSizeInformation
+	status, _, _ := procNtQueryVolumeInformationFile.Call(uintptr(h), uintptr(unsafe.Pointer(&iosb)),
+		uintptr(unsafe.Pointer(&info)), unsafe.Sizeof(info), fileFsFullSizeInformationClass)
+	if st := windows.NTStatus(status); st != windows.STATUS_SUCCESS {
+		return nil, &fs.PathError{Op: "statvfs", Path: name, Err: st.Errno()}
+	}
+	unit := uint64(info.SectorsPerAllocationUnit) * uint64(info.BytesPerSector)
 	return &sftp.StatVFS{
-		Bsize: block, Frsize: block, Blocks: total / block, Bfree: free / block, Bavail: avail / block, Namemax: 255,
+		Bsize: unit, Frsize: unit, Blocks: uint64(info.TotalAllocationUnits),
+		Bfree: uint64(info.ActualAvailableAllocationUnits), Bavail: uint64(info.CallerAvailableAllocationUnits),
+		Namemax: 255,
 	}, nil
 }

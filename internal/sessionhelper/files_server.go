@@ -7,7 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
-	"strings"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -19,10 +19,10 @@ import (
 )
 
 // FilesServerMode is the localport-session mode that runs ServeFiles as the
-// login: `localport-session files-server <access> <root>` with the SFTP
-// protocol on standard input and output and the event pipe on descriptor 3
-// (Unix) or the handle a fifth argument names (Windows). access is
-// FilesAccess.Arg.
+// login over standard input and output:
+// `files-server <access> <root> <home>` on Unix (event pipe on descriptor 3),
+// `files-server <access> <root> <home> <handle>` on Windows (event pipe
+// handle). access is FilesAccess.Arg; home is empty with a root.
 const FilesServerMode = "files-server"
 
 // FilesAccess is what an SFTP session may do beyond listing: read file
@@ -58,32 +58,45 @@ func ParseFilesAccess(v string) (FilesAccess, bool) {
 	return FilesAccess{}, false
 }
 
-// ServeFiles serves one SFTP session on rwc as the calling process's user,
-// confined to dir: the client sees dir as "/", and every path resolves
-// through an os.Root, so neither "..", an absolute name nor a symlink leaves
-// it. Each operation the files log names is written to events as a
-// FrameEvent (launcher.FileEvent); a request refused as malformed before it
-// acts (a symlink with an empty target) changes nothing and has no event. It
-// returns when the client ends the session. A request access does not allow
-// is refused with permission denied and writes its event with that result.
-func ServeFiles(rwc io.ReadWriteCloser, dir string, access FilesAccess, events io.Writer) error {
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return err
+// ServeFiles serves one SFTP session on rwc as the calling user until the
+// client ends it. With root the client sees root as "/" (os.Root); without it,
+// the real file system (on Windows a virtual "/" of drives), with relative
+// paths starting at home, which must be a directory. Each logged operation,
+// permission refusals included, writes a launcher.FileEvent to events; a
+// malformed request writes none.
+func ServeFiles(rwc io.ReadWriteCloser, root, home string, access FilesAccess, events io.Writer) error {
+	s := &filesServer{access: access, events: events, start: "/"}
+	if root != "" {
+		r, err := os.OpenRoot(root)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		s.fs = rootFS{root: r}
+	} else {
+		start, err := startDir(home)
+		if err != nil {
+			return err
+		}
+		s.fs, s.start = osFS{}, start
 	}
-	defer root.Close()
-	s := &filesServer{root: root, access: access, events: events}
-	h := sftp.Handlers{FileGet: s, FilePut: s, FileCmd: s, FileList: s}
-	err = sftp.NewRequestServer(rwc, h).Serve()
+	return serveSFTP(rwc, s)
+}
+
+// serveSFTP runs the request server over s until the client ends the session.
+func serveSFTP(rwc io.ReadWriteCloser, s *filesServer) error {
+	err := sftp.NewRequestServer(rwc, sftp.Handlers{FileGet: s, FilePut: s, FileCmd: s, FileList: s}, sftp.WithStartDirectory(s.start)).Serve()
 	if errors.Is(err, io.EOF) {
 		return nil
 	}
 	return err
 }
 
-// filesServer implements the request server's handlers over root.
+// filesServer implements the request server's handlers over fs.
 type filesServer struct {
-	root   *os.Root
+	fs filesFS
+	// start is the client path relative paths resolve against.
+	start  string
 	access FilesAccess
 	// mu serializes event frames; events is the helper's event pipe.
 	mu     sync.Mutex
@@ -120,18 +133,7 @@ func result(err error) string {
 	return "failure"
 }
 
-// rel is the root-relative name of a request path. Request paths are clean
-// and absolute ("/" is the root); "" names the root itself.
-func rel(p string) string {
-	p = strings.TrimPrefix(path.Clean("/"+p), "/")
-	if p == "" {
-		return "."
-	}
-	return p
-}
-
-// openRegular opens name with flag and refuses anything that is not a
-// regular file.
+// openRegular opens name with flag, refusing anything but a regular file.
 func (s *filesServer) openRegular(name string, flag int, perm fs.FileMode) (*os.File, error) {
 	return s.openChecked(name, flag, perm, false)
 }
@@ -141,7 +143,7 @@ func (s *filesServer) openRegular(name string, flag int, perm fs.FileMode) (*os.
 // blocking the open, and checkOpened refuses what the platform cannot stat
 // as a disk file.
 func (s *filesServer) openChecked(name string, flag int, perm fs.FileMode, dir bool) (*os.File, error) {
-	f, err := s.root.OpenFile(name, flag|openNonblock, perm)
+	f, err := s.fs.OpenFile(name, flag|openNonblock, perm)
 	if err != nil {
 		return nil, err
 	}
@@ -163,10 +165,11 @@ func (s *filesServer) openChecked(name string, flag int, perm fs.FileMode, dir b
 	return f, nil
 }
 
-// StatVFS answers statvfs@openssh.com (`df` in sftp) for the root's file
-// system.
-func (s *filesServer) StatVFS(*sftp.Request) (*sftp.StatVFS, error) {
-	return statVFS(s.root.Name())
+// StatVFS answers statvfs@openssh.com (`df` in sftp) for the file system
+// holding the request's path: files_root's, or without one the path's own
+// (on Windows the volume its data is on; the virtual top has none).
+func (s *filesServer) StatVFS(r *sftp.Request) (*sftp.StatVFS, error) {
+	return s.fs.StatVFS(r.Filepath)
 }
 
 // denied writes ev's event with a permission refusal and returns it as the
@@ -183,7 +186,7 @@ func (s *filesServer) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 	if !s.access.Download {
 		return nil, s.denied(launcher.FileEvent{Op: launcher.OpRead, Path: r.Filepath})
 	}
-	f, err := s.openRegular(rel(r.Filepath), os.O_RDONLY, 0)
+	f, err := s.openRegular(r.Filepath, os.O_RDONLY, 0)
 	if err != nil {
 		s.emit(launcher.FileEvent{Op: launcher.OpRead, Path: r.Filepath, Result: result(err)})
 		return nil, err
@@ -209,9 +212,8 @@ func writeFlags(r *sftp.Request, base int) int {
 	return flag
 }
 
-// createPerm is the mode a new file or directory gets: the client's
-// permissions when it sent them, else 0666 or 0777; the process umask
-// applies.
+// createPerm is a new entry's mode: the client's permissions if sent, else
+// 0666 or 0777, less the process umask.
 func createPerm(r *sftp.Request, def fs.FileMode) fs.FileMode {
 	if r.AttrFlags().Permissions {
 		return r.Attributes().FileMode().Perm()
@@ -234,7 +236,7 @@ func (s *filesServer) openWrite(r *sftp.Request, base int) (*countedFile, error)
 	if !s.access.Upload || base == os.O_RDWR && !s.access.Download {
 		return nil, s.denied(launcher.FileEvent{Op: launcher.OpWrite, Path: r.Filepath})
 	}
-	f, err := s.openRegular(rel(r.Filepath), writeFlags(r, base), createPerm(r, 0o666))
+	f, err := s.openRegular(r.Filepath, writeFlags(r, base), createPerm(r, 0o666))
 	if err != nil {
 		s.emit(launcher.FileEvent{Op: launcher.OpWrite, Path: r.Filepath, Result: result(err)})
 		return nil, err
@@ -276,8 +278,7 @@ func (c *countedFile) Close() error {
 }
 
 // Filecmd applies setstat, rename, rmdir, remove, mkdir, symlink and link,
-// and writes each one's event. Each one changes the file system, so each
-// needs Upload.
+// each needing Upload and writing its event.
 func (s *filesServer) Filecmd(r *sftp.Request) error {
 	ev := launcher.FileEvent{Path: r.Filepath}
 	var apply func() error
@@ -287,16 +288,16 @@ func (s *filesServer) Filecmd(r *sftp.Request) error {
 		apply = func() error { return s.setstat(r) }
 	case "Rename":
 		ev.Op, ev.Target = launcher.OpRename, r.Target
-		apply = func() error { return s.rename(rel(r.Filepath), rel(r.Target)) }
+		apply = func() error { return s.rename(r.Filepath, r.Target) }
 	case "Rmdir":
 		ev.Op = launcher.OpRmdir
-		apply = func() error { return s.removeKind(rel(r.Filepath), true) }
+		apply = func() error { return s.removeKind(r.Filepath, true) }
 	case "Remove":
 		ev.Op = launcher.OpRemove
-		apply = func() error { return s.removeKind(rel(r.Filepath), false) }
+		apply = func() error { return s.removeKind(r.Filepath, false) }
 	case "Mkdir":
 		ev.Op = launcher.OpMkdir
-		apply = func() error { return s.root.Mkdir(rel(r.Filepath), createPerm(r, 0o777)) }
+		apply = func() error { return s.fs.Mkdir(r.Filepath, createPerm(r, 0o777)) }
 	case "Symlink":
 		// Filepath is the link's target text, as the client sent it, Target
 		// the link's path. An empty target creates nothing and has no event.
@@ -304,10 +305,10 @@ func (s *filesServer) Filecmd(r *sftp.Request) error {
 			return sftp.ErrSSHFxBadMessage
 		}
 		ev.Op, ev.Path, ev.Target = launcher.OpSymlink, r.Target, r.Filepath
-		apply = func() error { return s.root.Symlink(r.Filepath, rel(r.Target)) }
+		apply = func() error { return s.fs.Symlink(r.Filepath, r.Target) }
 	case "Link":
 		ev.Op, ev.Target = launcher.OpLink, r.Target
-		apply = func() error { return s.root.Link(rel(r.Filepath), rel(r.Target)) }
+		apply = func() error { return s.fs.Link(r.Filepath, r.Target) }
 	default:
 		return sftp.ErrSSHFxOpUnsupported
 	}
@@ -325,57 +326,45 @@ func (s *filesServer) PosixRename(r *sftp.Request) error {
 	if !s.access.Upload {
 		return s.denied(launcher.FileEvent{Op: launcher.OpRename, Path: r.Filepath, Target: r.Target})
 	}
-	err := s.root.Rename(rel(r.Filepath), rel(r.Target))
+	err := s.fs.Rename(r.Filepath, r.Target)
 	s.emit(launcher.FileEvent{Op: launcher.OpRename, Path: r.Filepath, Target: r.Target, Result: result(err)})
 	return err
 }
 
-// rename is SFTP v3 rename, which never replaces the target: a hard link and
-// an unlink for a regular file, as OpenSSH does, else a rename that refuses an
-// existing target.
+// rename is SFTP v3 rename, which never replaces the target: link then unlink
+// for a regular file, as OpenSSH does, else a rename refusing an existing target.
 func (s *filesServer) rename(from, to string) error {
-	fi, err := s.root.Lstat(from)
+	fi, err := s.fs.Lstat(from)
 	if err != nil {
 		return err
 	}
 	if fi.Mode().IsRegular() {
-		if err := s.root.Link(from, to); err == nil {
-			return s.root.Remove(from)
+		if err := s.fs.Link(from, to); err == nil {
+			return s.fs.Remove(from)
 		} else if errors.Is(err, fs.ErrExist) {
 			return err
 		}
 	}
-	return renameNoReplace(s.root, from, to)
-}
-
-// checkThenRename renames after checking that the target does not exist; a
-// racing create can be replaced.
-func checkThenRename(root *os.Root, from, to string) error {
-	if _, err := root.Lstat(to); err == nil {
-		return &fs.PathError{Op: "rename", Path: to, Err: fs.ErrExist}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return root.Rename(from, to)
+	return s.fs.RenameNoReplace(from, to)
 }
 
 // removeKind removes a directory (dir) or anything else, refusing the other
 // kind as the SFTP operations require.
 func (s *filesServer) removeKind(name string, dir bool) error {
-	fi, err := s.root.Lstat(name)
+	fi, err := s.fs.Lstat(name)
 	if err != nil {
 		return err
 	}
 	if fi.IsDir() != dir {
 		return &fs.PathError{Op: "remove", Path: name, Err: syscall.EINVAL}
 	}
-	return s.root.Remove(name)
+	return s.fs.Remove(name)
 }
 
 // setstat applies the attributes the request carries: size, permissions,
 // owner and times.
 func (s *filesServer) setstat(r *sftp.Request) error {
-	name, flags, a := rel(r.Filepath), r.AttrFlags(), r.Attributes()
+	name, flags, a := r.Filepath, r.AttrFlags(), r.Attributes()
 	if flags.Size {
 		f, err := s.openRegular(name, os.O_WRONLY, 0)
 		if err != nil {
@@ -390,27 +379,26 @@ func (s *filesServer) setstat(r *sftp.Request) error {
 		}
 	}
 	if flags.Permissions {
-		if err := s.root.Chmod(name, a.FileMode().Perm()); err != nil {
+		if err := s.fs.Chmod(name, a.FileMode().Perm()); err != nil {
 			return err
 		}
 	}
 	if flags.UidGid {
-		if err := s.root.Chown(name, int(a.UID), int(a.GID)); err != nil {
+		if err := s.fs.Chown(name, int(a.UID), int(a.GID)); err != nil {
 			return err
 		}
 	}
 	if flags.Acmodtime {
-		if err := s.root.Chtimes(name, a.AccessTime(), a.ModTime()); err != nil {
+		if err := s.fs.Chtimes(name, a.AccessTime(), a.ModTime()); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// Filelist answers List (a directory's entries, one event), Stat and
-// Readlink.
+// Filelist answers List (a directory's entries, one event), Stat and Readlink.
 func (s *filesServer) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
-	name := rel(r.Filepath)
+	name := r.Filepath
 	switch r.Method {
 	case "List":
 		entries, err := s.readDir(name)
@@ -420,13 +408,13 @@ func (s *filesServer) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 		}
 		return listerAt(entries), nil
 	case "Stat":
-		fi, err := s.root.Stat(name)
+		fi, err := s.fs.Stat(name)
 		if err != nil {
 			return nil, err
 		}
 		return listerAt{fi}, nil
 	case "Readlink":
-		target, err := s.root.Readlink(name)
+		target, err := s.fs.Readlink(name)
 		if err != nil {
 			return nil, err
 		}
@@ -437,20 +425,28 @@ func (s *filesServer) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 
 // Lstat stats a name without following a final symlink.
 func (s *filesServer) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
-	fi, err := s.root.Lstat(rel(r.Filepath))
+	fi, err := s.fs.Lstat(r.Filepath)
 	if err != nil {
 		return nil, err
 	}
 	return listerAt{fi}, nil
 }
 
-// RealPath resolves a client path in the virtual namespace ("/" is the
-// root); the request server then confines every operation to it.
+// RealPath cleans a client path, a relative one against the start
+// directory, as the request server resolves request paths; "." is the start
+// directory. It does not resolve symlinks.
 func (s *filesServer) RealPath(p string) (string, error) {
-	return path.Clean("/" + p), nil
+	p = filepath.ToSlash(filepath.Clean(p))
+	if !path.IsAbs(p) {
+		p = path.Join(s.start, p)
+	}
+	return osClientName(p), nil
 }
 
 func (s *filesServer) readDir(name string) ([]fs.FileInfo, error) {
+	if entries, ok, err := s.fs.virtualDir(name); ok {
+		return entries, err
+	}
 	d, err := s.openChecked(name, os.O_RDONLY, 0, true)
 	if err != nil {
 		return nil, err

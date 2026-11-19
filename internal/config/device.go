@@ -40,12 +40,15 @@ var ErrLoginsWithoutSession = errcode.New(errcode.LoginsWithoutSession)
 // login to run them as.
 var ErrSessionWithoutLogins = errcode.New(errcode.SessionWithoutLogins)
 
-// ErrRunAsAgentLogins refuses logins on a device whose sessions run as the
-// agent account.
+// ErrRunAsAgentLogins refuses logins on a run_as_agent device.
 var ErrRunAsAgentLogins = errcode.New(errcode.RunAsAgentLogins)
 
-// ErrDesktopWithoutTarget refuses desktop on a device with no rdp or vnc
-// target.
+// ErrRunAsAgentFiles refuses files without a files_root on a device whose
+// sessions run as the agent account, which would expose every file that
+// account can read.
+var ErrRunAsAgentFiles = errcode.New(errcode.RunAsAgentFiles)
+
+// ErrDesktopWithoutTarget refuses desktop on a device without an rdp or vnc target.
 var ErrDesktopWithoutTarget = errcode.New(errcode.DesktopWithoutTarget)
 
 // ErrFilesRootMissing means a files_root names no existing directory, as
@@ -109,12 +112,13 @@ type LocalDevice struct {
 	AllowPorts ports.Ceiling
 	Enable     []Capability
 	Logins     []string
-	// PasswordLogins are the Logins (Windows only) whose sessions log on
-	// with the login's password, asked by SSH keyboard-interactive after the
-	// certificate, instead of S4U: Entra ID accounts and sessions that need
-	// network credentials.
+	// PasswordLogins (Windows) log on with the login's password, asked by SSH
+	// keyboard-interactive after the certificate, instead of S4U: Entra ID
+	// accounts and sessions that need network credentials.
 	PasswordLogins []string
-	// FilesRoot is the top of the browsable tree. Empty means the login's home.
+	// FilesRoot confines files sessions to this directory, shown to them as
+	// "/". Empty serves the whole file system as the login, with relative
+	// paths starting at the login's home.
 	FilesRoot string
 	// RDP and VNC are desktop targets as HOST:PORT. Empty means none.
 	RDP string
@@ -136,11 +140,10 @@ type LocalConfigFile struct {
 	// for the system-wide directory.
 	Base       string
 	FollowBase bool
-	// System marks the machine-wide device directory: it is checked and
-	// written with the security system file functions (on Unix a
-	// root:security.AgentGroup 0750 directory and 0640 agent.yaml; on Windows owned by Administrators,
-	// read-only to the device service) and never walked by the private
-	// directory walk.
+	// System marks the machine-wide device directory, checked and written as a
+	// system file (Unix: root:security.AgentGroup 0750 directory, 0640 agent.yaml;
+	// Windows: owned by Administrators, read-only to the device service) and
+	// never walked as a private directory.
 	System bool
 }
 
@@ -309,11 +312,10 @@ func decodeLocal(raw []byte, goos string) (*LocalConfig, error) {
 	return cfg, nil
 }
 
-// WriteLocal validates cfg, checks that the files_root of the entry changed
-// names an existing directory, and replaces the local config atomically,
-// creating its directory owner-only when missing. Other entries' files_root
-// is not checked, so an unmounted volume on another device never fails a
-// write.
+// WriteLocal validates cfg, checks that the changed entry's files_root is an
+// existing directory and replaces the local config atomically, creating its
+// directory owner-only. Other entries' files_root is not checked: an unmounted
+// volume on another device never fails a write.
 func WriteLocal(f LocalConfigFile, cfg *LocalConfig, changed identity.Ref) error {
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -519,6 +521,9 @@ func (d LocalDevice) validateSettings(name, goos string) error {
 	}
 	if d.RunAsAgent && len(d.Logins) > 0 {
 		return ErrRunAsAgentLogins.With(nil, device)
+	}
+	if d.RunAsAgent && slices.Contains(d.Enable, CapabilityFiles) && d.FilesRoot == "" {
+		return ErrRunAsAgentFiles.With(nil, device)
 	}
 	if len(d.Logins) == 0 && d.UsesLogins() && !d.RunAsAgent {
 		return ErrSessionWithoutLogins.With(nil, device)
@@ -794,13 +799,12 @@ func waitLock(ctx context.Context, lock *os.File, wait time.Duration) (held bool
 	}
 }
 
-// openLock opens the lock file path beside the config: run.lock everywhere,
-// and the config lock file on Windows (openConfigLock). For the system
-// config, root (an elevated Administrator on Windows) creates or secures the
-// directory and the file (run.lock root:security.AgentGroup 0660, the config
-// lock 0600; on Windows the matching DACLs, opened without delete sharing);
-// any other account only checks the directory and opens the existing
-// run.lock.
+// openLock opens the lock file path beside the config: run.lock, plus the
+// config lock on Windows (openConfigLock). For the system config, root (an
+// elevated Administrator on Windows) creates or secures the directory and the
+// file (run.lock root:security.AgentGroup 0660, config lock 0600; matching
+// DACLs on Windows, opened without delete sharing); other accounts only check
+// the directory and open the existing run.lock.
 func openLock(f LocalConfigFile, path string) (*os.File, error) {
 	if !f.System {
 		if err := security.EnsurePrivateDir(f.Base, filepath.Dir(f.Path), f.FollowBase); err != nil {

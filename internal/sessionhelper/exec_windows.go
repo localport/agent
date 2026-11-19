@@ -39,19 +39,24 @@ func commandLine(shell, command string) string {
 	return `"` + shell + `" /c "` + command + `"`
 }
 
-// filesServerCommand is the file server this binary runs as the login:
-// `"<exe>" files-server <access> "<root>"`, root the device's files_root or
-// the login's profile directory; startPiped appends the event pipe's handle.
+// filesServerCommand is the file server command run as the login:
+// `"<exe>" files-server <access> "<root>" "<home>"`. root is files_root or
+// empty; home is empty with a root, else the profile directory, which must be
+// a directory. startPiped appends the event pipe's handle.
 func filesServerCommand(token windows.Token, root string, access FilesAccess) (app, cmdLine string, err error) {
 	if app, err = os.Executable(); err != nil {
 		return "", "", err
 	}
+	home := ""
 	if root == "" {
-		if root, err = token.GetUserProfileDirectory(); err != nil {
+		if home, err = token.GetUserProfileDirectory(); err != nil {
 			return "", "", fmt.Errorf("profile directory: %w", err)
 		}
 	}
-	return app, syscall.EscapeArg(app) + " " + FilesServerMode + " " + access.Arg() + " " + syscall.EscapeArg(root), nil
+	if home, err = filesHome(root, home); err != nil {
+		return "", "", fmt.Errorf("profile directory: %w", err)
+	}
+	return app, syscall.EscapeArg(app) + " " + FilesServerMode + " " + access.Arg() + " " + syscall.EscapeArg(root) + " " + syscall.EscapeArg(home), nil
 }
 
 // environment is the login's environment block (CreateEnvironmentBlock) with

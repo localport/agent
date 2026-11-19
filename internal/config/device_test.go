@@ -277,6 +277,7 @@ func TestLocalConfigValidation(t *testing.T) {
 		{"rdp port zero", device("    enable: [desktop]\n    rdp: 127.0.0.1:0\n"), "linux", `rdp: "127.0.0.1:0" has no port between 1 and 65535`},
 		{"vnc without host", device("    enable: [desktop]\n    vnc: :5900\n"), "linux", `vnc: ":5900" is not HOST:PORT`},
 		{"terminal without logins", device("    enable: [terminal]\n"), "linux", "terminal and files need at least one login"},
+		{"files as the agent account without files_root", device("    enable: [files]\n    run_as_agent: true\n"), "linux", "needs a files root: set one with --files-root DIR"},
 		{"files_root relative", device("    files_root: home/pi\n"), "linux", `files_root: "home/pi" is not an absolute path`},
 		{"second document", device("") + "---\nversion: 2\ndevices: []\n", "linux", "more than one YAML document"},
 		{"second document unparsable", device("") + "---\n: [\n", "linux", "more than one YAML document"},
@@ -302,6 +303,8 @@ func TestLocalConfigValidation(t *testing.T) {
 		{"files on windows", device("    enable: [terminal, files]\n    logins: [admin]\n"), "windows"},
 		{"password logins on windows", device("    enable: [terminal]\n    logins: [admin, bob@corp.example]\n    password_logins: [bob@corp.example]\n"), "windows"},
 		{"bare device", device(""), "linux"},
+		{"files as the agent account in a files_root", device("    enable: [files]\n    run_as_agent: true\n    files_root: " + dir + "\n"), "linux"},
+		{"terminal as the agent account", device("    enable: [terminal]\n    run_as_agent: true\n"), "linux"},
 		// An unmounted volume must not stop the devices from loading.
 		{"files_root missing", device("    files_root: " + filepath.Join(dir, "missing") + "\n"), "linux"},
 		{"files_root a file", device("    files_root: " + file + "\n"), "linux"},

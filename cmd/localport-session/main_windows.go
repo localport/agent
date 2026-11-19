@@ -1,13 +1,11 @@
-// Command localport-session is the session launcher service and its
-// per-session helper on Windows.
+// Command localport-session is the Windows launcher service and its per-session helper.
 //
 //	localport-session launcher                          the LocalSystem service localport-session
 //	localport-session helper                            one session; started only by the launcher
-//	localport-session files-server <root> <handle>      one file session as the login; started only by a helper
+//	localport-session files-server <access> <root> <home> <handle>  one file session as the login; started only by a helper
 //	localport-session forward-server                    one connection's port forwards as the login; started only by a helper
 //
-// See internal/launcher for the protocol and internal/sessionhelper for the
-// session setup.
+// Protocol: internal/launcher. Session setup: internal/sessionhelper.
 package main
 
 import (
@@ -36,16 +34,16 @@ func main() {
 	logger := log.New(os.Stderr, "", 0)
 	// The file server runs as the login: the helper passes the event pipe's
 	// inherited handle as the last argument.
-	if len(os.Args) == 5 && os.Args[1] == sessionhelper.FilesServerMode {
+	if len(os.Args) == 6 && os.Args[1] == sessionhelper.FilesServerMode {
 		access, ok := sessionhelper.ParseFilesAccess(os.Args[2])
 		if !ok {
 			os.Exit(2)
 		}
-		h, err := strconv.ParseUint(os.Args[4], 10, 64)
+		h, err := strconv.ParseUint(os.Args[5], 10, 64)
 		if err != nil {
 			os.Exit(2)
 		}
-		if err := sessionhelper.ServeFiles(stdio{}, os.Args[3], access, os.NewFile(uintptr(h), "file-events")); err != nil {
+		if err := sessionhelper.ServeFiles(stdio{}, os.Args[3], os.Args[4], access, os.NewFile(uintptr(h), "file-events")); err != nil {
 			logger.Printf("localport-session: files: %v", err)
 			os.Exit(1)
 		}

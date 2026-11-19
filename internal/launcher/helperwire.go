@@ -26,9 +26,8 @@ func readWithin(conn interface{ SetDeadline(time.Time) error }, timeout time.Dur
 const (
 	// requestTimeout bounds reading the one request after accept.
 	requestTimeout = 5 * time.Second
-	// helperStartTimeout bounds a helper's account lookup, logon and session
-	// setup and process start; the launcher kills a helper still starting after
-	// it.
+	// helperStartTimeout bounds a helper's account lookup, logon, session setup
+	// and process start; the launcher then kills it.
 	helperStartTimeout = 30 * time.Second
 	// profileStartTimeout replaces helperStartTimeout once a Windows helper
 	// reports it is loading the login's profile, which can take minutes on
@@ -57,7 +56,8 @@ type HelperRequest struct {
 	// Env is the client's LANG and LC_* variables (Request.Env).
 	Env map[string]string `json:"env,omitempty"`
 	// Root is the directory an sftp session is confined to, the device's
-	// files_root; empty confines it to the login's home.
+	// files_root; empty serves the whole file system as the login, with
+	// relative paths starting at the login's home.
 	Root string `json:"root,omitempty"`
 	// FilesDownload and FilesUpload are an sftp session's access
 	// (Request.FilesDownload, Request.FilesUpload).
@@ -139,8 +139,7 @@ func authorize(load func() (*config.LocalConfig, error), agentAccount string, re
 	return h, nil
 }
 
-// WriteHelperRequest writes the launcher's request on a helper's control
-// channel.
+// WriteHelperRequest writes the launcher's request to a helper's control channel.
 func WriteHelperRequest(control io.Writer, req HelperRequest) error {
 	req.HasPassword = len(req.Password) > 0
 	if err := writeMessage(control, req); err != nil {
@@ -156,8 +155,7 @@ func WriteHelperRequest(control io.Writer, req HelperRequest) error {
 // about to load the login's profile.
 const ProgressProfile = "profile"
 
-// HelperProgress is a message a Windows helper may send once before its
-// reply.
+// HelperProgress is the one optional message a Windows helper sends before its reply.
 type HelperProgress struct {
 	Stage string `json:"progress"`
 }
@@ -235,8 +233,7 @@ func (w *startWatch) stop() bool {
 	return !w.timer.Stop() || w.timedOut.Load()
 }
 
-// ReadHelperRequest reads the launcher's request on the helper's control
-// channel.
+// ReadHelperRequest reads the launcher's request from the helper's control channel.
 func ReadHelperRequest(control io.Reader) (HelperRequest, error) {
 	body, err := readBody(control)
 	if err != nil {

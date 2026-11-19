@@ -23,9 +23,8 @@ func statVFS(dir string) (*sftp.StatVFS, error) {
 }
 
 // renameNoReplace renames from to to inside root, atomically refusing an
-// existing target. The parents are opened through root, so the rename stays
-// confined; a file system without RENAME_NOREPLACE takes the check-then-rename
-// path.
+// existing target. Parents open through root, keeping the rename confined;
+// without RENAME_NOREPLACE it falls back to check-then-rename.
 func renameNoReplace(root *os.Root, from, to string) error {
 	// O_DIRECTORY and O_NONBLOCK: a FIFO named as a parent answers at once.
 	const parentFlags = os.O_RDONLY | unix.O_DIRECTORY | unix.O_NONBLOCK
@@ -40,9 +39,21 @@ func renameNoReplace(root *os.Root, from, to string) error {
 	}
 	defer toDir.Close()
 	err = unix.Renameat2(int(fromDir.Fd()), path.Base(from), int(toDir.Fd()), path.Base(to), unix.RENAME_NOREPLACE)
+	return renameat2Result(err, root, from, to)
+}
+
+// osRenameNoReplace renames OS path from to to, atomically refusing an existing target.
+func osRenameNoReplace(from, to string) error {
+	err := unix.Renameat2(unix.AT_FDCWD, from, unix.AT_FDCWD, to, unix.RENAME_NOREPLACE)
+	return renameat2Result(err, osRenamer{}, from, to)
+}
+
+// renameat2Result maps a RENAME_NOREPLACE result; a file system without the
+// flag takes the check-then-rename path through r.
+func renameat2Result(err error, r renamer, from, to string) error {
 	switch {
 	case errors.Is(err, unix.ENOSYS), errors.Is(err, unix.EINVAL):
-		return checkThenRename(root, from, to)
+		return checkThenRename(r, from, to)
 	case errors.Is(err, unix.EEXIST):
 		return &fs.PathError{Op: "rename", Path: to, Err: fs.ErrExist}
 	case err != nil:

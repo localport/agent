@@ -142,23 +142,24 @@ func Run(log func(string, ...any)) int {
 		args: shellArgs(shell, req),
 		env:  sessionEnv(a, shell, req.Term, loginDefsPath(a.UID), req.ClientAddr, pamEnv, req.Env),
 		dir:  workDir(a.Home),
-		// With PAM the groups are already this process's: initgroups, then
-		// pam_setcred.
+		// With PAM, initgroups then pam_setcred already set this process's groups.
 		cred: &syscall.Credential{Uid: a.UID, Gid: a.GID, Groups: a.Groups, NoSetGroups: pam != nil && pamAvailable},
 	}
 	if req.Kind == launcher.KindSFTP {
-		// The file server is this binary run as the login, as sshd runs
-		// sftp-server: confined to files_root or the login's home.
+		// The file server is this binary run as the login, as sshd runs sftp-server:
+		// confined to files_root, else the whole file system with relative paths
+		// starting at the login's home, which must be a directory.
 		if plan.path, err = os.Executable(); err != nil {
 			pam.close()
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
-		root := req.Root
-		if root == "" {
-			root = a.Home
+		var home string
+		if home, err = filesHome(req.Root, a.Home); err != nil {
+			pam.close()
+			return refuse(launcher.CodeSpawnFailed, err)
 		}
 		access := FilesAccess{Download: req.FilesDownload, Upload: req.FilesUpload}
-		plan.args, plan.events = []string{"localport-session", FilesServerMode, access.Arg(), root}, true
+		plan.args, plan.events = []string{"localport-session", FilesServerMode, access.Arg(), req.Root, home}, true
 	}
 	if req.Kind == launcher.KindForward {
 		// The forward server takes the channel itself: it passes connected
@@ -274,8 +275,7 @@ func startForwardServer(channel *os.File, plan spawnPlan, login string, log func
 }
 
 const (
-	// maxChildLogLine bounds one relayed line; the rest of a longer line is
-	// dropped.
+	// maxChildLogLine bounds one relayed line; the rest of a longer line is dropped.
 	maxChildLogLine = 1 << 10
 	// maxChildLogBytes bounds what one child may write to the helper's log.
 	maxChildLogBytes = 64 << 10
@@ -379,9 +379,8 @@ func checkShadow(password string, expireDay int64, now time.Time) error {
 	return nil
 }
 
-// nologinPath is the file whose presence stops the logins of every account
-// but root; on a PAM build pam_nologin applies it to every login but the
-// agent account's.
+// nologinPath stops logins of every account but root; with PAM, pam_nologin
+// applies it to every login but the agent account's.
 const nologinPath = "/etc/nologin"
 
 // maxNologinText bounds the nologin text passed to the client.
@@ -448,9 +447,8 @@ func workDir(home string) string {
 // defaultPath is PATH when /etc/login.defs sets none.
 const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-// loginDefsPath is the PATH /etc/login.defs gives uid: ENV_SUPATH for root,
-// ENV_PATH otherwise, each "PATH=..." or a bare value; defaultPath when it
-// sets none.
+// loginDefsPath is the PATH /etc/login.defs gives uid (ENV_SUPATH for root,
+// ENV_PATH otherwise, as "PATH=..." or a bare value), or defaultPath.
 func loginDefsPath(uid uint32) string {
 	raw, err := os.ReadFile("/etc/login.defs")
 	if err != nil {
@@ -476,12 +474,11 @@ func parseLoginDefsPath(defs string, uid uint32) string {
 	return defaultPath
 }
 
-// sessionEnv is the shell's environment: the login's identity, TERM and
-// PATH, the client's origin (originEnv), then every variable PAM set, which
-// overrides those of the same name, then the client's LANG and LC_*
-// variables (launcher.ValidEnv, checked by Request.Validate), which override
-// a PAM locale. Nothing comes from the launcher's or the agent's
-// environment.
+// sessionEnv is the shell's environment: the login's identity, TERM, PATH and
+// the client's origin (originEnv), then PAM's variables, which override those,
+// then the client's LANG and LC_* (launcher.ValidEnv, checked by
+// Request.Validate), which override a PAM locale. Nothing comes from the
+// launcher's or agent's environment.
 func sessionEnv(a account, shell, term, path, clientAddr string, pamEnv []string, clientEnv map[string]string) []string {
 	env := map[string]string{
 		"HOME": a.Home, "USER": a.Name, "LOGNAME": a.Name, "SHELL": shell,
