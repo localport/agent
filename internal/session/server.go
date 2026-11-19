@@ -70,8 +70,7 @@ const (
 
 // Handshake and end bounds, variables so tests shorten them.
 var (
-	// handshakeTimeout bounds the SSH key exchange and userauth from the
-	// stream's start.
+	// handshakeTimeout bounds key exchange and userauth from the stream's start.
 	handshakeTimeout = 10 * time.Second
 	// interactiveAuthTimeout bounds one keyboard-interactive prompt, which a
 	// person answers, as the trust dialog does; the rest of the handshake
@@ -107,8 +106,7 @@ const (
 )
 
 // ServerConfig is one device's session server configuration. Capabilities,
-// Logins and Desktop are the device's local config; nothing from the network
-// widens them.
+// Logins and Desktop come only from the device's local config.
 type ServerConfig struct {
 	// Prefix is the device prefix certificates must name.
 	Prefix string
@@ -215,8 +213,7 @@ type Server struct {
 	// most maxHandshakes; capLogged is when a stream over it was last logged.
 	handshakes int
 	capLogged  time.Time
-	// forwards counts the forward channels of every connection, at most
-	// maxDeviceForwards.
+	// forwards counts every connection's forward channels, at most maxDeviceForwards.
 	forwards int
 	handlers map[*handler]struct{}
 	// conns holds every live resumable connection by its resume handle.
@@ -301,9 +298,8 @@ var (
 	errHandshakeTimeout = errors.New("session: SSH handshake timed out")
 )
 
-// afterAttemptClaimCleared, when set by a test, runs in endAttempt inside the
-// critical section, after the claim is cleared and before the hold is
-// released.
+// afterAttemptClaimCleared is a test hook run in endAttempt's critical section,
+// after the claim is cleared and before the hold is released.
 var afterAttemptClaimCleared atomic.Pointer[func()]
 
 // afterResumeInstall, when set by a test, runs in serveResume once the
@@ -327,8 +323,7 @@ var beforeConnUnregister atomic.Pointer[func(*Server)]
 const detachTimeout = 5 * time.Minute
 
 // closeFlushTimeout bounds how long an ended connection's last bytes and
-// closeTag may take to leave on its attached stream; a variable so tests
-// shorten it.
+// closeTag may take on its attached stream; a variable for tests.
 var closeFlushTimeout = 5 * time.Second
 
 // NewServer returns the session server of one device.
@@ -361,15 +356,13 @@ func (s *Server) log(format string, args ...any) {
 }
 
 // Serve runs one session stream to its end: a first connect starts an SSH
-// connection on a ResumableConn, a resume attaches the stream to a detached
-// one. id is the session id the edge assigned to the stream (a first
-// connect's recordings name it) and serial the certificate serial the
-// edge admitted. clientAddr is the client's `ip:port` from the edge's notice,
-// empty when unknown. Serve returns when the stream ends; the connection
-// outlives it while it waits detached for a resume. The caller closes stream
-// after Serve returns. With maxHandshakes streams before their handshake
-// decision, Serve returns at once without reading the stream and reports
-// refusedUnread.
+// connection on a ResumableConn; a resume attaches the stream to a detached
+// one. id is the edge's session id for the stream (a first connect's
+// recordings use it), serial the certificate serial the edge admitted,
+// clientAddr the client's `ip:port` from the notice (empty when unknown). The
+// connection outlives the stream while it waits detached for a resume; the
+// caller closes stream after Serve returns. With maxHandshakes streams awaiting
+// their handshake decision, Serve returns at once unread: refusedUnread.
 func (s *Server) Serve(stream net.Conn, id [16]byte, serial uint64, clientAddr string) (refusedUnread bool) {
 	h := &handler{stop: make(chan struct{}), handshaking: true, abort: func() { _ = stream.SetDeadline(time.Now()) }}
 	if ok, logIt := s.register(h); !ok {
@@ -788,9 +781,8 @@ func (s *Server) addConn(e *resumable, h *handler) bool {
 }
 
 // beginResume claims handle's connection for one resume and holds it
-// (release): statusLost when it is gone, statusBusy while another resume
-// holds the claim, statusRefused during Shutdown. A claim ends h's
-// handshake count.
+// (release): statusLost when gone, statusBusy while another resume holds the
+// claim, statusRefused during Shutdown. A claim ends h's handshake count.
 func (s *Server) beginResume(h *handler, handle string) (*resumable, uint32) {
 	s.mu.Lock()
 	e := s.conns[handle]
@@ -1038,9 +1030,8 @@ func (s *Server) withCARefresh(cert *ssh.Certificate, verify func() (*admission,
 	return adm, err
 }
 
-// keyRefreshContext bounds one key refresh by keyRefreshTimeout and ends it
-// when a Shutdown starts, so a refresh in flight never outlasts Shutdown's
-// budget.
+// keyRefreshContext bounds a key refresh by keyRefreshTimeout and ends it when
+// Shutdown starts, so no refresh outlasts Shutdown's budget.
 func (s *Server) keyRefreshContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), keyRefreshTimeout)
 	s.mu.Lock()
@@ -1291,13 +1282,11 @@ func (s *Server) shutdown(ctx context.Context, reason string) error {
 	}
 }
 
-// conn is the state of one admitted connection that run shares with its
-// channel goroutines.
+// conn is one admitted connection's state, shared by run and its channel goroutines.
 type conn struct {
 	s *Server
-	// adm is the admission the connection runs under: the first connect's,
-	// replaced by each installed resume's (readmit). A reader loads it once
-	// per decision.
+	// adm is the connection's admission: the first connect's, replaced by each
+	// installed resume's (readmit). Load it once per decision.
 	adm atomic.Pointer[connAdmission]
 	// readmitted receives, without blocking, after readmit stored a new
 	// admission, so run re-arms the idle timer for that admission's timeout.
@@ -1426,15 +1415,12 @@ func (s *Server) run(h *handler, sc *ssh.ServerConn, chans <-chan ssh.NewChannel
 		c.accept(chans, &wg)
 	})
 	wg.Go(func() {
-		// Global requests, answered in order: keepalives count as activity,
-		// except on a desktop connection, where only client channel data does;
-		// the remote forwarding requests are served when allowed, every
-		// other request is refused.
-		desktop := isDesktopKind(c.adm.Load().Kind)
+		// Global requests, answered in order: each counts as activity on every
+		// kind (the browser's Stay connected is a keepalive@openssh.com); the
+		// remote forwarding requests are served when allowed, every other
+		// request is refused.
 		for r := range reqs {
-			if !desktop {
-				c.active()
-			}
+			c.active()
 			ok, payload := c.fwd.globalRequest(r)
 			if r.WantReply {
 				_ = r.Reply(ok, payload)

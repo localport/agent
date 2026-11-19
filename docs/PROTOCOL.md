@@ -1051,9 +1051,9 @@ stream:
    The agent then relays the channel and the target until either ends; the
    channel's end, or its refusal after the dial, ends the connection, and
    every end of the connection closes the target connection. The agent
-   answers every other request on the channel false. Only data from the
-   client on the channel counts as activity for the idle timer; target
-   output and global requests do not. A recorded
+   answers every other request on the channel false. Data from the client
+   on the channel and global requests (the browser's `keepalive@openssh.com`)
+   count as activity for the idle timer; target output does not. A recorded
    connection writes an asciicast event `p` at each listen, cancel, forward
    open and forward close (direction, kind, address, result, bytes in and
    out), never the forwarded bytes; under Strict a `p` event the recorder
@@ -1061,9 +1061,8 @@ stream:
 4. End: the agent closes the connection, after writing
    `localport: session ended: <reason>` to each open channel's stderr, for
    `idle` (the admitting certificate's `idle@localport.io` timeout without
-   client channel data or a request; on a desktop connection, without client
-   channel data; after a resume, the resume certificate's timeout applies at
-   once),
+   client channel data or a global request, on every kind; after a resume,
+   the resume certificate's timeout applies at once),
    `shutdown` (the control session is ending), `config_changed`
    (`localport set` changed the device's entry and the agent reloaded it; the
    device's other sessions end too), `exited` (the channel of a `terminal`

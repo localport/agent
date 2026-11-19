@@ -268,8 +268,7 @@ func (f *sshFixture) connectResumableAs(t *testing.T, o certOpts) *resumeConn {
 // streamID is the session id the fixture's notice gives the stream of serial.
 func streamID(serial uint64) [16]byte { return [16]byte{0x01, 0x9b, byte(serial)} }
 
-// serveStream serves one stream with the notice serial and returns its
-// client side.
+// serveStream serves one stream with the notice serial and returns its client side.
 func (f *sshFixture) serveStream(t *testing.T, serial uint64) net.Conn {
 	t.Helper()
 	srvSide, cliSide := tcpPair(t)
@@ -291,8 +290,7 @@ func (f *sshFixture) serveStream(t *testing.T, serial uint64) net.Conn {
 	return cliSide
 }
 
-// cut drops the stream as a network loss would and waits for the client to
-// see it.
+// cut drops the stream like a network loss and waits for the client to see it.
 func (rc *resumeConn) cut(t *testing.T) {
 	t.Helper()
 	_ = rc.stream.Close()
@@ -424,6 +422,8 @@ func TestResumeRefusals(t *testing.T) {
 		{"another key", func(o *certOpts) { o.key = otherKey }},
 		{"another notice serial", func(o *certOpts) { o.serial = 78 }},
 		{"expired", func(o *certOpts) { o.before = time.Now().Add(-time.Minute) }},
+		{"without the idle option", func(o *certOpts) { o.noIdle = true }},
+		{"an idle value of zero", func(o *certOpts) { o.idle = new("0") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Both logins are enabled, so only the resume check refuses ops.

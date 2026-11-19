@@ -218,8 +218,7 @@ func openVNC(client *ssh.Client) (ssh.Channel, <-chan *ssh.Request, error) {
 	return ch, reqs, nil
 }
 
-// finishClientHandshake is the client side of finishNoneHandshake up to its
-// key events.
+// finishClientHandshake is the client side of finishNoneHandshake up to its key events.
 func finishClientHandshake(ch ssh.Channel) error {
 	if _, err := io.ReadFull(ch, make([]byte, 4)); err != nil {
 		return err
@@ -294,8 +293,7 @@ func TestDesktopReachesTheTarget(t *testing.T) {
 	waitClosed(t, client)
 }
 
-// A desktop certificate needs the desktop login, no recording, and its kind
-// configured.
+// A desktop certificate needs the desktop login, no recording and a configured kind.
 func TestDesktopAdmission(t *testing.T) {
 	target := newVNCTarget(t)
 	rdp := func(o *certOpts) { o.kind = "rdp" }
@@ -383,8 +381,7 @@ func TestDesktopChannelRules(t *testing.T) {
 	desktopPing(t, ch)
 }
 
-// A refused target dial rejects the channel with its code and ends the
-// connection.
+// A refused target dial rejects the channel with its code and ends the connection.
 func TestDesktopDialRefusals(t *testing.T) {
 	closed, _ := net.Listen("tcp", "127.0.0.1:0")
 	addr := closed.Addr().String()
@@ -399,8 +396,7 @@ func TestDesktopDialRefusals(t *testing.T) {
 	waitClosed(t, client)
 }
 
-// A terminal connection rejects both desktop channel types as it rejects any
-// unknown type.
+// A terminal connection rejects both desktop channel types like any unknown type.
 func TestTerminalRejectsDesktopChannels(t *testing.T) {
 	f := newSSHFixture(t, nil)
 	client := f.connect(t, f.defaults())
@@ -444,9 +440,9 @@ func (c *idleClock) fireIdle() {
 	}
 }
 
-// On a desktop connection only client channel data is activity: target
-// output and global requests do not hold off the idle end, which the client
-// is told by end@localport.io.
+// On a desktop connection client channel data and global requests (the
+// browser's keepalive@openssh.com) are activity; target output does not hold
+// off the idle end, which the client is told by end@localport.io.
 func TestDesktopIdle(t *testing.T) {
 	t.Run("target output only", func(t *testing.T) {
 		clock := &idleClock{}
@@ -466,9 +462,6 @@ func TestDesktopIdle(t *testing.T) {
 			t.Fatal(err)
 		}
 		readFor(t, ch, string([]byte{rfbServerBell}))
-		if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-			t.Fatal(err)
-		}
 		clock.fireIdle()
 		if reason := waitEndRequest(t, reqs); reason != CloseIdle {
 			t.Fatalf("end reason %q, want %q", reason, CloseIdle)
@@ -496,6 +489,30 @@ func TestDesktopIdle(t *testing.T) {
 		select {
 		case r := <-reqs:
 			t.Fatalf("request %v on an active connection", r)
+		default:
+		}
+	})
+	t.Run("global request", func(t *testing.T) {
+		clock := &idleClock{}
+		target := newVNCTarget(t)
+		f := desktopFixture(t, target.ln.Addr().String(), func(c *ServerConfig) { c.clock = clock })
+		client := f.connect(t, f.vncOpts())
+		ch, reqs, err := openVNC(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		desktopPing(t, ch)
+		clock.advance(testIdleTimeout - time.Minute)
+		// want-reply true: the answer means the agent handled the request.
+		if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+			t.Fatal(err)
+		}
+		clock.advance(2 * time.Minute)
+		clock.fireIdle()
+		desktopPing(t, ch)
+		select {
+		case r := <-reqs:
+			t.Fatalf("request %v after a keepalive within the timeout", r)
 		default:
 		}
 	})
@@ -558,8 +575,7 @@ func TestDesktopEndDuringTheDial(t *testing.T) {
 	}
 	select {
 	case err := <-opened:
-		// The refusal races the connection's close, so only the failure is
-		// certain.
+		// The refusal races the connection's close; only the failure is certain.
 		if err == nil {
 			t.Fatal("the channel opened after the end")
 		}
@@ -858,8 +874,7 @@ func TestDesktopEndsWithItsChannel(t *testing.T) {
 	})
 }
 
-// A desktop connection resumes with its relay; a detach timeout closes the
-// target.
+// A desktop connection resumes with its relay; a detach timeout closes the target.
 func TestDesktopResume(t *testing.T) {
 	clock := &manualClock{}
 	target := newVNCTarget(t)
