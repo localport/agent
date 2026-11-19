@@ -248,7 +248,8 @@ const serviceUsage = `Usage: localport service install
   localport-device) for the devices already in the machine-wide local config,
   and starts it. It needs no join token, and is refused when the config lists
   no device, when someone other than root (Administrators) could replace the
-  localport binary, or while a manual localport run holds the devices.
+  localport binary, on macOS when Localport.app beside it is missing or not
+  signed by Localport, or while a manual localport run holds the devices.
 
   uninstall stops and removes the device service. A service definition
   localport did not write is refused. With no service installed it says so

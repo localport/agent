@@ -82,6 +82,7 @@ const (
 	UnsafeExecutable         Code = "AG011"
 	UntrustedPath            Code = "AG012"
 	PackageManagerExecutable Code = "AG013"
+	SessionAppInvalid        Code = "AG014"
 
 	RunAsAgentFiles      Code = "AG020"
 	RunLocked            Code = "AG021"
@@ -227,6 +228,7 @@ var registry = []Entry{
 	{UnsafeExecutable, "Unsafe service executable", "the localport executable cannot run as the device service"},
 	{UntrustedPath, "Untrusted path", "a credential or system file path is a link, has the wrong owner, or is too open"},
 	{PackageManagerExecutable, "Package manager executable", "a localport installed by a package manager cannot run as the device service"},
+	{SessionAppInvalid, "Session app invalid", "Localport.app beside the localport executable is missing or not signed by Localport"},
 
 	{RunAsAgentFiles, "Files with run_as_agent", "files on a device that runs sessions as the agent account needs a files root: set one with --files-root DIR"},
 	{RunLocked, "Devices already running", "localport is already running the devices of this config"},

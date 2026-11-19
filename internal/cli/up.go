@@ -295,12 +295,12 @@ var (
 // devices without a join token.
 var serviceInstallCommand = elevatedLocalport() + " service install" + elevatedNote()
 
-// prepareService refuses before the spend what would stop the install after
-// it, or what the service must not run: no supported service manager, a
-// service definition under the device service's name that localport did not
-// write, an executable someone other than root could replace, or a manual
-// run holding run.lock, which would keep the started service from serving.
-// It lists the systemd drop-ins that extend the service.
+// prepareService refuses, before the spend, what would stop the install after
+// it or what the service must not run: no supported service manager, a foreign
+// service definition under its name, an executable someone other than root
+// could replace, on macOS a missing or unsigned Localport.app beside it, or a
+// manual run holding run.lock, which would block the service. It also lists
+// the service's systemd drop-ins.
 func prepareService(file config.LocalConfigFile, exe string) (*deviceService, error) {
 	m, err := newServiceManager()
 	if err != nil {
@@ -317,6 +317,11 @@ func prepareService(file config.LocalConfigFile, exe string) (*deviceService, er
 	}
 	if err != nil {
 		return nil, err
+	}
+	if c, ok := m.(service.AppChecker); ok {
+		if err := c.CheckApp(context.Background(), exe); err != nil {
+			return nil, err
+		}
 	}
 	if err := refuseManualRun(file, m); err != nil {
 		return nil, err
@@ -371,17 +376,15 @@ var serviceRunLockWait = 30 * time.Second
 // repeats until the lock is free or the service stops.
 const standbyRetry = time.Hour
 
-// runLockedRemedy follows a refusal because another process serves the
-// devices.
+// runLockedRemedy follows a refusal because another process serves the devices.
 const runLockedRemedy = "another localport run or up --foreground serves them"
 
 // holdRunLock takes run.lock for a privileged run or up --foreground. With
-// asService (run --service) it stands by for the lock (holdServiceRunLock).
-// Any other caller is refused at once while the lock is held, naming the
-// device service when one carrying the marker is installed. The caller holds
-// the lock until it exits and calls release; lock is the locked file, for a
-// caller that passes it to the agent-account child serving the devices
-// (runHeldAsAgent).
+// asService (run --service) it stands by for the lock (holdServiceRunLock);
+// any other caller is refused while the lock is held, naming the device
+// service when ours is installed. The caller holds the lock until it exits
+// and calls release. lock is the locked file, passed by some callers to the
+// agent-account child serving the devices (runHeldAsAgent).
 func holdRunLock(ctx context.Context, file config.LocalConfigFile, command string, asService bool) (lock *os.File, release func() error, err error) {
 	if asService {
 		return holdServiceRunLock(ctx, file)
@@ -407,8 +410,7 @@ func holdRunLock(ctx context.Context, file config.LocalConfigFile, command strin
 }
 
 // serviceHoldsRunLock reports whether the running device service is the
-// recorded run.lock holder; a service standing by beside a foreground run is
-// not.
+// recorded run.lock holder, not one standing by beside a foreground run.
 func serviceHoldsRunLock(file config.LocalConfigFile, m service.Manager) (bool, error) {
 	holder, err := config.RunLockHolder(file)
 	if err != nil || holder == 0 {
@@ -418,14 +420,12 @@ func serviceHoldsRunLock(file config.LocalConfigFile, m service.Manager) (bool, 
 	return err == nil && mainPID == holder, err
 }
 
-// holdServiceRunLock takes run.lock for `run --service`. It first waits up to
-// serviceRunLockWait for the previous process of a restart to exit; a lock
-// still held then belongs to a foreground run serving the devices (run, up
-// --foreground). The service then stands by: it logs that once and waits for
-// the lock with no deadline, so it takes the devices over when that run ends
-// and is never restarted in a loop by its manager. The wait ends with ctx
-// (the manager's Stop on Windows; on Linux and macOS the stop signal ends the
-// process).
+// holdServiceRunLock takes run.lock for `run --service`. It waits up to
+// serviceRunLockWait for a restart's previous process to exit; a lock still
+// held then belongs to a foreground run (run, up --foreground). The service
+// then logs once and waits for the lock with no deadline, taking the devices
+// over when that run ends, never restarted in a loop by its manager. The wait
+// ends with ctx (Stop on Windows; the stop signal ends it on Linux and macOS).
 func holdServiceRunLock(ctx context.Context, file config.LocalConfigFile) (lock *os.File, release func() error, err error) {
 	lock, release, err = config.LockRunFile(ctx, file, serviceRunLockWait)
 	if !errors.Is(err, config.ErrRunLocked) {
@@ -500,9 +500,8 @@ func installedDeviceService() (service.Manager, bool, error) {
 	return m, installed, nil
 }
 
-// install writes, enables and (re)starts the device service, holding the
-// service configuration lock. Each service manager command has its own
-// timeout.
+// install writes, enables and (re)starts the device service under the
+// service configuration lock; each service manager command has its own timeout.
 func (s *deviceService) install() error {
 	unlock, err := lockServiceDefinitions(context.Background())
 	if err != nil {
