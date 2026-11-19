@@ -38,8 +38,7 @@ SESSION_LINUX = \
 	linux/arm/v6:musl::linux_arm_musl_nopam
 SESSION_DARWIN = amd64 arm64
 SESSION_NAMES = $(foreach e,$(SESSION_LINUX),localport-session_$(lastword $(subst :, ,$(e)))) \
-	localport-session_linux_arm \
-	$(foreach a,$(SESSION_DARWIN),localport-session_darwin_$(a))
+	localport-session_linux_arm
 
 # ARMv6 hard-float glibc toolchain and libpam sysroot, made by
 # packaging/session/armv6/toolchain.sh.
@@ -47,9 +46,22 @@ ARMV6_TOOLCHAIN ?= $(HOME)/x-tools-localport
 ARMV6_TARGET = armv6-rpi-linux-gnueabihf
 ARMV6_GLIBC_FLOOR = 2.36
 
-# darwin release binaries: built and ad-hoc signed with the hardened runtime
-# on macOS (`make build-darwin`); `dist` on Linux takes them from bin/.
-DARWIN_NAMES = $(foreach a,$(SESSION_DARWIN),localport-darwin-$(a) localport-session_darwin_$(a))
+# darwin release files: the CLI and the session launcher app, packed, built
+# and signed on macOS (`make build-darwin`, then the release workflow's sign
+# job); `dist` on Linux takes them from bin/. The bare launcher builds are
+# not shipped.
+DARWIN_NAMES = $(foreach a,$(SESSION_DARWIN),localport-darwin-$(a) localport-session-darwin-$(a).tar.gz)
+
+# A release build (MACOS_RELEASE=1) embeds the SHA-1 fingerprint of the
+# macOS release signing certificate, so `localport service install` accepts
+# only a Localport.app signed with it (internal/service/launchd_app.go).
+MACOS_SIGNING_CERT = release/keys/macos-signing.pem
+ifneq ($(MACOS_RELEASE),)
+ifeq ($(wildcard $(MACOS_SIGNING_CERT)),)
+$(error MACOS_RELEASE needs $(MACOS_SIGNING_CERT); see RELEASING.md)
+endif
+LDFLAGS += -X github.com/localport/agent/internal/service.releaseCertSHA1=$(shell openssl x509 -in $(MACOS_SIGNING_CERT) -noout -fingerprint -sha1 | sed 's/^.*=//; s/://g' | tr 'A-F' 'a-f')
+endif
 
 DIST = dist
 
@@ -128,23 +140,17 @@ build-session-darwin:
 			-o bin/localport-session_darwin_$$arch ./cmd/localport-session || exit 1; \
 	done
 
-# Both darwin binaries of the release, ad-hoc signed with the hardened runtime.
+# Both darwin binaries of the release, ad-hoc signed with the hardened
+# runtime; the session launcher inside Localport.app.
 build-darwin: build-session-darwin
 	@$(MAKE) --no-print-directory build-all PLATFORMS="$(filter darwin/%,$(PLATFORMS))"
 	@$(MAKE) --no-print-directory sign-darwin
 
-# Ad-hoc signature (no Developer ID) with the hardened runtime and a fixed
-# identifier, io.localport.<binary name>.
+# Signs the darwin CLI and builds, signs and packs Localport.app
+# (scripts/release/macos-sign.sh): ad-hoc, or with the release identity when
+# MACOS_SIGN_KEYCHAIN names the keychain that holds it.
 sign-darwin:
-	@[ "$$(uname -s)" = Darwin ] || { echo "sign-darwin needs macOS"; exit 1; }
-	@for f in $(DARWIN_NAMES); do \
-		name=$${f%_darwin_*}; name=$${name%-darwin-*}; \
-		codesign --force --sign - --options runtime --identifier "io.localport.$$name" bin/$$f && \
-		codesign --verify --strict bin/$$f && \
-		codesign --display --verbose=1 bin/$$f 2>&1 | grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*runtime' || \
-		{ echo "bin/$$f: signature check failed"; exit 1; }; \
-		echo "signed bin/$$f as io.localport.$$name"; \
-	done
+	@VERSION="$(VERSION)" ./scripts/release/macos-sign.sh bin
 
 # Release set: binaries, license notices and checksums.txt. The release
 # workflow builds the localport-session binaries and the signed darwin
@@ -157,6 +163,7 @@ dist: notices-check
 	rm -rf $(DIST)
 	mkdir -p $(DIST)
 	cp bin/localport-* LICENSE NOTICE THIRD_PARTY_NOTICES $(DIST)/
+	rm -f $(DIST)/localport-session_darwin_*
 	./scripts/release/checksums.sh $(DIST)
 
 # Verifies and signs a draft release. Maintainer only; see RELEASING.md.

@@ -8,7 +8,7 @@ for installation and [SECURITY.md](SECURITY.md) for verification.
 
 | Artifact | Where | Verified by |
 |---|---|---|
-| `localport` and `localport-session` binaries for linux (amd64, arm64, armv6+; glibc and musl session builds), darwin (amd64, arm64), windows (amd64) | GitHub release | `checksums.txt` |
+| `localport` and `localport-session` binaries for linux (amd64, arm64, armv6+; glibc and musl session builds), darwin (amd64, arm64), windows (amd64); on darwin the session launcher ships as `Localport.app` in `localport-session-darwin-<arch>.tar.gz` | GitHub release | `checksums.txt`; the darwin files also by their code signature (macOS signing certificate) |
 | Windows installer (`localport-setup-<version>-windows-amd64.exe`) and zip, Authenticode-signed when SignPath is configured | GitHub release | `checksums.txt` |
 | OpenWrt packages (`localport-openwrt-<package arch>.apk`) | GitHub release; feed `openwrt/<series>/<package arch>/` on `pkg.localport.io` | `checksums.txt`; the feed's `packages.adb` against the OpenWrt key |
 | `checksums.txt` | GitHub release | `checksums.txt.sig` (release key) and `checksums.txt.sigstore.json` (release workflow) |
@@ -30,6 +30,7 @@ repositories, the OpenWrt feed and package managers carry stable releases.
 | Repository key, OpenPGP RSA 4096 | the `release` environment secret `REPO_GPG_PRIVATE_KEY` | apt `InRelease`/`Release.gpg`, rpm packages, `repomd.xml` |
 | apk key, RSA 4096 | the `release` environment secret `APK_PRIVATE_KEY` | apk packages, `APKINDEX.tar.gz` |
 | OpenWrt key, ECDSA P-256 | the `release` environment secret `OPENWRT_PRIVATE_KEY` | each OpenWrt feed's `packages.adb` (the packages themselves are unsigned, as in OpenWrt's own feeds) |
+| macOS signing certificate, self-signed, RSA 3072, code signing, 10 years | the `macos-signing` environment secrets `MACOS_SIGNING_P12` (base64 PKCS#12) and `MACOS_SIGNING_P12_PASSWORD`; the environment requires a maintainer's approval | the darwin `localport` and `Localport.app` (identifiers `io.localport.localport`, `io.localport.session`); macOS keys a Full Disk Access grant to it |
 | Authenticode certificate | SignPath Foundation; the repository secret `SIGNPATH_API_TOKEN` and the variables `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_SIGNING_POLICY_SLUG` | the Windows executables, uninstaller and installer |
 | Workflow identity (Sigstore, keyless) | GitHub OIDC, no stored key | `checksums.txt.sigstore.json`, the image, build provenance |
 
@@ -45,9 +46,13 @@ Public halves are committed:
   `.gitignore` ignores `*.pem` except under `release/keys/`.
 - `release/keys/VERSION`: the version of the `localport-archive-keyring`
   package, as `YYYY.MM.DD`.
+- `release/keys/macos-signing.pem`: the macOS signing certificate. A release
+  build (`MACOS_RELEASE=1`) embeds its SHA-1 fingerprint in the darwin CLI,
+  which then installs only a `Localport.app` signed with it.
 
-The install scripts embed these public keys. A key change requires new install
-scripts.
+The install scripts embed these public keys and the macOS certificate's SHA-1
+fingerprint; the install guide publishes its SHA-256 fingerprint. A key
+change requires new install scripts.
 
 ## Cutting a release
 
@@ -61,8 +66,12 @@ scripts.
 2. The tag starts the build jobs:
    - **Check tag** accepts `vX.Y.Z` and `vX.Y.Z-PRERELEASE` only.
    - **Session builds** build `localport-session` for every platform and the
-     signed darwin binaries; **OpenWrt** builds one package per package arch
-     with the pinned SDK (stable tags only).
+     ad-hoc signed darwin binaries; **OpenWrt** builds one package per package
+     arch with the pinned SDK (stable tags only).
+   - **Sign darwin** waits for approval in the `macos-signing` environment,
+     then signs the darwin `localport` and `Localport.app` with the macOS
+     signing certificate (`scripts/release/macos-sign.sh`) and fails unless
+     each signature names that certificate.
    - **Build draft** builds the rest of the release set and the SBOM.
    - **Windows packages** builds the installer and zip. With
      `SIGNPATH_PROJECT_SLUG` set, SignPath signs in two submissions, each
@@ -71,7 +80,8 @@ scripts.
    - **Draft release** writes `checksums.txt`, attests provenance, signs
      `checksums.txt` with Sigstore and creates the draft release.
 
-   Only **Windows packages** holds a secret (`SIGNPATH_API_TOKEN`).
+   Only **Sign darwin** (`MACOS_SIGNING_P12`) and **Windows packages**
+   (`SIGNPATH_API_TOKEN`) hold a secret.
 
 3. Sign the draft on the machine that holds the release key:
 
@@ -110,10 +120,10 @@ keys and publishes nothing. `make dist` needs the `localport-session` and
 darwin binaries in `bin/` first; only the session builds make them. A local
 `make build-session-linux` sends only tracked files to Docker
 (`scripts/release/tracked-context.sh`), so `git add` a new file before a
-local session build. The **CI** workflow runs the session builds and the dry run on every push to
-`main` and every pull request. The **Packaging** workflow builds the x86_64
-OpenWrt package on every push to `main` and on every pull request that
-changes the pipeline.
+local session build. The **CI** workflow runs the session builds and the dry
+run on every push to `main` and every pull request. The **Packaging**
+workflow builds the x86_64 OpenWrt package on every push to `main` and on
+every pull request that changes the pipeline.
 
 ## Key rotation
 
@@ -150,8 +160,7 @@ from `pkg.localport.io` again.
 
 apk has no keyring package. Ship install scripts with the new `<name>.rsa.pub`
 first. Then switch `APK_PRIVATE_KEY`, replace the file in `release/keys`, and
-release. Existing Alpine systems fetch the new public key
-as documented.
+release. Existing Alpine systems fetch the new public key as documented.
 
 ### OpenWrt key
 
@@ -163,6 +172,19 @@ release. Routers trust the new index once they install the new key in
 
 Generate a key with `openssl ecparam -name prime256v1 -genkey -noout` and its
 public half with `openssl ec -pubout`.
+
+### macOS signing certificate
+
+Localport has no Apple Developer ID, so the darwin binaries are signed with a
+self-signed code-signing certificate. macOS ties a Full Disk Access grant to
+the bundle identifier and this certificate, so every release signed with it
+keeps the grant. Its PKCS#12 and password are the `macos-signing`
+environment secrets (Keys); its certificate is `release/keys/macos-signing.pem`.
+
+A new certificate (expiry, compromise) replaces both secrets and
+`release/keys/macos-signing.pem` in one release, with new install scripts.
+Devices must grant Full Disk Access to Localport again after that release, and
+an MDM profile needs its new code requirement; announce it with that release.
 
 ## Maintenance
 

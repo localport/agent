@@ -28,6 +28,8 @@ class Localport < Formula
 
   def install
     # Homebrew downloads the single binary named after the URL; rename to `localport`.
+    # The formula installs the CLI only: a Homebrew binary cannot run the device
+    # service, so it carries no Localport.app.
     bin.install Dir["localport-*"].first => "localport"
   end
 

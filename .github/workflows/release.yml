@@ -38,8 +38,9 @@ jobs:
             exit 1
           fi
 
-  # The cgo localport-session builds and the signed darwin binaries; the
-  # build job ships them with the rest of the release set.
+  # The cgo localport-session builds and the ad-hoc signed darwin binaries;
+  # the build job ships the Linux ones with the rest of the release set, and
+  # sign-darwin re-signs the darwin ones.
   sessions:
     uses: ./.github/workflows/session.yml
     permissions:
@@ -47,6 +48,62 @@ jobs:
     with:
       version: ${{ github.ref_name }}
       cache: false
+      macos-release: true
+
+  # Signs the darwin CLI and Localport.app with the macOS release identity
+  # (scripts/release/macos-sign.sh): a self-signed certificate,
+  # release/keys/macos-signing.pem, whose PKCS#12 is a secret of the
+  # macos-signing environment, which needs a maintainer's approval. The key
+  # lives in a temporary keychain this job deletes; no build job sees it.
+  sign-darwin:
+    name: Sign darwin
+    needs: sessions
+    runs-on: macos-26
+    timeout-minutes: 15
+    environment: macos-signing
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: darwin
+          path: bin
+
+      # Artifacts do not keep file modes.
+      - run: chmod 0755 bin/localport-darwin-* bin/localport-session_darwin_*
+
+      - name: Sign and verify
+        env:
+          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          [ -n "$MACOS_SIGNING_P12" ] || { echo "::error::the macos-signing environment has no MACOS_SIGNING_P12"; exit 1; }
+          kc="$RUNNER_TEMP/release-signing.keychain-db"
+          p12="$RUNNER_TEMP/release-signing.p12"
+          pw="$(openssl rand -hex 32)"
+          trap 'security delete-keychain "$kc" 2>/dev/null || true; rm -f "$p12"' EXIT
+          umask 077
+          printf '%s' "$MACOS_SIGNING_P12" | base64 --decode >"$p12"
+          security create-keychain -p "$pw" "$kc"
+          security set-keychain-settings -lut 900 "$kc"
+          security unlock-keychain -p "$pw" "$kc"
+          security import "$p12" -k "$kc" -P "$MACOS_SIGNING_P12_PASSWORD" -T /usr/bin/codesign >/dev/null
+          rm -f "$p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pw" "$kc" >/dev/null
+          MACOS_SIGN_KEYCHAIN="$kc" VERSION="$TAG" ./scripts/release/macos-sign.sh bin
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: darwin-signed
+          path: |
+            bin/localport-darwin-*
+            bin/localport-session-darwin-*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
 
   # OpenWrt packages, built with the OpenWrt SDK of each package arch. The
   # build job ships them in the release set; publish indexes the feed.
@@ -93,7 +150,7 @@ jobs:
 
   build:
     name: Build draft
-    needs: [tag, sessions, openwrt]
+    needs: [tag, sessions, sign-darwin, openwrt]
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
@@ -115,7 +172,7 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: "{session-*,darwin}"
+          pattern: "{session-*,darwin-signed}"
           path: bin
           merge-multiple: true
 

@@ -2,9 +2,8 @@ name: Session builds
 
 # cgo builds of localport-session for every release platform, and the signed
 # darwin binaries. Called by the CI workflow (cache on) and the release
-# workflow (cache off). Artifacts: one session-* per Linux build and
-# darwin; download them into bin/ with the pattern "{session-*,darwin}" and
-# merge-multiple.
+# workflow (cache off). Artifacts: one session-* per Linux build, and darwin;
+# download them into bin/ with pattern "{session-*,darwin}" and merge-multiple.
 
 on:
   workflow_call:
@@ -17,6 +16,10 @@ on:
         description: Use the Go and ARMv6 toolchain caches.
         type: boolean
         default: true
+      macos-release:
+        description: Build the darwin CLI to accept only a Localport.app signed with the macOS release certificate (MACOS_RELEASE=1); the release workflow signs it later.
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -141,7 +144,8 @@ jobs:
           retention-days: 3
 
   # Agent and localport-session for darwin, ad-hoc signed with the hardened
-  # runtime. codesign needs macOS.
+  # runtime, and the launcher packed in Localport.app
+  # (localport-session-darwin-<arch>.tar.gz). codesign needs macOS.
   darwin:
     name: darwin (signed)
     runs-on: macos-26
@@ -159,8 +163,10 @@ jobs:
           cache: ${{ inputs.cache }}
 
       - name: Build and sign
+        env:
+          MACOS_RELEASE: ${{ inputs.macos-release && '1' || '' }}
         run: |
-          make build-darwin ${VERSION:+VERSION="$VERSION"} \
+          make build-darwin ${VERSION:+VERSION="$VERSION"} ${MACOS_RELEASE:+MACOS_RELEASE=1} \
             BUILDVCS=true SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -169,5 +175,6 @@ jobs:
           path: |
             bin/localport-darwin-*
             bin/localport-session_darwin_*
+            bin/localport-session-darwin-*.tar.gz
           if-no-files-found: error
           retention-days: 3
