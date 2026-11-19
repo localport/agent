@@ -736,10 +736,25 @@ func (t *Tunnel) closeActiveConns() {
 	}
 }
 
+// ackReceived, when set, runs after a successful RegisterAck and before the
+// cancellation check; tests stop the tunnel there.
+var ackReceived func(xctx context.Context)
+
 // connect dials the edge and exchanges Register and RegisterAck, following up
 // to maxRedirectHops redirects. attempt counts consecutive failures and widens
-// the dial timeout.
+// the dial timeout. Stop or ctx cancellation ends the dial, the exchange and
+// the handling of a refusal at once.
 func (t *Tunnel) connect(ctx context.Context, attempt int) error {
+	xctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// Stop cancels xctx; the goroutine ends when connect returns.
+	go func() {
+		select {
+		case <-t.shutdown:
+			cancel()
+		case <-xctx.Done():
+		}
+	}()
 	addr := t.edgeAddr
 	budget := dialBudget(t.opts.Transport.DialTimeout, attempt)
 
@@ -767,10 +782,15 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 		}
 		dialers := t.newDialers(topts)
 
-		raw, chosen, err := transport.Probe(ctx, addr, budget, dialers, slog.Default())
+		raw, chosen, err := transport.Probe(xctx, addr, budget, dialers, slog.Default())
 		if err != nil {
 			return fmt.Errorf("connect %s: %w", addr, err)
 		}
+		// registrationTimeout bounds the Register write and the RegisterAck
+		// read; xctx ending moves the deadline to now. Nothing else sets a
+		// deadline before Recv returns, so a cancellation is never overwritten.
+		_ = raw.SetDeadline(time.Now().Add(registrationTimeout))
+		interrupt := context.AfterFunc(xctx, func() { _ = raw.SetDeadline(time.Now()) })
 
 		pc := proto.NewConn(raw)
 		t.setState(StateRegistering)
@@ -807,9 +827,10 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			return ErrRegisterFailed.With(err, "send register")
 		}
 
-		_ = raw.SetReadDeadline(time.Now().Add(registrationTimeout))
 		msgType, body, err := pc.Recv()
-		_ = raw.SetReadDeadline(time.Time{})
+		// Every path below closes raw, except a successful ack, which checks
+		// xctx before it stores raw.
+		_ = raw.SetDeadline(time.Time{})
 		if err != nil {
 			raw.Close()
 			return ErrRegisterFailed.With(err, "register response")
@@ -824,7 +845,17 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			}
 			if !ack.Success {
 				raw.Close()
-				return t.refused(ctx, presented, registrationErrorFrom(ack))
+				return t.refused(xctx, presented, registrationErrorFrom(ack))
+			}
+			if ackReceived != nil {
+				ackReceived(xctx)
+			}
+			// The deadline func runs only once xctx is done, so xctx alone says
+			// whether the exchange was cancelled as the ack arrived.
+			interrupt()
+			if err := xctx.Err(); err != nil {
+				raw.Close()
+				return err
 			}
 			t.mu.Lock()
 			t.raw = raw

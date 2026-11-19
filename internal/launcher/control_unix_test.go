@@ -106,6 +106,47 @@ func TestControlRefusesAnotherPeer(t *testing.T) {
 	}
 }
 
+// A run that cannot read the peer's credentials answers refused, which the
+// client returns as ErrControlRefused, and queues no reload.
+func TestControlRefusalOfUnreadableCredentialsIsAnswered(t *testing.T) {
+	controlAt(t)
+	prev := controlPeerCred
+	t.Cleanup(func() { controlPeerCred = prev })
+	controlPeerCred = func(*net.UnixConn) (uint32, int, error) { return 0, 0, errors.New("getsockopt failed") }
+	_, reloads := serveControl(t)
+	if err := RequestReload(context.Background()); !errors.Is(err, ErrControlRefused) {
+		t.Fatalf("RequestReload = %v, want ErrControlRefused", err)
+	}
+	if reloads.Load() != 0 {
+		t.Fatalf("a refused request queued %d reloads", reloads.Load())
+	}
+}
+
+// The refusal is written only after the request arrives.
+func TestControlRefusalWaitsForTheRequest(t *testing.T) {
+	path := controlAt(t)
+	prev := controlPeerCred
+	t.Cleanup(func() { controlPeerCred = prev })
+	controlPeerCred = func(*net.UnixConn) (uint32, int, error) { return 0, 0, errors.New("getsockopt failed") }
+	serveControl(t)
+	c, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if b, err := io.ReadAll(c); len(b) != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("before the request the run answered %q, %v; want nothing until the request", b, err)
+	}
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.WriteString(c, controlReload); err != nil {
+		t.Fatal(err)
+	}
+	if ans, err := readAnswer(c); err != nil || ans != controlRefused {
+		t.Fatalf("answer %q, %v; want %q", ans, err, controlRefused)
+	}
+}
+
 // An unknown request queues no reload and gets no answer.
 func TestControlRefusesAnUnknownRequest(t *testing.T) {
 	path := controlAt(t)

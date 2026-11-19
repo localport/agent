@@ -24,6 +24,9 @@ var controlSocket = ControlSocketPath
 // it serves: root. Tests set their own uid.
 var controlOwner = func() uint32 { return 0 }
 
+// controlPeerCred is peerCred; tests make it fail.
+var controlPeerCred = peerCred
+
 // controlAnswerWait bounds the client's side of one exchange, which also
 // covers a run still starting before it accepts.
 const controlAnswerWait = 10 * time.Second
@@ -228,9 +231,14 @@ func (l *ControlListener) Serve(ctx context.Context, reload func() bool, logf fu
 
 func (l *ControlListener) serveConn(conn *net.UnixConn, reload func() bool, logf func(format string, args ...any)) {
 	defer conn.Close()
-	uid, pid, err := peerCred(conn)
+	uid, pid, err := controlPeerCred(conn)
 	if err != nil {
 		logf("control endpoint: peer credentials: %v", err)
+		// Only root can reach the 0600 socket, so the answer reveals the run to
+		// no one else.
+		if err := refuseControl(conn); err != nil {
+			logf("control endpoint: answer the refusal: %v", err)
+		}
 		return
 	}
 	if uid != l.peer {

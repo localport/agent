@@ -22,6 +22,7 @@ type fakeCredential struct {
 	registered   int
 	refused      int
 	refusedRetry bool
+	refusedWaits bool
 	due, force   bool
 	presentErr   error
 }
@@ -47,11 +48,17 @@ func (c *fakeCredential) Registered(*identity.Presentation) {
 	c.mu.Unlock()
 }
 
-func (c *fakeCredential) Refused(context.Context, *identity.Presentation, string) (bool, error) {
+func (c *fakeCredential) Refused(ctx context.Context, _ *identity.Presentation, _ string) (bool, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.refused++
-	return c.refusedRetry, nil
+	retry, waits := c.refusedRetry, c.refusedWaits
+	c.mu.Unlock()
+	if waits {
+		// A renewal against a control plane that does not answer.
+		<-ctx.Done()
+		return true, ctx.Err()
+	}
+	return retry, nil
 }
 
 func (c *fakeCredential) Tick(*identity.Presentation, time.Time) (bool, bool) {

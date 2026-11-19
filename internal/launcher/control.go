@@ -14,7 +14,8 @@ import (
 // elevated Administrators (Windows) may connect. The exchange is one request,
 // controlReload, answered by controlOK once the reload is queued, or by
 // controlStarting while the run holds run.lock but has not yet read the config
-// (it reads the change with it). The holder of run.lock opens the
+// (it reads the change with it), or by controlRefused when the run cannot read
+// the client's peer credentials (Unix). The holder of run.lock opens the
 // endpoint right after taking the lock and keeps it until it releases the
 // lock. On Unix root takes run.lock, opens the listening socket, answers
 // controlStarting itself while it enrols, then passes the socket and the lock
@@ -24,6 +25,7 @@ const (
 	controlReload   = "reload\n"
 	controlOK       = "ok\n"
 	controlStarting = "starting\n"
+	controlRefused  = "refused\n"
 	// controlTimeout bounds the run's side of one exchange.
 	controlTimeout = 2 * time.Second
 )
@@ -37,6 +39,9 @@ var (
 	// read the config: the change is in the config it reads, so it applies
 	// when the run starts serving the devices.
 	ErrRunStarting = errors.New("the foreground run is starting")
+	// ErrControlRefused means a foreground run serves the control endpoint but
+	// refused the request because it could not read the client's credentials.
+	ErrControlRefused = errors.New("the foreground run refused the control request")
 	// ErrControlUntrusted refuses a control endpoint that is not a foreground
 	// run's: on Unix a link or non-socket, a socket not owned by root or open
 	// to group or others, or a directory root does not own or group or others
@@ -77,8 +82,23 @@ func answerControl(conn deadlineConn, reload func() bool) error {
 	return err
 }
 
+// refuseControl reads one request, then answers controlRefused. Closing before
+// the request arrives fails the client's write with EPIPE, which the client
+// reads as no run.
+func refuseControl(conn deadlineConn) error {
+	if err := conn.SetDeadline(time.Now().Add(controlTimeout)); err != nil {
+		return err
+	}
+	if _, err := io.ReadFull(conn, make([]byte, len(controlReload))); err != nil {
+		return err
+	}
+	_, err := io.WriteString(conn, controlRefused)
+	return err
+}
+
 // askReload sends the reload request on conn and waits up to wait for the
-// answer: nil for controlOK, ErrRunStarting for controlStarting.
+// answer: nil for controlOK, ErrRunStarting for controlStarting,
+// ErrControlRefused for controlRefused.
 func askReload(conn deadlineConn, wait time.Duration) error {
 	if err := conn.SetDeadline(time.Now().Add(wait)); err != nil {
 		return err
@@ -95,6 +115,8 @@ func askReload(conn deadlineConn, wait time.Duration) error {
 		return nil
 	case controlStarting:
 		return ErrRunStarting
+	case controlRefused:
+		return ErrControlRefused
 	}
 	return fmt.Errorf("unexpected control answer %q", ans)
 }
