@@ -25,8 +25,7 @@ type Server struct {
 	// AgentUID is the only peer uid the launcher serves on its request
 	// socket, and the only publisher of the status document.
 	AgentUID uint32
-	// AgentGID is the agent group: its members, root and AgentUID read the
-	// status document.
+	// AgentGID is the agent group: its members, root and AgentUID read the status.
 	AgentGID uint32
 	// AgentAccount is the agent account's name, the login of a session
 	// that runs as the agent account.
@@ -37,6 +36,10 @@ type Server struct {
 	HelperPath string
 	// Probe reports what this host offers sessions.
 	Probe func() Probe
+	// FullDiskAccess reads the launcher's Full Disk Access for each terminal,
+	// exec and sftp request (macOS): the reading gates sftp and returns on the
+	// response. Nil where the platform has none (Linux).
+	FullDiskAccess func() string
 	// GroupMember, when set, reports whether the directory service lists a
 	// uid in a group. It decides a status reader whose peer credential may be
 	// truncated: on macOS an xucred carries at most 16 groups.
@@ -228,34 +231,45 @@ func (s *Server) handle(conn *net.UnixConn) {
 		s.refuse(conn, CodeBadRequest)
 		return
 	}
-	hreq, err := s.authorize(req)
+	fda := s.readFullDiskAccess(req.Kind)
+	hreq, err := s.authorize(req, fda)
 	if err != nil {
 		s.Log("launcher: refused %s for device %q login %q: %v", req.Kind, req.Device, req.Login, err)
-		s.refuse(conn, CodeOf(err))
+		s.refuseWith(conn, CodeOf(err), fda)
 		return
 	}
 	select {
 	case s.slots <- struct{}{}:
 	default:
-		s.refuse(conn, CodeBusy)
+		s.refuseWith(conn, CodeBusy, fda)
 		return
 	}
 	defer func() { <-s.slots }()
 	s.run(conn, hreq, channel)
 }
 
+// readFullDiskAccess is the reading a request of kind gets: taken now for a
+// terminal, exec or sftp request where the platform has the state, else empty.
+func (s *Server) readFullDiskAccess(kind string) string {
+	if s.FullDiskAccess == nil || !sessionKind(kind) {
+		return ""
+	}
+	return s.FullDiskAccess()
+}
+
 // authorize checks req against the device config it re-reads now.
-func (s *Server) authorize(req Request) (HelperRequest, error) {
-	return authorize(s.LoadConfig, s.AgentAccount, req)
+func (s *Server) authorize(req Request, fullDiskAccess string) (HelperRequest, error) {
+	return authorize(s.LoadConfig, s.AgentAccount, req, fullDiskAccess)
 }
 
 // run starts one helper with channel on fd 3 and its control socket on fd
 // 4, relays its start answer, then reports its exit.
 func (s *Server) run(conn *net.UnixConn, req HelperRequest, channel *os.File) {
+	fda := req.FullDiskAccess
 	ours, theirs, err := SocketPair()
 	if err != nil {
 		s.Log("launcher: control socketpair: %v", err)
-		s.refuse(conn, CodeInternal)
+		s.refuseWith(conn, CodeInternal, fda)
 		return
 	}
 	defer ours.Close()
@@ -272,7 +286,7 @@ func (s *Server) run(conn *net.UnixConn, req HelperRequest, channel *os.File) {
 	_ = channel.Close()
 	if err != nil {
 		s.Log("launcher: start the helper: %v", err)
-		s.refuse(conn, CodeSpawnFailed)
+		s.refuseWith(conn, CodeSpawnFailed, fda)
 		return
 	}
 	exited := make(chan Exit, 1)
@@ -283,18 +297,18 @@ func (s *Server) run(conn *net.UnixConn, req HelperRequest, channel *os.File) {
 		s.Log("launcher: helper %d: %v", cmd.Process.Pid, err)
 		_ = cmd.Process.Kill()
 		e := <-exited
-		s.refuse(conn, startFailureCode(err))
+		s.refuseWith(conn, startFailureCode(err), fda)
 		s.logExit(cmd.Process.Pid, e)
 		return
 	}
 	if reply.Refused != "" {
-		respond(conn, Response{Refused: &Refused{Code: reply.Refused}, Messages: reply.Messages})
+		respond(conn, Response{Refused: &Refused{Code: reply.Refused}, Messages: reply.Messages, FullDiskAccess: fda})
 		s.logExit(cmd.Process.Pid, <-exited)
 		return
 	}
 	id := newSessionID()
 	s.Log("launcher: session %s: %s for %q, helper %d", id, req.Kind, req.Login, cmd.Process.Pid)
-	respond(conn, Response{Started: &Started{SessionID: id}, Messages: reply.Messages})
+	respond(conn, Response{Started: &Started{SessionID: id}, Messages: reply.Messages, FullDiskAccess: fda})
 	e := <-exited
 	s.logExit(cmd.Process.Pid, e)
 	respond(conn, Response{Exit: &e})
@@ -320,7 +334,12 @@ func (s *Server) start(control *os.File, req HelperRequest) (HelperReply, error)
 }
 
 func (s *Server) refuse(conn *net.UnixConn, code string) {
-	respond(conn, Response{Refused: &Refused{Code: code}})
+	s.refuseWith(conn, code, "")
+}
+
+// refuseWith refuses with the Full Disk Access reading taken for the request.
+func (s *Server) refuseWith(conn *net.UnixConn, code, fullDiskAccess string) {
+	respond(conn, Response{Refused: &Refused{Code: code}, FullDiskAccess: fullDiskAccess})
 }
 
 // logExit logs a helper's exit; a helper ended by a signal could not clear
@@ -360,7 +379,8 @@ func SocketPair() (ours, theirs *os.File, err error) {
 		return nil, nil, err
 	}
 	// Non-blocking so os.NewFile makes it pollable and deadlines work. The
-	// helper's end stays blocking: it is a separate open file description.
+	// flag is per open file description, so theirs keeps its own; the helper
+	// sets its end non-blocking itself (sessionhelper pollableFile).
 	if err := unix.SetNonblock(fds[0], true); err != nil {
 		_ = unix.Close(fds[0])
 		_ = unix.Close(fds[1])

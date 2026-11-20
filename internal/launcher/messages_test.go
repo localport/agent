@@ -66,7 +66,7 @@ func TestResponseMessages(t *testing.T) {
 		t.Fatal("messages beside a probe were read")
 	}
 	var r *RefusalError
-	if err := clientRefusal(CodeAccountRefused, []string{"locked"}); !asRefusal(err, &r) || r.Messages[0] != "locked" {
+	if err := clientRefusal(CodeAccountRefused, []string{"locked"}, FullDiskAccessDenied); !asRefusal(err, &r) || r.Messages[0] != "locked" || r.FullDiskAccess != FullDiskAccessDenied {
 		t.Fatalf("refusal %v", err)
 	}
 }

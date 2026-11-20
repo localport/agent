@@ -35,6 +35,9 @@ const (
 	CodeKindDisabled    = "kind_disabled"
 	CodeAgentBusy       = "agent_busy"
 	CodeKindUnavailable = "kind_unavailable"
+	// CodeFullDiskAccessRequired: on macOS a files session needs Full Disk
+	// Access for Localport (launcher.CodeFullDiskAccessRequired).
+	CodeFullDiskAccessRequired = "full_disk_access_required"
 	// CodeRecordingUnavailable: a Strict channel whose recording could not
 	// open is refused before its helper starts.
 	CodeRecordingUnavailable = "recording_unavailable"
@@ -103,6 +106,9 @@ type channel struct {
 	// (startRelay) once the start request is answered. Only serve's
 	// goroutine reads and writes it.
 	relayPending bool
+	// refused is set by refuse when a start failed; serve closes the channel
+	// once the request is answered. Only serve's goroutine reads and writes it.
+	refused bool
 
 	// mu orders start's hand-off of helper, session, started and readerDone
 	// against end, which may run on another goroutine while the launcher
@@ -137,6 +143,9 @@ func (ch *channel) serve(reqs <-chan *ssh.Request) {
 		}
 		if ch.relayPending {
 			ch.startRelay()
+		}
+		if ch.refused {
+			ch.end("")
 		}
 	}
 	ch.end("")
@@ -230,9 +239,8 @@ func validSize(cols, rows uint32) bool {
 }
 
 // start opens the channel's recording on a recorded connection and asks the
-// launcher for the channel's session; serve starts the relay once the request
-// is answered. A refusal is written to the channel's stderr and fails the
-// request.
+// launcher for the session; serve starts the relay once the request is
+// answered. A refusal goes to stderr and fails the request.
 func (ch *channel) start(kind, command string) bool {
 	s := ch.c.s
 	adm := ch.c.adm.Load()
@@ -274,11 +282,13 @@ func (ch *channel) start(kind, command string) bool {
 		rec.abort()
 		s.log("session: %s for %q did not start: %v", kind, ch.c.login, err)
 		if r, ok := errors.AsType[*launcher.RefusalError](err); ok {
+			s.noteFullDiskAccess(r.FullDiskAccess)
 			ch.writeMessages(r.Messages)
 		}
 		ch.refuse(refusalReason(err))
 		return false
 	}
+	s.noteFullDiskAccess(sess.FullDiskAccess)
 	ch.writeMessages(sess.Messages)
 	// end may have run while the launcher started the session (a client
 	// disconnect, idle, Shutdown): it found no helper to close, so the new
@@ -382,9 +392,12 @@ func (ch *channel) watchRecording(rec *sessionRecorder) {
 	}
 }
 
-// refuse tells the client why its request failed.
+// refuse tells the client why its start request failed; serve closes the
+// channel once the request is answered, so a client waiting for the reason
+// reads it and then the channel's end.
 func (ch *channel) refuse(code string) {
 	_, _ = ch.ch.Stderr().Write([]byte("localport: " + code + "\r\n"))
+	ch.refused = true
 }
 
 // writeMessages writes the session setup's PAM messages to the channel's
@@ -408,6 +421,8 @@ func refusalReason(err error) string {
 		return CodeKindDisabled
 	case launcher.CodeBusy:
 		return CodeAgentBusy
+	case launcher.CodeFullDiskAccessRequired:
+		return CodeFullDiskAccessRequired
 	}
 	return CodeKindUnavailable
 }
@@ -470,8 +485,7 @@ func decodeExit(code int32, goos string) (status uint32, signal string) {
 	return uint32(128 + n), name
 }
 
-// readHelper relays the helper's frames until its exit frame or the
-// channel's end.
+// readHelper relays the helper's frames until its exit or end frame, or the channel ends.
 func (ch *channel) readHelper() {
 	defer close(ch.readerDone)
 	fr := launcher.NewFrameReader(ch.helper)

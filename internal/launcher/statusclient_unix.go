@@ -42,13 +42,12 @@ func (c Client) OpenStatus(ctx context.Context) (io.ReadWriteCloser, error) {
 		return conn, nil
 	case resp.Refused != nil:
 		conn.Close()
-		return nil, clientRefusal(resp.Refused.Code, nil)
+		return nil, clientRefusal(resp.Refused.Code, nil, "")
 	}
 	conn.Close()
 	return nil, errors.New("launcher: unexpected response to a status request")
 }
 
-// statusReadTimeout bounds a status read.
 const statusReadTimeout = 3 * time.Second
 
 // ErrStatusUntrusted refuses a status endpoint that is not the launcher's: a

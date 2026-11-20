@@ -68,8 +68,9 @@ func testConfig(t *testing.T, d config.LocalDevice) func() (*config.LocalConfig,
 	return func() (*config.LocalConfig, error) { return &config.LocalConfig{Devices: []config.LocalDevice{d}}, nil }
 }
 
-// serve runs a launcher for uid on a fresh socket and returns its client.
-func serve(t *testing.T, uid uint32, load func() (*config.LocalConfig, error)) (Client, *Server) {
+// serve runs a launcher for uid on a fresh socket and returns its client;
+// each edit adjusts the server before it serves.
+func serve(t *testing.T, uid uint32, load func() (*config.LocalConfig, error), edits ...func(*Server)) (Client, *Server) {
 	t.Helper()
 	// macOS bounds a socket path at 104 bytes; t.TempDir is too deep.
 	dir, err := os.MkdirTemp("/tmp", "lp-launcher-")
@@ -90,6 +91,9 @@ func serve(t *testing.T, uid uint32, load func() (*config.LocalConfig, error)) (
 		AgentUID: uid, AgentAccount: AgentAccount, LoadConfig: load, HelperPath: exe,
 		Probe: func() Probe { return Probe{PAM: true, FullDiskAccess: FullDiskAccessDenied} },
 		Log:   t.Logf,
+	}
+	for _, edit := range edits {
+		edit(s)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -140,9 +144,8 @@ func openFDs(t *testing.T) int {
 	return len(entries)
 }
 
-// A request carrying more than one descriptor is a bad request: refused
-// before the config is read or anything starts, with every received
-// descriptor closed.
+// A request with more than one descriptor is refused as a bad request before
+// the config is read or anything starts; every received descriptor is closed.
 func TestRequestWithTwoDescriptorsIsRefused(t *testing.T) {
 	c, _ := serve(t, uint32(os.Getuid()), testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityTerminal}, Logins: []string{"pi"}}))
 	conn, err := c.dial(ctx(t))
@@ -207,6 +210,41 @@ func TestStartRelaysTheHelpersChannel(t *testing.T) {
 	}
 }
 
+// startOn starts req on a fresh session channel and returns the agent's end.
+func startOn(t *testing.T, c Client, req Request) (*Session, *os.File) {
+	t.Helper()
+	ours, theirs, err := SocketPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ours.Close() })
+	sess, err := c.Start(ctx(t), req, theirs)
+	theirs.Close()
+	if err != nil {
+		t.Fatalf("Start %s: %v", req.Kind, err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	return sess, ours
+}
+
+// A refusal carries the reading too: a file session without Full Disk
+// Access is refused before any helper starts.
+func TestFilesRefusedWithoutFullDiskAccess(t *testing.T) {
+	c, _ := serve(t, uint32(os.Getuid()), testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityFiles}, Logins: []string{"pi"}}),
+		func(s *Server) { s.FullDiskAccess = func() string { return FullDiskAccessDenied } })
+	ours, theirs, err := SocketPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ours.Close()
+	_, err = c.Start(ctx(t), Request{Kind: KindSFTP, Device: testDevice, Login: "pi"}, theirs)
+	theirs.Close()
+	r, ok := errors.AsType[*RefusalError](err)
+	if !ok || r.Code != CodeFullDiskAccessRequired || r.FullDiskAccess != FullDiskAccessDenied {
+		t.Fatalf("Start = %v, want full_disk_access_required with the denied reading", err)
+	}
+}
+
 // Every config refusal comes before a helper starts, with its typed code.
 func TestStartRefusesWhatTheConfigDoesNotEnable(t *testing.T) {
 	terminal := []config.Capability{config.CapabilityTerminal}
@@ -245,7 +283,7 @@ func TestStartRefusesWhatTheConfigDoesNotEnable(t *testing.T) {
 
 func TestRunAsAgentStartsTheAgentAccount(t *testing.T) {
 	s := &Server{AgentAccount: AgentAccount, LoadConfig: testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityTerminal}, RunAsAgent: true})}
-	h, err := s.authorize(terminalRequest(AgentAccount))
+	h, err := s.authorize(terminalRequest(AgentAccount), "")
 	if err != nil || !h.AgentAccount || h.Login != AgentAccount {
 		t.Fatalf("authorize = %+v, %v", h, err)
 	}
@@ -257,22 +295,48 @@ func TestAuthorizeFileSessions(t *testing.T) {
 	files := Request{V: Version, Kind: KindSFTP, Device: terminalRequest("pi").Device, Login: "pi"}
 	s := &Server{LoadConfig: testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityFiles},
 		Logins: []string{"pi"}, FilesRoot: "/srv/share"})}
-	h, err := s.authorize(files)
+	h, err := s.authorize(files, "")
 	if err != nil || h.Kind != KindSFTP || h.Root != "/srv/share" {
 		t.Fatalf("authorize = %+v, %v", h, err)
 	}
-	if _, err := s.authorize(terminalRequest("pi")); CodeOf(err) != CodeKindNotEnabled {
+	if _, err := s.authorize(terminalRequest("pi"), ""); CodeOf(err) != CodeKindNotEnabled {
 		t.Fatalf("terminal on a files-only device: %v, want kind_not_enabled", err)
 	}
 	s = &Server{LoadConfig: testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityTerminal}, Logins: []string{"pi"}})}
-	if _, err := s.authorize(files); CodeOf(err) != CodeKindNotEnabled {
+	if _, err := s.authorize(files, ""); CodeOf(err) != CodeKindNotEnabled {
 		t.Fatalf("files on a terminal-only device: %v, want kind_not_enabled", err)
 	}
 }
 
-// A forward request (the networking helper) needs forwarding enabled;
-// terminal alone does not admit it, and it carries no terminal, command or
-// environment.
+// On macOS a file session needs the launcher's Full Disk Access granted:
+// denied and unknown are refused full_disk_access_required. Terminal and exec
+// are never refused for it and carry the reading to the helper; where the
+// platform has no reading (empty, Linux) a file session proceeds.
+func TestAuthorizeFullDiskAccess(t *testing.T) {
+	files := Request{V: Version, Kind: KindSFTP, Device: terminalRequest("pi").Device, Login: "pi"}
+	exec := Request{V: Version, Kind: KindExec, Device: files.Device, Login: "pi", Command: "id"}
+	s := &Server{LoadConfig: testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityFiles, config.CapabilityTerminal},
+		Logins: []string{"pi"}})}
+	for _, fda := range []string{FullDiskAccessDenied, FullDiskAccessUnknown} {
+		if _, err := s.authorize(files, fda); CodeOf(err) != CodeFullDiskAccessRequired {
+			t.Errorf("files with %s: %v, want full_disk_access_required", fda, err)
+		}
+		for _, r := range []Request{terminalRequest("pi"), exec} {
+			if h, err := s.authorize(r, fda); err != nil || h.FullDiskAccess != fda {
+				t.Errorf("%s with %s: %+v, %v", r.Kind, fda, h, err)
+			}
+		}
+	}
+	if h, err := s.authorize(files, FullDiskAccessGranted); err != nil || h.FullDiskAccess != FullDiskAccessGranted {
+		t.Errorf("files granted: %+v, %v", h, err)
+	}
+	if h, err := s.authorize(files, ""); err != nil || h.FullDiskAccess != "" {
+		t.Errorf("files without a reading: %+v, %v", h, err)
+	}
+}
+
+// A forward request (the networking helper) needs forwarding enabled, not just
+// terminal, and carries no terminal, command or environment.
 func TestAuthorizeForwardRequests(t *testing.T) {
 	fwd := Request{V: Version, Kind: KindForward, Device: terminalRequest("pi").Device, Login: "pi"}
 	if err := fwd.Validate(); err != nil {
@@ -280,11 +344,11 @@ func TestAuthorizeForwardRequests(t *testing.T) {
 	}
 	s := &Server{LoadConfig: testConfig(t, config.LocalDevice{
 		Enable: []config.Capability{config.CapabilityTerminal, config.CapabilityForwarding}, Logins: []string{"pi"}})}
-	if h, err := s.authorize(fwd); err != nil || h.Kind != KindForward || h.Login != "pi" {
+	if h, err := s.authorize(fwd, ""); err != nil || h.Kind != KindForward || h.Login != "pi" {
 		t.Fatalf("authorize = %+v, %v", h, err)
 	}
 	s = &Server{LoadConfig: testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityTerminal}, Logins: []string{"pi"}})}
-	if _, err := s.authorize(fwd); CodeOf(err) != CodeKindNotEnabled {
+	if _, err := s.authorize(fwd, ""); CodeOf(err) != CodeKindNotEnabled {
 		t.Fatalf("forward on a terminal-only device: %v, want kind_not_enabled", err)
 	}
 	for name, edit := range map[string]func(*Request){

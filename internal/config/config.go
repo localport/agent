@@ -77,11 +77,13 @@ type DeviceSpec struct {
 	// PasswordLogins are the Logins whose sessions ask for the login's
 	// password (LocalDevice.PasswordLogins); local to the session server.
 	PasswordLogins []string
-	// SessionAuth, RunAsAgent and FullDiskAccess are reported on Register for
-	// display: the launcher's probe and the run_as_agent opt-in.
-	SessionAuth    string
-	RunAsAgent     bool
-	FullDiskAccess string
+	// SessionAuth and RunAsAgent are reported on Register for display: the
+	// launcher's probe and the run_as_agent opt-in.
+	SessionAuth string
+	RunAsAgent  bool
+	// FullDiskAccess is shared by the run's devices with logins, kept current
+	// by probes and session responses; nil for a device without logins.
+	FullDiskAccess *tunnel.FullDiskAccessState
 	// SessionHandler serves the device's sessions; nil leaves them off.
 	SessionHandler tunnel.SessionHandler
 	// ClipboardNotices queues the clipboard notices of the device's desktop
@@ -89,8 +91,7 @@ type DeviceSpec struct {
 	ClipboardNotices *tunnel.ClipboardNotices
 	// HintRevoked receives the session CA key ids a RegisterAck names revoked.
 	HintRevoked func(kids []string)
-	// OnStatus receives the device tunnel's status on every change; it must
-	// not block.
+	// OnStatus receives the device tunnel's status on every change; it must not block.
 	OnStatus func(tunnel.Status)
 	// FlushRecordings waits for the device's recordings to reach the server
 	// when an admin's Disconnect drains it.
@@ -115,8 +116,7 @@ type tunnelFile struct {
 }
 
 // Load reads the YAML at path, substitutes environment references and returns
-// a validated Config. Every failure carries errcode.TunnelConfigInvalid with
-// the path.
+// a validated Config. Every failure is errcode.TunnelConfigInvalid with the path.
 func Load(path string) (*Config, error) {
 	cfg, err := load(path)
 	if err != nil {
@@ -136,8 +136,7 @@ func load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	// Unknown keys are errors, so a misspelled key is reported rather than
-	// silently ignored.
+	// Unknown keys are errors, so a misspelled key is reported, not ignored.
 	dec := yaml.NewDecoder(strings.NewReader(expanded))
 	dec.KnownFields(true)
 

@@ -54,9 +54,8 @@ const (
 	// dial-back, so a faulty edge cannot exhaust local file descriptors.
 	maxConcurrentDataConns = 512
 
-	// edgeFallbackAfter is how long an assigned edge address may fail before
-	// the agent returns to the configured connect host. It covers an edge
-	// restart.
+	// edgeFallbackAfter is how long an assigned edge address may fail, as in
+	// an edge restart, before the agent returns to the configured connect host.
 	edgeFallbackAfter = 90 * time.Second
 )
 
@@ -234,11 +233,12 @@ type Options struct {
 	Capabilities []string
 	Logins       []string
 	Desktop      []string
-	// SessionAuth, RunAsAgent and FullDiskAccess are reported on Register
-	// for display only.
-	SessionAuth    string
-	RunAsAgent     bool
-	FullDiskAccess string
+	// SessionAuth and RunAsAgent are reported on Register for display only.
+	SessionAuth string
+	RunAsAgent  bool
+	// FullDiskAccess is reported on Register and by device_report, for
+	// display only; nil reports none.
+	FullDiskAccess *FullDiskAccessState
 
 	// AgentVersion is sent on registration for the audit record.
 	AgentVersion string
@@ -314,10 +314,14 @@ type Tunnel struct {
 	// sessionID is the session secret from the last RegisterAck. The next
 	// Register sends it to replace the stale session.
 	sessionID string
+	// registeredFDA is the Full Disk Access reading the current session's
+	// Register carried; its report loop starts from it.
+	registeredFDA string
+	// reportWake asks the report loop to send a changed reading.
+	reportWake chan struct{}
 
-	// presented is the device certificate the current session registered
-	// with. Mux dials reuse the dialer, and so the certificate, of that
-	// registration.
+	// presented is the device certificate the current session registered with;
+	// mux dials reuse that registration's dialer and so its certificate.
 	presented *identity.Presentation
 	// rollover is set when a session ends to register with a pending
 	// certificate; Run then reconnects without a backoff.
@@ -341,8 +345,7 @@ type Tunnel struct {
 	acMu        sync.RWMutex
 	activeConns map[string]*activeConn
 
-	// recentReqs is a ring of the newest requests. totalReqs counts all
-	// requests.
+	// recentReqs is a ring of the newest requests; totalReqs counts all of them.
 	reqMu      sync.Mutex
 	recentReqs []RequestInfo
 	totalReqs  atomic.Int64
@@ -364,8 +367,7 @@ type Tunnel struct {
 	// signalDisconnected of the session gave. Guarded by mu; Run clears it
 	// with each new disconnected channel.
 	endCause error
-	// retryNow ends a reconnect backoff wait. OnNetworkChange signals it while
-	// disconnected.
+	// retryNow ends a reconnect backoff wait; OnNetworkChange signals it while disconnected.
 	retryNow chan struct{}
 
 	// dataSlots bounds concurrent inbound connections, one slot per
@@ -420,6 +422,7 @@ func New(opts Options) *Tunnel {
 		shutdown:      make(chan struct{}),
 		disconnected:  make(chan struct{}),
 		retryNow:      make(chan struct{}, 1),
+		reportWake:    make(chan struct{}, 1),
 		dataSlots:     make(chan struct{}, maxConcurrentDataConns),
 	}
 	if device {
@@ -480,6 +483,10 @@ func (t *Tunnel) dialTarget(port uint16) (net.Conn, int, error) {
 // the edge refuses the tunnel permanently.
 func (t *Tunnel) Run(ctx context.Context) error {
 	defer t.closeConn()
+	if s := t.opts.FullDiskAccess; s != nil && t.IsDevice() {
+		s.attach(t)
+		defer s.detach(t)
+	}
 	if h := t.opts.Handler; h != nil {
 		h.OnStart(t.EventKey(), t.opts.Label)
 	}
@@ -488,8 +495,7 @@ func (t *Tunnel) Run(ctx context.Context) error {
 	refusals := 0
 	var failingSince time.Time
 	for {
-		// Capture the channel here. The next iteration replaces
-		// t.disconnected.
+		// Capture the channel now: the next iteration replaces t.disconnected.
 		t.mu.Lock()
 		sessionDone := make(chan struct{})
 		t.disconnected, t.endCause = sessionDone, nil
@@ -698,8 +704,7 @@ func (t *Tunnel) removeActiveConn(id string) {
 	t.acMu.Unlock()
 }
 
-// closeConnsForPorts closes both sockets of every live connection on the
-// closed ports.
+// closeConnsForPorts closes both sockets of every live connection on the closed ports.
 func (t *Tunnel) closeConnsForPorts(ports []uint16) {
 	if len(ports) == 0 {
 		return
@@ -800,29 +805,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 			raw.Close()
 			return err
 		}
-		t.mu.RLock()
-		resumeID := t.sessionID
-		t.mu.RUnlock()
-		reg := &proto.RegisterPayload{
-			Token:        t.opts.Token,
-			Kind:         t.opts.Kind,
-			Protocol:     t.opts.Protocol,
-			ClientName:   t.opts.ClientName,
-			AllowedPorts: wirePortRanges(t.opts.AllowPorts),
-			Timestamp:    time.Now().Unix(),
-			Nonce:        nonce,
-			// GOOS/GOARCH of the build, for example "darwin/arm64".
-			AgentVersion:    t.opts.AgentVersion,
-			AgentOS:         runtime.GOOS + "/" + runtime.GOARCH,
-			ResumeSessionID: resumeID,
-			Capabilities:    t.opts.Capabilities,
-			Logins:          t.opts.Logins,
-			Desktop:         t.opts.Desktop,
-			SessionAuth:     t.opts.SessionAuth,
-			RunAsAgent:      t.opts.RunAsAgent,
-			FullDiskAccess:  t.opts.FullDiskAccess,
-		}
-		if err := pc.SendRegister(reg); err != nil {
+		if err := pc.SendRegister(t.registerPayload(nonce)); err != nil {
 			raw.Close()
 			return ErrRegisterFailed.With(err, "send register")
 		}
@@ -897,8 +880,7 @@ func (t *Tunnel) connect(ctx context.Context, attempt int) error {
 				return ErrRegisterFailed.With(err, "parse redirect")
 			}
 			if !allowedRedirectHost(rd.EdgeAddr) {
-				// The address is edge text: the cause, shown by --verbose and
-				// logs.
+				// The address is edge text: the cause, shown by --verbose and logs only.
 				return ErrUntrustedRedirect.With(fmt.Errorf("redirect to %q", sanitizeDisplay(rd.EdgeAddr)), "")
 			}
 			if h := t.opts.Handler; h != nil {
@@ -939,10 +921,9 @@ func (t *Tunnel) refused(ctx context.Context, presented *identity.Presentation, 
 	return regErr
 }
 
-// rolloverLoop ends the session so the device registers with a pending
-// certificate: when no connection or browser or CLI session is open, or
-// regardless once the current certificate is within identity.RolloverDeadline
-// of expiry.
+// rolloverLoop ends the session so the device registers with its pending
+// certificate: once no connection or browser or CLI session is open, or at once
+// when the current certificate is within identity.RolloverDeadline of expiry.
 func (t *Tunnel) rolloverLoop(sessionDone <-chan struct{}) {
 	tick := time.NewTicker(t.rolloverEvery)
 	defer tick.Stop()
@@ -993,6 +974,12 @@ func (t *Tunnel) runSession(ctx context.Context, sessionDone <-chan struct{}) bo
 	if t.opts.Credential != nil {
 		loops.Go(func() { t.rolloverLoop(sessionDone) })
 	}
+	if t.IsDevice() && t.opts.FullDiskAccess != nil {
+		t.mu.RLock()
+		registered := t.registeredFDA
+		t.mu.RUnlock()
+		loops.Go(func() { t.reportLoop(sessionDone, registered) })
+	}
 
 	select {
 	case <-ctx.Done():
@@ -1041,10 +1028,9 @@ func (t *Tunnel) heartbeatLoop(sessionDone <-chan struct{}) {
 	}
 }
 
-// receiveLoop reads control frames. Recv blocks with a deadline at the next
-// dead link check, idle expiry or an armed probe window, so an idle session
-// has no wakeups. interruptReader wakes it early when a probe is armed or the
-// session ends.
+// receiveLoop reads control frames. Recv blocks until the next dead link
+// check, idle expiry or armed probe window, so an idle session has no
+// wakeups; interruptReader wakes it when a probe is armed or the session ends.
 func (t *Tunnel) receiveLoop(sessionDone <-chan struct{}) {
 	lastInbound := time.Now()
 	for {
@@ -1165,8 +1151,7 @@ func (t *Tunnel) dispatch(msgType proto.MessageType, body []byte, sessionDone <-
 		if !applied {
 			return
 		}
-		// dialTarget refuses new connections to closed ports. Close the live
-		// ones.
+		// dialTarget refuses new connections to closed ports; close the live ones.
 		t.closeConnsForPorts(removed)
 		if h := t.opts.Handler; h != nil {
 			h.OnPortsUpdate(t.EventKey(), t.ports.List())
@@ -1258,8 +1243,7 @@ func isHTTPProto(proto string) bool {
 	return proto == "http" || proto == "https"
 }
 
-// newRequestInspector returns nil unless this is an http tunnel with inspection
-// enabled.
+// newRequestInspector returns nil unless this is an http tunnel with inspection on.
 func (t *Tunnel) newRequestInspector() *httpInspector {
 	return t.newInspectorFor(t.opts.Protocol, 0)
 }
@@ -1406,8 +1390,7 @@ func (t *Tunnel) serveData(ac *activeConn, connID string, edge, local net.Conn, 
 		})
 	}
 
-	// The inspector reads a copy of the traffic. On a device it uses the port
-	// protocol.
+	// The inspector reads a copy of the traffic; on a device it uses the port protocol.
 	reqSrc, respSrc := io.Reader(edge), io.Reader(local)
 	if insp := t.newInspectorFor(target.protocol, target.port); insp != nil {
 		reqSrc = insp.wrapRequest(edge)
@@ -1452,10 +1435,9 @@ var copyBufPool = sync.Pool{
 	},
 }
 
-// copyWithCounters copies src to dst and adds each write to every counter.
-// It avoids io.Copy, whose splice path between TCP connections would bypass
-// the counters. It returns nil at end of stream, otherwise the read or write
-// error.
+// copyWithCounters copies src to dst, adding each write to every counter,
+// and returns nil at end of stream, else the read or write error. It avoids
+// io.Copy, whose splice path between TCP connections bypasses the counters.
 func copyWithCounters(dst io.Writer, src io.Reader, counters ...*atomic.Int64) error {
 	bufp := copyBufPool.Get().(*[]byte)
 	defer copyBufPool.Put(bufp)
@@ -1560,8 +1542,7 @@ func terminalShutdown(sd *proto.ShutdownPayload) bool {
 	return sd != nil && sd.Retryable != nil && !*sd.Retryable
 }
 
-// errRollover ends a device session so the next one presents the renewed
-// certificate.
+// errRollover ends a device session so the next one presents the renewed certificate.
 var errRollover = errors.New("reconnecting with the renewed certificate")
 
 // shutdownCause is the disconnect cause of a retryable Shutdown sd (nil when
@@ -1761,11 +1742,9 @@ type RegistrationError struct {
 	// RetryAfter is the edge's retry_after hint: the control plane lifts the
 	// refusal without local action. Zero when absent.
 	RetryAfter time.Duration
-	// Serial is the serial of the device certificate refused, empty for a
-	// tunnel.
+	// Serial is the refused device certificate's serial, empty for a tunnel.
 	Serial string
-	// Err is a local failure that followed the refusal, such as a failed
-	// certificate renewal.
+	// Err is a local failure after the refusal, such as a failed certificate renewal.
 	Err error
 }
 
@@ -1780,8 +1759,7 @@ func (e *RegistrationError) Error() string {
 
 func (e *RegistrationError) Unwrap() error { return e.Err }
 
-// RemoteMessage is the message and its limit, without the cause
-// (errcode.Remote).
+// RemoteMessage is the message and its limit, without the cause (errcode.Remote).
 func (e *RegistrationError) RemoteMessage() string {
 	s := e.Message
 	if e.LimitType != "" && e.LimitType != proto.LimitUnspecified {
@@ -1849,6 +1827,36 @@ func sniForAddr(originalEdge, addr string) string {
 		return origHost
 	}
 	return connectLabel + "." + zone
+}
+
+// registerPayload is the Register of a new control session. It records the
+// Full Disk Access reading it carries, which that session's report loop
+// starts from, so a change after this read is reported once registered.
+func (t *Tunnel) registerPayload(nonce string) *proto.RegisterPayload {
+	t.mu.Lock()
+	resumeID := t.sessionID
+	fda := t.opts.FullDiskAccess.Load()
+	t.registeredFDA = fda
+	t.mu.Unlock()
+	return &proto.RegisterPayload{
+		Token:        t.opts.Token,
+		Kind:         t.opts.Kind,
+		Protocol:     t.opts.Protocol,
+		ClientName:   t.opts.ClientName,
+		AllowedPorts: wirePortRanges(t.opts.AllowPorts),
+		Timestamp:    time.Now().Unix(),
+		Nonce:        nonce,
+		// GOOS/GOARCH of the build, for example "darwin/arm64".
+		AgentVersion:    t.opts.AgentVersion,
+		AgentOS:         runtime.GOOS + "/" + runtime.GOARCH,
+		ResumeSessionID: resumeID,
+		Capabilities:    t.opts.Capabilities,
+		Logins:          t.opts.Logins,
+		Desktop:         t.opts.Desktop,
+		SessionAuth:     t.opts.SessionAuth,
+		RunAsAgent:      t.opts.RunAsAgent,
+		FullDiskAccess:  fda,
+	}
 }
 
 func newNonce() (string, error) {

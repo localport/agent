@@ -69,6 +69,10 @@ type HelperRequest struct {
 	// ClientAddr is the session client's `ip:port` (Request.ClientAddr),
 	// empty when unknown.
 	ClientAddr string `json:"client_addr,omitempty"`
+	// FullDiskAccess is the launcher's reading for this terminal, exec or sftp
+	// request (macOS), one of the FullDiskAccess states, empty where the
+	// platform has none.
+	FullDiskAccess string `json:"full_disk_access,omitempty"`
 	// Pipe is the session channel pipe the helper opens (Windows).
 	Pipe string `json:"pipe,omitempty"`
 	// HasPassword announces a password trailer after the message (Windows).
@@ -99,8 +103,11 @@ func startFailureCode(err error) string {
 // authorize checks req against the device config load reads now and returns
 // what the helper is told. agentAccount is the login a run_as_agent device
 // serves; empty where there is no such account (Windows), which refuses
-// every run_as_agent request.
-func authorize(load func() (*config.LocalConfig, error), agentAccount string, req Request) (HelperRequest, error) {
+// every run_as_agent request. fullDiskAccess is the launcher's reading for
+// this request, empty where the platform has none: an sftp session needs it
+// granted, since the file server is our code and TCC would ask the console
+// user for each protected folder.
+func authorize(load func() (*config.LocalConfig, error), agentAccount string, req Request, fullDiskAccess string) (HelperRequest, error) {
 	cfg, err := load()
 	if err != nil {
 		return HelperRequest{}, fmt.Errorf("%w: %w", Refusal(CodeConfigUnreadable), err)
@@ -122,8 +129,14 @@ func authorize(load func() (*config.LocalConfig, error), agentAccount string, re
 	if !slices.Contains(d.Enable, need) {
 		return HelperRequest{}, Refusal(CodeKindNotEnabled)
 	}
+	if req.Kind == KindSFTP && fullDiskAccess != "" && fullDiskAccess != FullDiskAccessGranted {
+		return HelperRequest{}, Refusal(CodeFullDiskAccessRequired)
+	}
 	h := HelperRequest{Kind: req.Kind, Login: req.Login, Cols: req.Cols, Rows: req.Rows, Term: req.Term, Command: req.Command,
 		Env: req.Env, ClientAddr: req.ClientAddr, Pipe: req.Pipe, HasPassword: req.HasPassword, Password: req.Password}
+	if sessionKind(req.Kind) {
+		h.FullDiskAccess = fullDiskAccess
+	}
 	if req.Kind == KindSFTP {
 		h.Root, h.FilesDownload, h.FilesUpload = d.FilesRoot, req.FilesDownload, req.FilesUpload
 	}
@@ -251,6 +264,9 @@ func ReadHelperRequest(control io.Reader) (HelperRequest, error) {
 	}
 	if req.ClientAddr != "" && !ValidClientAddr(req.ClientAddr) {
 		return HelperRequest{}, errors.New("bad helper request client address")
+	}
+	if req.FullDiskAccess != "" && (!sessionKind(req.Kind) || !validFullDiskAccess(req.FullDiskAccess)) {
+		return HelperRequest{}, errors.New("bad helper request full disk access")
 	}
 	if req.HasPassword {
 		if req.Password, err = readSecret(control); err != nil {

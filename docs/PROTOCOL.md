@@ -60,6 +60,7 @@ identical on either carrier.
 | MuxBindAck      | 12  | E → C     | Mux bind result                  |
 | PortsUpdate     | 13  | E → C     | A device's new allowed ports     |
 | PortsAck        | 14  | C → E     | The port version now served      |
+| DeviceReport    | 15  | C → E     | A device's changed self-report   |
 
 ## Payloads
 
@@ -112,7 +113,9 @@ the control plane shows them and decides nothing on them.
   agent account (`run_as_agent` in `agent.yaml`).
 - `full_disk_access`: macOS only. `granted` or `denied` when the session
   launcher holds or lacks Full Disk Access, `unknown` when its check was
-  inconclusive.
+  inconclusive. It is the agent's latest launcher reading (start-up probe,
+  reload probe, or the reading on a session response); a change while
+  connected is sent as [DeviceReport](#devicereport-15).
 
 `allowed_ports` is a device's optional port ceiling (`--allow-ports`): up to 64
 inclusive ranges of ports 1 to 65535. Absent means no ceiling. The edge refuses
@@ -221,6 +224,22 @@ control frames and data streams travel on different connections.
 
 A port the dashboard allows outside the device's `allowed_ports` stays in the
 list and is refused: the dashboard shows it as blocked by the device.
+
+### DeviceReport (15)
+
+A device sends it on its control connection when the session launcher's Full
+Disk Access reading differs from the last value that connection reported (in
+its Register or an earlier report): once per change, in order, each with the
+latest value. A reconnect's Register carries the latest value.
+
+```json
+{ "full_disk_access": "granted" }
+```
+
+Display only, like the Register field. The edge accepts it on a device
+connection only, validates it as it validates the Register field, ignores an
+unchanged or invalid value, and carries a change to the control plane with
+its next fleet sync.
 
 `protocol` is `tcp` (opaque bytes) or `http` (requests are parsed for this
 agent's own request view and for the status counters in the access log).
@@ -770,10 +789,12 @@ stream:
    link) is, as OpenSSH `sftp-server -R`; listing, stat, readlink and realpath
    are always served, and each refusal is a file event with result
    `permission_denied`. A shell or exec on an `ssh` connection is not restricted
-   by it. A refusal fails the request and writes `localport: <code>` to the
+   by it. A refusal fails the request, writes `localport: <code>` to the
    channel's stderr (`login_not_allowed`, `kind_disabled`, `agent_busy`,
    `kind_unavailable`, `launcher_unavailable`, `recording_unavailable` for a
-   Strict channel whose recording did not open). The messages PAM gives the
+   Strict channel whose recording did not open, `full_disk_access_required`
+   on macOS, below) and then closes the channel, so a client reads the reason
+   to the end of stderr. The messages PAM gives the
    login's session setup (an expiry warning, the `/etc/nologin` text) are
    written to the channel's stderr, one line each ending in CRLF, before the
    session's output or the refusal line; a port forward has no stderr, so the
@@ -785,6 +806,10 @@ stream:
    4254 name without `SIG`, `<name>@localport.io` outside its list, core-dumped
    false), then the channel closes; a Strict channel whose recording fails ends
    with `localport: session ended: recording_failed`.
+
+   On macOS the launcher reads its Full Disk Access for every `shell`, `exec`
+   and `sftp` request. An `sftp` request needs it `granted`; otherwise it is
+   refused `full_disk_access_required`.
 
    Port forwarding (RFC 4254 section 7, OpenSSH PROTOCOL section 2.4) is
    served on an `ssh` connection only, when the device's config enables

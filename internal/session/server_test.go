@@ -39,17 +39,18 @@ import (
 
 const testLogin = "pi"
 
-// fakeLauncher runs an in-process helper on each session channel: a terminal
-// echoes its input and exits 7 on "bye"; exec "cat" echoes stdin until eof
-// and exits 0; any other command writes it to stdout, "warn" to stderr and
-// exits 3.
+// fakeLauncher runs an in-process helper on each session channel. A terminal
+// echoes its input and exits 7 on "bye"; exec "cat" echoes stdin until eof and
+// exits 0; any other command goes to stdout ("warn" to stderr) and exits 3.
 type fakeLauncher struct {
 	mu       sync.Mutex
 	requests []launcher.Request
 	resizes  chan [2]uint16
 	refuse   error
-	// messages are the PAM messages every started session carries.
+	// messages are the PAM messages every started session carries, and fda
+	// its Full Disk Access reading.
 	messages []string
+	fda      string
 	// hold, when set, makes Start wait for it to close after announcing the
 	// request on starting; helperDone receives, when it has room, when a
 	// helper's channel ends.
@@ -101,7 +102,7 @@ func (l *fakeLauncher) Start(_ context.Context, req launcher.Request, channel *o
 			}
 		}
 	})
-	return &launcher.Session{Messages: l.messages}, nil
+	return &launcher.Session{Messages: l.messages, FullDiskAccess: l.fda}, nil
 }
 
 func (l *fakeLauncher) lastRequest(t *testing.T) launcher.Request {
@@ -122,8 +123,7 @@ func (l *fakeLauncher) helper(conn net.Conn, req launcher.Request) {
 		return
 	}
 	if req.Command == "hold" {
-		// Ignores every frame, eof included, until the agent closes the
-		// channel.
+		// Ignores every frame, eof included, until the agent closes the channel.
 		_, _ = io.Copy(io.Discard, conn)
 		return
 	}
@@ -264,9 +264,8 @@ type certOpts struct {
 	resumes string
 	// key signs instead of a fresh client key.
 	key ed25519.PrivateKey
-	// files replaces the files option of a files or ssh certificate (default
-	// "download,upload") and adds it to any other kind; noFiles leaves the
-	// option out.
+	// files replaces a files or ssh certificate's files option (default
+	// "download,upload") and adds it to other kinds; noFiles leaves it out.
 	files   *string
 	noFiles bool
 	// clipboard replaces the clipboard option of a vnc or rdp certificate
@@ -470,10 +469,9 @@ func readFor(t *testing.T, r io.Reader, want string) {
 	}
 }
 
-// A terminal session: pty-req and shell start the launcher's terminal with
-// the requested size; bytes pass both ways; window-change resizes; the
-// helper's exit becomes exit-status, and the terminal connection ends with
-// its channel.
+// A terminal session: pty-req and shell start the launcher's terminal at the
+// requested size; bytes pass both ways; window-change resizes; the helper's
+// exit becomes exit-status, and the connection ends with its channel.
 func TestTerminalOverSSH(t *testing.T) {
 	f := newSSHFixture(t, nil)
 	client := f.connect(t, f.defaults())
@@ -636,8 +634,7 @@ func TestExecOverSSH(t *testing.T) {
 	}
 }
 
-// Every certificate the local config or the notice does not admit fails
-// userauth.
+// Every certificate the local config or the notice does not admit fails userauth.
 func TestUserauthRefusals(t *testing.T) {
 	f := newSSHFixture(t, func(c *ServerConfig) {
 		c.Capabilities, c.Desktop = []string{"terminal", "files", "desktop"}, []string{"vnc"}
@@ -1143,6 +1140,49 @@ func TestLauncherRefusalFailsTheRequest(t *testing.T) {
 	readFor(t, stderr, "localport: "+CodeLoginNotAllowed+"\r\n")
 }
 
+// A Files or shell refusal for Full Disk Access names its own code, passes
+// the launcher's reading on, and closes the channel after the reason, so a
+// client waiting for stderr's end reads it.
+func TestFullDiskAccessRefusalClosesTheChannel(t *testing.T) {
+	readings := make(chan string, 4)
+	f := newSSHFixture(t, func(c *ServerConfig) { c.OnFullDiskAccess = func(r string) { readings <- r } })
+	f.launcher.refuse = &launcher.RefusalError{Code: launcher.CodeFullDiskAccessRequired, FullDiskAccess: launcher.FullDiskAccessDenied}
+	client := f.connect(t, f.defaults())
+	sess, _ := client.NewSession()
+	_ = sess.RequestPty("xterm", 24, 80, nil)
+	stderr, _ := sess.StderrPipe()
+	if err := sess.Shell(); err == nil {
+		t.Fatal("the shell started")
+	}
+	readFor(t, stderr, "localport: "+CodeFullDiskAccessRequired+"\r\n")
+	ended := make(chan error, 1)
+	go func() { _, err := io.ReadAll(stderr); ended <- err }()
+	select {
+	case err := <-ended:
+		if err != nil {
+			t.Fatalf("stderr after the refusal: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the channel stayed open after the refusal")
+	}
+	if r := <-readings; r != launcher.FullDiskAccessDenied {
+		t.Fatalf("reading %q", r)
+	}
+}
+
+// Each refusal code maps to the code the client sees.
+func TestRefusalReasonCodes(t *testing.T) {
+	for code, want := range map[string]string{
+		launcher.CodeFullDiskAccessRequired: CodeFullDiskAccessRequired,
+		launcher.CodeAccountRefused:         CodeLoginNotAllowed,
+		launcher.CodeInternal:               CodeKindUnavailable,
+	} {
+		if got := refusalReason(launcher.Refusal(code)); got != want {
+			t.Errorf("%s: %s, want %s", code, got, want)
+		}
+	}
+}
+
 // PAM's messages reach the client's stderr ahead of the session's output, and
 // ahead of the refusal when the setup refused.
 func TestPAMMessagesReachTheClient(t *testing.T) {
@@ -1174,8 +1214,7 @@ func TestPAMMessagesReachTheClient(t *testing.T) {
 	})
 }
 
-// The notice's client address reaches every launcher request of the
-// connection.
+// The notice's client address reaches every launcher request of the connection.
 func TestClientAddrReachesTheLauncherRequest(t *testing.T) {
 	f := newSSHFixture(t, nil)
 	f.clientAddr = "203.0.113.9:40022"
@@ -1318,8 +1357,7 @@ func TestFirstStreamIsAttachedWhenTheConnIsPublished(t *testing.T) {
 	}
 }
 
-// handshakeCount is the server's count of streams before their handshake
-// decision.
+// handshakeCount is the server's count of streams awaiting their handshake decision.
 func handshakeCount(s *Server) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

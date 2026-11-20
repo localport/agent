@@ -64,8 +64,7 @@ func (s *servedDevice) start(ctx context.Context) {
 }
 
 // end stops the device's loops, waits for them and releases its sessions
-// lock. The device's tunnel has stopped by then. A second call does nothing
-// more.
+// lock, after its tunnel stopped. A second call does nothing.
 func (s *servedDevice) end() {
 	if s.cancel != nil {
 		s.cancel()
@@ -89,14 +88,17 @@ type deviceRunner struct {
 	logEvent func(string)
 	probe    sessionProbe
 	probed   bool
+	// fda is the launcher's latest Full Disk Access reading, shared by the
+	// devices with logins: set by each probe and by every session response,
+	// reported by their tunnels. Nil reports none.
+	fda *tunnel.FullDiskAccessState
 	// noMux keeps the launcher unprobed: no session runs.
 	noMux  bool
 	served map[identity.Ref]*servedDevice
 	// configured is the device list the uploader accepts recordings for:
 	// the config's, less the removed devices.
 	configured atomic.Pointer[[]config.LocalDevice]
-	// board receives each device's state for the status endpoint; nil
-	// publishes none.
+	// board receives each device's state for the status endpoint; nil publishes none.
 	board *status.Board
 	// reloads subscribes to the run's reload requests; nil is notifyReload.
 	reloads reloadSource
@@ -135,12 +137,16 @@ func (r *deviceRunner) build(d config.LocalDevice) (spec config.DeviceSpec, ok b
 	}
 	if !r.probed && d.UsesLogins() {
 		r.probe, r.probed = probeLauncher(r.parent, r.logEvent), true
+		r.fda.Set(r.probe.fullDiskAccess)
 	}
 	spec, renews, err := deviceSpec(r.store, d, r.probe, r.logEvent)
 	if err != nil {
 		// err names the device.
 		fmt.Fprintf(os.Stderr, "  skipped: %v\n", err)
 		return config.DeviceSpec{}, false
+	}
+	if d.UsesLogins() {
+		spec.FullDiskAccess = r.fda
 	}
 	served := &servedDevice{local: d}
 	state, err := deviceSessions(r.store, d.Identity, &spec, r.uploads, r.notices, r.logEvent)
@@ -447,8 +453,7 @@ func (r *deviceRunner) isConfigured(identifier string) bool {
 // stop ends the subscription.
 type reloadSource func() (sig <-chan os.Signal, stop func())
 
-// notifyReload subscribes to the service manager's reload signals; tests
-// replace it.
+// notifyReload subscribes to the service manager's reload signals; tests replace it.
 var notifyReload reloadSource = reloadSignals
 
 // logEventf writes an event line to stderr, as the devices' runner does.
@@ -523,13 +528,12 @@ func serveControl(ctl *launcher.ControlListener) (reloads reloadSource, stop fun
 	}
 }
 
-// watchReload is the owner goroutine of the served devices: it runs
-// handleEnds for queued device ends and, with load set, reloads on every
-// reload request (r.reloads), until ctx ends. A config that fails to load keeps
-// the running devices and is logged. It subscribes
-// first, so a signal sent before the agent runs is queued (not lost, and on
-// Unix not the default SIGHUP exit), and handles it once the agent has
-// started.
+// watchReload owns the served devices until ctx ends: it runs handleEnds for
+// queued device ends and, with load set, reloads on every request
+// (r.reloads). A config that fails to load is logged; the running devices
+// stay. It subscribes first, so a signal sent before the agent runs is queued
+// (not lost, and on Unix not the default SIGHUP exit) and handled once the
+// agent has started.
 func (r *deviceRunner) watchReload(ctx context.Context, a *agent.Agent, load func() ([]config.LocalDevice, error)) {
 	var sig <-chan os.Signal
 	if load != nil {

@@ -53,7 +53,7 @@ func (c Client) Probe(ctx context.Context) (Probe, error) {
 	case resp.Probe != nil:
 		return *resp.Probe, nil
 	case resp.Refused != nil:
-		return Probe{}, clientRefusal(resp.Refused.Code, nil)
+		return Probe{}, clientRefusal(resp.Refused.Code, nil, "")
 	}
 	return Probe{}, errors.New("launcher: unexpected response to probe")
 }
@@ -100,7 +100,7 @@ func (c Client) Start(ctx context.Context, req Request, channel *os.File) (*Sess
 		return &Session{conn: conn, ID: resp.Started.SessionID, Messages: resp.Messages}, nil
 	case resp.Refused != nil:
 		conn.Close()
-		return nil, clientRefusal(resp.Refused.Code, resp.Messages)
+		return nil, clientRefusal(resp.Refused.Code, resp.Messages, "")
 	}
 	conn.Close()
 	return nil, errors.New("launcher: unexpected response to a session request")

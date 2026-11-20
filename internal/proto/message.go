@@ -23,6 +23,7 @@ const (
 	MsgMuxBindAck      MessageType = 12
 	MsgPortsUpdate     MessageType = 13
 	MsgPortsAck        MessageType = 14
+	MsgDeviceReport    MessageType = 15
 )
 
 var msgNames = map[MessageType]string{
@@ -40,6 +41,7 @@ var msgNames = map[MessageType]string{
 	MsgMuxBindAck:      "MuxBindAck",
 	MsgPortsUpdate:     "PortsUpdate",
 	MsgPortsAck:        "PortsAck",
+	MsgDeviceReport:    "DeviceReport",
 }
 
 func (m MessageType) String() string {
@@ -109,6 +111,14 @@ type RegisterPayload struct {
 	FullDiskAccess string `json:"full_disk_access,omitempty"`
 }
 
+// DeviceReportPayload is a device's change to what it reported on Register,
+// sent on the control connection when the session launcher's Full Disk Access
+// reading (macOS) differs from the last value this connection reported.
+// Display only, like the Register fields.
+type DeviceReportPayload struct {
+	FullDiskAccess string `json:"full_disk_access"`
+}
+
 type RegisterAckPayload struct {
 	Success    bool      `json:"success"`
 	TunnelID   string    `json:"tunnel_id"`
@@ -133,8 +143,7 @@ type RegisterAckPayload struct {
 	// next Register to reclaim the slot.
 	SessionID string `json:"session_id,omitempty"`
 
-	// Ports lists the device's allowed ports as set in the dashboard, with
-	// their version.
+	// Ports lists the device's allowed ports from the dashboard, with their version.
 	PortsVersion uint64       `json:"ports_version,omitempty"`
 	Ports        []DevicePort `json:"ports,omitempty"`
 

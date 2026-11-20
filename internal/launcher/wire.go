@@ -30,8 +30,7 @@ import (
 	"github.com/localport/agent/internal/errcode"
 )
 
-// Version is the request schema version. A launcher refuses any other with
-// CodeVersionMismatch.
+// Version is the request schema version; any other is refused CodeVersionMismatch.
 const Version = 2
 
 // AgentAccount is the system account the network agent runs as: the only
@@ -48,9 +47,8 @@ const (
 	KindExec     = "exec"
 	KindSFTP     = "sftp"
 	KindProbe    = "probe"
-	// KindForward starts one connection's networking helper: the forward
-	// server, run as the login, dials and listens for its port forwards
-	// (forwardwire.go).
+	// KindForward starts one connection's networking helper: the forward server,
+	// run as the login, dials and listens for its port forwards (forwardwire.go).
 	KindForward = "forward"
 	// KindStatus opens the device service's status publication: after the
 	// launcher answers Publishing, the connection carries status frames
@@ -75,6 +73,9 @@ const (
 	// CodeVersionMismatch refuses a request of another Version: the agent
 	// and the launcher service come from different releases.
 	CodeVersionMismatch = "version_mismatch"
+	// CodeFullDiskAccessRequired refuses, on macOS, an sftp session while the
+	// launcher lacks Full Disk Access.
+	CodeFullDiskAccessRequired = "full_disk_access_required"
 )
 
 // Full Disk Access states a probe reports.
@@ -83,6 +84,16 @@ const (
 	FullDiskAccessDenied  = "denied"
 	FullDiskAccessUnknown = "unknown"
 )
+
+func validFullDiskAccess(s string) bool {
+	return s == FullDiskAccessGranted || s == FullDiskAccessDenied || s == FullDiskAccessUnknown
+}
+
+// sessionKind reports whether kind is one of the session kinds whose start
+// reads Full Disk Access on macOS: terminal, exec and sftp.
+func sessionKind(kind string) bool {
+	return kind == KindTerminal || kind == KindExec || kind == KindSFTP
+}
 
 // Request is the one message an agent sends per connection.
 type Request struct {
@@ -113,10 +124,9 @@ type Request struct {
 	// changing the file system. Only an sftp request carries them.
 	FilesDownload bool `json:"files_download,omitempty"`
 	FilesUpload   bool `json:"files_upload,omitempty"`
-	// ClientAddr is the session client's address, `ip:port` with an IP
-	// literal and no zone, as the edge reported it; empty when unknown. The
-	// helper gives it to PAM (PAM_RHOST), SSH_CLIENT, SSH_CONNECTION and
-	// utmp.
+	// ClientAddr is the client's `ip:port` as the edge reported it (an IP
+	// literal, no zone), empty when unknown. The helper passes it to PAM
+	// (PAM_RHOST), SSH_CLIENT, SSH_CONNECTION and utmp.
 	ClientAddr string `json:"client_addr,omitempty"`
 	// Password travels outside JSON, as a raw length-prefixed trailer
 	// (writeSecret, readSecret), so no encoder buffer ever holds it; each
@@ -132,10 +142,9 @@ const (
 	MaxPassword     = 256
 	// MaxCommand bounds an exec command line so the request fits MaxMessage.
 	MaxCommand = 2 << 10
-	// MaxEnvVars, MaxEnvValue and MaxEnvBytes bound a request's environment:
-	// at most 16 variables, each value at most 256 bytes, names and values
-	// together at most 1 KiB, so the request with a full command still fits
-	// MaxMessage.
+	// MaxEnvVars, MaxEnvValue and MaxEnvBytes bound a request's environment to
+	// 16 variables, 256-byte values and 1 KiB in all, so a request with a full
+	// command still fits MaxMessage.
 	MaxEnvVars  = 16
 	MaxEnvValue = 256
 	MaxEnvBytes = 1 << 10
@@ -286,16 +295,19 @@ type Response struct {
 	// Messages are the session setup's PAM messages for the client, in
 	// order (HelperReply.Messages).
 	Messages []string `json:"messages,omitempty"`
+	// FullDiskAccess is the launcher's reading for this terminal, exec or sftp
+	// request (macOS), beside Started or Refused; empty where the platform has
+	// none or a refusal came before the reading.
+	FullDiskAccess string `json:"full_disk_access,omitempty"`
 }
 
 // maxCodeLen bounds every refusal code, so FitMessages can size a reply
 // before its code is known.
 const maxCodeLen = 32
 
-// FitMessages returns msgs cut so that a HelperReply and a Response carrying
-// them with their largest other fields encode within MaxMessage: whole
-// messages are dropped from the end, then the last one kept is cut on a
-// rune boundary.
+// FitMessages cuts msgs so a HelperReply and a Response carrying them, with
+// their largest other fields, fit MaxMessage: whole messages drop from the
+// end, then the last kept is cut on a rune boundary.
 func FitMessages(msgs []string) []string {
 	if len(msgs) == 0 || messagesFit(msgs) {
 		return msgs
@@ -337,8 +349,8 @@ func messagesFit(msgs []string) bool {
 	code := strings.Repeat("x", maxCodeLen)
 	for _, v := range []any{
 		HelperReply{Refused: code, Messages: msgs},
-		Response{Started: &Started{SessionID: strings.Repeat("0", 32)}, Messages: msgs},
-		Response{Refused: &Refused{Code: code}, Messages: msgs},
+		Response{Started: &Started{SessionID: strings.Repeat("0", 32)}, Messages: msgs, FullDiskAccess: FullDiskAccessGranted},
+		Response{Refused: &Refused{Code: code}, Messages: msgs, FullDiskAccess: FullDiskAccessGranted},
 	} {
 		b, err := json.Marshal(v)
 		if err != nil || len(b) > MaxMessage {
@@ -383,10 +395,12 @@ type Exit struct {
 }
 
 // RefusalError is a refusal carried as an error; errors.As finds it.
-// Messages are the PAM messages that came with it, for the client.
+// Messages are the PAM messages that came with it, for the client;
+// FullDiskAccess is the launcher's reading that came with it (macOS).
 type RefusalError struct {
-	Code     string
-	Messages []string
+	Code           string
+	Messages       []string
+	FullDiskAccess string
 }
 
 func (e *RefusalError) Error() string { return "launcher refused: " + e.Code }
@@ -399,8 +413,8 @@ func Refusal(code string) error { return &RefusalError{Code: code} }
 var ErrLauncherVersion = errcode.New(errcode.LauncherVersion)
 
 // clientRefusal is the error a client returns for a refusal it read.
-func clientRefusal(code string, messages []string) error {
-	r := &RefusalError{Code: code, Messages: messages}
+func clientRefusal(code string, messages []string, fullDiskAccess string) error {
+	r := &RefusalError{Code: code, Messages: messages, FullDiskAccess: fullDiskAccess}
 	if code == CodeVersionMismatch {
 		return ErrLauncherVersion.With(r, "")
 	}
@@ -529,6 +543,9 @@ func readResponse(r io.Reader) (Response, error) {
 	}
 	if len(resp.Messages) > 0 && resp.Started == nil && resp.Refused == nil {
 		return Response{}, errors.New("launcher: bad response: messages without started or refused")
+	}
+	if resp.FullDiskAccess != "" && ((resp.Started == nil && resp.Refused == nil) || !validFullDiskAccess(resp.FullDiskAccess)) {
+		return Response{}, errors.New("launcher: bad response: full disk access")
 	}
 	return resp, nil
 }

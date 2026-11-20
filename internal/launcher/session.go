@@ -17,6 +17,9 @@ type Session struct {
 	ID   string
 	// Messages are the PAM messages of the session's setup, for the client.
 	Messages []string
+	// FullDiskAccess is the launcher's reading taken for this session
+	// (macOS); empty elsewhere.
+	FullDiskAccess string
 }
 
 // Close ends the request connection; the session goes on.

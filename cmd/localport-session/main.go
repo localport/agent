@@ -149,10 +149,11 @@ func runLauncher(logger *log.Logger) error {
 		LoadConfig:   func() (*config.LocalConfig, error) { return config.LoadLocal(file) },
 		HelperPath:   exe,
 		Probe: func() launcher.Probe {
-			return launcher.Probe{PAM: sessionhelper.PAMAvailable(), FullDiskAccess: fullDiskAccess()}
+			return launcher.Probe{PAM: sessionhelper.PAMAvailable(), FullDiskAccess: launcher.ReadFullDiskAccess()}
 		},
-		GroupMember: groupMember,
-		Log:         logger.Printf,
+		FullDiskAccess: sessionFullDiskAccess,
+		GroupMember:    groupMember,
+		Log:            logger.Printf,
 	}
 	// The status endpoint never stops the launcher: a missing endpoint or a
 	// failed accept loop is logged and session requests keep being served.

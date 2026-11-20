@@ -11,11 +11,12 @@ import "C"
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
 	"os"
 	"syscall"
 	"unsafe"
+
+	"github.com/localport/agent/internal/launcher"
 )
 
 // The Sockets keys of the io.localport.session plist: the launcher socket
@@ -67,19 +68,6 @@ func activatedSocket(key string) (*net.UnixListener, error) {
 	return ul, nil
 }
 
-// tccDatabase is readable only by a process holding Full Disk Access.
-const tccDatabase = "/Library/Application Support/com.apple.TCC/TCC.db"
-
-// fullDiskAccess reports whether the launcher holds Full Disk Access, by
-// opening a file TCC protects for every process without it.
-func fullDiskAccess() string {
-	f, err := os.Open(tccDatabase)
-	switch {
-	case err == nil:
-		_ = f.Close()
-		return "granted"
-	case errors.Is(err, fs.ErrPermission):
-		return "denied"
-	}
-	return "unknown"
-}
+// sessionFullDiskAccess is the launcher's per-request Full Disk Access
+// reading (launcher.Server.FullDiskAccess).
+var sessionFullDiskAccess = launcher.ReadFullDiskAccess

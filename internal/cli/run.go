@@ -26,7 +26,6 @@ import (
 	"github.com/localport/agent/internal/ui"
 )
 
-// runFlags are run's flags.
 type runFlags struct {
 	noUI, system, asService *bool
 	logFile                 *string
@@ -229,25 +228,24 @@ func serveDevices(parent context.Context, version string, store *identity.Store,
 	return serveDevicesOn(parent, version, store, devices, noUI, noMux, reload, nil, nil)
 }
 
-// serveDevicesOn runs the enrolled devices until a signal or until parent
-// ends, with the renewal loop of each renewable device credential. A device
-// whose credential is missing or unreadable is logged and skipped. Without
-// reload, the run refuses to start when no device can and returns when the
-// last one ends; with it (the run.lock holder, serveHeldDevices) the run keeps
-// going with none until it stops. A device refused for good is forgotten
-// (SE018, SE041) or parked (deviceRunner.handleEnd). noMux serves every
-// inbound connection over its own connection, so the devices serve no
-// sessions. With reload set, each request from reloads (notifyReload when nil)
-// re-reads the devices through it and applies the changed ones only
-// (deviceRunner.reload). board, when set, receives each device's state for the
-// status endpoint.
+// serveDevicesOn runs the enrolled devices until a signal or parent ends,
+// with the renewal loop of each renewable credential. A device whose
+// credential is missing or unreadable is logged and skipped. Without reload
+// the run refuses to start when no device can, and returns when the last one
+// ends; with it (the run.lock holder, serveHeldDevices) it keeps going with
+// none until stopped, and each request from reloads (notifyReload when nil)
+// re-reads the devices and applies the changed ones (deviceRunner.reload). A
+// device refused for good is forgotten (SE018, SE041) or parked
+// (deviceRunner.handleEnd). noMux serves every inbound connection on its own
+// connection, so no sessions run. board, when set, receives each device's
+// state for the status endpoint.
 func serveDevicesOn(parent context.Context, version string, store *identity.Store, devices []config.LocalDevice, noUI, noMux bool, reload func() ([]config.LocalDevice, error), reloads reloadSource, board *status.Board) error {
 	// Each line names its own topic (identity, session, reload).
 	logEvent := func(line string) { fmt.Fprintf(os.Stderr, "  [event] %s\n", line) }
 	cfg := &config.Config{AgentVersion: version, NoMux: noMux}
 	var a *agent.Agent
 	runner := &deviceRunner{parent: parent, store: store, logEvent: logEvent, served: map[identity.Ref]*servedDevice{},
-		forget: store.Forget, endWake: make(chan struct{}, 1), board: board, reloads: reloads}
+		forget: store.Forget, endWake: make(chan struct{}, 1), board: board, reloads: reloads, fda: tunnel.NewFullDiskAccessState()}
 	runner.configured.Store(&devices)
 	// The uploader runs only after a is set.
 	runner.uploads = openUploader(store, runner.isConfigured, func(identifier string) (recording.Client, error) {
@@ -323,8 +321,7 @@ func serveDevicesOn(parent context.Context, version string, store *identity.Stor
 		runnerServing(runner, a)
 	}
 	runErr := a.Run(ctx, renderer)
-	// Every device has stopped; end the reload, renewal and key refresh loops
-	// with them.
+	// Every device has stopped; end the reload, renewal and key refresh loops.
 	stop()
 	renewing.Wait()
 	// Ends queued as the last tunnels stopped still forget or park.
@@ -423,7 +420,7 @@ func deviceSpec(store *identity.Store, d config.LocalDevice, probe sessionProbe,
 		RunAsAgent:     d.RunAsAgent,
 	}
 	if d.UsesLogins() {
-		spec.SessionAuth, spec.FullDiskAccess = probe.sessionAuth, probe.fullDiskAccess
+		spec.SessionAuth = probe.sessionAuth
 	}
 	return spec, m.Meta.Source.Renewable(), nil
 }
@@ -440,13 +437,12 @@ type deviceSessionState struct {
 
 // deviceSessions sets spec's HintRevoked hook and, when the device enables a
 // session capability, its session server. The server binds certificates to,
-// and uses as SSH host key, the certificate of the last acknowledged
-// registration (spec.Credential), never Store.Load, which lags behind a
-// renewed certificate until it is promoted. It returns nil state when no
-// server is set, and an error, leaving sessions off, when the sessions lock
-// cannot be held, as when another process serves the same identity, or when
-// the device has logins and this process is not an account the session
-// launcher serves.
+// and uses as SSH host key, the last acknowledged registration's certificate
+// (spec.Credential), never Store.Load, which lags behind a renewal until it is
+// promoted. It returns nil state when no server is set. It returns an error,
+// leaving sessions off, when the sessions lock is held elsewhere (another
+// process serves the identity) or the device has logins and this process is
+// not an account the session launcher serves.
 func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.DeviceSpec, uploads *recording.Uploader, notices *tunnel.ClipboardNotices, logEvent func(string)) (*deviceSessionState, error) {
 	keys, err := store.TicketKeys(ref)
 	if err != nil {
@@ -518,6 +514,8 @@ func deviceSessions(store *identity.Store, ref identity.Ref, spec *config.Device
 		Identifier:     ref.Identity,
 		Device:         ref.String(),
 		Launcher:       sessionLauncher,
+		// nil-safe: a device without logins has no state.
+		OnFullDiskAccess: spec.FullDiskAccess.Set,
 	})
 	spec.ClipboardNotices = notices
 	return &deviceSessionState{refresher: refresher, lock: lock, unshare: unshare}, nil

@@ -126,12 +126,37 @@ func TestVersionMismatch(t *testing.T) {
 			t.Errorf("%s: %v, want version_mismatch", body, err)
 		}
 	}
-	err := clientRefusal(CodeVersionMismatch, nil)
+	err := clientRefusal(CodeVersionMismatch, nil, "")
 	if !errors.Is(err, ErrLauncherVersion) || CodeOf(err) != CodeVersionMismatch {
 		t.Fatalf("client error %v", err)
 	}
-	if errors.Is(clientRefusal(CodeBusy, nil), ErrLauncherVersion) {
+	if errors.Is(clientRefusal(CodeBusy, nil, ""), ErrLauncherVersion) {
 		t.Fatal("busy reported as a version mismatch")
+	}
+}
+
+// A Full Disk Access reading stands only beside Started or Refused and only
+// with a known state.
+func TestResponseFullDiskAccess(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		resp Response
+		ok   bool
+	}{
+		{"started", Response{Started: &Started{SessionID: "s"}, FullDiskAccess: FullDiskAccessGranted}, true},
+		{"refused", Response{Refused: &Refused{Code: CodeFullDiskAccessRequired}, FullDiskAccess: FullDiskAccessDenied}, true},
+		{"none", Response{Started: &Started{SessionID: "s"}}, true},
+		{"beside exit", Response{Exit: &Exit{}, FullDiskAccess: FullDiskAccessUnknown}, false},
+		{"beside probe", Response{Probe: &Probe{}, FullDiskAccess: FullDiskAccessGranted}, false},
+		{"unknown state", Response{Started: &Started{SessionID: "s"}, FullDiskAccess: "maybe"}, false},
+	} {
+		b, err := encode(tc.resp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readResponse(bytes.NewReader(b)); (err == nil) != tc.ok {
+			t.Errorf("%s: %v, want ok %v", tc.name, err, tc.ok)
+		}
 	}
 }
 

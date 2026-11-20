@@ -41,8 +41,7 @@ import (
 	"github.com/localport/agent/internal/recording"
 )
 
-// Reasons a connection ends with, written to its open channels' stderr and
-// recorded; the edge records the stream's end.
+// Reasons a connection ends with, written to its open channels' stderr and recorded.
 const (
 	CloseIdle     = "idle"
 	CloseShutdown = "shutdown"
@@ -159,6 +158,10 @@ type ServerConfig struct {
 	Device string
 	// Launcher starts sessions; nil is the launcher socket or pipe.
 	Launcher Launcher
+	// OnFullDiskAccess receives the launcher's Full Disk Access reading of
+	// every session start, started or refused (macOS; never empty); it must
+	// not block. Nil drops them.
+	OnFullDiskAccess func(reading string)
 
 	// clock replaces the wall clock for validity, idle and desktop client
 	// wait checks. Tests set it.
@@ -352,6 +355,14 @@ func (s *Server) RecordingClientUp() {
 func (s *Server) log(format string, args ...any) {
 	if s.cfg.OnEvent != nil {
 		s.cfg.OnEvent(fmt.Sprintf(format, args...))
+	}
+}
+
+// noteFullDiskAccess passes a session start's launcher reading on; an empty
+// one (off macOS, or a refusal before the reading) is dropped.
+func (s *Server) noteFullDiskAccess(reading string) {
+	if reading != "" && s.cfg.OnFullDiskAccess != nil {
+		s.cfg.OnFullDiskAccess(reading)
 	}
 }
 

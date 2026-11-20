@@ -13,8 +13,7 @@ import (
 	"github.com/localport/agent/internal/security"
 )
 
-// sanitize strips control and invisible formatting characters from wire
-// values.
+// sanitize strips control and invisible formatting characters from wire values.
 func sanitize(s string) string { return security.SanitizeDisplay(s) }
 
 // Frame layout on the wire:
@@ -37,9 +36,8 @@ const defaultWriteTimeout = 10 * time.Second
 // buffer is released after use.
 const maxRetainedWriteBuffer = 4 << 10
 
-// Conn wraps a net.Conn with framed JSON messages. Sends and receives are
-// serialized separately, so one reader and several writers may run
-// concurrently.
+// Conn wraps a net.Conn with framed JSON messages. Sends and receives lock
+// separately: one reader and several writers may run concurrently.
 type Conn struct {
 	raw net.Conn
 	wmu sync.Mutex
@@ -146,18 +144,19 @@ func (c *Conn) SendMuxBind(p *MuxBindPayload) error { return c.Send(MsgMuxBind, 
 func (c *Conn) SendPortsAck(p *PortsAckPayload) error {
 	return c.Send(MsgPortsAck, p)
 }
+func (c *Conn) SendDeviceReport(p *DeviceReportPayload) error {
+	return c.Send(MsgDeviceReport, p)
+}
 
 // Payload parsers validate the JSON, strip control characters from displayed
-// fields and return a typed payload. They are the sanitization boundary for
-// inbound strings.
+// fields and return a typed payload; they sanitize every inbound string.
 //
 // These fields are matched or dialed, so they stay verbatim.
 //
 //   - SessionID, compared byte for byte by the edge on resume.
 //   - TunnelID, EdgeID.
 //   - EdgeAddr, a dial target checked by allowedRedirectHost.
-//   - ConnectionID, echoed in ConnectionReady and sanitized for display in
-//     ui.shortID.
+//   - ConnectionID, echoed in ConnectionReady and shown sanitized (ui.shortID).
 
 func ParseRegisterAck(b []byte) (*RegisterAckPayload, error) {
 	p, err := parse[RegisterAckPayload](b)

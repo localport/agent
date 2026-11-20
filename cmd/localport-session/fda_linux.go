@@ -2,7 +2,6 @@
 
 package main
 
-import "github.com/localport/agent/internal/launcher"
-
-// fullDiskAccess is a macOS state; Linux reports unknown.
-func fullDiskAccess() string { return launcher.FullDiskAccessUnknown }
+// sessionFullDiskAccess is nil: Full Disk Access is a macOS state, so Linux
+// session requests carry no reading and are not gated by one.
+var sessionFullDiskAccess func() string

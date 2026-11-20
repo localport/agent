@@ -19,11 +19,9 @@ import (
 
 // Server is the launcher service's configuration on Windows.
 type Server struct {
-	// AgentSID is the only client the launcher serves: the device service's
-	// virtual account.
+	// AgentSID is the only client served: the device service's virtual account.
 	AgentSID *windows.SID
-	// LoadConfig reads the Administrators-owned device config; called per
-	// request.
+	// LoadConfig reads the Administrators-owned device config on each request.
 	LoadConfig func() (*config.LocalConfig, error)
 	// HelperPath is the absolute path of localport-session.exe.
 	HelperPath string
@@ -175,7 +173,7 @@ func (s *Server) handle(conn *os.File) {
 		s.refuse(conn, CodeBadRequest)
 		return
 	}
-	hreq, err := authorize(s.LoadConfig, "", req)
+	hreq, err := authorize(s.LoadConfig, "", req, "")
 	if err != nil {
 		s.Log("launcher: refused %s for device %q login %q: %v", req.Kind, req.Device, req.Login, err)
 		s.refuse(conn, CodeOf(err))
@@ -248,7 +246,6 @@ func (s *Server) run(conn *os.File, req HelperRequest) {
 	respond(conn, Response{Exit: &e})
 }
 
-// waitExit waits for cmd and returns its exit code.
 func waitExit(cmd *exec.Cmd) Exit {
 	err := cmd.Wait()
 	var exitErr *exec.ExitError

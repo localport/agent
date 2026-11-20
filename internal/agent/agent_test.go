@@ -24,9 +24,8 @@ func identities(a *Agent) []string {
 	return out
 }
 
-// Apply stops a changed device's tunnel and starts its replacement, keeps the
-// other device running, and keeps Run running through the swap of its only
-// device.
+// Apply replaces only a changed device's tunnel, keeps the other device
+// running, and keeps Run running while its only device is swapped.
 func TestApplySwapsOnlyTheNamedDevice(t *testing.T) {
 	a := New(&config.Config{Devices: []config.DeviceSpec{unreachableDevice("a.one"), unreachableDevice("b.two")}})
 	if _, err := a.Apply(nil, nil); !errors.Is(err, ErrNotRunning) {
@@ -83,16 +82,18 @@ func specs(s ...config.DeviceSpec) func() []config.DeviceSpec {
 // deviceOptions carries the spec into the tunnel: the identity (which keys
 // session recordings and UI events), name, edge, host and session settings.
 func TestDeviceOptionsCarryTheSpec(t *testing.T) {
+	fda := tunnel.NewFullDiskAccessState()
+	fda.Set("granted")
 	spec := config.DeviceSpec{
 		Name: "gw-01", Identity: "tun12345.gw-01", Host: "10.0.0.5", Edge: "eu.edge.localport.dev:443",
 		Capabilities: []string{"terminal"}, Logins: []string{"pi"}, Desktop: []string{"vnc"},
-		SessionAuth: "pam", RunAsAgent: true, FullDiskAccess: "granted",
+		SessionAuth: "pam", RunAsAgent: true, FullDiskAccess: fda,
 	}
 	opts := deviceOptions(spec)
 	if opts.Identity != spec.Identity || opts.Label != spec.Name || opts.ClientName != spec.Name || opts.Host != spec.Host || opts.Edge != spec.Edge {
 		t.Fatalf("options identity=%q label=%q client=%q host=%q edge=%q", opts.Identity, opts.Label, opts.ClientName, opts.Host, opts.Edge)
 	}
-	if len(opts.Capabilities) != 1 || len(opts.Logins) != 1 || len(opts.Desktop) != 1 || opts.SessionAuth != "pam" || !opts.RunAsAgent || opts.FullDiskAccess != "granted" {
+	if len(opts.Capabilities) != 1 || len(opts.Logins) != 1 || len(opts.Desktop) != 1 || opts.SessionAuth != "pam" || !opts.RunAsAgent || opts.FullDiskAccess.Load() != "granted" {
 		t.Fatalf("session settings not carried: %+v", opts)
 	}
 	if opts.Credential != nil {
