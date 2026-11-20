@@ -160,6 +160,31 @@ func TestResponseFullDiskAccess(t *testing.T) {
 	}
 }
 
+// An end frame carries one known reason; any other payload is refused on
+// both the write and the read.
+func TestEndFrame(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteFrame(&buf, Frame{Type: FrameEnd, Data: []byte(EndFullDiskAccessRevoked)}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := NewFrameReader(&buf).ReadFrame()
+	if err != nil || f.Type != FrameEnd || string(f.Data) != EndFullDiskAccessRevoked {
+		t.Fatalf("read %+v, %v", f, err)
+	}
+	if err := WriteFrame(&buf, Frame{Type: FrameEnd, Data: []byte("other")}); err == nil {
+		t.Fatal("an unknown end reason was written")
+	}
+	for _, payload := range []string{"other", "", strings.Repeat("x", maxEndReason+1)} {
+		raw := append([]byte{FrameEnd, 0, 0, 0, byte(len(payload))}, payload...)
+		if len(payload) > 255 {
+			t.Fatal("payload too long for the one-byte length")
+		}
+		if _, err := NewFrameReader(bytes.NewReader(raw)).ReadFrame(); err == nil {
+			t.Errorf("end frame %q was read", payload)
+		}
+	}
+}
+
 // The request bound ends with the request: a later read on the conn waits for
 // data instead of failing at the expired deadline.
 func TestReadWithinClearsTheDeadline(t *testing.T) {

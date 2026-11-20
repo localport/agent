@@ -38,7 +38,8 @@ type Server struct {
 	Probe func() Probe
 	// FullDiskAccess reads the launcher's Full Disk Access for each terminal,
 	// exec and sftp request (macOS): the reading gates sftp, picks how a shell
-	// starts and returns on the response. Nil off macOS.
+	// starts, returns on the response and, when granted, enrols the session
+	// for revocation. Nil where the platform has none (Linux).
 	FullDiskAccess func() string
 	// GroupMember, when set, reports whether the directory service lists a
 	// uid in a group. It decides a status reader whose peer credential may be
@@ -49,6 +50,9 @@ type Server struct {
 	slots  chan struct{}
 	wg     sync.WaitGroup
 	status statusRelay
+	// revoke ends granted sessions when Full Disk Access goes; made by Serve
+	// when FullDiskAccess is set, unless a test set it first.
+	revoke *revocation
 	// peerGroups is peerCredGroups; tests replace it.
 	peerGroups func(*net.UnixConn) (uid uint32, gids []uint32, err error)
 }
@@ -150,6 +154,9 @@ func (s *Server) publish(conn *net.UnixConn) {
 // it: each holds its own channel to the agent.
 func (s *Server) Serve(ctx context.Context, ln *net.UnixListener) error {
 	s.slots = make(chan struct{}, maxHelpers)
+	if s.FullDiskAccess != nil && s.revoke == nil {
+		s.revoke = newRevocation(s.FullDiskAccess, s.Log)
+	}
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
 	for {
@@ -167,12 +174,12 @@ func (s *Server) Serve(ctx context.Context, ln *net.UnixListener) error {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			s.handle(conn)
+			s.handle(ctx, conn)
 		}()
 	}
 }
 
-func (s *Server) handle(conn *net.UnixConn) {
+func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	defer conn.Close()
 	uid, pid, err := peerCred(conn)
 	if err != nil {
@@ -245,7 +252,7 @@ func (s *Server) handle(conn *net.UnixConn) {
 		return
 	}
 	defer func() { <-s.slots }()
-	s.run(conn, hreq, channel)
+	s.run(ctx, conn, hreq, channel)
 }
 
 // readFullDiskAccess is the reading a request of kind gets: taken now for a
@@ -263,8 +270,9 @@ func (s *Server) authorize(req Request, fullDiskAccess string) (HelperRequest, e
 }
 
 // run starts one helper with channel on fd 3 and its control socket on fd
-// 4, relays its start answer, then reports its exit.
-func (s *Server) run(conn *net.UnixConn, req HelperRequest, channel *os.File) {
+// 4, relays its start answer, then reports its exit. A session started with
+// Full Disk Access granted is enrolled for revocation until its helper exits.
+func (s *Server) run(ctx context.Context, conn *net.UnixConn, req HelperRequest, channel *os.File) {
 	fda := req.FullDiskAccess
 	ours, theirs, err := SocketPair()
 	if err != nil {
@@ -305,6 +313,14 @@ func (s *Server) run(conn *net.UnixConn, req HelperRequest, channel *os.File) {
 		respond(conn, Response{Refused: &Refused{Code: reply.Refused}, Messages: reply.Messages, FullDiskAccess: fda})
 		s.logExit(cmd.Process.Pid, <-exited)
 		return
+	}
+	// start bounded the control channel for the reply; End writes set their own.
+	_ = ours.SetDeadline(time.Time{})
+	if fda == FullDiskAccessGranted && s.revoke != nil {
+		g := &grantedSession{control: ours}
+		s.revoke.add(ctx, g)
+		// Runs before the deferred close of ours.
+		defer s.revoke.remove(g)
 	}
 	id := newSessionID()
 	s.Log("launcher: session %s: %s for %q, helper %d", id, req.Kind, req.Login, cmd.Process.Pid)

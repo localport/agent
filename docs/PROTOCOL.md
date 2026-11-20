@@ -818,6 +818,10 @@ stream:
      not permitted" on protected folders; a program the user runs is its own
      responsible process and may still ask on the Mac. A macOS that cannot
      start it that way refuses the request `full_disk_access_required`.
+   - A session started with it `granted` ends with `localport: session
+     ended: full_disk_access_revoked` when the grant is removed while it runs:
+     the launcher and the session's own helper each re-read it every 30
+     seconds.
    - Every login, agent-account sessions included, runs in its own BSM audit
      session as under Apple's sshd: the login's audit user id, flags remote and
      authenticated, a TTY flag for a PTY, the client address as terminal id. A
@@ -1117,7 +1121,12 @@ stream:
    `recording_failed` (a Strict
    connection's port forwarding events could not be recorded) and, on one
    channel, `helper_failed` (the session helper's channel ended without an
-   exit). A client that closes the
+   exit or an end frame) or `full_disk_access_revoked` (macOS, the helper's
+   end frame: Full Disk Access was removed during a session started with
+   it). Once the session's process exited, the helper closes the login's
+   utmp entry and PAM session first, then delivers the remaining output and
+   the exit or end frame within 30 seconds; a channel the agent stops reading
+   for longer ends without them (`helper_failed`). A client that closes the
    connection ends it without a reason. A desktop connection's channel has no
    stderr: before closing it for a reason, unless the channel already ended,
    the agent sends the channel request `end@localport.io` (want-reply false)

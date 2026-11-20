@@ -39,6 +39,14 @@ func startShell(t *testing.T) *shell {
 // startShellArgs starts /bin/sh with args on a PTY.
 func startShellArgs(t *testing.T, args ...string) *shell {
 	t.Helper()
+	s, _ := startShellGated(t, 0, args...)
+	return s
+}
+
+// startShellGated is startShellArgs with a gateWriter parking the first
+// frame of type park between the terminal and the channel.
+func startShellGated(t *testing.T, park byte, args ...string) (*shell, *gateWriter) {
+	t.Helper()
 	agent, helper, err := launcher.SocketPair()
 	if err != nil {
 		t.Fatal(err)
@@ -47,19 +55,21 @@ func startShellArgs(t *testing.T, args ...string) *shell {
 	if err != nil {
 		t.Fatal(err)
 	}
+	gate := newGate(helper, park)
 	plan := spawnPlan{path: "/bin/sh", args: args, env: []string{"PATH=/usr/bin:/bin", "TERM=dumb", "HOME=/", "PS1=$ "}, dir: "/"}
-	k, err := startTerminal(&frameWriter{w: helper}, master, slave, plan, t.Logf)
+	k, err := startTerminal(&frameWriter{w: gate}, master, slave, plan, t.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		gate.release()
 		k.finish()
 		k.Wait()
 		agent.Close()
 		helper.Close()
 	})
 	_ = agent.SetDeadline(time.Now().Add(15 * time.Second))
-	return &shell{k: k, fr: launcher.NewFrameReader(agent), in: agent}
+	return &shell{k: k, fr: launcher.NewFrameReader(agent), in: agent}, gate
 }
 
 func (s *shell) send(t *testing.T, line string) {
@@ -181,6 +191,86 @@ func TestTerminalShellKilledBySignal(t *testing.T) {
 	s := startShell(t)
 	s.send(t, "kill -KILL $$\n")
 	s.expectExit(t, -9)
+}
+
+func (k *terminal) sawExit() bool {
+	k.procMu.Lock()
+	defer k.procMu.Unlock()
+	return k.exitSeen
+}
+
+// A revocation while an output write (the prompt) is parked on an agent that
+// stopped reading hangs up the shell and releases the login before the
+// output moves; the end frame follows that output once the agent reads again.
+func TestTerminalEndWhileOutputIsParked(t *testing.T) {
+	s, gate := startShellGated(t, launcher.FrameData, "-sh")
+	gate.waitParked(t)
+	e := startEnding(t, s.k, s.k.out)
+	e.revoked <- launcher.EndFullDiskAccessRevoked
+	waitClosed(t, "the login was released with the output parked", e.released)
+	if !s.k.sawExit() {
+		t.Fatal("the login was released before the shell exited")
+	}
+	gate.release()
+	waitClosed(t, "endSession returned", e.done)
+	expectFrames(t, s.in, launcher.Frame{Type: launcher.FrameData}, endRevoked)
+}
+
+// A shell that exits by itself while its output is parked, then the end frame
+// during the exit drain: the exit path sees the stopped output, so the end
+// frame follows the output and no exit frame is sent. The session's steps
+// are driven directly to force this interleaving.
+func TestTerminalEndDuringTheExitDrain(t *testing.T) {
+	s, gate := startShellGated(t, launcher.FrameData, "sh", "-c", "echo x; exit 3")
+	gate.waitParked(t)
+	waitClosed(t, "the shell exited", s.k.exited)
+	if !s.k.stop() {
+		t.Fatal("the output had stopped before the end")
+	}
+	s.k.finish()
+	ended := make(chan struct{})
+	go func() { s.k.writeEnd(launcher.EndFullDiskAccessRevoked); close(ended) }()
+	gate.release()
+	waitClosed(t, "writeEnd returned", ended)
+	s.k.Wait()
+	expectFrames(t, s.in, launcher.Frame{Type: launcher.FrameData}, endRevoked)
+}
+
+// An end after the exit frame writes nothing: the exit frame stays last.
+func TestTerminalEndAfterExitIsIgnored(t *testing.T) {
+	s := startShell(t)
+	s.send(t, "exit 3\n")
+	s.expectExit(t, 3)
+	e := startEnding(t, s.k, s.k.out)
+	e.revoked <- launcher.EndFullDiskAccessRevoked
+	waitClosed(t, "endSession returned", e.done)
+	expectNoFrame(t, s.in)
+}
+
+// An agent that never reads cannot hold a terminal: the parked output write
+// fails at sessionDrainBound, the reader returns and endSession returns.
+func TestTerminalEndSessionBoundsAStalledAgent(t *testing.T) {
+	setDrainBound(t, 200*time.Millisecond)
+	agent, helper := pollablePair(t)
+	defer agent.Close()
+	defer helper.Close()
+	master, slave, err := openPTY(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := spawnPlan{path: "/bin/sh", args: []string{"sh", "-c", "yes"}, env: []string{"PATH=/usr/bin:/bin", "TERM=dumb"}, dir: "/"}
+	w := &blockedWriter{f: helper}
+	k, err := startTerminal(&frameWriter{w: w}, master, slave, plan, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Closing the helper's end first fails a write still pending.
+	defer func() { helper.Close(); k.finish(); k.Wait() }()
+	w.waitBlocked(t)
+	e := startEnding(t, k, k.out)
+	e.revoked <- launcher.EndFullDiskAccessRevoked
+	waitClosed(t, "the login was released", e.released)
+	waitClosed(t, "endSession returned", e.done)
 }
 
 func TestTerminalRoundTripAndExitCode(t *testing.T) {
@@ -319,9 +409,8 @@ func TestParseLoginDefsPath(t *testing.T) {
 	}
 }
 
-// PAM's variables come after the login's and override the same name; the
-// client's LANG and LC_* come last and override a PAM locale; nothing else
-// is added.
+// PAM's variables follow the login's and override them; the client's LANG
+// and LC_* come last and override a PAM locale; nothing else is added.
 func TestSessionEnv(t *testing.T) {
 	a := account{Name: "pi", Home: "/home/pi"}
 	got := sessionEnv(a, "/bin/bash", "xterm", "/usr/bin", "", []string{"XDG_SESSION_ID=4", "PATH=/pam/bin", "LANG=C", "bad", "=x"},

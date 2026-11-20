@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,6 +48,24 @@ func fakeHelper() int {
 		time.Sleep(requestTimeout + time.Second)
 		_ = WriteHelperReply(control, HelperReply{Refused: CodeAccountRefused})
 		return 1
+	case "granted":
+		// A granted session runs until the launcher's End, then reports it
+		// as the real helper does: an end frame as its last frame.
+		if req.FullDiskAccess != FullDiskAccessGranted || WriteHelperReply(control, HelperReply{Started: true}) != nil {
+			return 1
+		}
+		// The peer's close ends it, as the real helper's hang-up path does,
+		// so a test that fails before the End does not hang in cleanup.
+		go func() {
+			_, _ = io.Copy(io.Discard, channel)
+			os.Exit(1)
+		}()
+		reason, err := ReadHelperEnd(control)
+		if err != nil {
+			return 1
+		}
+		_ = WriteFrame(channel, Frame{Type: FrameEnd, Data: []byte(reason)})
+		return 0
 	}
 	if err := WriteHelperReply(control, HelperReply{Started: true}); err != nil {
 		return 1
@@ -225,6 +244,60 @@ func startOn(t *testing.T, c Client, req Request) (*Session, *os.File) {
 	}
 	t.Cleanup(func() { sess.Close() })
 	return sess, ours
+}
+
+// fakeTicks makes a revocation whose interval ticks the test sends.
+func fakeTicks(s *Server, ticks chan time.Time) *revocation {
+	r := newRevocation(s.FullDiskAccess, s.Log)
+	r.ticker = func(time.Duration) (<-chan time.Time, func()) { return ticks, func() {} }
+	s.revoke = r
+	return r
+}
+
+// The launcher re-reads Full Disk Access while granted sessions run: a
+// granted reading changes nothing, the first other reading ends every
+// granted session with full_disk_access_revoked, and the watcher stops once
+// they are gone. Each response carries the reading taken for its request.
+func TestRevocationEndsGrantedSessions(t *testing.T) {
+	var reading atomic.Value
+	reading.Store(FullDiskAccessGranted)
+	ticks := make(chan time.Time)
+	var r *revocation
+	c, _ := serve(t, uint32(os.Getuid()), testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityTerminal, config.CapabilityFiles}, Logins: []string{"granted"}}),
+		func(s *Server) {
+			s.FullDiskAccess = func() string { return reading.Load().(string) }
+			r = fakeTicks(s, ticks)
+		})
+	exec := Request{Kind: KindExec, Device: testDevice, Login: "granted", Command: "id"}
+	var channels []*os.File
+	sftp := Request{Kind: KindSFTP, Device: testDevice, Login: "granted"}
+	for _, req := range []Request{terminalRequest("granted"), exec, sftp} {
+		sess, ch := startOn(t, c, req)
+		if sess.FullDiskAccess != FullDiskAccessGranted {
+			t.Fatalf("%s started with reading %q", req.Kind, sess.FullDiskAccess)
+		}
+		channels = append(channels, ch)
+	}
+	ticks <- time.Now()
+	reading.Store(FullDiskAccessDenied)
+	ticks <- time.Now()
+	for i, ch := range channels {
+		_ = ch.SetDeadline(time.Now().Add(10 * time.Second))
+		fr := NewFrameReader(ch)
+		if f, err := fr.ReadFrame(); err != nil || f.Type != FrameEnd || string(f.Data) != EndFullDiskAccessRevoked {
+			t.Fatalf("session %d: first frame %+v, %v; want the revoked end", i, f, err)
+		}
+		if f, err := fr.ReadFrame(); !errors.Is(err, io.EOF) {
+			t.Fatalf("session %d: frame %+v, %v after the end; want the channel's EOF", i, f, err)
+		}
+	}
+	stopped := make(chan struct{})
+	go func() { r.watchers.Wait(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the watcher still runs with no granted session")
+	}
 }
 
 // A refusal carries the reading too: a file session without Full Disk

@@ -48,15 +48,27 @@ func Run(log func(string, ...any)) int {
 	// where it cannot list descriptors still keeps them from the children.
 	unix.CloseOnExec(channelFD)
 	unix.CloseOnExec(controlFD)
-	channel := os.NewFile(channelFD, "session-channel")
+	// Pollable, so closing it ends a pending read of the launcher's End.
+	_ = unix.SetNonblock(controlFD, true)
 	control := os.NewFile(controlFD, "launcher-control")
-	if channel == nil || control == nil {
-		log("sessionhelper: started without the channel and control descriptors")
+	if control == nil {
+		log("sessionhelper: started without the control descriptor")
 		return 1
 	}
 	req, err := launcher.ReadHelperRequest(control)
 	if err != nil {
 		log("sessionhelper: read the request: %v", err)
+		return 1
+	}
+	// A session relayed in frames writes with a deadline once it ended
+	// (endSession), which needs a pollable descriptor. The forward server
+	// takes the descriptor itself and keeps it as the launcher passed it.
+	if req.Kind != launcher.KindForward {
+		_ = unix.SetNonblock(channelFD, true)
+	}
+	channel := os.NewFile(channelFD, "session-channel")
+	if channel == nil {
+		log("sessionhelper: started without the channel descriptor")
 		return 1
 	}
 	// msgs is what PAM modules say; both the refusal and the started reply
@@ -224,7 +236,16 @@ func Run(log func(string, ...any)) int {
 		log("sessionhelper: reply started: %v", err)
 		k.finish()
 	}
-	_ = control.Close()
+	// A session started with Full Disk Access granted runs on our identity's
+	// grant: it ends when the grant goes. Every other session needs no control.
+	var revoked <-chan string
+	if req.FullDiskAccess == launcher.FullDiskAccessGranted {
+		w := watchRevocation(control, launcher.ReadFullDiskAccess, realTicker)
+		defer w.stop()
+		revoked = w.C()
+	} else {
+		_ = control.Close()
+	}
 
 	inputDone := make(chan struct{})
 	go func() {
@@ -241,23 +262,89 @@ func Run(log func(string, ...any)) int {
 			}
 		}
 	}()
+	release := func() {
+		ut.logout()
+		pam.close()
+	}
+	endSession(k, out, inputDone, revoked, release, func(reason string) {
+		log("sessionhelper: %s for %q ended: %s", req.Kind, req.Login, reason)
+	}, log)
+	_ = channel.Close()
+	return 0
+}
+
+// sessionDrainBound is how long the remaining output, the exit frame or the
+// end frame may take to reach the agent once a session ended. x/crypto/ssh
+// channel writes block while the client's window is 0, so an agent relaying
+// to a client that stopped reading stops reading this channel.
+var sessionDrainBound = 30 * time.Second
+
+// endExitWait bounds the wait for the session's process to exit after the
+// end path: its SIGKILL step, then the reap.
+const endExitWait = terminalKillDelay + terminalReapTimeout
+
+// endSession waits for the session to end and shuts it down. The session ends
+// when its process exits, its output ends, the agent closes the channel or
+// revoked delivers a reason (logged by ended). Once the process is gone,
+// release closes the login record and the PAM session, before the remaining
+// output and the last frame are delivered, so a client that stopped reading
+// cannot keep either open. That delivery is bounded by sessionDrainBound: a
+// write still pending then fails and the agent sees the channel end without
+// the last frame.
+func endSession(k helperSession, out *frameWriter, inputDone <-chan struct{}, revoked <-chan string, release func(), ended func(reason string), log func(string, ...any)) {
+	var endReason string
+	select {
+	case <-k.endedC():
+	case <-inputDone:
+	case <-k.exitedC():
+	case reason := <-revoked:
+		ended(reason)
+		// Stopped before the end path, so neither output nor an exit frame
+		// follows the end frame; false when the exit frame was sent first.
+		if k.stop() {
+			endReason = reason
+		}
+	}
+	select {
+	case <-k.exitedC():
+		// Exited by itself: the waiter delivers the exit frame.
+	default:
+		k.finish()
+	}
+	exitWait := time.NewTimer(endExitWait)
+	select {
+	case <-k.exitedC():
+	case <-exitWait.C:
+		log("sessionhelper: the session's process did not exit %v after the end", endExitWait)
+	}
+	exitWait.Stop()
+	release()
+	out.bound(sessionDrainBound)
+	if endReason != "" {
+		// The agent ends the channel with the reason.
+		k.writeEnd(endReason)
+	}
 	select {
 	case <-k.endedC():
 	case <-inputDone:
 	}
 	k.finish()
 	k.Wait()
-	ut.logout()
-	pam.close()
-	_ = channel.Close()
-	return 0
 }
 
 // helperSession is a running session: a terminal on a PTY or an exec
 // session on pipes.
 type helperSession interface {
 	handle(f launcher.Frame) error
+	// endedC is closed once the exit frame was sent or the output stopped.
 	endedC() <-chan struct{}
+	// exitedC is closed once the session's process has exited.
+	exitedC() <-chan struct{}
+	// stop stops the output and reports whether it was still running, so
+	// that an end frame written after it is the session's last frame.
+	stop() bool
+	// writeEnd sends an end frame carrying reason, after stop returned true.
+	writeEnd(reason string)
 	finish()
 	Wait()
 }

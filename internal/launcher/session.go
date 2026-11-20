@@ -10,8 +10,9 @@ import (
 var ErrUnavailable = errors.New("launcher unavailable")
 
 // Session is a started session's request connection. The helper's exit frame
-// on the channel is the session's exit; the launcher logs a helper that ended
-// by a signal, and the agent does not read the launcher's exit report.
+// on the channel is the session's exit, and its end frame the reason it ended
+// the session; the launcher logs a helper that ended by a signal, and the
+// agent does not read the launcher's exit report.
 type Session struct {
 	conn io.ReadWriteCloser
 	ID   string

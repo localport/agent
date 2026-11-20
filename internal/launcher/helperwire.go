@@ -72,7 +72,8 @@ type HelperRequest struct {
 	// FullDiskAccess is the launcher's reading for this terminal, exec or sftp
 	// request (macOS), one of the FullDiskAccess states, empty where the
 	// platform has none. A shell starts as its own responsible process unless
-	// the reading is granted.
+	// the reading is granted; a granted session ends when the grant goes
+	// (HelperEnd from the launcher).
 	FullDiskAccess string `json:"full_disk_access,omitempty"`
 	// Pipe is the session channel pipe the helper opens (Windows).
 	Pipe string `json:"pipe,omitempty"`
@@ -280,6 +281,32 @@ func ReadHelperRequest(control io.Reader) (HelperRequest, error) {
 // WriteHelperReply writes the helper's one control reply.
 func WriteHelperReply(control io.Writer, reply HelperReply) error {
 	return writeMessage(control, reply)
+}
+
+// HelperEnd is the launcher's one message on a started helper's control
+// channel: end the session with Reason (an End reason, frame.go). Only a
+// helper of a granted session reads it.
+type HelperEnd struct {
+	End string `json:"end"`
+}
+
+// WriteHelperEnd tells a started helper to end its session for reason.
+func WriteHelperEnd(control io.Writer, reason string) error {
+	return writeMessage(control, HelperEnd{End: reason})
+}
+
+// ReadHelperEnd waits for the launcher's HelperEnd and returns its reason; it
+// fails when the launcher closes the channel (it exited) or sends anything else.
+func ReadHelperEnd(control io.Reader) (string, error) {
+	body, err := readBody(control)
+	if err != nil {
+		return "", err
+	}
+	var m HelperEnd
+	if err := decodeStrict(body, &m); err != nil || !validEndReason([]byte(m.End)) {
+		return "", errors.New("bad helper end message")
+	}
+	return m.End, nil
 }
 
 func newSessionID() string {

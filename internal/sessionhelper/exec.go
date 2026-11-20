@@ -32,6 +32,9 @@ type pipeSession struct {
 
 	ended     chan struct{}
 	endedOnce sync.Once
+	// exited is closed once the command's exit is observed.
+	exited     chan struct{}
+	exitedOnce sync.Once
 	// readersDone is closed once both output readers returned.
 	readersDone chan struct{}
 	waiterDone  chan struct{}
@@ -91,6 +94,7 @@ func startPipeSession(out *frameWriter, plan spawnPlan, log func(string, ...any)
 	p := &pipeSession{
 		out: out, cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
 		ended:       make(chan struct{}),
+		exited:      make(chan struct{}),
 		readersDone: make(chan struct{}),
 		waiterDone:  make(chan struct{}),
 		killDone:    make(chan struct{}),
@@ -189,8 +193,10 @@ func (p *pipeSession) writeOutput(typ byte, b []byte) bool {
 func (p *pipeSession) wait() {
 	defer close(p.waiterDone)
 	pid := p.cmd.Process.Pid
+	observed := true
 	if err := p.observeExit(pid); err != nil {
 		p.log("sessionhelper: observe the exit of %d: %v", pid, err)
+		observed = false
 	}
 	p.procMu.Lock()
 	p.exitSeen = true
@@ -198,6 +204,11 @@ func (p *pipeSession) wait() {
 		close(p.killDone)
 	}
 	p.procMu.Unlock()
+	// The command is reaped only after its output pipes drained, so its
+	// exit is the observed one; without that, the reap below.
+	if observed {
+		p.markExited()
+	}
 	drain := time.NewTimer(terminalDrainTimeout)
 	select {
 	case <-p.readersDone:
@@ -212,6 +223,7 @@ func (p *pipeSession) wait() {
 	}
 	<-p.readersDone
 	_ = p.cmd.Wait()
+	p.markExited()
 	p.exitCode = exitCode(p.cmd.ProcessState)
 	p.outMu.Lock()
 	if !p.stopped.Swap(true) {
@@ -220,6 +232,22 @@ func (p *pipeSession) wait() {
 	p.outMu.Unlock()
 	p.markEnded()
 	p.finish()
+}
+
+func (p *pipeSession) exitedC() <-chan struct{} { return p.exited }
+
+func (p *pipeSession) markExited() { p.exitedOnce.Do(func() { close(p.exited) }) }
+
+// stop stops the output and reports whether it was still running; the exit
+// path makes the same decision under outMu, so exactly one of the exit frame
+// and an end frame is sent.
+func (p *pipeSession) stop() bool { return !p.stopped.Swap(true) }
+
+// writeEnd sends an end frame with reason after any output write in progress.
+func (p *pipeSession) writeEnd(reason string) {
+	p.outMu.Lock()
+	defer p.outMu.Unlock()
+	_ = p.out.write(launcher.Frame{Type: launcher.FrameEnd, Data: []byte(reason)})
 }
 
 // finish is the end path, run once for every end: it stops the output,

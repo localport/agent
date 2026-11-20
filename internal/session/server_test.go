@@ -122,6 +122,11 @@ func (l *fakeLauncher) helper(conn net.Conn, req launcher.Request) {
 		exit(-9)
 		return
 	}
+	if req.Command == "revoked" {
+		// The helper ends the session itself: an end frame is its last.
+		_ = launcher.WriteFrame(conn, launcher.Frame{Type: launcher.FrameEnd, Data: []byte(launcher.EndFullDiskAccessRevoked)})
+		return
+	}
 	if req.Command == "hold" {
 		// Ignores every frame, eof included, until the agent closes the channel.
 		_, _ = io.Copy(io.Discard, conn)
@@ -1166,6 +1171,29 @@ func TestFullDiskAccessRefusalClosesTheChannel(t *testing.T) {
 		t.Fatal("the channel stayed open after the refusal")
 	}
 	if r := <-readings; r != launcher.FullDiskAccessDenied {
+		t.Fatalf("reading %q", r)
+	}
+}
+
+// A helper's end frame ends the channel with its reason, as a typed session
+// end, and a started session's reading is passed on.
+func TestHelperEndFrameEndsTheChannel(t *testing.T) {
+	readings := make(chan string, 4)
+	f := newSSHFixture(t, func(c *ServerConfig) { c.OnFullDiskAccess = func(r string) { readings <- r } })
+	f.launcher.fda = launcher.FullDiskAccessGranted
+	o := f.defaults()
+	o.kind = "ssh"
+	client := f.connect(t, o)
+	sess, _ := client.NewSession()
+	var stderr bytes.Buffer
+	sess.Stderr = &stderr
+	if err := sess.Run("revoked"); err == nil {
+		t.Fatal("the session reported a normal exit")
+	}
+	if want := "localport: session ended: " + launcher.EndFullDiskAccessRevoked; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr %q, want %q", stderr.String(), want)
+	}
+	if r := <-readings; r != launcher.FullDiskAccessGranted {
 		t.Fatalf("reading %q", r)
 	}
 }

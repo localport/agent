@@ -5,6 +5,7 @@ package sessionhelper
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -52,13 +53,21 @@ type spawnPlan struct {
 // frameWriter serializes the frames the helper writes to the channel.
 type frameWriter struct {
 	mu sync.Mutex
-	w  *os.File
+	w  io.Writer
 }
 
 func (fw *frameWriter) write(f launcher.Frame) error {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 	return launcher.WriteFrame(fw.w, f)
+}
+
+// bound gives every write from now on until d from now to finish; a write
+// still pending then fails. A writer without deadlines is left unbounded.
+func (fw *frameWriter) bound(d time.Duration) {
+	if dw, ok := fw.w.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = dw.SetWriteDeadline(time.Now().Add(d))
+	}
 }
 
 // terminal is one terminal session: the shell in a PTY, a reader goroutine
@@ -119,8 +128,7 @@ type sessionLeader struct {
 	pidfd int
 }
 
-// observeExit is the terminal's exit observer; tests replace it before the
-// session starts.
+// observeExit is the terminal's exit observer; tests replace it before a session starts.
 var observeExit = childproc.WaitExited
 
 // openPTY opens a PTY pair of the given size.
@@ -331,12 +339,25 @@ func (k *terminal) setExitSeen() {
 	k.procMu.Unlock()
 }
 
-// finish is the end path, run once for every end: it stops the output,
-// records the slave's session leader, sends SIGHUP to the shell, hangs up
-// the foreground group and the session leader where the kernel does not
-// (macOS), arms the SIGKILL step at terminalKillDelay while either may be
-// alive, revokes the slave (macOS) and closes the master, which hangs up the
-// slave's session.
+func (k *terminal) exitedC() <-chan struct{} { return k.exited }
+
+// stop stops the output and reports whether it was still running; the exit
+// path makes the same decision under outMu, so exactly one of the exit frame
+// and an end frame is sent.
+func (k *terminal) stop() bool { return !k.stopped.Swap(true) }
+
+// writeEnd sends an end frame with reason after any output write in progress.
+func (k *terminal) writeEnd(reason string) {
+	k.outMu.Lock()
+	defer k.outMu.Unlock()
+	_ = k.out.write(launcher.Frame{Type: launcher.FrameEnd, Data: []byte(reason)})
+}
+
+// finish is the end path, run once for every end. It stops the output,
+// records the slave's session leader, sends SIGHUP to the shell, hangs up the
+// foreground group and the session leader where the kernel does not (macOS),
+// arms the SIGKILL step at terminalKillDelay while either may be alive,
+// revokes the slave (macOS) and closes the master, hanging up its session.
 func (k *terminal) finish() {
 	k.endOnce.Do(func() {
 		k.stopped.Store(true)
@@ -394,9 +415,8 @@ func ptySession(master *os.File) int {
 	return sid
 }
 
-// recordLeader returns the terminal's session leader. It returns nil when
-// there is none, or when the leader is the shell, which the group SIGKILL
-// covers.
+// recordLeader returns the terminal's session leader, or nil when there is
+// none or it is the shell, which the group SIGKILL covers.
 func (k *terminal) recordLeader() *sessionLeader {
 	sid := ptySession(k.master)
 	if sid == 0 || sid == k.cmd.Process.Pid {
@@ -412,8 +432,7 @@ func (k *terminal) recordLeader() *sessionLeader {
 	return l
 }
 
-// leaderAlive reports whether the recorded session leader still exists.
-// procMu held.
+// leaderAlive reports whether the recorded session leader still exists; procMu held.
 func (k *terminal) leaderAlive() bool {
 	return k.leader != nil && k.leader.signal(0) == nil
 }

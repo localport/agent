@@ -527,6 +527,11 @@ func (ch *channel) readHelper() {
 			}
 			line, _ := ev.Marshal()
 			ch.rec.file(line, ch.halted)
+		case launcher.FrameEnd:
+			// The helper ended the session (launcher.EndFullDiskAccessRevoked);
+			// its last frame, read only with a known reason.
+			ch.end(string(f.Data))
+			return
 		case launcher.FrameExit:
 			status, signal := decodeExit(f.Code, runtime.GOOS)
 			ch.rec.exit(status)

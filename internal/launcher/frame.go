@@ -10,10 +10,11 @@ import (
 )
 
 // Frame types on the session channel between the agent and the helper. The
-// agent sends data, resize and eof (end of the session's input); the helper
-// sends data, stderr (an exec session's standard error without a PTY), event
-// (one file operation of an sftp session, a FileEvent in JSON) and exit, and
-// exit is its last frame.
+// agent sends data, resize and eof (end of the session's input). The helper
+// sends data, stderr (an exec session's stderr without a PTY), event (one
+// sftp file operation, a FileEvent in JSON), exit (the process ended by
+// itself) and end (the helper ended the session, with the reason); exit or
+// end is its last frame, and the agent ends the channel at either.
 const (
 	FrameData   byte = 1
 	FrameResize byte = 2
@@ -21,7 +22,19 @@ const (
 	FrameStderr byte = 4
 	FrameEOF    byte = 5
 	FrameEvent  byte = 6
+	FrameEnd    byte = 7
 )
+
+// End reasons a FrameEnd carries.
+const (
+	// EndFullDiskAccessRevoked: the session ran with Full Disk Access and
+	// the grant was removed while it ran (macOS).
+	EndFullDiskAccessRevoked = "full_disk_access_revoked"
+)
+
+func validEndReason(reason []byte) bool {
+	return string(reason) == EndFullDiskAccessRevoked
+}
 
 // MaxFrameData bounds a data frame's payload; MaxFrameEvent an event frame's,
 // which fits a FileEvent whose Path and Target are each maxEventPath bytes
@@ -42,6 +55,9 @@ type Frame struct {
 
 const frameHeader = 5
 
+// maxEndReason bounds an end frame's payload.
+const maxEndReason = 64
+
 // errBadFrame is a frame no peer of this protocol sends.
 var errBadFrame = errors.New("launcher: bad channel frame")
 
@@ -56,6 +72,11 @@ func WriteFrame(w io.Writer, f Frame) error {
 		payload = f.Data
 	case FrameEvent:
 		if len(f.Data) == 0 || len(f.Data) > MaxFrameEvent {
+			return errBadFrame
+		}
+		payload = f.Data
+	case FrameEnd:
+		if !validEndReason(f.Data) {
 			return errBadFrame
 		}
 		payload = f.Data
@@ -105,6 +126,10 @@ func (fr *FrameReader) ReadFrame() (Frame, error) {
 		if n == 0 || n > MaxFrameEvent {
 			return Frame{}, errBadFrame
 		}
+	case FrameEnd:
+		if n == 0 || n > maxEndReason {
+			return Frame{}, errBadFrame
+		}
 	case FrameEOF:
 		if n != 0 {
 			return Frame{}, errBadFrame
@@ -123,6 +148,11 @@ func (fr *FrameReader) ReadFrame() (Frame, error) {
 	switch f.Type {
 	case FrameData, FrameStderr, FrameEvent:
 		f.Data = p
+	case FrameEnd:
+		if !validEndReason(p) {
+			return Frame{}, errBadFrame
+		}
+		f.Data = p
 	case FrameResize:
 		f.Cols, f.Rows = binary.BigEndian.Uint16(p), binary.BigEndian.Uint16(p[2:])
 		if f.Cols < 1 || f.Cols > maxTerminalSize || f.Rows < 1 || f.Rows > maxTerminalSize {
@@ -134,8 +164,7 @@ func (fr *FrameReader) ReadFrame() (Frame, error) {
 	return f, nil
 }
 
-// decodeStrict decodes one JSON value into v, refusing unknown fields and
-// trailing data.
+// decodeStrict decodes one JSON value into v, refusing unknown fields and trailing data.
 func decodeStrict(body []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
