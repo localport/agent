@@ -117,6 +117,12 @@ func Run(log func(string, ...any)) int {
 			_ = slave.Close()
 		}
 	}
+	// Before PAM, as sshd: the session and every process it starts belong to
+	// the login's remote audit session (macOS; Linux has pam_loginuid).
+	if err := newAuditSession(a.UID, a.Name, usePTY, req.ClientAddr); err != nil {
+		closePTY()
+		return refuse(launcher.CodeInternal, err)
+	}
 	var pam *pamSession
 	if pamAvailable && !req.AgentAccount {
 		if err := restoreStartFileLimit(); err != nil {
@@ -160,6 +166,21 @@ func Run(log func(string, ...any)) int {
 		}
 		access := FilesAccess{Download: req.FilesDownload, Upload: req.FilesUpload}
 		plan.args, plan.events = []string{"localport-session", FilesServerMode, access.Arg(), req.Root, home}, true
+	}
+	switch shellSpawn(req.Kind, req.FullDiskAccess, disclaimAvailable()) {
+	case spawnShellExec:
+		var exe string
+		if exe, err = os.Executable(); err != nil {
+			pam.close()
+			closePTY()
+			return refuse(launcher.CodeSpawnFailed, err)
+		}
+		plan.args = append([]string{"localport-session", ShellExecMode, plan.path}, plan.args...)
+		plan.path = exe
+	case spawnRefuse:
+		pam.close()
+		closePTY()
+		return refuse(launcher.CodeFullDiskAccessRequired, errors.New("this macOS cannot start the shell as its own responsible process"))
 	}
 	if req.Kind == launcher.KindForward {
 		// The forward server takes the channel itself: it passes connected

@@ -71,7 +71,8 @@ type HelperRequest struct {
 	ClientAddr string `json:"client_addr,omitempty"`
 	// FullDiskAccess is the launcher's reading for this terminal, exec or sftp
 	// request (macOS), one of the FullDiskAccess states, empty where the
-	// platform has none.
+	// platform has none. A shell starts as its own responsible process unless
+	// the reading is granted.
 	FullDiskAccess string `json:"full_disk_access,omitempty"`
 	// Pipe is the session channel pipe the helper opens (Windows).
 	Pipe string `json:"pipe,omitempty"`

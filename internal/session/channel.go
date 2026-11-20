@@ -35,8 +35,9 @@ const (
 	CodeKindDisabled    = "kind_disabled"
 	CodeAgentBusy       = "agent_busy"
 	CodeKindUnavailable = "kind_unavailable"
-	// CodeFullDiskAccessRequired: on macOS a files session needs Full Disk
-	// Access for Localport (launcher.CodeFullDiskAccessRequired).
+	// CodeFullDiskAccessRequired: on macOS a files session, or a shell that
+	// cannot start as its own responsible process, needs Full Disk Access for
+	// Localport (launcher.CodeFullDiskAccessRequired).
 	CodeFullDiskAccessRequired = "full_disk_access_required"
 	// CodeRecordingUnavailable: a Strict channel whose recording could not
 	// open is refused before its helper starts.

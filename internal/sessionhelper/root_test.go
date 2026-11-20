@@ -29,6 +29,12 @@ func TestMain(m *testing.M) {
 	if os.Getenv(fileLimitTestStage) != "" {
 		os.Exit(runFileLimitStage())
 	}
+	if os.Getenv(shellExecChildEnv) != "" {
+		os.Exit(runShellExecChild())
+	}
+	if os.Getenv(auditProbeEnv) != "" {
+		os.Exit(runAuditProbe())
+	}
 	if len(os.Args) == 2 && os.Args[1] == "helper" {
 		os.Exit(Run(log.New(os.Stderr, "", 0).Printf))
 	}
@@ -141,8 +147,7 @@ func TestRootHelperForwardsAsTheLogin(t *testing.T) {
 }
 
 // rootLogin returns LOCALPORT_TEST_LOGIN for a test that runs a session as
-// root; without root or the login it skips, or fails under testroot's
-// RequireEnv.
+// root. Without root or the login it skips (fails under testroot's RequireEnv).
 func rootLogin(t *testing.T) string {
 	t.Helper()
 	login := os.Getenv("LOCALPORT_TEST_LOGIN")

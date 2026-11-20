@@ -73,8 +73,8 @@ const (
 	// CodeVersionMismatch refuses a request of another Version: the agent
 	// and the launcher service come from different releases.
 	CodeVersionMismatch = "version_mismatch"
-	// CodeFullDiskAccessRequired refuses, on macOS, an sftp session while the
-	// launcher lacks Full Disk Access.
+	// CodeFullDiskAccessRequired refuses, on macOS without Full Disk Access, an
+	// sftp session or a shell that cannot start as its own responsible process.
 	CodeFullDiskAccessRequired = "full_disk_access_required"
 )
 

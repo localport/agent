@@ -6,6 +6,7 @@
 //	localport-session helper                    one session; started only by the launcher
 //	localport-session files-server <access> <root> <home>  one file session as the login; started only by a helper
 //	localport-session forward-server            one connection's port forwards as the login; started only by a helper
+//	localport-session shell-exec <path> <argv0> [args...]  replaces itself with a session's shell, its own responsible process (macOS); started only by a helper
 //
 // Protocol: internal/launcher. Session setup: internal/sessionhelper.
 package main
@@ -55,6 +56,11 @@ func main() {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	}
+	// The shell-exec mode runs as the login: the helper starts it in place of
+	// the shell, and it replaces itself with the shell (macOS).
+	if os.Args[1] == sessionhelper.ShellExecMode {
+		os.Exit(sessionhelper.ShellExec(os.Args[2:], os.Stderr))
 	}
 	// The forward server runs as the login; the forward channel is descriptor 3.
 	if os.Args[1] == sessionhelper.ForwardServerMode {

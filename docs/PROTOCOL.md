@@ -807,9 +807,22 @@ stream:
    false), then the channel closes; a Strict channel whose recording fails ends
    with `localport: session ended: recording_failed`.
 
-   On macOS the launcher reads its Full Disk Access for every `shell`, `exec`
-   and `sftp` request. An `sftp` request needs it `granted`; otherwise it is
-   refused `full_disk_access_required`.
+   On macOS no session makes the agent's code or Apple's tools raise a privacy
+   (TCC) dialog on the device's screen. The launcher reads its Full Disk Access
+   for every `shell`, `exec` and `sftp` request:
+   - `sftp` needs it `granted`; otherwise the request is refused
+     `full_disk_access_required`.
+   - With it `granted`, a shell runs as the launcher's child and the grant
+     applies. Without it the shell starts as its own responsible process
+     (`localport-session shell-exec`), so Apple tools get a silent "Operation
+     not permitted" on protected folders; a program the user runs is its own
+     responsible process and may still ask on the Mac. A macOS that cannot
+     start it that way refuses the request `full_disk_access_required`.
+   - Every login, agent-account sessions included, runs in its own BSM audit
+     session as under Apple's sshd: the login's audit user id, flags remote and
+     authenticated, a TTY flag for a PTY, the client address as terminal id. A
+     failure refuses the request `kind_unavailable`. Linux sets the login uid
+     through `pam_loginuid`; Windows has no equivalent.
 
    Port forwarding (RFC 4254 section 7, OpenSSH PROTOCOL section 2.4) is
    served on an `ssh` connection only, when the device's config enables

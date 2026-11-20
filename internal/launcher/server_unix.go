@@ -37,8 +37,8 @@ type Server struct {
 	// Probe reports what this host offers sessions.
 	Probe func() Probe
 	// FullDiskAccess reads the launcher's Full Disk Access for each terminal,
-	// exec and sftp request (macOS): the reading gates sftp and returns on the
-	// response. Nil where the platform has none (Linux).
+	// exec and sftp request (macOS): the reading gates sftp, picks how a shell
+	// starts and returns on the response. Nil off macOS.
 	FullDiskAccess func() string
 	// GroupMember, when set, reports whether the directory service lists a
 	// uid in a group. It decides a status reader whose peer credential may be
