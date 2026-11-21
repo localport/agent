@@ -4,6 +4,8 @@ package sessionhelper
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -39,5 +41,38 @@ func TestRootHelperUtmpHost(t *testing.T) {
 		"echo WHO=$(who -m) END; exit 0\n")
 	if !regexp.MustCompile(`WHO=\S+ .*\(203\.0\.113\.9\) END`).MatchString(out) {
 		t.Fatalf("output %q: want the utmp host 203.0.113.9", out)
+	}
+}
+
+// The helper closes the session's utmp record when the session ends: once
+// it exited, who no longer lists the session's terminal line.
+func TestRootHelperClosesUtmpAtTheEnd(t *testing.T) {
+	login := rootLogin(t)
+	if _, err := os.Stat("/var/run/utmp"); err != nil {
+		testroot.Require(t, "a host with /var/run/utmp")
+	}
+	// runRootTerminal returns after the helper exited.
+	out, _ := runRootTerminal(t, launcher.HelperRequest{Kind: launcher.KindTerminal, Login: login, Cols: 80, Rows: 24, Term: "xterm"},
+		"echo LINE=$(who -m | awk '{print $2}') END; exit 0\n")
+	m := regexp.MustCompile(`LINE=(\S+) END`).FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("output %q: no utmp line for the session", out)
+	}
+	// A file argument: without one, GNU who hides records whose pid is dead,
+	// which would hide an unclosed record of the exited shell too. The
+	// resolved path (/run/utmp), because a gnulib build with systemd reads
+	// logind sessions instead when the argument equals UTMP_FILE.
+	file, err := filepath.EvalSymlinks("/var/run/utmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	who, err := exec.Command("who", file).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(string(who), "\n") {
+		if f := strings.Fields(l); len(f) > 1 && f[1] == m[1] {
+			t.Fatalf("who lists %s after the session ended: %q", m[1], l)
+		}
 	}
 }

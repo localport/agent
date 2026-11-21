@@ -43,17 +43,24 @@ type pipeSession struct {
 	outMu sync.Mutex
 
 	endOnce sync.Once
-	// procMu orders the end path's signals against the reap; exitSeen is set
-	// once the exit is observed, after which the group is never signalled.
-	procMu   sync.Mutex
-	exitSeen bool
-	kill     *time.Timer
-	killDone chan struct{}
-	exitCode int
+	// procMu orders the end path's signals against the reap. exitSeen is set
+	// once the exit is observed or the command reaped; it is never signalled
+	// after. exitUnobserved is set before the reap when the watch failed; from
+	// then on only the command is signalled, never its group by number.
+	procMu         sync.Mutex
+	exitSeen       bool
+	exitUnobserved bool
+	kill           *time.Timer
+	killDone       chan struct{}
+	exitCode       int
 
-	observeExit func(pid int) error
-	log         func(format string, args ...any)
+	// watch observes the command's exit without reaping it; the waiter closes it.
+	watch exitWatch
+	log   func(format string, args ...any)
 }
+
+// killGroup signals the process group pid leads; tests replace it.
+var killGroup = func(pid int, s syscall.Signal) error { return syscall.Kill(-pid, s) }
 
 // startPipeSession starts plan with pipes. On error nothing was started.
 func startPipeSession(out *frameWriter, plan spawnPlan, log func(string, ...any)) (*pipeSession, error) {
@@ -85,7 +92,8 @@ func startPipeSession(out *frameWriter, plan spawnPlan, log func(string, ...any)
 		events, cmd.ExtraFiles = r, []*os.File{w}
 		defer w.Close() // the child holds its copy once started
 	}
-	if err := startChild(cmd); err != nil {
+	watch, err := startWatched(cmd)
+	if err != nil {
 		if events != nil {
 			_ = events.Close()
 		}
@@ -98,7 +106,7 @@ func startPipeSession(out *frameWriter, plan spawnPlan, log func(string, ...any)
 		readersDone: make(chan struct{}),
 		waiterDone:  make(chan struct{}),
 		killDone:    make(chan struct{}),
-		observeExit: observeExit,
+		watch:       watch,
 		log:         log,
 	}
 	var readers sync.WaitGroup
@@ -189,14 +197,26 @@ func (p *pipeSession) writeOutput(typ byte, b []byte) bool {
 }
 
 // wait observes the command's exit, drains its output, sends the exit frame
-// when the session did not end first, and reaps it.
+// when the session did not end first, and reaps it. When the watch fails,
+// the reap is the exit observation: it uses cmd.Process.Wait, because
+// cmd.Wait closes the output pipes before they drained.
 func (p *pipeSession) wait() {
 	defer close(p.waiterDone)
 	pid := p.cmd.Process.Pid
-	observed := true
-	if err := p.observeExit(pid); err != nil {
+	err := p.watch.Wait()
+	_ = p.watch.Close()
+	reaped := false
+	var state *os.ProcessState
+	if err != nil {
 		p.log("sessionhelper: observe the exit of %d: %v", pid, err)
-		observed = false
+		p.procMu.Lock()
+		p.exitUnobserved = true
+		p.procMu.Unlock()
+		state, err = p.cmd.Process.Wait()
+		if err != nil {
+			p.log("sessionhelper: reap %d: %v", pid, err)
+		}
+		reaped = true
 	}
 	p.procMu.Lock()
 	p.exitSeen = true
@@ -204,11 +224,7 @@ func (p *pipeSession) wait() {
 		close(p.killDone)
 	}
 	p.procMu.Unlock()
-	// The command is reaped only after its output pipes drained, so its
-	// exit is the observed one; without that, the reap below.
-	if observed {
-		p.markExited()
-	}
+	p.markExited()
 	drain := time.NewTimer(terminalDrainTimeout)
 	select {
 	case <-p.readersDone:
@@ -222,9 +238,11 @@ func (p *pipeSession) wait() {
 		_ = p.events.Close()
 	}
 	<-p.readersDone
-	_ = p.cmd.Wait()
-	p.markExited()
-	p.exitCode = exitCode(p.cmd.ProcessState)
+	if !reaped {
+		_ = p.cmd.Wait()
+		state = p.cmd.ProcessState
+	}
+	p.exitCode = exitCode(state)
 	p.outMu.Lock()
 	if !p.stopped.Swap(true) {
 		_ = p.out.write(launcher.Frame{Type: launcher.FrameExit, Code: int32(p.exitCode)})
@@ -251,8 +269,8 @@ func (p *pipeSession) writeEnd(reason string) {
 }
 
 // finish is the end path, run once for every end: it stops the output,
-// closes stdin, and while the command is unreaped sends its group SIGHUP and
-// arms SIGKILL at terminalKillDelay.
+// closes stdin, and while the command is unreaped sends it SIGHUP and arms
+// SIGKILL at terminalKillDelay.
 func (p *pipeSession) finish() {
 	p.endOnce.Do(func() {
 		p.stopped.Store(true)
@@ -264,16 +282,29 @@ func (p *pipeSession) finish() {
 			close(p.killDone)
 			return
 		}
-		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGHUP)
+		p.signal(syscall.SIGHUP)
 		p.kill = time.AfterFunc(terminalKillDelay, func() {
 			p.procMu.Lock()
 			defer p.procMu.Unlock()
 			if !p.exitSeen {
-				_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+				p.signal(syscall.SIGKILL)
 			}
 			close(p.killDone)
 		})
 	})
+}
+
+// signal sends s to the command's process group, which Setsid made its own,
+// or only to the command once its exit is unobservable: the group's number
+// may then be reused. procMu held, the command unreaped or being reaped.
+func (p *pipeSession) signal(s syscall.Signal) {
+	if p.exitUnobserved {
+		// os.Process signals through a pidfd on Linux; elsewhere it refuses
+		// a process it has reaped.
+		_ = p.cmd.Process.Signal(s)
+		return
+	}
+	_ = killGroup(p.cmd.Process.Pid, s)
 }
 
 // Wait joins the SIGKILL step and the waiter; a command still unreaped

@@ -49,10 +49,9 @@ func Run(log func(string, ...any)) int {
 	unix.CloseOnExec(channelFD)
 	unix.CloseOnExec(controlFD)
 	// Pollable, so closing it ends a pending read of the launcher's End.
-	_ = unix.SetNonblock(controlFD, true)
-	control := os.NewFile(controlFD, "launcher-control")
-	if control == nil {
-		log("sessionhelper: started without the control descriptor")
+	control, err := pollableFile(controlFD, "launcher-control")
+	if err != nil {
+		log("sessionhelper: control descriptor: %v", err)
 		return 1
 	}
 	req, err := launcher.ReadHelperRequest(control)
@@ -63,12 +62,14 @@ func Run(log func(string, ...any)) int {
 	// A session relayed in frames writes with a deadline once it ended
 	// (endSession), which needs a pollable descriptor. The forward server
 	// takes the descriptor itself and keeps it as the launcher passed it.
+	var channel *os.File
 	if req.Kind != launcher.KindForward {
-		_ = unix.SetNonblock(channelFD, true)
+		channel, err = pollableFile(channelFD, "session-channel")
+	} else if channel = os.NewFile(channelFD, "session-channel"); channel == nil {
+		err = errors.New("invalid descriptor")
 	}
-	channel := os.NewFile(channelFD, "session-channel")
-	if channel == nil {
-		log("sessionhelper: started without the channel descriptor")
+	if err != nil {
+		log("sessionhelper: channel descriptor: %v", err)
 		return 1
 	}
 	// msgs is what PAM modules say; both the refusal and the started reply
@@ -273,24 +274,21 @@ func Run(log func(string, ...any)) int {
 	return 0
 }
 
-// sessionDrainBound is how long the remaining output, the exit frame or the
-// end frame may take to reach the agent once a session ended. x/crypto/ssh
-// channel writes block while the client's window is 0, so an agent relaying
-// to a client that stopped reading stops reading this channel.
+// sessionDrainBound bounds delivery of the remaining output and the last
+// frame after a session ended. An SSH client that stops reading stalls the
+// agent's relay, and with it this channel.
 var sessionDrainBound = 30 * time.Second
 
 // endExitWait bounds the wait for the session's process to exit after the
 // end path: its SIGKILL step, then the reap.
 const endExitWait = terminalKillDelay + terminalReapTimeout
 
-// endSession waits for the session to end and shuts it down. The session ends
-// when its process exits, its output ends, the agent closes the channel or
-// revoked delivers a reason (logged by ended). Once the process is gone,
-// release closes the login record and the PAM session, before the remaining
-// output and the last frame are delivered, so a client that stopped reading
-// cannot keep either open. That delivery is bounded by sessionDrainBound: a
-// write still pending then fails and the agent sees the channel end without
-// the last frame.
+// endSession waits for the session to end (process exit, output end, channel
+// close or a revoked reason) and shuts it down. release closes the login
+// record and PAM session once the process is gone, before the remaining
+// output is delivered, so a client that stopped reading cannot hold them
+// open. Delivery is bounded by sessionDrainBound; past it the channel ends
+// without the last frame.
 func endSession(k helperSession, out *frameWriter, inputDone <-chan struct{}, revoked <-chan string, release func(), ended func(reason string), log func(string, ...any)) {
 	var endReason string
 	select {
@@ -319,7 +317,9 @@ func endSession(k helperSession, out *frameWriter, inputDone <-chan struct{}, re
 	}
 	exitWait.Stop()
 	release()
-	out.bound(sessionDrainBound)
+	if err := out.bound(sessionDrainBound); err != nil {
+		log("sessionhelper: bound the session's output: %v", err)
+	}
 	if endReason != "" {
 		// The agent ends the channel with the reason.
 		k.writeEnd(endReason)
@@ -633,6 +633,20 @@ func sessionEnv(a account, shell, term, path, clientAddr string, pamEnv []string
 func startChild(cmd *exec.Cmd) error {
 	closeExtraFDs()
 	return cmd.Start()
+}
+
+// pollableFile returns descriptor fd as a file in non-blocking mode, which
+// os.NewFile registers with the runtime poller: Close then ends a pending
+// read and SetWriteDeadline applies.
+func pollableFile(fd int, name string) (*os.File, error) {
+	if err := unix.SetNonblock(fd, true); err != nil {
+		return nil, fmt.Errorf("set %s non-blocking: %w", name, err)
+	}
+	f := os.NewFile(uintptr(fd), name)
+	if f == nil {
+		return nil, fmt.Errorf("%s: invalid descriptor %d", name, fd)
+	}
+	return f, nil
 }
 
 // closeExtraFDs makes every descriptor from 3 up close-on-exec.

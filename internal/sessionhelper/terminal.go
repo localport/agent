@@ -62,12 +62,14 @@ func (fw *frameWriter) write(f launcher.Frame) error {
 	return launcher.WriteFrame(fw.w, f)
 }
 
-// bound gives every write from now on until d from now to finish; a write
-// still pending then fails. A writer without deadlines is left unbounded.
-func (fw *frameWriter) bound(d time.Duration) {
+// bound sets a write deadline d from now: a write still pending then fails.
+// A writer without deadlines stays unbounded; a file that refuses one (not
+// pollable) returns its error.
+func (fw *frameWriter) bound(d time.Duration) error {
 	if dw, ok := fw.w.(interface{ SetWriteDeadline(time.Time) error }); ok {
-		_ = dw.SetWriteDeadline(time.Now().Add(d))
+		return dw.SetWriteDeadline(time.Now().Add(d))
 	}
+	return nil
 }
 
 // terminal is one terminal session: the shell in a PTY, a reader goroutine
@@ -116,9 +118,9 @@ type terminal struct {
 	// exitCode is the code of the shell's exit frame, set once it is reaped.
 	exitCode int
 
-	// observeExit blocks until the shell exited, without reaping it.
-	observeExit func(pid int) error
-	log         func(format string, args ...any)
+	// watch observes the shell's exit without reaping it; the waiter closes it.
+	watch exitWatch
+	log   func(format string, args ...any)
 }
 
 // sessionLeader is a process held for the end path's SIGKILL: by pidfd on
@@ -128,8 +130,45 @@ type sessionLeader struct {
 	pidfd int
 }
 
-// observeExit is the terminal's exit observer; tests replace it before a session starts.
-var observeExit = childproc.WaitExited
+// exitWatch observes a session child's exit without reaping it (childproc.ExitWatch).
+type exitWatch interface {
+	Watch(pid int) error
+	Wait() error
+	Close() error
+}
+
+// newExitWatch creates a session child's exit watch; tests replace it before
+// the session starts.
+var newExitWatch = func() (exitWatch, error) {
+	w, err := childproc.NewExitWatch()
+	if err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// startWatched starts cmd, a child in its own process group (Setsid), with
+// its exit watch in place: the watch exists before the spawn and is
+// registered right after it, so no session child runs without one. When the
+// registration fails, the still unreaped child's group is killed, the child
+// reaped, and the start fails. On error nothing is left running.
+func startWatched(cmd *exec.Cmd) (exitWatch, error) {
+	w, err := newExitWatch()
+	if err != nil {
+		return nil, fmt.Errorf("create the exit watch: %w", err)
+	}
+	if err := startChild(cmd); err != nil {
+		_ = w.Close()
+		return nil, err
+	}
+	if err := w.Watch(cmd.Process.Pid); err != nil {
+		_ = killGroup(cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		_ = w.Close()
+		return nil, fmt.Errorf("watch the exit of %d: %w", cmd.Process.Pid, err)
+	}
+	return w, nil
+}
 
 // openPTY opens a PTY pair of the given size.
 func openPTY(cols, rows uint16) (master, slave *os.File, err error) {
@@ -181,7 +220,8 @@ func startTerminal(out *frameWriter, master, slave *os.File, plan spawnPlan, log
 		// Ctty is the child's fd 0, the slave.
 		SysProcAttr: &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0, Credential: plan.cred},
 	}
-	if err := startChild(cmd); err != nil {
+	watch, err := startWatched(cmd)
+	if err != nil {
 		return nil, err
 	}
 	k := &terminal{
@@ -193,8 +233,8 @@ func startTerminal(out *frameWriter, master, slave *os.File, plan spawnPlan, log
 		drainFull:  make(chan struct{}),
 		killDone:   make(chan struct{}),
 
-		observeExit: observeExit,
-		log:         log,
+		watch: watch,
+		log:   log,
 	}
 	go k.readOutput()
 	go k.wait()
@@ -294,7 +334,9 @@ func (k *terminal) writeOutput(p []byte) bool {
 func (k *terminal) wait() {
 	defer close(k.waiterDone)
 	pid := k.cmd.Process.Pid
-	if err := k.observeExit(pid); err != nil {
+	err := k.watch.Wait()
+	_ = k.watch.Close()
+	if err != nil {
 		k.log("sessionhelper: observe the exit of %d: %v", pid, err)
 		k.procMu.Lock()
 		k.exitUnobserved = true
@@ -473,8 +515,12 @@ func (k *terminal) endKill() {
 }
 
 // exitCode is the exit frame's code: the process's exit status, or minus the
-// signal that ended it.
+// signal that ended it. A process whose reap failed has no status: 255, as
+// ssh reports an unknown failure; a negative code would read as a signal.
 func exitCode(ps *os.ProcessState) int {
+	if ps == nil {
+		return 255
+	}
 	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 		return -int(ws.Signal())
 	}

@@ -4,6 +4,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -22,17 +23,59 @@ import (
 // background process the child left on the PTY may keep it open.
 const relayDrainTimeout = time.Second
 
+// exitWatch observes the child's exit without reaping it (childproc.ExitWatch).
+type exitWatch interface {
+	Watch(pid int) error
+	Wait() error
+	Close() error
+}
+
+// newExitWatch creates the child's exit watch; tests replace it.
+var newExitWatch = func() (exitWatch, error) {
+	w, err := childproc.NewExitWatch()
+	if err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// killGroup signals the process group pid leads; tests replace it.
+var killGroup = func(pid int, s syscall.Signal) error { return syscall.Kill(-pid, s) }
+
+// startWatched starts cmd, which leads its own process group (Setsid), with
+// its exit watch in place: the watch exists before the spawn and is
+// registered right after it, so the child never runs without one. When the
+// registration fails, the still unreaped child's group is killed, the child
+// reaped, and the start fails.
+func startWatched(cmd *exec.Cmd) (exitWatch, error) {
+	w, err := newExitWatch()
+	if err != nil {
+		return nil, fmt.Errorf("create the exit watch: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = w.Close()
+		return nil, err
+	}
+	if err := w.Watch(cmd.Process.Pid); err != nil {
+		_ = killGroup(cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		_ = w.Close()
+		return nil, fmt.Errorf("watch the exit of %d: %w", cmd.Process.Pid, err)
+	}
+	return w, nil
+}
+
 // runRelayed starts cmd in its own session and waits for it, as sudo with
 // use_pty does: the child never shares root's terminal, so it cannot push
-// input into it (TIOCSTI) or act on root's session. Each of stdin, stdout
-// and stderr that is a terminal is replaced in the child by the slave of one
-// new PTY, its controlling terminal; root relays bytes and the window size
-// between its terminal and the master. The others stay as given (a pipe,
-// reader or writer). SIGINT and SIGTERM root receives go to the child's
-// process group. On terminal loss the child's group gets SIGHUP, unless
-// hangupIgnored (root itself ignores SIGHUP): then root stops writing
-// output, keeps draining the master and waits for the child. It returns
-// cmd.Wait's error.
+// input into it (TIOCSTI) or act on root's session. Each of stdin, stdout and
+// stderr that is a terminal becomes, in the child, the slave of one new PTY
+// (its controlling terminal); root relays bytes and the window size between
+// its terminal and the master. Pipes, readers and writers stay as given.
+// SIGINT and SIGTERM go to the child's process group. On terminal loss the
+// group gets SIGHUP, unless hangupIgnored (root ignores SIGHUP): then root
+// stops writing output, keeps draining the master and waits. Once the
+// child's exit watch fails, signals go to the child alone, since its group
+// number may be reused. It returns cmd.Wait's error.
 func runRelayed(cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer, hangupIgnored bool) error {
 	std := [3]any{stdin, stdout, stderr}
 	var term *os.File
@@ -102,7 +145,7 @@ func runWithSignals(cmd *exec.Cmd, r *ptyRelay, hangupIgnored bool, closeAfterSt
 	sig := make(chan os.Signal, 4)
 	signal.Notify(sig, sigs...)
 	defer signal.Stop(sig)
-	err := cmd.Start()
+	watch, err := startWatched(cmd)
 	for _, f := range closeAfterStart {
 		_ = f.Close()
 	}
@@ -119,8 +162,9 @@ func runWithSignals(cmd *exec.Cmd, r *ptyRelay, hangupIgnored bool, closeAfterSt
 		if err != nil {
 			// The child leads its own group and is unreaped, so the group's
 			// number is still its own.
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = killGroup(cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Wait()
+			_ = watch.Close()
 			r.closeUnstarted()
 			return err
 		}
@@ -128,14 +172,21 @@ func runWithSignals(cmd *exec.Cmd, r *ptyRelay, hangupIgnored bool, closeAfterSt
 	}
 	pid := cmd.Process.Pid
 	var exitMu sync.Mutex
-	exited := false
-	// group signals the child's process group while it is unreaped, so a
-	// reused pid is never signalled.
+	// exited is set once the exit is observed or the child reaped;
+	// unobserved before the reap when the watch failed.
+	exited, unobserved := false, false
+	// group signals the child's process group while it is unreaped and its
+	// exit observable, so a reused group number is never signalled; with the
+	// exit unobservable, only the child.
 	group := func(s syscall.Signal) {
 		exitMu.Lock()
 		defer exitMu.Unlock()
-		if !exited {
-			_ = syscall.Kill(-pid, s)
+		switch {
+		case exited:
+		case unobserved:
+			_ = cmd.Process.Signal(s)
+		default:
+			_ = killGroup(pid, s)
 		}
 	}
 	if r != nil {
@@ -144,13 +195,20 @@ func runWithSignals(cmd *exec.Cmd, r *ptyRelay, hangupIgnored bool, closeAfterSt
 	}
 	done := make(chan error, 1)
 	go func() {
-		err := childproc.WaitExited(pid)
+		err := watch.Wait()
+		_ = watch.Close()
+		exitMu.Lock()
 		if err == nil {
-			exitMu.Lock()
 			exited = true
-			exitMu.Unlock()
+		} else {
+			unobserved = true
 		}
-		done <- errors.Join(err, cmd.Wait())
+		exitMu.Unlock()
+		waitErr := cmd.Wait()
+		exitMu.Lock()
+		exited = true
+		exitMu.Unlock()
+		done <- errors.Join(err, waitErr)
 	}()
 	for {
 		select {
@@ -306,7 +364,6 @@ func (r *ptyRelay) finish() {
 	}
 }
 
-// isTerminal reports whether f is a terminal.
 func isTerminal(f *os.File) bool {
 	_, err := unix.IoctlGetTermios(int(f.Fd()), ioctlReadTermios)
 	return err == nil
