@@ -22,18 +22,12 @@ const (
 	AppName = "Localport.app"
 	// LaunchdAppPath is the installed bundle the launcher plist runs.
 	LaunchdAppPath = "/Library/Application Support/Localport/" + AppName
-	// AppBundleID is the bundle's CFBundleIdentifier and code signing
-	// identifier.
+	// AppBundleID is the bundle's CFBundleIdentifier and code signing identifier.
 	AppBundleID = "io.localport.session"
 	// appExecutable is the launcher inside a bundle.
 	appExecutable = "Contents/MacOS/localport-session"
 	codesignPath  = "/usr/bin/codesign"
 )
-
-// releaseCertSHA1 is the SHA-1 fingerprint of the Localport release signing
-// certificate, set by release builds (-ldflags -X). Empty in local and CI
-// builds, whose bundles are ad-hoc signed and checked by identifier only.
-var releaseCertSHA1 string
 
 var sha1Hex = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
@@ -52,7 +46,7 @@ type sessionApp struct {
 
 // AppChecker is a Manager whose Install also installs a session app from
 // beside the CLI. CheckApp refuses, before a join token is spent, an app
-// Install would refuse (AG014).
+// Install refuses (AG014).
 type AppChecker interface {
 	CheckApp(ctx context.Context, exe string) error
 }
@@ -74,18 +68,6 @@ func appRequirement(certSHA1 string) (string, error) {
 		return "", errAppInvalid.With(nil, "this build names a malformed release certificate fingerprint")
 	}
 	return req + ` and certificate leaf = H"` + certSHA1 + `"`, nil
-}
-
-// codesignVerify checks bundle's signature, strictly, against appRequirement.
-func codesignVerify(ctx context.Context, bundle string) error {
-	req, err := appRequirement(releaseCertSHA1)
-	if err != nil {
-		return err
-	}
-	if _, err := execRun(ctx, codesignPath, "--verify", "--strict", "-R="+req, bundle); err != nil {
-		return errAppInvalid.With(err, fmt.Sprintf("%s is not signed by Localport", bundle))
-	}
-	return nil
 }
 
 // install copies the bundle beside exe to a staging directory next to
@@ -135,7 +117,7 @@ func (a sessionApp) install(ctx context.Context, exe string) error {
 }
 
 // check refuses, before anything is written or a join token is spent, a
-// bundle beside exe that install would refuse: missing, or not signed as
+// bundle beside exe that install refuses: missing, or not signed as
 // verify requires. install verifies its own staged copy again.
 func (a sessionApp) check(ctx context.Context, exe string) error {
 	src, err := appBeside(exe)
@@ -145,14 +127,18 @@ func (a sessionApp) check(ctx context.Context, exe string) error {
 	return a.verify(ctx, src)
 }
 
-// appBeside is the bundle in exe's directory, refused unless it is a
-// directory.
+// appBeside is the bundle in exe's directory, refused unless it is a directory.
 func appBeside(exe string) (string, error) {
 	src := filepath.Join(filepath.Dir(exe), AppName)
 	if fi, err := os.Lstat(src); err != nil || !fi.IsDir() {
 		return "", errAppInvalid.With(err, fmt.Sprintf("%s is missing: install localport with the install script, or extract the release's Localport app archive next to %s", src, exe))
 	}
 	return src, nil
+}
+
+func (a sessionApp) installed() bool {
+	fi, err := os.Lstat(a.path)
+	return err == nil && fi.IsDir()
 }
 
 // uninstall removes the installed bundle and, when empty, its directory.

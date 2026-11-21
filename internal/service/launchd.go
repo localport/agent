@@ -38,9 +38,8 @@ const (
 	launchdLauncherLog = "/var/log/localport-session.log"
 )
 
-// The Sockets keys the launcher checks in with (launch_activate_socket):
-// the launcher socket and the status endpoint. cmd/localport-session names
-// the same.
+// The Sockets keys the launcher checks in with (launch_activate_socket): the
+// launcher socket and the status endpoint, as cmd/localport-session names them.
 const (
 	launchdSocketName       = "Listeners"
 	launchdStatusSocketName = "Status"
@@ -77,8 +76,7 @@ type job struct {
 
 func (l launchd) Name() string { return LaunchdLabel }
 
-// StopCommand unloads the job: KeepAlive restarts a job that is only killed
-// or stopped.
+// StopCommand unloads the job: KeepAlive restarts a job only killed or stopped.
 func (l launchd) StopCommand() string { return "launchctl bootout " + target(LaunchdLabel) }
 
 func (l launchd) jobs() []job {
@@ -99,8 +97,8 @@ func (l launchd) plists() []string {
 
 func target(label string) string { return "system/" + label }
 
-// Check refuses a plist without the ManagedBy marker, and a loaded job whose plist is not
-// ours.
+// Check refuses a plist without the ManagedBy marker, and a loaded job whose
+// plist is not ours.
 func (l launchd) Check() ([]string, error) {
 	if err := checkOwned(plistMarker, l.plists()...); err != nil {
 		return nil, err
@@ -180,16 +178,21 @@ func (l launchd) Reload(ctx context.Context) error {
 }
 
 // Uninstall boots both daemons out and removes their plists and the
-// launcher bundle.
+// launcher bundle. Whichever of them a partial install or removal left is
+// removed too; ErrNotInstalled only when none is there.
 func (l launchd) Uninstall(ctx context.Context) error {
 	if err := checkOwned(plistMarker, l.plists()...); err != nil {
 		return err
 	}
-	exists, err := owned(l.plistPath, plistMarker)
-	if err != nil {
-		return err
+	installed := l.app.installed()
+	for _, p := range l.plists() {
+		exists, err := owned(p, plistMarker)
+		if err != nil {
+			return err
+		}
+		installed = installed || exists
 	}
-	if !exists {
+	if !installed {
 		return ErrNotInstalled
 	}
 	for _, j := range l.jobs() {
@@ -309,8 +312,7 @@ func prepareLogDir(dir string, acct Account) error {
 	return nil
 }
 
-// xmlPath escapes p for a plist <string>, refusing a relative path or a
-// control character.
+// xmlPath escapes p for a plist <string>, refusing a relative path or control character.
 func xmlPath(p string) (string, error) {
 	if !filepath.IsAbs(p) || strings.ContainsFunc(p, unicode.IsControl) {
 		return "", ErrUnsafeExecutable.With(nil, fmt.Sprintf("%q", p))

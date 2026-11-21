@@ -389,8 +389,7 @@ func TestSystemdUninstall(t *testing.T) {
 	}
 }
 
-// plistStrings returns the character data of a plist, refusing XML that is
-// not well-formed.
+// plistStrings returns a plist's character data, refusing XML that is not well-formed.
 func plistStrings(t *testing.T, plist []byte) []string {
 	t.Helper()
 	var strs []string
@@ -588,6 +587,56 @@ func TestLaunchdUninstall(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(l.app.path)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the app directory is still there: %v", err)
+	}
+}
+
+// Whatever a partial removal left (the launcher bundle, the launcher plist)
+// is still uninstalled; a second Uninstall finds nothing.
+func TestLaunchdUninstallRemovesWhatIsLeft(t *testing.T) {
+	unixInitOnly(t)
+	for _, tc := range []struct {
+		name   string
+		remove func(l launchd) error
+	}{
+		{"bundle without the plists", func(l launchd) error {
+			for _, j := range l.jobs() {
+				if err := os.Remove(j.plist); err != nil {
+					return err
+				}
+			}
+			return nil
+		}},
+		{"launcher plist alone", func(l launchd) error {
+			if err := os.Remove(l.plistPath); err != nil {
+				return err
+			}
+			return os.RemoveAll(filepath.Dir(l.app.path))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &recorder{fail: notLoaded(LaunchdLabel, LaunchdLauncherLabel)}
+			l := newLaunchd(t, r)
+			if err := l.Install(context.Background(), testAppExe(t)); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.remove(l); err != nil {
+				t.Fatal(err)
+			}
+			if err := l.Uninstall(context.Background()); err != nil {
+				t.Fatalf("Uninstall = %v", err)
+			}
+			for _, j := range l.jobs() {
+				if _, err := os.Stat(j.plist); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("%s still there: %v", j.plist, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Dir(l.app.path)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the app directory is still there: %v", err)
+			}
+			if err := l.Uninstall(context.Background()); !errors.Is(err, ErrNotInstalled) {
+				t.Fatalf("second Uninstall = %v, want ErrNotInstalled", err)
+			}
+		})
 	}
 }
 
