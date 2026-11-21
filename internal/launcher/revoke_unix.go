@@ -4,6 +4,7 @@ package launcher
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"time"
@@ -24,21 +25,21 @@ type grantedSession struct {
 }
 
 // end tells the helper once to end its session for the revoked grant. A
-// helper whose session already ended ignores it, and a closed channel fails
-// the write, which is harmless.
+// helper whose session already ended ignores it. os.ErrClosed (the run
+// goroutine closed the channel first) is not logged.
 func (g *grantedSession) end(log func(string, ...any)) {
 	g.endOnce.Do(func() {
 		_ = g.control.SetWriteDeadline(time.Now().Add(replyTimeout))
-		if err := WriteHelperEnd(g.control, EndFullDiskAccessRevoked); err != nil {
+		if err := WriteHelperEnd(g.control, EndFullDiskAccessRevoked); err != nil && !errors.Is(err, os.ErrClosed) {
 			log("launcher: end a session for the revoked Full Disk Access: %v", err)
 		}
 	})
 }
 
 // revocation ends every granted session when Full Disk Access goes away.
-// Its watcher runs only while a granted session runs: add starts it, the
-// remove that empties the set stops it. The set is memory only; a restarted
-// launcher does not adopt running helpers, whose own check covers them.
+// Its watcher runs only while a granted session runs and Serve is open (open
+// to close). The set is memory only; helpers run their own check, which also
+// covers sessions a closed or restarted launcher does not watch.
 type revocation struct {
 	read func() string
 	// ticker returns the interval's ticks and their stop; tests replace it.
@@ -47,9 +48,11 @@ type revocation struct {
 
 	mu       sync.Mutex
 	sessions map[*grantedSession]struct{}
-	// stop is non-nil while a watcher runs and closes to stop it.
-	stop chan struct{}
-	// watchers counts running watcher goroutines.
+	// stop is non-nil while a watcher may run; closing it stops the watcher.
+	stop   chan struct{}
+	closed bool
+	// watchers: Add runs under mu and never while closed, so close's Wait
+	// cannot race a new watcher.
 	watchers sync.WaitGroup
 }
 
@@ -62,12 +65,27 @@ func realTicker(d time.Duration) (<-chan time.Time, func()) {
 	return t.C, t.Stop
 }
 
+// open allows watchers under ctx and starts one for sessions still registered.
+func (r *revocation) open(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = false
+	if len(r.sessions) > 0 {
+		r.startWatcherLocked(ctx)
+	}
+}
+
 // add registers g and starts the watcher if none runs.
 func (r *revocation) add(ctx context.Context, g *grantedSession) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sessions[g] = struct{}{}
-	if r.stop == nil {
+	r.startWatcherLocked(ctx)
+}
+
+// startWatcherLocked starts a watcher unless one runs or r is closed. Holds r.mu.
+func (r *revocation) startWatcherLocked(ctx context.Context) {
+	if r.stop == nil && !r.closed {
 		r.stop = make(chan struct{})
 		r.watchers.Add(1)
 		go r.watch(ctx, r.stop)
@@ -79,7 +97,23 @@ func (r *revocation) remove(g *grantedSession) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.sessions, g)
-	if len(r.sessions) == 0 && r.stop != nil {
+	if len(r.sessions) == 0 {
+		r.stopWatcherLocked()
+	}
+}
+
+// close stops the watcher and blocks new ones; it returns once none runs.
+func (r *revocation) close() {
+	r.mu.Lock()
+	r.closed = true
+	r.stopWatcherLocked()
+	r.mu.Unlock()
+	r.watchers.Wait()
+}
+
+// stopWatcherLocked closes stop if set. Holds r.mu.
+func (r *revocation) stopWatcherLocked() {
+	if r.stop != nil {
 		close(r.stop)
 		r.stop = nil
 	}

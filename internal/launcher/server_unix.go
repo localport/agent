@@ -157,6 +157,10 @@ func (s *Server) Serve(ctx context.Context, ln *net.UnixListener) error {
 	if s.FullDiskAccess != nil && s.revoke == nil {
 		s.revoke = newRevocation(s.FullDiskAccess, s.Log)
 	}
+	if s.revoke != nil {
+		s.revoke.open(ctx)
+		defer s.revoke.close()
+	}
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
 	for {
