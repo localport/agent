@@ -93,18 +93,37 @@ func serveSFTP(rwc io.ReadWriteCloser, s *filesServer) error {
 	return err
 }
 
-// sftpHandlers are filesServer's handlers with every permission refusal
-// answered SSH_FX_PERMISSION_DENIED: the request server maps only the POSIX
-// errnos EACCES and EPERM, so a refusal such as Windows ERROR_ACCESS_DENIED
-// would otherwise reach the client as a generic failure.
+// sftpHandlers are filesServer's handlers, every error answered through sftpStatus.
 type sftpHandlers struct{ s *filesServer }
 
-// sftpStatus maps a permission refusal to sftp.ErrSSHFxPermissionDenied.
+// sftpPassThrough are the pkg/sftp status errors the server returns as is.
+var sftpPassThrough = []error{
+	sftp.ErrSSHFxEOF, sftp.ErrSSHFxNoSuchFile, sftp.ErrSSHFxPermissionDenied, sftp.ErrSSHFxFailure,
+	sftp.ErrSSHFxBadMessage, sftp.ErrSSHFxNoConnection, sftp.ErrSSHFxConnectionLost, sftp.ErrSSHFxOpUnsupported,
+}
+
+// sftpStatus maps err to a pkg/sftp status error, which has a fixed message;
+// pkg/sftp sends any other error's text, paths included, to the client.
+// Permission refusals (Windows ERROR_ACCESS_DENIED included) are
+// PERMISSION_DENIED, missing files NO_SUCH_FILE, the rest FAILURE. io.EOF is
+// kept: it ends a read or a listing.
 func sftpStatus(err error) error {
-	if errors.Is(err, fs.ErrPermission) {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, io.EOF):
+		return io.EOF
+	case errors.Is(err, fs.ErrPermission):
 		return sftp.ErrSSHFxPermissionDenied
+	case errors.Is(err, fs.ErrNotExist):
+		return sftp.ErrSSHFxNoSuchFile
 	}
-	return err
+	for _, fx := range sftpPassThrough {
+		if errors.Is(err, fx) {
+			return fx
+		}
+	}
+	return sftp.ErrSSHFxFailure
 }
 
 func (h sftpHandlers) Fileread(r *sftp.Request) (io.ReaderAt, error) {
@@ -314,13 +333,13 @@ func (c *countedFile) ReadAt(p []byte, off int64) (int, error) {
 	if c.op == launcher.OpRead {
 		c.bytes.Add(int64(n))
 	}
-	return n, err
+	return n, sftpStatus(err)
 }
 
 func (c *countedFile) WriteAt(p []byte, off int64) (int, error) {
 	n, err := c.File.WriteAt(p, off)
 	c.bytes.Add(int64(n))
-	return n, err
+	return n, sftpStatus(err)
 }
 
 func (c *countedFile) Close() error {
@@ -328,7 +347,7 @@ func (c *countedFile) Close() error {
 	c.once.Do(func() {
 		c.s.emit(launcher.FileEvent{Op: c.op, Path: c.path, Bytes: c.bytes.Load(), Result: result(err)})
 	})
-	return err
+	return sftpStatus(err)
 }
 
 // Filecmd applies setstat, rename, rmdir, remove, mkdir, symlink and link,

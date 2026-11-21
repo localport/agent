@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -370,6 +371,58 @@ func TestFilesAnswersEveryPermissionRefusalDenied(t *testing.T) {
 	for _, ev := range events.list(t) {
 		if ev.Result != "permission_denied" {
 			t.Errorf("event %+v, want result permission_denied", ev)
+		}
+	}
+}
+
+// An OS error carries its path and OS wording; the client sees only the
+// status code's fixed message, from a request and from an open handle.
+func TestFilesStatusTextIsFixed(t *testing.T) {
+	h := newFilesHarness(t)
+	if err := os.MkdirAll(filepath.Join(h.dir, "full", "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := h.client.RemoveDirectory("/full")
+	var st *sftp.StatusError
+	if !errors.As(err, &st) || st.FxCode() != sftp.ErrSSHFxFailure {
+		t.Fatalf("rmdir of a non-empty directory = %v, want SSH_FX_FAILURE", err)
+	}
+	// The client wraps the status with its own operation and path; the
+	// server's part is st.
+	if msg := st.Error(); strings.Contains(msg, "full") || strings.Contains(msg, "not empty") || strings.Contains(msg, h.dir) {
+		t.Errorf("status %q carries the OS error's text", msg)
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "handle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	closed := &countedFile{File: f, op: launcher.OpRead}
+	if _, err := closed.ReadAt(make([]byte, 1), 0); err != sftp.ErrSSHFxFailure {
+		t.Errorf("ReadAt on a failing handle = %v, want SSH_FX_FAILURE", err)
+	}
+	if _, err := closed.WriteAt([]byte("x"), 0); err != sftp.ErrSSHFxFailure {
+		t.Errorf("WriteAt on a failing handle = %v, want SSH_FX_FAILURE", err)
+	}
+}
+
+// sftpStatus keeps io.EOF and pkg/sftp's own status errors, and maps missing
+// files and permission refusals to their codes.
+func TestSFTPStatusMapping(t *testing.T) {
+	for _, c := range []struct {
+		in, want error
+	}{
+		{nil, nil},
+		{io.EOF, io.EOF},
+		{&fs.PathError{Op: "open", Path: "/x", Err: fs.ErrNotExist}, sftp.ErrSSHFxNoSuchFile},
+		{&fs.PathError{Op: "open", Path: "/x", Err: fs.ErrPermission}, sftp.ErrSSHFxPermissionDenied},
+		{sftp.ErrSSHFxOpUnsupported, sftp.ErrSSHFxOpUnsupported},
+		{sftp.ErrSSHFxBadMessage, sftp.ErrSSHFxBadMessage},
+		{errors.New("device busy"), sftp.ErrSSHFxFailure},
+	} {
+		if got := sftpStatus(c.in); got != c.want {
+			t.Errorf("sftpStatus(%v) = %v, want %v", c.in, got, c.want)
 		}
 	}
 }
