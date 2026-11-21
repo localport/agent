@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/localport/agent/internal/childproc"
 	"github.com/localport/agent/internal/launcher"
 )
 
@@ -55,7 +56,7 @@ type pipeSession struct {
 	exitCode       int
 
 	// watch observes the command's exit without reaping it; the waiter closes it.
-	watch exitWatch
+	watch childproc.Watcher
 	log   func(format string, args ...any)
 }
 

@@ -4,7 +4,6 @@ package cli
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -23,47 +22,11 @@ import (
 // background process the child left on the PTY may keep it open.
 const relayDrainTimeout = time.Second
 
-// exitWatch observes the child's exit without reaping it (childproc.ExitWatch).
-type exitWatch interface {
-	Watch(pid int) error
-	Wait() error
-	Close() error
-}
-
 // newExitWatch creates the child's exit watch; tests replace it.
-var newExitWatch = func() (exitWatch, error) {
-	w, err := childproc.NewExitWatch()
-	if err != nil {
-		return nil, err
-	}
-	return w, nil
-}
+var newExitWatch = childproc.NewWatcher
 
 // killGroup signals the process group pid leads; tests replace it.
 var killGroup = func(pid int, s syscall.Signal) error { return syscall.Kill(-pid, s) }
-
-// startWatched starts cmd, which leads its own process group (Setsid), with
-// its exit watch in place: the watch exists before the spawn and is
-// registered right after it, so the child never runs without one. When the
-// registration fails, the still unreaped child's group is killed, the child
-// reaped, and the start fails.
-func startWatched(cmd *exec.Cmd) (exitWatch, error) {
-	w, err := newExitWatch()
-	if err != nil {
-		return nil, fmt.Errorf("create the exit watch: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		_ = w.Close()
-		return nil, err
-	}
-	if err := w.Watch(cmd.Process.Pid); err != nil {
-		_ = killGroup(cmd.Process.Pid, syscall.SIGKILL)
-		_ = cmd.Wait()
-		_ = w.Close()
-		return nil, fmt.Errorf("watch the exit of %d: %w", cmd.Process.Pid, err)
-	}
-	return w, nil
-}
 
 // runRelayed starts cmd in its own session and waits for it, as sudo with
 // use_pty does: the child never shares root's terminal, so it cannot push
@@ -145,7 +108,7 @@ func runWithSignals(cmd *exec.Cmd, r *ptyRelay, hangupIgnored bool, closeAfterSt
 	sig := make(chan os.Signal, 4)
 	signal.Notify(sig, sigs...)
 	defer signal.Stop(sig)
-	watch, err := startWatched(cmd)
+	watch, err := childproc.StartWatched(cmd, newExitWatch, (*exec.Cmd).Start, killGroup)
 	for _, f := range closeAfterStart {
 		_ = f.Close()
 	}
@@ -196,7 +159,6 @@ func runWithSignals(cmd *exec.Cmd, r *ptyRelay, hangupIgnored bool, closeAfterSt
 	done := make(chan error, 1)
 	go func() {
 		err := watch.Wait()
-		_ = watch.Close()
 		exitMu.Lock()
 		if err == nil {
 			exited = true
@@ -204,6 +166,8 @@ func runWithSignals(cmd *exec.Cmd, r *ptyRelay, hangupIgnored bool, closeAfterSt
 			unobserved = true
 		}
 		exitMu.Unlock()
+		// Closed after the decision, so a closed watch implies it is recorded.
+		_ = watch.Close()
 		waitErr := cmd.Wait()
 		exitMu.Lock()
 		exited = true

@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/localport/agent/internal/childproc"
 	"github.com/localport/agent/internal/launcher"
 )
 
@@ -28,7 +29,7 @@ func (w *fakeWatch) Wait() error         { return w.waitErr }
 func (w *fakeWatch) Close() error        { return nil }
 
 // setExitWatch makes every session start in the test use newWatch.
-func setExitWatch(t *testing.T, newWatch func() (exitWatch, error)) {
+func setExitWatch(t *testing.T, newWatch func() (childproc.Watcher, error)) {
 	t.Helper()
 	old := newExitWatch
 	newExitWatch = newWatch
@@ -95,7 +96,7 @@ func startTerminalFails(t *testing.T, command string) {
 
 // Without an exit watch no session child is spawned.
 func TestSessionStartRefusedWithoutAnExitWatch(t *testing.T) {
-	setExitWatch(t, func() (exitWatch, error) { return nil, unix.EMFILE })
+	setExitWatch(t, func() (childproc.Watcher, error) { return nil, unix.EMFILE })
 	for name, start := range map[string]func(*testing.T, string){"pipe": startPipeFails, "terminal": startTerminalFails} {
 		t.Run(name, func(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "ran")
@@ -113,7 +114,7 @@ func TestSessionStartRefusedWhenTheWatchFails(t *testing.T) {
 	for name, start := range map[string]func(*testing.T, string){"pipe": startPipeFails, "terminal": startTerminalFails} {
 		t.Run(name, func(t *testing.T) {
 			w := &fakeWatch{watchErr: unix.ENOMEM}
-			setExitWatch(t, func() (exitWatch, error) { return w, nil })
+			setExitWatch(t, func() (childproc.Watcher, error) { return w, nil })
 			start(t, "sleep 30")
 			if w.pid == 0 {
 				t.Fatal("the watch was never registered")
@@ -130,7 +131,7 @@ func TestSessionStartRefusedWhenTheWatchFails(t *testing.T) {
 // once, as an unobservable exit.
 func startPipeUnwatched(t *testing.T, command string, park byte) (*pipeSession, *os.File, *gateWriter) {
 	t.Helper()
-	setExitWatch(t, func() (exitWatch, error) { return &fakeWatch{waitErr: unix.EBADF}, nil })
+	setExitWatch(t, func() (childproc.Watcher, error) { return &fakeWatch{waitErr: unix.EBADF}, nil })
 	return startPipeAgent(t, command, park)
 }
 

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/localport/agent/internal/childproc"
 )
 
 // fakeWatch is an exit watch whose registration or wait fails on demand. It
@@ -28,7 +30,7 @@ func (w *fakeWatch) Watch(pid int) error { w.pid = pid; return w.watchErr }
 func (w *fakeWatch) Wait() error         { return w.waitErr }
 func (w *fakeWatch) Close() error        { return nil }
 
-func setExitWatch(t *testing.T, newWatch func() (exitWatch, error)) {
+func setExitWatch(t *testing.T, newWatch func() (childproc.Watcher, error)) {
 	t.Helper()
 	old := newExitWatch
 	newExitWatch = newWatch
@@ -47,7 +49,7 @@ func countGroupSignals(t *testing.T) *atomic.Int32 {
 
 // Without an exit watch the child is not spawned.
 func TestRunRelayedRefusedWithoutAnExitWatch(t *testing.T) {
-	setExitWatch(t, func() (exitWatch, error) { return nil, unix.EMFILE })
+	setExitWatch(t, func() (childproc.Watcher, error) { return nil, unix.EMFILE })
 	marker := filepath.Join(t.TempDir(), "ran")
 	err := runRelayed(exec.Command("/bin/sh", "-c", "touch "+marker), bytes.NewReader(nil), io.Discard, io.Discard, false)
 	if err == nil {
@@ -62,7 +64,7 @@ func TestRunRelayedRefusedWithoutAnExitWatch(t *testing.T) {
 // A child whose exit cannot be registered is killed and reaped; the run fails.
 func TestRunRelayedRefusedWhenTheWatchFails(t *testing.T) {
 	w := &fakeWatch{watchErr: unix.ENOMEM}
-	setExitWatch(t, func() (exitWatch, error) { return w, nil })
+	setExitWatch(t, func() (childproc.Watcher, error) { return w, nil })
 	if err := runRelayed(exec.Command("/bin/sh", "-c", "sleep 30"), bytes.NewReader(nil), io.Discard, io.Discard, false); err == nil {
 		t.Fatal("the child started")
 	}
@@ -83,7 +85,7 @@ func TestRunRelayedSignalsOnlyTheChildWhenTheExitIsUnobservable(t *testing.T) {
 	}{{"observable", false}, {"unobservable", true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.unobserved {
-				setExitWatch(t, func() (exitWatch, error) { return &fakeWatch{waitErr: unix.EBADF}, nil })
+				setExitWatch(t, func() (childproc.Watcher, error) { return &fakeWatch{waitErr: unix.EBADF}, nil })
 			}
 			groups := countGroupSignals(t)
 			ready := filepath.Join(t.TempDir(), "ready")

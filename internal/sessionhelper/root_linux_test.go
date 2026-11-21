@@ -59,11 +59,16 @@ func TestRootHelperClosesUtmpAtTheEnd(t *testing.T) {
 		t.Fatalf("output %q: no utmp line for the session", out)
 	}
 	// A file argument: without one, GNU who hides records whose pid is dead,
-	// which would hide an unclosed record of the exited shell too. The
-	// resolved path (/run/utmp), because a gnulib build with systemd reads
-	// logind sessions instead when the argument equals UTMP_FILE.
-	file, err := filepath.EvalSymlinks("/var/run/utmp")
+	// which would hide an unclosed record of the exited shell too. A copy,
+	// because a gnulib build with systemd reads logind sessions instead when
+	// the argument equals UTMP_FILE, and where /var/run is a real directory
+	// no other path names that file.
+	records, err := os.ReadFile("/var/run/utmp")
 	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "utmp")
+	if err := os.WriteFile(file, records, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	who, err := exec.Command("who", file).Output()

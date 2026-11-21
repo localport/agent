@@ -119,7 +119,7 @@ type terminal struct {
 	exitCode int
 
 	// watch observes the shell's exit without reaping it; the waiter closes it.
-	watch exitWatch
+	watch childproc.Watcher
 	log   func(format string, args ...any)
 }
 
@@ -130,44 +130,14 @@ type sessionLeader struct {
 	pidfd int
 }
 
-// exitWatch observes a session child's exit without reaping it (childproc.ExitWatch).
-type exitWatch interface {
-	Watch(pid int) error
-	Wait() error
-	Close() error
-}
-
 // newExitWatch creates a session child's exit watch; tests replace it before
 // the session starts.
-var newExitWatch = func() (exitWatch, error) {
-	w, err := childproc.NewExitWatch()
-	if err != nil {
-		return nil, err
-	}
-	return w, nil
-}
+var newExitWatch = childproc.NewWatcher
 
-// startWatched starts cmd, a child in its own process group (Setsid), with
-// its exit watch in place: the watch exists before the spawn and is
-// registered right after it, so no session child runs without one. When the
-// registration fails, the still unreaped child's group is killed, the child
-// reaped, and the start fails. On error nothing is left running.
-func startWatched(cmd *exec.Cmd) (exitWatch, error) {
-	w, err := newExitWatch()
-	if err != nil {
-		return nil, fmt.Errorf("create the exit watch: %w", err)
-	}
-	if err := startChild(cmd); err != nil {
-		_ = w.Close()
-		return nil, err
-	}
-	if err := w.Watch(cmd.Process.Pid); err != nil {
-		_ = killGroup(cmd.Process.Pid, syscall.SIGKILL)
-		_ = cmd.Wait()
-		_ = w.Close()
-		return nil, fmt.Errorf("watch the exit of %d: %w", cmd.Process.Pid, err)
-	}
-	return w, nil
+// startWatched starts a session child in its own process group (Setsid)
+// through startChild, with its exit watch in place (childproc.StartWatched).
+func startWatched(cmd *exec.Cmd) (childproc.Watcher, error) {
+	return childproc.StartWatched(cmd, newExitWatch, startChild, killGroup)
 }
 
 // openPTY opens a PTY pair of the given size.
