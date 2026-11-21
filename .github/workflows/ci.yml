@@ -145,12 +145,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      # Linux lints natively with cgo; darwin's cgo files lint in its macOS job.
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        with:
-          version: v2.15.0
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        env:
-          GOOS: darwin
         with:
           version: v2.15.0
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
@@ -159,6 +155,22 @@ jobs:
         with:
           version: v2.15.0
       - run: make errwrapcheck
+
+  lint-macos:
+    name: Lint (macOS)
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
 
   # The TestRoot tests, as root with libpam and the localport PAM service.
   test-root:
@@ -307,12 +319,12 @@ jobs:
       - run: make cargo-deny
 
   # Every cgo localport-session build of the release (glibc, musl, ARMv6,
-  # signed darwin), with the floor and architecture checks they run.
+  # ad-hoc signed darwin), with the floor and architecture checks they run.
   sessions:
     uses: ./.github/workflows/session.yml
 
   # Release dry run with throwaway keys: packages, signed repositories and
-  # install tests, from the session and signed darwin binaries `make dist`
+  # install tests, from the session and ad-hoc signed darwin binaries `make dist`
   # requires.
   dryrun:
     name: Release dry run
