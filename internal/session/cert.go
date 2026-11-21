@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -64,9 +65,8 @@ type certRec struct {
 	PubSHA256 string `json:"pub_sha256"`
 }
 
-// admission is what a verified certificate admits: the identity the channel
-// handlers read, and the certificate's wire form, which a recording open
-// forwards.
+// admission is what a verified certificate admits: the identity channel
+// handlers read and the wire form a recording open forwards.
 type admission struct {
 	Kind    string
 	Login   string
@@ -90,27 +90,22 @@ type admission struct {
 	Idle time.Duration
 }
 
-// Bounds of an optionIdle value, the range the control plane mints.
-const (
-	minIdle = 5 * time.Minute
-	maxIdle = 240 * time.Minute
-)
+// maxIdleSeconds keeps the conversion to a Duration from overflowing. The
+// policy range is the signer's; the agent checks only the form.
+const maxIdleSeconds = math.MaxInt64 / int64(time.Second)
 
-// parseIdle parses an optionIdle value: whole seconds in decimal without
-// leading zeros, within minIdle and maxIdle. The bounds are checked on the
-// seconds, before the conversion to a Duration can overflow.
+// parseIdle parses an optionIdle value: positive whole seconds in decimal
+// without leading zeros.
 func parseIdle(v string) (time.Duration, bool) {
 	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || strconv.FormatInt(n, 10) != v ||
-		n < int64(minIdle/time.Second) || n > int64(maxIdle/time.Second) {
+	if err != nil || strconv.FormatInt(n, 10) != v || n < 1 || n > maxIdleSeconds {
 		return 0, false
 	}
 	return time.Duration(n) * time.Second, true
 }
 
 // clipboardAccess is a clipboard@localport.io value: whether clipboard text
-// may move from the device to the browser (Copy) and from the browser to the
-// device (Paste).
+// may move device to browser (Copy) and browser to device (Paste).
 type clipboardAccess struct {
 	Copy  bool
 	Paste bool
@@ -174,22 +169,20 @@ func refuseCert(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", errCertRefused, fmt.Sprintf(format, args...))
 }
 
-// verifyCert checks a user certificate whose key possession userauth proved: a
-// user certificate signed by one of cas, with exactly the serial the edge
-// admitted, valid at now within certSkew, for principal user, with exactly the
-// critical options the device option (which must name device), optionIdle,
-// for a files or ssh certificate optionFiles, and for a vnc or rdp certificate
-// optionClipboard. A resume certificate is refused (its resume option is
-// unknown here). It returns the certificate's claims; the caller applies the
-// local config.
+// verifyCert checks a user certificate whose key possession userauth proved:
+// signed by one of cas, exactly the serial the edge admitted, valid at now
+// within certSkew, for principal user, with exactly these critical options:
+// the device option (naming device), optionIdle, optionFiles for a files or
+// ssh certificate and optionClipboard for vnc or rdp. A resume certificate is
+// refused (its option is unknown here). It returns the claims; the caller
+// applies the local config.
 func verifyCert(cert *ssh.Certificate, user string, cas []ed25519.PublicKey, device Device, serial uint64, now time.Time) (*admission, error) {
 	return checkCert(cert, user, cas, device, serial, now, []string{optionDevice, optionIdle})
 }
 
-// verifyResumeCert checks a resume certificate in a resume prelude: as
-// verifyCert for its one principal, with optionResume beside verifyCert's
-// critical options, which must name original, the serial of the connection it
-// resumes.
+// verifyResumeCert checks a resume prelude's certificate as verifyCert does
+// for its one principal, plus optionResume naming original, the serial of the
+// connection it resumes.
 func verifyResumeCert(cert *ssh.Certificate, cas []ed25519.PublicKey, device Device, serial, original uint64, now time.Time) (*admission, error) {
 	if len(cert.ValidPrincipals) != 1 {
 		return nil, refuseCert("want one principal")
@@ -321,8 +314,7 @@ func clampInto(t, after, before time.Time) time.Time {
 	return t
 }
 
-// strictJSON decodes one JSON value into v, refusing unknown fields and
-// trailing data.
+// strictJSON decodes one JSON value into v, refusing unknown fields and trailing data.
 func strictJSON(s string, v any) error {
 	dec := json.NewDecoder(bytes.NewReader([]byte(s)))
 	dec.DisallowUnknownFields()

@@ -195,7 +195,6 @@ func (c *manualClock) NewTimer(time.Duration) (<-chan time.Time, func() bool) {
 	return make(chan time.Time, 1), func() bool { return true }
 }
 
-// NewDetachTimer records a detach timer.
 func (c *manualClock) NewDetachTimer(d time.Duration) (<-chan time.Time, func() bool) {
 	ch := make(chan time.Time, 1)
 	c.mu.Lock()

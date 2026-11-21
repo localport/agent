@@ -665,8 +665,7 @@ func TestUserauthRefusals(t *testing.T) {
 		{"files option malformed", func(o *certOpts) { o.kind, o.files = "files", new("upload,download") }, 0},
 		{"terminal certificate with a files option", func(o *certOpts) { o.files = new("download") }, 0},
 		{"without the idle option", func(o *certOpts) { o.noIdle = true }, 0},
-		{"idle below 5 minutes", func(o *certOpts) { o.idle = new("299") }, 0},
-		{"idle above 240 minutes", func(o *certOpts) { o.idle = new("14401") }, 0},
+		{"idle of zero", func(o *certOpts) { o.idle = new("0") }, 0},
 		{"idle with a leading zero", func(o *certOpts) { o.idle = new("01800") }, 0},
 		{"idle not in seconds", func(o *certOpts) { o.idle = new("30m") }, 0},
 		// 2^55 + 1800 seconds: in nanoseconds it wraps to exactly 1800 s.
