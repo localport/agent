@@ -333,6 +333,47 @@ func isDenied(err error) bool {
 	return errors.Is(err, os.ErrPermission)
 }
 
+// deniedFS refuses opens and directory creation with a permission error
+// that is not a POSIX errno, as Windows ERROR_ACCESS_DENIED is not.
+type deniedFS struct{ filesFS }
+
+func (deniedFS) OpenFile(name string, _ int, _ fs.FileMode) (*os.File, error) {
+	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrPermission}
+}
+
+func (deniedFS) Mkdir(name string, _ fs.FileMode) error {
+	return &fs.PathError{Op: "mkdir", Path: name, Err: fs.ErrPermission}
+}
+
+// A permission refusal of any OS reaches the client as permission denied and
+// is logged with that result.
+func TestFilesAnswersEveryPermissionRefusalDenied(t *testing.T) {
+	dir := t.TempDir()
+	events := &eventSink{}
+	s := &filesServer{access: FilesAccess{Download: true, Upload: true}, events: events, start: "/", fs: deniedFS{osFS{}}}
+	serverSide, clientSide := net.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- serveSFTP(serverSide, s) }()
+	c, err := sftp.NewClientPipe(clientSide, clientSide)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Open(filepath.ToSlash(filepath.Join(dir, "a"))); !isDenied(err) {
+		t.Errorf("open: %v, want permission denied", err)
+	}
+	if err := c.Mkdir(filepath.ToSlash(filepath.Join(dir, "d"))); !isDenied(err) {
+		t.Errorf("mkdir: %v, want permission denied", err)
+	}
+	_ = c.Close()
+	_ = clientSide.Close()
+	<-done
+	for _, ev := range events.list(t) {
+		if ev.Result != "permission_denied" {
+			t.Errorf("event %+v, want result permission_denied", ev)
+		}
+	}
+}
+
 // Without Upload the server behaves as sftp-server -R: every request that
 // changes the file system is refused permission denied and logged with that
 // result, and nothing changes; listing and stat still work. Without Download

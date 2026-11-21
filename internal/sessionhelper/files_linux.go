@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"path"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/sys/unix"
@@ -26,20 +25,10 @@ func statVFS(dir string) (*sftp.StatVFS, error) {
 // existing target. Parents open through root, keeping the rename confined;
 // without RENAME_NOREPLACE it falls back to check-then-rename.
 func renameNoReplace(root *os.Root, from, to string) error {
-	// O_DIRECTORY and O_NONBLOCK: a FIFO named as a parent answers at once.
-	const parentFlags = os.O_RDONLY | unix.O_DIRECTORY | unix.O_NONBLOCK
-	fromDir, err := root.OpenFile(path.Dir(from), parentFlags, 0)
-	if err != nil {
-		return err
-	}
-	defer fromDir.Close()
-	toDir, err := root.OpenFile(path.Dir(to), parentFlags, 0)
-	if err != nil {
-		return err
-	}
-	defer toDir.Close()
-	err = unix.Renameat2(int(fromDir.Fd()), path.Base(from), int(toDir.Fd()), path.Base(to), unix.RENAME_NOREPLACE)
-	return renameat2Result(err, root, from, to)
+	return renameAtParents(root, from, to, func(fromDir int, fromName string, toDir int, toName string) error {
+		err := unix.Renameat2(fromDir, fromName, toDir, toName, unix.RENAME_NOREPLACE)
+		return renameat2Result(err, root, from, to)
+	})
 }
 
 // osRenameNoReplace renames OS path from to to, atomically refusing an existing target.

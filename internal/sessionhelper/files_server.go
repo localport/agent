@@ -85,11 +85,65 @@ func ServeFiles(rwc io.ReadWriteCloser, root, home string, access FilesAccess, e
 
 // serveSFTP runs the request server over s until the client ends the session.
 func serveSFTP(rwc io.ReadWriteCloser, s *filesServer) error {
-	err := sftp.NewRequestServer(rwc, sftp.Handlers{FileGet: s, FilePut: s, FileCmd: s, FileList: s}, sftp.WithStartDirectory(s.start)).Serve()
+	h := sftpHandlers{s}
+	err := sftp.NewRequestServer(rwc, sftp.Handlers{FileGet: h, FilePut: h, FileCmd: h, FileList: h}, sftp.WithStartDirectory(s.start)).Serve()
 	if errors.Is(err, io.EOF) {
 		return nil
 	}
 	return err
+}
+
+// sftpHandlers are filesServer's handlers with every permission refusal
+// answered SSH_FX_PERMISSION_DENIED: the request server maps only the POSIX
+// errnos EACCES and EPERM, so a refusal such as Windows ERROR_ACCESS_DENIED
+// would otherwise reach the client as a generic failure.
+type sftpHandlers struct{ s *filesServer }
+
+// sftpStatus maps a permission refusal to sftp.ErrSSHFxPermissionDenied.
+func sftpStatus(err error) error {
+	if errors.Is(err, fs.ErrPermission) {
+		return sftp.ErrSSHFxPermissionDenied
+	}
+	return err
+}
+
+func (h sftpHandlers) Fileread(r *sftp.Request) (io.ReaderAt, error) {
+	f, err := h.s.Fileread(r)
+	return f, sftpStatus(err)
+}
+
+func (h sftpHandlers) Filewrite(r *sftp.Request) (io.WriterAt, error) {
+	f, err := h.s.Filewrite(r)
+	return f, sftpStatus(err)
+}
+
+func (h sftpHandlers) OpenFile(r *sftp.Request) (sftp.WriterAtReaderAt, error) {
+	f, err := h.s.OpenFile(r)
+	return f, sftpStatus(err)
+}
+
+func (h sftpHandlers) Filecmd(r *sftp.Request) error { return sftpStatus(h.s.Filecmd(r)) }
+
+func (h sftpHandlers) PosixRename(r *sftp.Request) error { return sftpStatus(h.s.PosixRename(r)) }
+
+func (h sftpHandlers) StatVFS(r *sftp.Request) (*sftp.StatVFS, error) {
+	st, err := h.s.StatVFS(r)
+	return st, sftpStatus(err)
+}
+
+func (h sftpHandlers) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
+	l, err := h.s.Filelist(r)
+	return l, sftpStatus(err)
+}
+
+func (h sftpHandlers) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
+	l, err := h.s.Lstat(r)
+	return l, sftpStatus(err)
+}
+
+func (h sftpHandlers) RealPath(p string) (string, error) {
+	rp, err := h.s.RealPath(p)
+	return rp, sftpStatus(err)
 }
 
 // filesServer implements the request server's handlers over fs.
@@ -244,8 +298,8 @@ func (s *filesServer) openWrite(r *sftp.Request, base int) (*countedFile, error)
 	return &countedFile{File: f, s: s, op: launcher.OpWrite, path: r.Filepath}, nil
 }
 
-// countedFile counts the bytes read or written through one handle and
-// writes its read or write event when the handle closes.
+// countedFile counts the bytes read or written through one handle and writes
+// its event when the handle closes; errors go through sftpStatus.
 type countedFile struct {
 	*os.File
 	s     *filesServer
