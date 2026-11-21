@@ -32,7 +32,7 @@ func S4UAvailability() string {
 	if err := windows.NetGetJoinInformation(nil, &name, &status); err != nil {
 		return launcher.S4UUnknown
 	}
-	windows.NetApiBufferFree((*byte)(unsafe.Pointer(name)))
+	_ = windows.NetApiBufferFree((*byte)(unsafe.Pointer(name)))
 	if status != netSetupDomainName {
 		return launcher.S4ULocal
 	}
@@ -47,6 +47,6 @@ func S4UAvailability() string {
 	default:
 		return launcher.S4UUnknown
 	}
-	windows.NetApiBufferFree(info)
+	_ = windows.NetApiBufferFree(info)
 	return launcher.S4UDomain
 }

@@ -258,8 +258,12 @@ cargo-deny:
 smoke:
 	./scripts/smoke.sh
 
+# Cross-OS runs have cgo off, so cgo-only files are linted on their native OS.
 lint: errwrapcheck
-	golangci-lint run ./...
+	@for os in $(sort $(foreach p,$(PLATFORMS),$(firstword $(subst /, ,$(p))))); do \
+		echo "golangci-lint GOOS=$$os"; \
+		GOOS=$$os golangci-lint run ./... || exit 1; \
+	done
 
 # errwrapcheck (tools/errwrapcheck, its own module) runs as a vet tool per
 # platform, since build tags select different files.

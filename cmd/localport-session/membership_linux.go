@@ -1,3 +1,5 @@
+//go:build cgo
+
 package main
 
 // groupMember is nil on Linux: SO_PEERGROUPS carries every supplementary

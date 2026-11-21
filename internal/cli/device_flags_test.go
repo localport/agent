@@ -256,8 +256,7 @@ func TestWindowsDefaultLogin(t *testing.T) {
 	}
 }
 
-// The Windows rows of the default-login table, through apply as up and set
-// run it.
+// The Windows rows of the default-login table, through apply as up and set run it.
 func TestWindowsLoginsThroughApply(t *testing.T) {
 	apply := func(who invoker, stored config.LocalDevice, args ...string) (config.LocalDevice, error) {
 		fs, flags := parseDeviceFlags(t, args...)
@@ -295,6 +294,35 @@ func TestWindowsLoginsThroughApply(t *testing.T) {
 	stored := config.LocalDevice{Enable: []config.Capability{config.CapabilityTerminal}, Logins: []string{"ops"}}
 	if d, err := apply(service, stored, "--allow-ports", "22"); err != nil || !slices.Equal(d.Logins, []string{"ops"}) {
 		t.Fatalf("set keeping stored logins = %v, %v", d.Logins, err)
+	}
+}
+
+// The Windows account lookup runs only when the merged device uses logins and
+// needs the account: for its default login or an unprivileged own-login check.
+func TestWindowsLoginLookupOnlyWhenNeeded(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		privileged bool
+		args       []string
+		lookups    int
+	}{
+		{"privileged with logins", true, []string{"--enable", "terminal", "--logins", "ops"}, 0},
+		{"unprivileged with logins", false, []string{"--enable", "terminal", "--logins", "ana@corp.example"}, 1},
+		{"unprivileged without logins", false, []string{"--enable", "terminal"}, 1},
+		{"no logins used", false, []string{"--allow-ports", "502"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			who := invoker{privileged: tc.privileged, goos: "windows", lookupLogin: func() (string, string) {
+				calls++
+				return "ana@corp.example", ""
+			}}
+			fs, flags := parseDeviceFlags(t, tc.args...)
+			var d config.LocalDevice
+			if err := flags.apply(fs, &d, who); err != nil || calls != tc.lookups {
+				t.Fatalf("err %v, %d lookups; want nil, %d", err, calls, tc.lookups)
+			}
+		})
 	}
 }
 

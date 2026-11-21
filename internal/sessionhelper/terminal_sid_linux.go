@@ -1,3 +1,5 @@
+//go:build cgo
+
 package sessionhelper
 
 import "golang.org/x/sys/unix"

@@ -1,3 +1,5 @@
+//go:build cgo
+
 package sessionhelper
 
 // ioctlGetSession is TIOCGSID, _IOR('t', 99, int) in <sys/ioctl_compat.h>;

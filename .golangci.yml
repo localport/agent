@@ -14,6 +14,7 @@ linters:
         - (net.Conn).Close
         - (net.Listener).Close
         - (*os.File).Close
+        - golang.org/x/sys/windows.CloseHandle
         - fmt.Fprint
         - fmt.Fprintf
         - fmt.Fprintln

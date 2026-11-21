@@ -17,8 +17,7 @@ import (
 	"github.com/localport/agent/internal/security"
 )
 
-// invoker is who runs a command, which decides where its local config and
-// credentials live.
+// invoker is who runs a command; it decides where the local config and credentials live.
 type invoker struct {
 	// privileged is root, an elevated Administrator, or `run --system` (or
 	// `--service`, which implies it).
@@ -202,7 +201,7 @@ func (f *deviceFlags) apply(fs *flag.FlagSet, d *config.LocalDevice, who invoker
 	if given["vnc"] {
 		d.VNC = f.vnc
 	}
-	if who.lookupLogin != nil && d.UsesLogins() {
+	if who.lookupLogin != nil && d.UsesLogins() && (len(d.Logins) == 0 || !who.privileged) {
 		who.current, who.noDefault = who.lookupLogin()
 	}
 	if !d.UsesLogins() {

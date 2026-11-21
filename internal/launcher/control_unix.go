@@ -47,11 +47,10 @@ type ControlSocket struct {
 }
 
 // OpenControl binds and listens on the control endpoint: mode 0600, owned by
-// root, in a root-owned directory neither group nor others can write, which
-// it creates with mode 0755 (as the systemd socket units do) when missing.
-// The caller holds run.lock, which makes it the only owner of the socket's
-// path: a socket already there is one a run that exited left, and is
-// replaced.
+// root, in a root-owned directory neither group nor others can write (created
+// 0755 when missing, as the systemd socket units do). The caller holds
+// run.lock, so it alone owns the socket's path: a socket already there was
+// left by an exited run and is replaced.
 func OpenControl() (*ControlSocket, error) {
 	path := controlSocket
 	dir := filepath.Dir(path)
@@ -87,9 +86,8 @@ func (c *ControlSocket) Close() error {
 	return err
 }
 
-// bindControl removes a socket a run that exited left (the caller holds
-// run.lock, so none is live) and binds a new stream socket at path with mode
-// 0600.
+// bindControl removes a socket an exited run left (the caller holds run.lock,
+// so none is live) and binds a new stream socket at path, mode 0600.
 func bindControl(path string) (*os.File, error) {
 	if fi, err := os.Lstat(path); err == nil {
 		if fi.Mode().Type() != fs.ModeSocket {
@@ -250,8 +248,7 @@ func (l *ControlListener) serveConn(conn *net.UnixConn, reload func() bool, logf
 	}
 }
 
-// Close stops listening and, for an endpoint ListenControl opened, removes
-// the socket.
+// Close stops listening and removes the socket of an endpoint ListenControl opened.
 func (l *ControlListener) Close() error {
 	err := l.ln.Close()
 	if errors.Is(err, net.ErrClosed) {
@@ -322,4 +319,18 @@ func checkControlSocket(path string) error {
 // checkControlDir is checkTrustedDir for the control endpoint's owner.
 func checkControlDir(dir string) error {
 	return checkTrustedDir(dir, controlOwner(), ErrControlUntrusted)
+}
+
+// refuseControl reads one request, then answers controlRefused. Closing before
+// the request arrives fails the client's write with EPIPE, which the client
+// reads as no run.
+func refuseControl(conn deadlineConn) error {
+	if err := conn.SetDeadline(time.Now().Add(controlTimeout)); err != nil {
+		return err
+	}
+	if _, err := io.ReadFull(conn, make([]byte, len(controlReload))); err != nil {
+		return err
+	}
+	_, err := io.WriteString(conn, controlRefused)
+	return err
 }

@@ -52,8 +52,7 @@ var (
 	ErrControlBusy = errors.New("another process serves the control endpoint")
 )
 
-// deadlineConn is a connection with deadlines: a Unix socket or a pollable
-// pipe.
+// deadlineConn is a connection with deadlines: a Unix socket or a pollable pipe.
 type deadlineConn interface {
 	io.ReadWriter
 	SetDeadline(time.Time) error
@@ -79,20 +78,6 @@ func answerControl(conn deadlineConn, reload func() bool) error {
 		answer = controlOK
 	}
 	_, err := io.WriteString(conn, answer)
-	return err
-}
-
-// refuseControl reads one request, then answers controlRefused. Closing before
-// the request arrives fails the client's write with EPIPE, which the client
-// reads as no run.
-func refuseControl(conn deadlineConn) error {
-	if err := conn.SetDeadline(time.Now().Add(controlTimeout)); err != nil {
-		return err
-	}
-	if _, err := io.ReadFull(conn, make([]byte, len(controlReload))); err != nil {
-		return err
-	}
-	_, err := io.WriteString(conn, controlRefused)
 	return err
 }
 
@@ -122,8 +107,7 @@ func askReload(conn deadlineConn, wait time.Duration) error {
 }
 
 // readAnswer reads one newline-terminated answer, no longer than the longest
-// one. A connection closed before the newline is io.EOF or
-// io.ErrUnexpectedEOF.
+// valid one; a close before the newline is io.EOF or io.ErrUnexpectedEOF.
 func readAnswer(r io.Reader) (string, error) {
 	buf := make([]byte, 0, len(controlStarting))
 	b := make([]byte, 1)

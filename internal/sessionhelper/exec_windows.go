@@ -69,7 +69,7 @@ func environment(token windows.Token, clientAddr string, client map[string]strin
 	if err := windows.CreateEnvironmentBlock(&block, token, false); err != nil {
 		return nil, fmt.Errorf("CreateEnvironmentBlock: %w", err)
 	}
-	defer windows.DestroyEnvironmentBlock(block)
+	defer func() { _ = windows.DestroyEnvironmentBlock(block) }()
 	return mergeEnvironment(environmentStrings(block), launcher.OriginEnv(clientAddr), client), nil
 }
 
@@ -129,7 +129,7 @@ func killOnCloseJob() (windows.Handle, error) {
 	}
 	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
 		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
-		windows.CloseHandle(job)
+		_ = windows.CloseHandle(job)
 		return 0, fmt.Errorf("SetInformationJobObject: %w", err)
 	}
 	return job, nil
@@ -165,7 +165,7 @@ func startPiped(token windows.Token, app, cmdLine string, env []uint16, withEven
 		for _, e := range ends {
 			for _, h := range e {
 				if h != 0 {
-					windows.CloseHandle(h)
+					_ = windows.CloseHandle(h)
 				}
 			}
 		}
@@ -196,14 +196,14 @@ func startPiped(token windows.Token, app, cmdLine string, env []uint16, withEven
 	// The child holds its own references to its ends; ours close now, so
 	// EOF follows the child's exit.
 	for _, h := range child {
-		windows.CloseHandle(h)
+		_ = windows.CloseHandle(h)
 	}
 	if err != nil {
-		windows.CloseHandle(ends[0][1])
+		_ = windows.CloseHandle(ends[0][1])
 		for _, e := range ends[1:] {
-			windows.CloseHandle(e[0])
+			_ = windows.CloseHandle(e[0])
 		}
-		windows.CloseHandle(job)
+		_ = windows.CloseHandle(job)
 		return nil, err
 	}
 	p := &piped{
@@ -227,10 +227,10 @@ func spawnInJob(token windows.Token, job windows.Handle, app, cmdLine string, en
 	if err != nil {
 		return 0, err
 	}
-	defer windows.CloseHandle(thread)
+	defer func() { _ = windows.CloseHandle(thread) }()
 	if err := windows.AssignProcessToJobObject(job, process); err != nil {
 		_ = windows.TerminateProcess(process, 1)
-		windows.CloseHandle(process)
+		_ = windows.CloseHandle(process)
 		return 0, fmt.Errorf("AssignProcessToJobObject: %w", err)
 	}
 	if _, err := windows.ResumeThread(thread); err != nil {
@@ -273,10 +273,10 @@ func spawnSuspended(token windows.Token, appPath, cmdLine string, env []uint16, 
 		return 0, 0, err
 	}
 	si := windows.StartupInfoEx{ProcThreadAttributeList: attrs.List()}
-	si.StartupInfo.Cb = uint32(unsafe.Sizeof(si))
-	si.StartupInfo.Desktop = desktop
-	si.StartupInfo.Flags = windows.STARTF_USESTDHANDLES
-	si.StartupInfo.StdInput, si.StartupInfo.StdOutput, si.StartupInfo.StdErr = std[0], std[1], std[2]
+	si.Cb = uint32(unsafe.Sizeof(si))
+	si.Desktop = desktop
+	si.Flags = windows.STARTF_USESTDHANDLES
+	si.StdInput, si.StdOutput, si.StdErr = std[0], std[1], std[2]
 	var pi windows.ProcessInformation
 	if err := windows.CreateProcessAsUser(token, app, line, nil, nil, true,
 		windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT|windows.CREATE_SUSPENDED|windows.CREATE_NO_WINDOW,

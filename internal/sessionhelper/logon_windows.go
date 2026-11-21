@@ -33,8 +33,7 @@ var (
 )
 
 const (
-	// logonNetwork is SECURITY_LOGON_TYPE Network, the S4U logon Win32-OpenSSH
-	// uses.
+	// logonNetwork is SECURITY_LOGON_TYPE Network, as Win32-OpenSSH's S4U logon.
 	logonNetwork = 3
 	// msv1_0S4ULogon and kerbS4ULogon are the S4U submit types (both 12).
 	msv1_0S4ULogon = 12
@@ -147,7 +146,7 @@ func s4uLogonToken(l login) (windows.Token, error) {
 	if st, _, _ := procLsaRegisterLogonProcess.Call(uintptr(unsafe.Pointer(process)), uintptr(unsafe.Pointer(&lsa)), uintptr(unsafe.Pointer(&mode))); st != 0 {
 		return 0, fmt.Errorf("LsaRegisterLogonProcess: %w", ntError(st))
 	}
-	defer procLsaDeregisterLogonProcess.Call(uintptr(lsa))
+	defer func() { _, _, _ = procLsaDeregisterLogonProcess.Call(uintptr(lsa)) }()
 
 	pkgName, name, domain := "MICROSOFT_AUTHENTICATION_PACKAGE_V1_0", l.User, "."
 	messageType := uint32(msv1_0S4ULogon)
@@ -216,7 +215,7 @@ func s4uLogonToken(l login) (windows.Token, error) {
 		uintptr(unsafe.Pointer(&profile)), uintptr(unsafe.Pointer(&profileLen)), uintptr(unsafe.Pointer(&logonID)),
 		uintptr(unsafe.Pointer(&token)), uintptr(unsafe.Pointer(&quotas)), uintptr(unsafe.Pointer(&sub)))
 	if profile != 0 {
-		procLsaFreeReturnBuffer.Call(profile)
+		_, _, _ = procLsaFreeReturnBuffer.Call(profile)
 	}
 	if st != 0 {
 		return 0, fmt.Errorf("%w: LsaLogonUser: %w (substatus %#x)", errAccount, ntError(st), uint32(sub))
@@ -244,8 +243,7 @@ func domainUPN(l login) (name, realm string) {
 // every path, as is its UTF-16 copy.
 func passwordLogonToken(l login, password []byte) (windows.Token, error) {
 	defer clear(password)
-	// Decoded byte by byte: string(password) would leave a copy no one can
-	// clear.
+	// Decoded byte by byte: string(password) would leave an uncleared copy.
 	pw := make([]uint16, 0, 2*len(password)+1)
 	defer func() { clear(pw[:cap(pw)]) }()
 	for b := password; len(b) > 0; {
@@ -302,7 +300,7 @@ func loadProfile(token windows.Token, user string) (unload func(), err error) {
 	if r, _, e := procLoadUserProfileW.Call(uintptr(token), uintptr(unsafe.Pointer(&pi))); r == 0 {
 		return nil, fmt.Errorf("LoadUserProfile: %w", e)
 	}
-	return func() { procUnloadUserProfile.Call(uintptr(token), uintptr(pi.Profile)) }, nil
+	return func() { _, _, _ = procUnloadUserProfile.Call(uintptr(token), uintptr(pi.Profile)) }, nil
 }
 
 // enablePrivileges enables names on this process's token: the launcher
