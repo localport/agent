@@ -180,6 +180,14 @@ func Run(log func(string, ...any)) int {
 		access := FilesAccess{Download: req.FilesDownload, Upload: req.FilesUpload}
 		plan.args, plan.events = []string{"localport-session", FilesServerMode, access.Arg(), req.Root, home}, true
 	}
+	// startLogDone closes at the start log's EOF: the exec or the mode's exit.
+	// Nil unless shell-exec.
+	var startLogDone chan struct{}
+	joinStartLog := func() {
+		if startLogDone != nil {
+			<-startLogDone
+		}
+	}
 	switch shellSpawn(req.Kind, req.FullDiskAccess, disclaimAvailable()) {
 	case spawnShellExec:
 		var exe string
@@ -188,6 +196,19 @@ func Run(log func(string, ...any)) int {
 			closePTY()
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
+		var startLog *os.File
+		if startLog, plan.startLog, err = os.Pipe(); err != nil {
+			pam.close()
+			closePTY()
+			return refuse(launcher.CodeSpawnFailed, err)
+		}
+		startLogDone = make(chan struct{})
+		prefix := fmt.Sprintf("sessionhelper: shell-exec for %q:", req.Login)
+		go func() {
+			defer close(startLogDone)
+			defer startLog.Close()
+			relayChildLog(startLog, prefix, log)
+		}()
 		plan.args = append([]string{"localport-session", ShellExecMode, plan.path}, plan.args...)
 		plan.path = exe
 	case spawnRefuse:
@@ -219,6 +240,7 @@ func Run(log func(string, ...any)) int {
 	if usePTY {
 		t, err := startTerminal(out, master, slave, plan, log)
 		if err != nil {
+			joinStartLog()
 			pam.close()
 			closePTY()
 			return refuse(launcher.CodeSpawnFailed, err)
@@ -228,6 +250,7 @@ func Run(log func(string, ...any)) int {
 	} else {
 		p, err := startPipeSession(out, plan, log)
 		if err != nil {
+			joinStartLog()
 			pam.close()
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
@@ -264,6 +287,7 @@ func Run(log func(string, ...any)) int {
 		}
 	}()
 	release := func() {
+		joinStartLog()
 		ut.logout()
 		pam.close()
 	}

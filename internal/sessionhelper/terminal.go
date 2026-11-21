@@ -48,6 +48,17 @@ type spawnPlan struct {
 	// events gives a pipe session descriptor 3, an event pipe whose
 	// FrameEvent frames the helper validates and relays (the file server).
 	events bool
+	// startLog is the shell-exec start log's write end, the child's
+	// shellExecLogFD; the start closes it. Never set with events.
+	startLog *os.File
+}
+
+// extraFiles is the child's ExtraFiles, the event pipe aside.
+func (plan spawnPlan) extraFiles() []*os.File {
+	if plan.startLog == nil {
+		return nil
+	}
+	return []*os.File{plan.startLog}
 }
 
 // frameWriter serializes the frames the helper writes to the channel.
@@ -189,6 +200,10 @@ func startTerminal(out *frameWriter, master, slave *os.File, plan spawnPlan, log
 		Stderr: slave,
 		// Ctty is the child's fd 0, the slave.
 		SysProcAttr: &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0, Credential: plan.cred},
+		ExtraFiles:  plan.extraFiles(),
+	}
+	if plan.startLog != nil {
+		defer plan.startLog.Close() // the child holds its copy once started
 	}
 	watch, err := startWatched(cmd)
 	if err != nil {

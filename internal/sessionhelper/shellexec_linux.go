@@ -12,7 +12,8 @@ import (
 func disclaimAvailable() bool { return false }
 
 // ShellExec refuses: the shell-exec mode exists on macOS only.
-func ShellExec(_ []string, stderr io.Writer) int {
-	fmt.Fprintln(stderr, "localport: shell-exec: not supported on this platform")
+func ShellExec(_ []string, stderr, startLog io.Writer) int {
+	_, _ = io.WriteString(stderr, shellStartFailedLine)
+	_, _ = fmt.Fprintln(startLog, "shell-exec: not supported on this platform")
 	return 127
 }

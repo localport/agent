@@ -71,6 +71,10 @@ func startPipeSession(out *frameWriter, plan spawnPlan, log func(string, ...any)
 		Env:         plan.env,
 		Dir:         plan.dir,
 		SysProcAttr: &syscall.SysProcAttr{Setsid: true, Credential: plan.cred},
+		ExtraFiles:  plan.extraFiles(),
+	}
+	if plan.startLog != nil {
+		defer plan.startLog.Close() // the child holds its copy once started
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

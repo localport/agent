@@ -60,7 +60,7 @@ func main() {
 	// The shell-exec mode runs as the login: the helper starts it in place of
 	// the shell, and it replaces itself with the shell (macOS).
 	if os.Args[1] == sessionhelper.ShellExecMode {
-		os.Exit(sessionhelper.ShellExec(os.Args[2:], os.Stderr))
+		os.Exit(sessionhelper.ShellExecMain(os.Args[2:]))
 	}
 	// The forward server runs as the login; the forward channel is descriptor 3.
 	if os.Args[1] == sessionhelper.ForwardServerMode {

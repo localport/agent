@@ -4,6 +4,7 @@ package sessionhelper
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -24,8 +25,9 @@ const shellExecChildEnv = "LOCALPORT_TEST_SHELL_EXEC"
 const shellExecProbe = `if /bin/sh -c 'kill -USR2 $$'; then echo usr2-blocked; else echo usr2-delivered; fi; if [ -e /dev/fd/3 ]; then echo fd3-open; else echo fd3-closed; fi; kill -HUP $$; echo survived`
 
 // runShellExecChild is the child: it ignores SIGHUP and blocks SIGUSR2, as
-// a caller of the mode could leave them, then runs the mode with descriptor 3
-// open (ExtraFiles); exec'd, the probe reports what the shell got.
+// a caller of the mode could leave them, then runs the mode as a helper
+// starts it, its start log open as descriptor 3 (ExtraFiles); exec'd, the
+// probe reports what the shell got.
 func runShellExecChild() int {
 	runtime.LockOSThread()
 	signal.Ignore(syscall.SIGHUP)
@@ -33,7 +35,7 @@ func runShellExecChild() int {
 		os.Stderr.WriteString(err.Error())
 		return 3
 	}
-	return ShellExec([]string{"/bin/sh", "sh", "-c", shellExecProbe}, os.Stderr)
+	return ShellExecMain([]string{"/bin/sh", "sh", "-c", shellExecProbe})
 }
 
 // The shell the mode execs has an empty signal mask, every signal at its
@@ -66,25 +68,31 @@ func TestShellExecStartsTheShellClean(t *testing.T) {
 	}
 }
 
-// Each failing step of the mode writes one line naming it and returns 127
-// without starting anything; this process is still here to check.
+// Each failing step of the mode returns 127 without starting anything (this
+// process is still here to check): the session's stderr gets only the fixed
+// coded line, and the start log one line naming the step and its errno.
 func TestShellExecFailsClosed(t *testing.T) {
 	if !disclaimAvailable() {
 		t.Skip("this macOS has no responsibility_spawnattrs_setdisclaim")
 	}
 	t.Cleanup(func() { shellExecFailAt = 0 })
+	check := func(name string, args []string, wantLog string) {
+		t.Helper()
+		var stderr, startLog bytes.Buffer
+		if code := ShellExec(args, &stderr, &startLog); code != 127 {
+			t.Fatalf("%s: exit %d, want 127", name, code)
+		}
+		if stderr.String() != shellStartFailedLine {
+			t.Errorf("%s: stderr %q, want only %q", name, stderr.String(), shellStartFailedLine)
+		}
+		if !strings.HasPrefix(startLog.String(), wantLog) || strings.Count(startLog.String(), "\n") != 1 {
+			t.Errorf("%s: start log %q, want one line starting %q", name, startLog.String(), wantLog)
+		}
+	}
 	for step := 1; step < len(shellExecSteps); step++ {
 		shellExecFailAt = step
-		var stderr bytes.Buffer
-		if code := ShellExec([]string{"/bin/sh", "sh", "-c", "exit 0"}, &stderr); code != 127 {
-			t.Fatalf("step %d: exit %d, want 127", step, code)
-		}
-		if want := "localport: shell-exec: " + shellExecSteps[step] + ": "; !strings.HasPrefix(stderr.String(), want) || strings.Count(stderr.String(), "\n") != 1 {
-			t.Errorf("step %d: stderr %q, want one line starting %q", step, stderr.String(), want)
-		}
+		check(fmt.Sprintf("step %d", step), []string{"/bin/sh", "sh", "-c", "exit 0"}, "shell-exec: "+shellExecSteps[step]+": ")
 	}
-	var stderr bytes.Buffer
-	if code := ShellExec([]string{"/bin/sh"}, &stderr); code != 127 {
-		t.Fatalf("too few arguments: exit %d", code)
-	}
+	shellExecFailAt = 0
+	check("too few arguments", []string{"/bin/sh"}, "shell-exec: usage: ")
 }

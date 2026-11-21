@@ -87,16 +87,15 @@ var shellExecFailAt int
 // own responsible process.
 func disclaimAvailable() bool { return C.lp_disclaim() != nil }
 
-// ShellExec is the shell-exec mode: args are the shell's path, its argv[0]
-// and its arguments. It replaces this process with the shell as its own
-// responsible process, so TCC attributes the shell's file access to the shell
-// (an Apple binary gets a silent EPERM on protected folders) and never asks
-// the console user on our behalf. On any failure it writes one line to stderr
-// and returns 127; no shell runs.
-func ShellExec(args []string, stderr io.Writer) int {
+// ShellExec is the shell-exec mode; args are the shell's path, argv[0] and
+// arguments. It replaces this process with the shell as its own responsible
+// process, so TCC attributes the shell's file access to the shell (an Apple
+// binary gets a silent EPERM on protected folders) and never prompts the
+// console user for Localport. On failure it writes shellStartFailedLine to
+// stderr, the step and errno to startLog, and returns 127.
+func ShellExec(args []string, stderr, startLog io.Writer) int {
 	if len(args) < 2 {
-		fmt.Fprintln(stderr, "localport: shell-exec: usage: shell-exec <path> <argv0> [args...]")
-		return 127
+		return shellExecFailed(stderr, startLog, "usage: shell-exec <path> <argv0> [args...]")
 	}
 	path := C.CString(args[0])
 	argv := make([]*C.char, len(args))
@@ -115,6 +114,13 @@ func ShellExec(args []string, stderr io.Writer) int {
 	if int(step) < len(shellExecSteps) {
 		name = shellExecSteps[step]
 	}
-	fmt.Fprintf(stderr, "localport: shell-exec: %s: %v\n", name, syscall.Errno(rc))
+	return shellExecFailed(stderr, startLog, fmt.Sprintf("%s: %v", name, syscall.Errno(rc)))
+}
+
+// shellExecFailed writes the fixed line to stderr and detail to startLog, best
+// effort, and returns 127.
+func shellExecFailed(stderr, startLog io.Writer, detail string) int {
+	_, _ = io.WriteString(stderr, shellStartFailedLine)
+	_, _ = fmt.Fprintf(startLog, "shell-exec: %s\n", detail)
 	return 127
 }
