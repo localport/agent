@@ -1480,6 +1480,8 @@ type captureClient struct {
 	priv  hpke.PrivateKey
 	// failedOpens, when set, receives each failed open.
 	failedOpens chan recording.FailedOpen
+	// refuse, when set, is the answer to every open after it is captured.
+	refuse *recording.Refusal
 
 	mu       sync.Mutex
 	wrapped  map[string][]byte
@@ -1543,6 +1545,9 @@ func (c *captureClient) Open(ctx context.Context, id, sessionID string, wrappedD
 	if c.block {
 		<-ctx.Done()
 		return recording.Result{}, ctx.Err()
+	}
+	if c.refuse != nil {
+		return recording.Result{}, c.refuse
 	}
 	return recording.Result{Status: "recording"}, nil
 }
@@ -1726,6 +1731,50 @@ func TestBestEffortRecordingOpenFailureRunsUnrecorded(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(spoolDir); len(entries) != 0 {
 		t.Fatalf("spool holds %v", entries)
+	}
+}
+
+// An open refused as recording_not_found (the session's device was deleted
+// after admission) is final: Best effort runs the channel unrecorded and
+// Strict refuses it, both with no spool entry.
+func TestRecordingOpenRefusedAsNotFound(t *testing.T) {
+	for _, policy := range []string{RecPolicyBestEffort, RecPolicyStrict} {
+		t.Run(policy, func(t *testing.T) {
+			client := &captureClient{
+				opens:  make(chan capturedOpen, 1),
+				refuse: &recording.Refusal{Status: 404, Code: recording.CodeNotFound},
+			}
+			f, keySum, spoolDir := recordingFixture(t, client)
+			o := f.defaults()
+			o.kind = "ssh"
+			o.rec = &certRec{Policy: policy, PubSHA256: keySum}
+			c := f.connect(t, o)
+			sess, err := c.NewSession()
+			if err != nil {
+				t.Fatalf("channel: %v", err)
+			}
+			if policy == RecPolicyStrict {
+				stderr, _ := sess.StderrPipe()
+				if err := sess.Start("ls -l /tmp"); err == nil {
+					t.Fatal("a Strict channel ran with its recording refused")
+				}
+				readFor(t, stderr, "localport: "+CodeRecordingUnavailable+"\r\n")
+				if len(f.launcher.requests) != 0 {
+					t.Fatal("a session started")
+				}
+			} else {
+				var exitErr *ssh.ExitError
+				if err := sess.Run("ls -l /tmp"); !errors.As(err, &exitErr) || exitErr.ExitStatus() != 3 {
+					t.Fatalf("run after a refused Best effort open: %v", err)
+				}
+			}
+			if len(client.opens) != 1 {
+				t.Fatalf("opens %d, want 1", len(client.opens))
+			}
+			if entries, _ := os.ReadDir(spoolDir); len(entries) != 0 {
+				t.Fatalf("spool holds %v", entries)
+			}
+		})
 	}
 }
 
