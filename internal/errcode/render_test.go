@@ -41,9 +41,8 @@ func TestRenderKeepsALocalPathError(t *testing.T) {
 	if !errors.As(err, &pathErr) {
 		t.Fatal("the cause is not in the chain")
 	}
-	// The reason is the OS's own text for the errno ("no such file or
-	// directory" on Unix, "The system cannot find the file specified." on
-	// Windows).
+	// The reason is the OS's text for the errno: "no such file or directory" on
+	// Unix, "The system cannot find the file specified." on Windows.
 	text, hidden := errcode.Render(err)
 	want := "invalid local config: open " + filepath.Join(dir, "missing.json") + ": " + pathErr.Err.Error() + " [AG028]"
 	if text != want || hidden {
@@ -83,8 +82,7 @@ func TestRenderInvalidAroundTypedErrors(t *testing.T) {
 	}
 }
 
-// Detail is shown; a plain wrapper's words are not, and do not count as a
-// hidden cause.
+// Detail is shown; a plain wrapper's words are not, nor counted as a hidden cause.
 func TestRenderShowsDetailNotWrappers(t *testing.T) {
 	err := fmt.Errorf("ssh-proxy: %w", errcode.New(errcode.NoSessionCert).With(nil, "run: localport ssh-cert pi gw"))
 	if text, hidden := errcode.Render(err); text != "no session certificate: run: localport ssh-cert pi gw [AG101]" || hidden {
@@ -145,7 +143,7 @@ func TestRenderRemedy(t *testing.T) {
 	if text, _ := errcode.Render(err); text != want {
 		t.Fatalf("Render = %q, want %q", text, want)
 	}
-	if text, _ := errcode.Render(errcode.WithRemedy(errors.New("plain"), "do this")); text != "plain\n  do this" {
+	if text, _ := errcode.Render(errcode.WithRemedy(errors.New("plain"), "do this")); text != errcode.New(errcode.Unexpected).Error()+"\n  do this" {
 		t.Fatalf("plain: Render = %q", text)
 	}
 }
@@ -195,10 +193,21 @@ func TestRenderJoinedErrors(t *testing.T) {
 	}
 }
 
-// A plain chain prints as Error(), unless it holds a network error.
+// A plain chain that shows nothing prints the Unexpected line, hidden; one
+// with a local cause prints that cause; a usage error prints its text; a
+// network chain prints a generic line.
 func TestRenderPlainChains(t *testing.T) {
-	if text, hidden := errcode.Render(errors.New("name the device to change")); text != "name the device to change" || hidden {
-		t.Fatalf("plain: Render = %q, %v", text, hidden)
+	unexpected := errcode.New(errcode.Unexpected).Error()
+	if text, hidden := errcode.Render(fmt.Errorf("decode: %w", errors.New("internal detail"))); text != unexpected || !hidden {
+		t.Fatalf("plain: Render = %q, %v; want %q, hidden", text, hidden, unexpected)
+	}
+	local := fmt.Errorf("read config: %w", &fs.PathError{Op: "open", Path: "/etc/localport/x", Err: syscall.EACCES})
+	if text, hidden := errcode.Render(local); text != "open /etc/localport/x: "+syscall.EACCES.Error() || hidden {
+		t.Fatalf("local cause: Render = %q, %v", text, hidden)
+	}
+	usage := errcode.UsageError(errors.New("flag provided but not defined: -x"))
+	if text, hidden := errcode.Render(usage); text != "flag provided but not defined: -x" || hidden {
+		t.Fatalf("usage: Render = %q, %v", text, hidden)
 	}
 	netErr := fmt.Errorf("fetch: %w", &url.Error{Op: "Get", URL: "https://x/v1/y", Err: errors.New("eof")})
 	if text, hidden := errcode.Render(netErr); text != "a network operation failed" || !hidden {
@@ -206,8 +215,7 @@ func TestRenderPlainChains(t *testing.T) {
 	}
 }
 
-// The account codes name this platform's agent account: _localport on macOS,
-// localport elsewhere.
+// The account codes name the platform's agent account: _localport on macOS, else localport.
 func TestAccountCodesNameThePlatformAccount(t *testing.T) {
 	account := "localport"
 	if runtime.GOOS == "darwin" {

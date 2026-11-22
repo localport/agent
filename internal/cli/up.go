@@ -57,7 +57,7 @@ func runUp(version string, args []string) (retErr error) {
 		joinToken, rest = args[0], args[1:]
 	}
 	if err := fs.Parse(rest); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 	positional := fs.Args()
 	if joinToken == "" && len(positional) > 0 {
@@ -538,7 +538,6 @@ func (e *deviceNotRecorded) Error() string { return e.err.Error() }
 
 func (e *deviceNotRecorded) Unwrap() error { return e.err }
 
-// isDeviceNotRecorded reports whether err holds a deviceNotRecorded.
 func isDeviceNotRecorded(err error) bool {
 	var notRecorded *deviceNotRecorded
 	return errors.As(err, &notRecorded)
@@ -728,7 +727,7 @@ func prepareDevice(fs *flag.FlagSet, flags *deviceFlags, who invoker) (config.Lo
 	}
 	if d.FilesRoot != "" {
 		if err := config.CheckFilesRoot(d.FilesRoot); err != nil {
-			return d, fmt.Errorf("--files-root: %w", err)
+			return d, errcode.Invalidf("--files-root: %w", err)
 		}
 	}
 	return d, nil

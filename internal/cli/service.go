@@ -13,6 +13,7 @@ import (
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/service"
 )
 
@@ -24,7 +25,7 @@ func runService(args []string) (err error) {
 	ignoreHangup()
 	if len(args) == 0 || (args[0] != "install" && args[0] != "uninstall") {
 		usageService()
-		return errors.New("unknown service command; use install or uninstall")
+		return errcode.Invalidf("unknown service command; use install or uninstall")
 	}
 	sub := args[0]
 	var who invoker
@@ -41,15 +42,15 @@ func runService(args []string) (err error) {
 	}
 	fs.Usage = usageService
 	if err := fs.Parse(args[1:]); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 	if fs.NArg() > 0 {
 		usageService()
-		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		return errExtraArgument.With(nil, fmt.Sprintf("%q", security.SanitizeDisplay(fs.Arg(0))))
 	}
 	who = currentInvoker(false)
 	if !who.privileged {
-		return fmt.Errorf("service %s needs root: run it with sudo (from an elevated prompt on Windows)", sub)
+		return errcode.WithRemedy(config.ErrSystemNotRoot.With(nil, "service "+sub), "run it "+elevatedCommand("service "+sub))
 	}
 	if sub == "install" {
 		return installService(who)
@@ -173,7 +174,7 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 		fmt.Fprintf(os.Stderr, "  nothing to delete: %s does not exist\n%s\n", dir, stillValid)
 		return nil
 	} else if err != nil {
-		return fmt.Errorf("inspect %s: %w", dir, err)
+		return errPurgeFailed.With(err, "inspect "+dir)
 	}
 	if m != nil {
 		installed, err := m.Installed()
@@ -198,7 +199,7 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 	}
 	defer unlock()
 	if err := os.Remove(file.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("remove %s: %w", file.Path, err)
+		return errPurgeFailed.With(err, "remove "+file.Path)
 	}
 	fmt.Fprintf(os.Stderr, "  deleted %s\n", file.Path)
 	if err := purgeDeviceStore(dir, viaChild, store); err != nil {
@@ -211,7 +212,7 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 	}
 	if root := service.CrashRoot(); root != "" && file.System {
 		if err := os.RemoveAll(root); err != nil {
-			return fmt.Errorf("remove %s: %w", root, err)
+			return errPurgeFailed.With(err, "remove "+root)
 		}
 		fmt.Fprintf(os.Stderr, "  deleted %s\n", root)
 	}
@@ -224,13 +225,16 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 // directory), otherwise in store.
 func purgeDeviceStore(dir string, viaChild bool, store *identity.Store) error {
 	if !viaChild {
-		return purgeStore(store)
+		if err := purgeStore(store); err != nil {
+			return errPurgeFailed.With(err, "")
+		}
+		return nil
 	}
 	idDir := filepath.Join(dir, "identity")
 	if _, err := os.Lstat(idDir); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	} else if err != nil {
-		return fmt.Errorf("inspect %s: %w", idDir, err)
+		return errPurgeFailed.With(err, "inspect "+idDir)
 	}
 	return runAsAgentAccount([]string{"purge"}, nil, os.Stdout)
 }

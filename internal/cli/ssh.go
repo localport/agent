@@ -41,8 +41,7 @@ const (
 	// sshCertMinRemaining is the validity a cached certificate must still
 	// have to be reused; below it ssh-cert mints a new one.
 	sshCertMinRemaining = 60 * time.Second
-	// sshLockWait bounds the wait for the client-files lock another process
-	// holds.
+	// sshLockWait bounds the wait for a client-files lock another process holds.
 	sshLockWait = 30 * time.Second
 	// sshDialTimeout bounds the WebSocket dial and the certificate write.
 	sshDialTimeout = 30 * time.Second
@@ -88,12 +87,11 @@ func (t sshTarget) mintWithAPI(ctx context.Context, req identity.SessionRequest)
 	return client.MintSession(ctx, cur, req)
 }
 
-// sshFiles are the client files of a target. The client key, its
-// certificate and the edge URL are per credential, device and login, so runs
-// for two logins never replace each other's certificate; known_hosts is per
-// credential, so a mint with one credential never replaces the host key
-// another trusts; the lock is shared, so one lock covers every write ssh
-// reads.
+// sshFiles are a target's client files. The client key, its certificate and
+// the edge URL are per credential, device and login, so two logins never
+// replace each other's certificate. known_hosts is per credential, so one
+// credential's mint never replaces a host key another trusts. One shared lock
+// covers every write ssh reads.
 type sshFiles struct {
 	key, cert, url, knownHosts, lock string
 }
@@ -117,10 +115,9 @@ func (t sshTarget) clientDir(root string) string {
 	return filepath.Join(root, "ssh", t.ref.Path())
 }
 
-// sshLoginShellChars are refused in a login: ssh_config passes %r to sh -c
-// inside double quotes, and these are the characters OpenSSH 9.6 refuses in
-// a command-line login (valid_ruser) plus $, which double quotes still
-// expand.
+// sshLoginShellChars are refused in a login. ssh_config passes %r to sh -c
+// inside double quotes: these are OpenSSH 9.6's refused login characters
+// (valid_ruser) plus $, which double quotes still expand.
 const sshLoginShellChars = "'`\";&<>|(){}$"
 
 // checkSSHLogin refuses a login that cannot name a client file or travel
@@ -150,7 +147,7 @@ var deviceHostPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(
 func parseDeviceHost(raw string) (string, error) {
 	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
 	if len(host) > 253 || !deviceHostPattern.MatchString(host) {
-		return "", fmt.Errorf("%q is not a device host, such as gw-01-factory.eu.localport.dev", security.SanitizeDisplay(raw))
+		return "", errcode.Invalidf("%q is not a device host, such as gw-01-factory.eu.localport.dev", security.SanitizeDisplay(raw))
 	}
 	return host, nil
 }
@@ -229,8 +226,7 @@ func (t sshTarget) ensureCert(ctx context.Context, login string, mint sessionMin
 }
 
 var (
-	// errSSHFilesBusy: another process held the client-files lock for all of
-	// sshLockWait.
+	// errSSHFilesBusy: another process held the client-files lock past sshLockWait.
 	errSSHFilesBusy = errcode.New(errcode.SSHFilesBusy)
 	// errNoSessionCert: ssh-proxy found no certificate, edge URL or client
 	// key; ssh-cert writes them.
@@ -263,11 +259,11 @@ func loadOrCreateClientKey(path string) (ssh.Signer, error) {
 	}
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("generate ssh client key: %w", err)
+		return nil, errcode.New(errcode.SSHClientFiles).With(err, "generate the client key")
 	}
 	block, err := ssh.MarshalPrivateKey(priv, "localport")
 	if err != nil {
-		return nil, fmt.Errorf("encode ssh client key: %w", err)
+		return nil, errcode.New(errcode.SSHClientFiles).With(err, "encode the client key")
 	}
 	if err := security.WritePrivateFileAtomic(path, pem.EncodeToMemory(block)); err != nil {
 		return nil, err
@@ -833,7 +829,7 @@ func splitLoginHost(arg string) (string, string, error) {
 	// At the last @, as ssh does, so a UPN login keeps its own @.
 	if i := strings.LastIndexByte(arg, '@'); i >= 0 {
 		if i == 0 {
-			return "", "", errors.New("empty login before @")
+			return "", "", errcode.Invalidf("empty login before @")
 		}
 		return arg[:i], arg[i+1:], nil
 	}
@@ -859,11 +855,11 @@ func parseSSHHelperArgs(name string, args []string) (identityArg, login, host st
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
-		return "", "", "", err
+		return "", "", "", errcode.UsageError(err)
 	}
 	if fs.NArg() != 2 || fs.Arg(0) == "" {
 		fs.Usage()
-		return "", "", "", errors.New("want a login and a device host")
+		return "", "", "", errcode.Invalidf("want a login and a device host")
 	}
 	return *ident, fs.Arg(0), fs.Arg(1), nil
 }
@@ -914,11 +910,11 @@ device through Localport. Add them to ~/.ssh/config:
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 	if fs.NArg() == 0 {
 		fs.Usage()
-		return errors.New("name at least one device host")
+		return errcode.Invalidf("name at least one device host")
 	}
 	exe, err := configCommand()
 	if err != nil {
@@ -968,11 +964,11 @@ func runSSH(args []string) error {
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 	if fs.NArg() == 0 {
 		fs.Usage()
-		return errors.New("name a device host")
+		return errcode.Invalidf("name a device host")
 	}
 	login, host, err := splitLoginHost(fs.Arg(0))
 	if err != nil {

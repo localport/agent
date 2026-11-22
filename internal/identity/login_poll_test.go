@@ -32,8 +32,9 @@ func TestLoginSurvivesATransportFailureMidPoll(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/device/start"):
 			writeJSON(t, w, map[string]any{
 				"device_code": "dc", "user_code": "ABCD-EFGH",
-				"verification_uri": "https://dash.example/device",
-				"interval":         1, "expires_in": 30,
+				"verification_uri":          "https://dash.example/device",
+				"verification_uri_complete": "https://dash.example/device?code=ABCD-EFGH",
+				"interval":                  1, "expires_in": 30,
 			})
 		case strings.HasSuffix(r.URL.Path, "/device/token"):
 			switch polls.Add(1) {
@@ -110,8 +111,9 @@ func TestLoginStopsOnARealRefusal(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, "/device/start") {
 			writeJSON(t, w, map[string]any{
 				"device_code": "dc", "user_code": "ABCD-EFGH",
-				"verification_uri": "https://dash.example/device",
-				"interval":         1, "expires_in": 30,
+				"verification_uri":          "https://dash.example/device",
+				"verification_uri_complete": "https://dash.example/device?code=ABCD-EFGH",
+				"interval":                  1, "expires_in": 30,
 			})
 			return
 		}

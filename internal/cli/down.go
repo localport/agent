@@ -43,7 +43,7 @@ func runPause(command string, args []string, pause bool) (err error) {
 		selector, rest = args[0], args[1:]
 	}
 	if err := fs.Parse(rest); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 	if selector == "" && fs.NArg() > 0 {
 		selector = fs.Arg(0)
@@ -122,8 +122,7 @@ func elevatedStop(m service.Manager) string {
 	return "sudo " + m.StopCommand()
 }
 
-// elevatedCommand names how to run command with the privilege it needs on
-// this OS.
+// elevatedCommand names how to run command with the privilege this OS needs.
 func elevatedCommand(command string) string {
 	if runtime.GOOS == "windows" {
 		return "from an elevated prompt: localport " + command
@@ -282,8 +281,7 @@ func applyConfig(start bool) (applyTarget, error) {
 	return appliedByService, nil
 }
 
-// notApplied is a service start or reload that failed after the config was
-// written.
+// notApplied is a service start or reload that failed after the config was saved.
 func notApplied(err error) error {
 	return errcode.WithRemedy(errcode.New(errcode.SettingsNotApplied).With(err, ""), "apply them with: "+serviceInstallCommand)
 }
@@ -547,12 +545,10 @@ func storeFact(store *identity.Store, ref identity.Ref) deviceFact {
 	return f
 }
 
-// runDevicesStorePart is runAsAgentAccount for the devices store part; tests
-// replace it.
+// runDevicesStorePart is runAsAgentAccount for the devices store part, replaced in tests.
 var runDevicesStorePart = runAsAgentAccount
 
-// readFacts is readDeviceFacts; tests replace it to observe the lock it runs
-// under.
+// readFacts is readDeviceFacts; tests replace it to observe the lock held.
 var readFacts = readDeviceFacts
 
 // readDeviceFacts returns the store facts of devices: on the system layout as

@@ -11,6 +11,7 @@ import (
 	"github.com/localport/agent/internal/config"
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/security"
 )
 
 // runSet edits one enrolled device's settings in the local config and, as root
@@ -41,14 +42,14 @@ func runSet(args []string) (err error) {
 		name, rest = args[0], args[1:]
 	}
 	if err := fs.Parse(rest); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 	if name == "" {
 		fs.Usage()
-		return fmt.Errorf("name the device to change")
+		return errcode.Invalidf("name the device to change")
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		return errExtraArgument.With(nil, fmt.Sprintf("%q", security.SanitizeDisplay(fs.Arg(0))))
 	}
 
 	who = currentInvoker(false)
@@ -96,8 +97,7 @@ func runSet(args []string) (err error) {
 }
 
 // applySettings applies saved settings: as root through applyConfig, which
-// does not start a stopped service; otherwise it tells the user to restart
-// `localport run`.
+// leaves a stopped service stopped; otherwise it asks to restart `localport run`.
 func applySettings(who invoker) error {
 	if !who.privileged {
 		fmt.Fprintf(os.Stderr, "  restart `localport run` to apply it\n")

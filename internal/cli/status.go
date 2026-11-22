@@ -26,7 +26,7 @@ import (
 func runStatus(args []string) error {
 	if len(args) > 0 {
 		fmt.Fprintln(os.Stderr, "Usage: localport status")
-		return fmt.Errorf("unexpected argument %q", args[0])
+		return errExtraArgument.With(nil, fmt.Sprintf("%q", security.SanitizeDisplay(args[0])))
 	}
 	return printStatus(context.Background(), os.Stdout)
 }
@@ -126,8 +126,7 @@ func printStatusDevices(ctx context.Context, w io.Writer) error {
 	return nil
 }
 
-// printServiceState prints whether the device service is installed and its
-// main process.
+// printServiceState prints whether the device service is installed, and its main process.
 func printServiceState(ctx context.Context, w io.Writer) error {
 	m, err := newServiceManager()
 	if errors.Is(err, service.ErrUnsupported) {

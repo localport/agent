@@ -87,7 +87,7 @@ func TestRefFromCertReadsTheCertificate(t *testing.T) {
 }
 
 func TestRefFromCertRefusesAForeignURI(t *testing.T) {
-	// A trusted CA can put arbitrary URIs in a SAN. Anything that is not our
+	// A trusted CA can put arbitrary URIs in a SAN. Anything not in Localport's
 	// trust-domain shape must not be mistaken for a team, or the credential
 	// lands in a directory named after someone else's string.
 	leaf := selfSigned(t, "spiffe://example.com/client/whoever")
@@ -137,8 +137,7 @@ func TestSaveWritesKeyMaterialUnreadableByOthers(t *testing.T) {
 	}
 }
 
-// `localport login` and `localport setup` credentials resolve to different
-// directories.
+// `localport login` and `localport setup` credentials live in different directories.
 func TestSignInAndSetupTokenDoNotOverwriteEachOther(t *testing.T) {
 	store := &Store{Root: t.TempDir()}
 
@@ -439,7 +438,7 @@ func TestLoginPollingIsDrivenByControlPlaneErrorCodes(t *testing.T) {
 		if r.URL.Path == "/v1/mtls/device/start" {
 			w.WriteHeader(http.StatusCreated)
 			// Short interval to keep the test fast.
-			fmt.Fprint(w, `{"device_code":"dc","user_code":"ABCD-EFGH","interval":1,"expires_in":600}`)
+			fmt.Fprint(w, `{"device_code":"dc","user_code":"ABCD-EFGH","verification_uri":"https://dash.example/device","verification_uri_complete":"https://dash.example/device?code=ABCD-EFGH","interval":1,"expires_in":600}`)
 			return
 		}
 		polls++
@@ -483,7 +482,7 @@ func TestLoginStopsOnAnUnrecognisedError(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/mtls/device/start" {
 			w.WriteHeader(http.StatusCreated)
-			fmt.Fprint(w, `{"device_code":"dc","user_code":"ABCD-EFGH","interval":1,"expires_in":600}`)
+			fmt.Fprint(w, `{"device_code":"dc","user_code":"ABCD-EFGH","verification_uri":"https://dash.example/device","verification_uri_complete":"https://dash.example/device?code=ABCD-EFGH","interval":1,"expires_in":600}`)
 			return
 		}
 		w.WriteHeader(http.StatusBadRequest)
@@ -503,8 +502,7 @@ func TestLoginStopsOnAnUnrecognisedError(t *testing.T) {
 	}
 }
 
-// credentialFor builds a self-signed leaf and its key for Save and Load round
-// trips.
+// credentialFor builds a self-signed leaf and key for Save and Load round trips.
 func credentialFor(t *testing.T, uri string) Material {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -602,8 +600,7 @@ func testKey(t *testing.T) *ecdsa.PrivateKey {
 	return key
 }
 
-// Signing the renewal proof through crypto.Signer verifies the same as
-// ecdsa.SignASN1.
+// A renewal proof signed through crypto.Signer verifies like ecdsa.SignASN1.
 func TestSignerProducesTheSameSignatureFormatAsSignASN1(t *testing.T) {
 	key := testKey(t)
 	digest := renewalDigest([]byte("csr-der-bytes"), 29000000, "beef")

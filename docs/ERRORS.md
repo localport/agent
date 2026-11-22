@@ -16,15 +16,19 @@ value the agent refused, is always shown. Several failures at once print one per
 line. The agent that runs tunnels and devices (`run`, `up`, the tunnel
 form) prints full causes in its log.
 
-Codes are grouped by area: AG00x credentials and keys, AG01x file and binary
-checks, AG02x local config, AG03x commands, AG04x the device service, AG05x
-terminal sessions, AG06x recordings, AG07x network, AG08x and AG09x the Windows
-installer, AG10x SSH clients, AG11x commands (enrolment, settings, credentials),
-AG12x `localport access`. The Windows installer and uninstaller exit with the
-number of their code (`AG084` exits 84). Two refusals of the installer itself
-use the Windows Installer codes instead: exit 1618, another Localport installer
-or uninstaller is running (wait for it to finish, then run it again), and exit
-1633, the machine is not running 64-bit Windows.
+Codes up to AG134 are grouped by area: AG001 to AG010 credentials and keys,
+AG011 to AG014 file and binary checks, AG020 to AG030 local config, AG031 to
+AG039 commands, AG041 to AG045 the device service, AG053 to AG055 terminal
+sessions, AG061 to AG063 recordings, AG071 to AG079 network, AG081 to AG093 the
+Windows installer, AG101 to AG109 SSH clients, AG110 to AG120 commands
+(enrolment, settings, credentials), AG121 to AG125 `localport access`, AG126 to
+AG134 control plane calls and credentials. Codes from AG135 on have no area
+grouping. The Windows installer and uninstaller exit with the number of their code
+(`AG084` exits 84). Three refusals of the installer itself use the Windows
+Installer codes instead: exit 1603, a step could not run or take its lock; exit
+1618, another Localport installer or uninstaller is running (wait for it to
+finish, then run it again); exit 1633, the machine is not running 64-bit
+Windows.
 
 | Code | Title | What to do |
 |---|---|---|
@@ -34,7 +38,7 @@ or uninstaller is running (wait for it to finish, then run it again), and exit
 | AG004 | Session keys unreadable | `ticket_keys.json` (the device's session CA keys) beside the device's credential is unreadable or not owner-only. Make it a regular file owned by the account running the agent, mode 0600. |
 | AG005 | Session keys busy | Another localport process held the device's key lock. Stop the other process, or retry. |
 | AG006 | Renewal in progress | Another localport process is renewing this credential. Wait for it to finish, then retry. |
-| AG007 | Credential does not renew | The credential expires instead of renewing: a sign-in, a CI workload credential, or a setup-token credential the control plane gave no renewal time because its setup token's expiry or renewal stop comes first, or because too little of its own life would remain. Run `localport login` again for a sign-in; a CI job requests a new workload credential with a fresh identity token; for a setup-token credential, run `localport setup` with a new setup token once it expires. |
+| AG007 | Credential does not renew | The credential expires instead of renewing: a sign-in, a CI workload credential, or a setup-token credential issued without a renewal time. Run `localport login` again for a sign-in; a CI job requests a new workload credential with a fresh identity token; for a setup-token credential, run `localport setup` with a new setup token once it expires. |
 | AG008 | Desktop target keys unreadable | `desktop_pins.json` beside the device's credential is unreadable, not owner-only, or not valid. Make it a regular file owned by the account running the agent, mode 0600, or run `localport set <device> --rdp-reset-pin` (or `--vnc-reset-pin`), which removes the file with every key it held; the next browser connection asks to trust the key again. In an untrusted credential directory the reset fails too: fix the directory's owner and mode first. |
 | AG009 | Desktop target keys busy | Another localport process held the device's desktop key lock. Retry. |
 | AG010 | Device credential not saved | The control plane issued the device credential, but writing it to the credential store failed; the message names why. The join token is spent: fix the cause, then create a new join command in the dashboard and run it. |
@@ -50,9 +54,9 @@ or uninstaller is running (wait for it to finish, then run it again), and exit
 | AG025 | Terminal or files without logins | Name at least one login with `--logins`. |
 | AG026 | Desktop without target | Give desktop a target with `--rdp` or `--vnc`. |
 | AG027 | Files root missing | The files root must be an existing directory the agent can inspect; the message names the path and the reason. Mount or create it, or change it with `localport set`. |
+| AG028 | Invalid local config | The local config failed validation; the message names the field. Every command that reads it refuses the same way, `localport set` included, so correct `agent.yaml` by hand: in `$LOCALPORT_HOME` (or `~/.localport`), or as root in the machine-wide config directory. |
 | AG029 | Logins with run_as_agent | A device with `run_as_agent: true` runs terminal and files sessions as the agent account (`localport`, `_localport` on macOS), so it lists no logins. Remove `--logins`, or on a host with usable logins remove `run_as_agent` from the device in `agent.yaml` (it has no command-line flag). |
 | AG030 | Forwarding without terminal | SSH port forwarding rides an `ssh` connection, so it needs terminal on the same device. Enable both, for example `--enable terminal,forwarding`. |
-| AG028 | Invalid local config | The local config failed validation; the message names the field. Every command that reads it refuses the same way, `localport set` included, so correct `agent.yaml` by hand: in `$LOCALPORT_HOME` (or `~/.localport`), or as root in the machine-wide config directory. |
 | AG031 | No enrolled device | The machine-wide config lists no device. Enrol one with `sudo localport up <join-token>` (on Windows, `localport up <join-token>` from an elevated prompt). |
 | AG032 | No device can start | Every enrolled device is paused, removed, or has a missing or unreadable credential; the lines above name each one. Resume a paused device with `sudo localport up` (on Windows, `localport up` from an elevated prompt). A removed device, or one whose credential is gone, needs a new join command from the dashboard: run it. |
 | AG033 | Device service installed | Deleting the devices is refused while the device service is installed, as when another command installed it during the purge. Run `sudo localport service uninstall --purge` again once that command has finished. |
@@ -70,7 +74,7 @@ or uninstaller is running (wait for it to finish, then run it again), and exit
 | AG053 | Device sessions locked | Another localport process serves this device's sessions. Stop the other process. |
 | AG054 | Logins disabled | The device has `/etc/nologin`, so sessions run only as root. Remove the file once maintenance is over. Hosts with PAM apply this through `pam_nologin` instead. |
 | AG055 | Session launcher from another release | The agent and the session launcher service (`localport-session`) come from different localport releases, usually right after an upgrade. Restart the launcher service: `sudo systemctl restart localport-session` (Linux), `sudo launchctl kickstart -k system/io.localport.session` (macOS), or restart the `localport-session` service (Windows). |
-| AG061 | Recording spool full | The recording spool reached its size limit, so recordings stop until uploads catch up. Check the device's connection to the control plane. |
+| AG061 | Recording spool full | The recording spool reached its size limit, so recordings stop until uploads catch up. Check the device's connection to the edge on TCP 443. |
 | AG062 | Disk space low for recordings | The disk holding the recording spool is nearly full. Free disk space. |
 | AG063 | Recording unavailable | A recording could not start; the message names the cause. Causes: no recording uploader, a recording key that is not held or does not match the session certificate, a key that cannot seal the recording's key (malformed, or the wrap fails), too little time before the session's deadline, a spool that cannot store the entry, no session mux, or the control plane refusing, not answering or answering the open with segments already stored. A strict session is refused and a best-effort session runs unrecorded. Retry the session; when it persists, act on the named cause. |
 | AG071 | No transport | No connection to the edge worked. Check that this machine reaches the edge on TCP 443 and that no firewall or proxy blocks it. |
@@ -155,3 +159,5 @@ or uninstaller is running (wait for it to finish, then run it again), and exit
 | AG158 | No credential chosen | A command asked which stored credential to use and the input ended before a choice. Nothing changed. Choose one with `--identity`. |
 | AG159 | System run needs root | `localport run --system` serves this machine's devices in the foreground, and `up`, `down` and `set` reach such a run only when root (an elevated Administrator on Windows) runs it. Run `sudo localport run`, or on Windows `localport run` in an elevated shell. The device service runs the devices under its own account. |
 | AG160 | Control endpoint unavailable | A foreground run (`localport run`, `up --foreground`) could not serve the control endpoint that `up`, `down` and `set` use to apply settings, so it did not start. When the message says the endpoint is not a foreground run's, the directory (`/run/localport`, `/var/run/localport` on macOS) or the socket at `control.sock` is not root's or is open to others: find what created it, remove it, and start the run again. Otherwise start the run again, and if it fails again contact support with the output of `localport --verbose run`. |
+| AG161 | Service install busy | Another `localport service install` or `uninstall` is installing or removing Localport.app on macOS. Wait for it to finish, then run the command again. |
+| AG162 | Unexpected error | The command failed for a reason it has no message for. Run it again with `--verbose` to see the cause, and contact support with that output if it fails again. |

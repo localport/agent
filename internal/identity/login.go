@@ -41,8 +41,7 @@ type LoginPrompt struct {
 	UserCode string
 	// VerificationURI never carries the code.
 	VerificationURI string
-	// VerificationURIComplete carries it (RFC 8628 §3.3.1). Empty against an
-	// older control plane, in which case the bare URI is the only one to show.
+	// VerificationURIComplete carries it (RFC 8628 §3.3.1).
 	VerificationURIComplete string
 }
 
@@ -101,8 +100,8 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 	}); err != nil {
 		return nil, err
 	}
-	if start.DeviceCode == "" || start.UserCode == "" {
-		return nil, errAnswer.With(nil, "the sign-in request has no device or user code")
+	if start.DeviceCode == "" || start.UserCode == "" || start.VerificationURI == "" || start.VerificationURIComplete == "" {
+		return nil, errAnswer.With(nil, "the sign-in request has no device code, user code or verification address")
 	}
 
 	if onPrompt != nil {

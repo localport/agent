@@ -9,17 +9,16 @@ import (
 	"github.com/localport/agent/internal/identity"
 )
 
-// `localport login` signs a person in with the device flow and stores a
-// short-lived certificate. It does not renew. Running it again issues a new
-// certificate. The device flow needs no localhost callback, so it works over
-// SSH.
+// `localport login` signs a person in with the device flow, which needs no
+// localhost callback and so works over SSH, and stores a short-lived
+// certificate. It does not renew; running it again issues a new one.
 func runLogin(args []string) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	apiURL := fs.String("api", "", "control plane base URL (default "+identity.DefaultAPIURL+")")
 	fs.Usage = usageLogin
 	if err := fs.Parse(args); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 
 	client, err := identity.NewClient(resolveAPIURL(*apiURL))
@@ -43,13 +42,8 @@ func runLogin(args []string) error {
 		// Printed to stderr so stdout stays pipeable. The prefilled link comes
 		// first. The bare address and code serve a browser on another device,
 		// and the code lets the user match the approval screen.
-		if p.VerificationURIComplete != "" {
-			fmt.Fprintf(os.Stderr, "\n  Open %s\n", p.VerificationURIComplete)
-			fmt.Fprintf(os.Stderr, "  or go to %s and enter  %s\n\n", p.VerificationURI, p.UserCode)
-		} else {
-			fmt.Fprintf(os.Stderr, "\n  Open %s\n", p.VerificationURI)
-			fmt.Fprintf(os.Stderr, "  Enter code  %s\n\n", p.UserCode)
-		}
+		fmt.Fprintf(os.Stderr, "\n  Open %s\n", p.VerificationURIComplete)
+		fmt.Fprintf(os.Stderr, "  or go to %s and enter  %s\n\n", p.VerificationURI, p.UserCode)
 		fmt.Fprintf(os.Stderr, "  Waiting for you to sign in...\n")
 	})
 	if err != nil {

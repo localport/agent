@@ -188,7 +188,7 @@ func (f *deviceFlags) apply(fs *flag.FlagSet, d *config.LocalDevice, who invoker
 	if given["allow-ports"] {
 		allowed, err := ports.ParseFlag(*f.allowPorts)
 		if err != nil {
-			return fmt.Errorf("--allow-ports: %w", err)
+			return errcode.Invalidf("--allow-ports: %w", err)
 		}
 		d.AllowPorts = allowed
 	}
@@ -223,7 +223,7 @@ func (f *deviceFlags) apply(fs *flag.FlagSet, d *config.LocalDevice, who invoker
 			}
 			// Windows account names are case-insensitive.
 			if l != who.current && (who.goos != "windows" || !strings.EqualFold(l, who.current)) {
-				return fmt.Errorf("--logins: %q is not the user running this command; without %s a device serves only %s", l, who.elevation(), who.current)
+				return errcode.Invalidf("--logins: %q is not the user running this command; without %s a device serves only %s", l, who.elevation(), who.current)
 			}
 		}
 	}

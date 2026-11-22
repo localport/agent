@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -9,6 +8,7 @@ import (
 
 	"github.com/localport/agent/internal/agent"
 	"github.com/localport/agent/internal/config"
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/tunnel"
 	"github.com/localport/agent/internal/ui"
@@ -46,7 +46,7 @@ func runTunnel(version string, args []string) error {
 	fs.Usage = func() { usageTunnel(fs) }
 
 	if err := fs.Parse(rest); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 
 	if err := refuseBesideConfig(fs, *configPath, "token", "t", "region", "local", "l", "proto", "name"); err != nil {
@@ -54,10 +54,10 @@ func runTunnel(version string, args []string) error {
 	}
 	if posProto != "" {
 		if *configPath != "" {
-			return errors.New("a positional protocol and port cannot be combined with --config: set it in the config file")
+			return errcode.Invalidf("a positional protocol and port cannot be combined with --config: set it in the config file")
 		}
 		if *local != "" {
-			return errors.New("--local cannot be combined with positional protocol/address")
+			return errcode.Invalidf("--local cannot be combined with positional protocol/address")
 		}
 		*proto = posProto
 		*local = posLocal
@@ -124,8 +124,7 @@ func warnTokenFlag(renderer tunnelUI, fromFlag bool) {
 }
 
 // warnNoPortCeiling logs one warning per device without --allow-ports, the
-// only port limit enforced locally. Plain mode only, the TUI shows it in the
-// device header.
+// only port limit enforced locally; plain mode only, the TUI shows it itself.
 func warnNoPortCeiling(renderer tunnelUI, devices []config.DeviceSpec) {
 	p, ok := renderer.(*ui.Plain)
 	if !ok {
@@ -171,7 +170,7 @@ func refuseGiven(fs *flag.FlagSet, reason string, names ...string) error {
 	if len(given) == 0 {
 		return nil
 	}
-	return fmt.Errorf("%s %s", strings.Join(given, ", "), reason)
+	return errcode.Invalidf("%s %s", strings.Join(given, ", "), reason)
 }
 
 func pickRenderer(mode ui.Mode, a *agent.Agent) tunnelUI {
@@ -192,7 +191,7 @@ func buildTunnelConfig(path, flagToken, region, local, proto, name string) (*con
 		return nil, err
 	}
 	if local == "" {
-		return nil, errors.New("--local is required for token-based tunnel mode")
+		return nil, errcode.Invalidf("--local is required for token-based tunnel mode")
 	}
 	return config.TunnelFromFlags(token, region, local, proto, name)
 }

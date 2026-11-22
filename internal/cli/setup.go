@@ -34,7 +34,7 @@ func runSetup(args []string) error {
 		positional, rest = args[0], args[1:]
 	}
 	if err := fs.Parse(rest); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 	if positional == "" && fs.NArg() > 0 {
 		positional = fs.Arg(0)
@@ -50,7 +50,7 @@ func runSetup(args []string) error {
 	}
 	if secret == "" {
 		usageSetup()
-		return fmt.Errorf("setup token required (argument, --token, or %s)", setupTokenEnv)
+		return errcode.Invalidf("setup token required (argument, --token, or %s)", setupTokenEnv)
 	}
 
 	client, err := identity.NewClient(resolveAPIURL(*apiURL))
@@ -76,8 +76,7 @@ func runSetup(args []string) error {
 	}
 	material, err := client.RedeemSetupToken(ctx, secret, *wait, notice)
 	if err != nil {
-		// The error may quote the request. Keep the token out of terminals and
-		// CI logs.
+		// The error may quote the request; keep the token out of terminals and CI logs.
 		return security.RedactError(err, secret)
 	}
 	ref, err := store.SaveIssued(ctx, *material)

@@ -15,8 +15,8 @@ import (
 	"github.com/localport/agent/internal/agentaccount"
 )
 
-// Code is a local error code: "AG" and three digits. Codes are grouped by
-// package in blocks of ten.
+// Code is a local error code: "AG" and three digits. AG001 to AG134 are
+// grouped by area (ranges in docs/ERRORS.md); later codes are not.
 type Code string
 
 // Error is a coded error. New makes its sentinels; With adds the detail the
@@ -208,6 +208,8 @@ const (
 	NoCredentialChosen      Code = "AG158"
 	SystemRunNotPrivileged  Code = "AG159"
 	ControlEndpointFailed   Code = "AG160"
+	ServiceInstallBusy      Code = "AG161"
+	Unexpected              Code = "AG162"
 )
 
 // NewJoinCommand is the remedy for every lost or unusable device credential.
@@ -330,6 +332,8 @@ var registry = []Entry{
 
 	{ServiceManagerFailed, "Service manager failed", "the service manager could not carry out the step"},
 	{ServiceDefinitionFailed, "Service definition not written", "the device service definition could not be read, written or removed"},
+	{ServiceInstallBusy, "Service install busy", "another localport service install or uninstall is running"},
+	{Unexpected, "Unexpected error", "localport could not finish the command"},
 	{AccountMissing, "Agent account missing", "the agent account " + agentaccount.Name + " does not exist; create it with: sudo localport service install"},
 	{AccountNotChanged, "Agent account not changed", "the agent account " + agentaccount.Name + " could not be created, looked up or inspected"},
 	{SystemNeedsRoot, "Needs root", "only root or an elevated Administrator changes the device config directory"},

@@ -328,7 +328,7 @@ func WriteLocal(f LocalConfigFile, cfg *LocalConfig, changed identity.Ref) error
 			continue
 		}
 		if err := CheckFilesRoot(d.FilesRoot); err != nil {
-			return fmt.Errorf("device %s: files_root: %w", d.Identity, err)
+			return errcode.Invalidf("device %s: files_root: %w", d.Identity, err)
 		}
 	}
 	raw, err := cfg.marshal()
@@ -428,7 +428,7 @@ func (c *LocalConfig) marshal() ([]byte, error) {
 	}
 	raw, err := yaml.Marshal(&lf)
 	if err != nil {
-		return nil, fmt.Errorf("encode local config: %w", err)
+		return nil, errLocalNotWritten.With(err, "encode the local config")
 	}
 	return raw, nil
 }

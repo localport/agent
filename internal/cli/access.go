@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -48,7 +47,7 @@ func runAccess(args []string) error {
 		parsed = args[1:]
 	}
 	if err := fs.Parse(parsed); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 
 	if *configPath != "" {
@@ -59,13 +58,13 @@ func runAccess(args []string) error {
 	if remote == "" {
 		if fs.NArg() < 1 {
 			fs.Usage()
-			return errors.New("remote address required")
+			return errcode.Invalidf("remote address required")
 		}
 		remote = fs.Arg(0)
 	}
 	if (remoteFromHead == "" && fs.NArg() > 1) || (remoteFromHead != "" && fs.NArg() > 0) {
 		fs.Usage()
-		return errors.New("unexpected extra positional arguments")
+		return errcode.Invalidf("unexpected extra positional arguments")
 	}
 
 	deviceHost, deviceAddr, err := access.ParseDevice(remote)
@@ -74,10 +73,10 @@ func runAccess(args []string) error {
 	}
 	if len(forwards) == 0 && *stdio == 0 {
 		fs.Usage()
-		return errors.New("pass -L <local>:<remote>, or --stdio <port>")
+		return errcode.Invalidf("pass -L <local>:<remote>, or --stdio <port>")
 	}
 	if len(forwards) > 0 && *stdio != 0 {
-		return errors.New("--stdio carries one connection, so it cannot be combined with -L")
+		return errcode.Invalidf("--stdio carries one connection, so it cannot be combined with -L")
 	}
 	parsedForwards := make([]access.Forward, 0, len(forwards))
 	for _, raw := range forwards {
@@ -117,8 +116,7 @@ func runAccess(args []string) error {
 	)
 	switch src {
 	case credentialWorkload:
-		// Exchange the CI platform token for a short-lived in-memory
-		// certificate.
+		// Exchange the CI platform token for a short-lived in-memory certificate.
 		tlsCfg, source, err = workloadTLSConfig(ctx, *audience, *apiURL, deviceAddr, deviceHost)
 	case credentialStored:
 		tlsCfg, source, err = identityTLSConfig(ctx, chosen, deviceAddr, deviceHost)
@@ -155,7 +153,7 @@ func runAccess(args []string) error {
 
 	if *stdio != 0 {
 		if *stdio < 1 || *stdio > 65535 {
-			return errors.New("--stdio port must be 1-65535")
+			return errcode.Invalidf("--stdio port must be 1-65535")
 		}
 		return proxy.ServeStdio(ctx, os.Stdin, os.Stdout, uint16(*stdio))
 	}
@@ -186,7 +184,7 @@ func pickCredentialSource(pemFile, p12File, audience string) (credentialSource, 
 	// Both flags name a credential. Picking one would present a principal the
 	// caller did not choose, so the combination is an error.
 	if audience != "" && fileNamed {
-		return 0, errors.New("--audience uses the CI platform's own identity, so it cannot be combined with --pem or --p12")
+		return 0, errcode.Invalidf("--audience uses the CI platform's own identity, so it cannot be combined with --pem or --p12")
 	}
 	switch {
 	case fileNamed:
@@ -223,9 +221,8 @@ func identityTLSConfig(ctx context.Context, ref identity.Ref, remote, serverName
 	if err != nil {
 		return nil, "", errcode.WithRemedy(err, "or pass a credential file with --pem / --p12")
 	}
-	// A refused reload means the file now holds a different principal. The
-	// process keeps presenting what it opened with, so the refusal must be
-	// visible.
+	// A refused reload means the file holds another principal while the
+	// process keeps presenting the old one; show it.
 	cred.OnSwap(func(line string) { fmt.Fprintf(os.Stderr, "  [identity] %s\n", line) })
 
 	cfg := access.BaseTLSConfig(remote, serverName)
@@ -233,9 +230,8 @@ func identityTLSConfig(ctx context.Context, ref identity.Ref, remote, serverName
 
 	meta := cred.Meta()
 	if !meta.Source.Renewable() {
-		// No renewal loop, so say when it ends. Otherwise it stops being
-		// accepted mid-session and the far side answers with an opaque TLS
-		// refusal.
+		// No renewal loop: say when it ends, or the far side later answers with
+		// an opaque TLS refusal mid-session.
 		noteSignInExpiry(cred.Ref(), meta)
 		return cfg, "sign-in " + meta.Identity, nil
 	}
@@ -276,7 +272,7 @@ func workloadTLSConfig(ctx context.Context, audience, apiURL, remote, serverName
 
 	cert, err := material.TLSCertificate()
 	if err != nil {
-		return nil, "", fmt.Errorf("load workload certificate: %w", err)
+		return nil, "", errcode.New(errcode.ClientCertUnusable).With(err, "the workload certificate")
 	}
 	cfg := access.BaseTLSConfig(remote, serverName)
 	cfg.Certificates = []tls.Certificate{*cert}
@@ -305,7 +301,7 @@ func runAccessFromConfig(path string) error {
 		deviceHost, deviceAddr, parseErr := access.ParseDevice(entry.Device)
 		if parseErr != nil {
 			cancel()
-			return fmt.Errorf("device %q: %w", entry.Device, parseErr)
+			return errcode.Invalidf("device %q: %w", entry.Device, parseErr)
 		}
 
 		forwards := make([]access.Forward, 0, len(entry.Forward))
@@ -313,7 +309,7 @@ func runAccessFromConfig(path string) error {
 			f, forwardErr := access.ParseForward(raw, "127.0.0.1")
 			if forwardErr != nil {
 				cancel()
-				return fmt.Errorf("device %q: %w", entry.Device, forwardErr)
+				return errcode.Invalidf("device %q: %w", entry.Device, forwardErr)
 			}
 			forwards = append(forwards, f)
 		}
@@ -336,7 +332,7 @@ func runAccessFromConfig(path string) error {
 		}
 		if err != nil {
 			cancel()
-			return fmt.Errorf("device %q: %w", entry.Device, err)
+			return errcode.Invalidf("device %q: %w", entry.Device, err)
 		}
 
 		session := &access.Session{Device: deviceHost, Addr: deviceAddr, TLSConfig: tlsCfg}
@@ -431,11 +427,10 @@ func resolveP12Password(inline, filePath, envName string) (string, error) {
 	case inline != "":
 		return noteWeakPassword(inline), nil
 	case filePath != "":
-		// Owner-only and no symlink, as for the archive. This file unlocks the
-		// key.
+		// Owner-only and no symlink, as for the archive: this file unlocks the key.
 		data, err := security.ReadPrivateFile(filePath)
 		if err != nil {
-			return "", fmt.Errorf("read p12 password file: %w", err)
+			return "", errcode.New(errcode.ClientCertUnusable).With(err, "read the p12 password file")
 		}
 		return noteWeakPassword(strings.TrimSpace(string(data))), nil
 	}

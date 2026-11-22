@@ -3,8 +3,6 @@
 package cli
 
 import (
-	"fmt"
-
 	"golang.org/x/sys/windows"
 
 	"github.com/localport/agent/internal/errcode"
@@ -20,11 +18,11 @@ var errSessionsNeedDeviceService = errcode.New(errcode.SessionsNeedService)
 func checkSessionAccount() error {
 	service, err := windows.StringToSid(security.ServiceSID(security.WindowsServiceName))
 	if err != nil {
-		return fmt.Errorf("read the device service account: %w", err)
+		return errcode.New(errcode.Unexpected).With(err, "read the device service account")
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return fmt.Errorf("read the process account: %w", err)
+		return errcode.New(errcode.CurrentUserUnknown).With(err, "")
 	}
 	return sessionAccountError(user.User.Sid, service)
 }

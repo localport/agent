@@ -19,6 +19,7 @@ import (
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/launcher"
 	"github.com/localport/agent/internal/recording"
+	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/service"
 	"github.com/localport/agent/internal/session"
 	"github.com/localport/agent/internal/status"
@@ -62,12 +63,12 @@ func runRun(version string, args []string) error {
 	fs.SetOutput(os.Stderr)
 	fs.Usage = usageRun
 	if err := fs.Parse(args); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 	noUI, system, asService, logFile := f.noUI, f.system, f.asService, f.logFile
 	if fs.NArg() > 0 {
 		usageRun()
-		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		return errExtraArgument.With(nil, fmt.Sprintf("%q", security.SanitizeDisplay(fs.Arg(0))))
 	}
 	// A foreground run of the system devices must be one up, down and set can
 	// reach, which only root's (an elevated Administrator's) is.

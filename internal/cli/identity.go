@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
 	"github.com/localport/agent/internal/security"
 	"github.com/localport/agent/internal/ui"
@@ -22,7 +23,7 @@ const identityEnv = "LOCALPORT_IDENTITY"
 func runIdentity(args []string) error {
 	if len(args) == 0 {
 		usageIdentity()
-		return errors.New("identity: subcommand required")
+		return errcode.Invalidf("identity: subcommand required")
 	}
 	switch args[0] {
 	case "list":
@@ -36,7 +37,7 @@ func runIdentity(args []string) error {
 		return nil
 	default:
 		usageIdentity()
-		return fmt.Errorf("identity: unknown subcommand %q", args[0])
+		return errcode.Invalidf("identity: unknown subcommand %q", args[0])
 	}
 }
 
@@ -48,7 +49,7 @@ func runIdentityList(args []string) error {
 	selector := fs.String("identity", "", "narrow to one credential")
 	fs.Usage = usageIdentity
 	if err := fs.Parse(args); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 
 	store, err := currentInvoker(false).store()
@@ -119,7 +120,7 @@ func runIdentityRenew(args []string) error {
 	selector := fs.String("identity", "", "credential to renew")
 	fs.Usage = usageIdentity
 	if err := fs.Parse(args); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 
 	store, err := currentInvoker(false).store()
@@ -154,11 +155,11 @@ func runIdentityRemove(args []string) error {
 	fs.SetOutput(os.Stderr)
 	fs.Usage = usageIdentity
 	if err := fs.Parse(args); err != nil {
-		return err
+		return errcode.UsageError(err)
 	}
 	if fs.NArg() != 1 {
 		usageIdentity()
-		return errors.New("identity remove: name exactly one credential")
+		return errcode.Invalidf("identity remove: name exactly one credential")
 	}
 
 	store, err := currentInvoker(false).store()
@@ -180,8 +181,7 @@ func runIdentityRemove(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "  removed %s\n", ref)
 	fmt.Fprintf(os.Stderr, "  deleted %s\n", dir)
-	// Removing the file does not revoke. Say so, or the operator assumes it
-	// did.
+	// Removing the file does not revoke; say so, or the operator assumes it did.
 	fmt.Fprintf(os.Stderr, "\n  the certificate is still valid until it is revoked in the dashboard\n")
 	return nil
 }

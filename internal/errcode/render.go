@@ -54,15 +54,31 @@ func (e *Invalid) Error() string { return e.err.Error() }
 
 func (e *Invalid) Unwrap() error { return e.err }
 
+// Usage is a flag.FlagSet Parse error. It carries no code (docs/ERRORS.md);
+// Render prints its text.
+type Usage struct{ err error }
+
+// UsageError wraps a Parse error; nil stays nil.
+func UsageError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &Usage{err: err}
+}
+
+func (e *Usage) Error() string { return e.err.Error() }
+
+func (e *Usage) Unwrap() error { return e.err }
+
 // Render is the user text of err, built from typed parts of its chain and never
 // from a node's Error(): each *Error's message and detail, a local cause the
 // user acts on (*fs.PathError, *os.LinkError, a listen address in use, an
 // *Invalid) and a Remote's message, followed by every code, innermost first.
 // Each error of a join prints on its own line. Other causes (network, TLS,
 // server internals, plain wrappers) are left out; hidden reports that one was,
-// so the caller can point at --verbose, which prints Error(). A chain with no
-// *Error and no Remote is plain local text and prints as Error(), unless it
-// holds a network error.
+// so the caller can point at --verbose, which prints Error(). A *Usage prints
+// its text. A chain that shows nothing prints "a network operation failed"
+// when it holds a network error, else the Unexpected line; both hidden.
 func Render(err error) (text string, hidden bool) {
 	if err == nil {
 		return "", false
@@ -70,15 +86,18 @@ func Render(err error) (text string, hidden bool) {
 	var r renderer
 	r.walk(err)
 	switch {
-	case r.typed:
+	case r.typed, len(r.parts) > 0 || len(r.branches) > 0:
 		text, hidden = r.text(), r.hidden
 	case isNetwork(err):
 		return "a network operation failed", true
 	default:
-		text = err.Error()
+		r.parts = []string{errUnexpected.Error()}
+		return r.text(), true
 	}
 	return redact(err, text), hidden
 }
+
+var errUnexpected = New(Unexpected)
 
 // Redactor is an error that masks secrets in the text of its chain
 // (security.RedactError). Render applies every Redactor in the chain to the
@@ -152,6 +171,10 @@ func (r *renderer) walk(err error) {
 			r.walk(e.Err)
 		}
 		r.codes = append(r.codes, string(e.Code))
+		return
+	case *Usage:
+		r.typed = true
+		r.parts = append(r.parts, e.Error())
 		return
 	case *Invalid:
 		r.typed = true
