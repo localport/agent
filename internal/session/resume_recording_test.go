@@ -545,7 +545,7 @@ func TestAStreamReleaseUnderAResumeArmsNoTimer(t *testing.T) {
 	f := newSSHFixture(t, func(c *ServerConfig) { c.clock = &manualClock{} })
 	rc := f.connectResumable(t)
 	e := onlyConn(t, f.srv)
-	if got, status := f.srv.beginResume(&handler{}, e.handle); got != e || status != statusOK {
+	if got, _, status := f.srv.beginResume(&handler{}, e.handle); got != e || status != statusOK {
 		t.Fatalf("beginResume = %v, %d", got, status)
 	}
 	e.rc.Detach()
@@ -590,24 +590,28 @@ func TestEndAttemptIsOneCriticalSection(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if _, status := f.srv.beginResume(&handler{}, e.handle); status != statusOK {
+	if _, _, status := f.srv.beginResume(&handler{}, e.handle); status != statusOK {
 		t.Fatalf("beginResume = %d", status)
 	}
 	clock.advance(detachTimeout + time.Second)
-	statuses := make(chan uint32, 1)
+	type claim struct {
+		conn   *resumable
+		record *endRecord
+	}
+	claims := make(chan claim, 1)
 	hook := func() {
 		afterAttemptClaimCleared.Store(nil)
 		go func() {
-			_, status := f.srv.beginResume(&handler{}, e.handle)
-			statuses <- status
+			conn, record, _ := f.srv.beginResume(&handler{}, e.handle)
+			claims <- claim{conn, record}
 		}()
 		time.Sleep(50 * time.Millisecond)
 	}
 	afterAttemptClaimCleared.Store(&hook)
 	t.Cleanup(func() { afterAttemptClaimCleared.Store(nil) })
 	f.srv.endAttempt(e, true)
-	if status := <-statuses; status != statusLost {
-		t.Fatalf("a resume during endAttempt = %d, want statusLost", status)
+	if got := <-claims; got.conn != nil || got.record == nil || got.record.reason != CloseDetachTimeout {
+		t.Fatalf("a resume during endAttempt claimed %+v, want the detach_timeout record", got)
 	}
 }
 

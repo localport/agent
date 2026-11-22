@@ -221,6 +221,8 @@ type Server struct {
 	handlers map[*handler]struct{}
 	// conns holds every live resumable connection by its resume handle.
 	conns map[string]*resumable
+	// ended holds the end records of connections that ended detached, by resume handle.
+	ended map[string]*endRecord
 	// drained is closed when handlers becomes empty while Shutdown waits.
 	drained chan struct{}
 }
@@ -246,19 +248,9 @@ type handler struct {
 // resumable is one connection's resume state. The fields after ended are
 // guarded by Server.mu.
 type resumable struct {
-	rc      *ResumableConn
-	handle  string
-	token   []byte
-	subject string
-	kind    string
-	// login is the first connect's principal, the SSH user; every resume
-	// certificate must name it.
-	login string
-	// certKey is the certificate key the first connect bound the connection
-	// to; userauth and every resume must present it.
-	certKey []byte
-	// serial is the serial of the certificate that admitted the first connect.
-	serial uint64
+	rc     *ResumableConn
+	handle string
+	resumeBinding
 	// ended delivers an end decided outside run: detach timeout, a resume
 	// refused or lost.
 	ended chan string
@@ -274,6 +266,10 @@ type resumable struct {
 	failures int
 	expired  bool
 	removed  bool
+	// endDecided is set once the connection's end is decided (run's end, a
+	// record, an end its resume stream answered, the proof failure limit);
+	// no later expiry leaves an end record for it.
+	endDecided bool
 	// stopTimer stops the armed detach timer; timer names it, so a fire that
 	// raced a stop or a re-arm is ignored.
 	stopTimer func()
@@ -286,6 +282,92 @@ type resumable struct {
 	// admitted is the last installed resume's admission, set before its
 	// stream is installed; run starts under it when a resume came first.
 	admitted *connAdmission
+}
+
+// resumeBinding is what a resume of a connection must match before its
+// proof, and the token the proof is checked with.
+type resumeBinding struct {
+	token   []byte
+	subject string
+	kind    string
+	// login is the first connect's principal, the SSH user; every resume
+	// certificate must name it.
+	login string
+	// certKey is the certificate key the first connect bound the connection
+	// to; userauth and every resume must present it.
+	certKey []byte
+	// serial is the serial of the certificate that admitted the first connect.
+	serial uint64
+}
+
+// endRecord keeps the end reason of a connection that ended detached. A
+// resume of its handle passes the live-handle checks and, once its proof
+// verifies, is answered statusEnded with the reason. Guarded by Server.mu;
+// holds no slot or goroutine; lives detachTimeout; at most maxSessions.
+type endRecord struct {
+	resumeBinding
+	// received is the connection's received position at the end, signed into
+	// the resume reply as a live handle's is.
+	received uint64
+	reason   string
+	expires  time.Time
+	// resuming and failures are a live handle's claim and proof failures.
+	resuming bool
+	failures int
+}
+
+// endRecordable reports whether an end leaves a record. A client's close and
+// the reasons a resume stream already answered leave none.
+func endRecordable(reason string) bool {
+	switch reason {
+	case "", CloseResumeRefused, CloseResumeLost, CloseRecordingRequired:
+		return false
+	}
+	return true
+}
+
+// recordEndLocked leaves e's end record for reason, unless the reason leaves
+// none or e already has one. Expired records go first; at maxSessions the
+// oldest is evicted.
+func (s *Server) recordEndLocked(e *resumable, reason string) {
+	if e.endDecided || !endRecordable(reason) {
+		return
+	}
+	e.endDecided = true
+	if _, ok := s.ended[e.handle]; ok {
+		return
+	}
+	now := s.cfg.clock.Now()
+	var oldest string
+	for handle, r := range s.ended {
+		if !now.Before(r.expires) {
+			delete(s.ended, handle)
+		} else if oldest == "" || r.expires.Before(s.ended[oldest].expires) {
+			oldest = handle
+		}
+	}
+	if len(s.ended) >= maxSessions {
+		delete(s.ended, oldest)
+	}
+	s.ended[e.handle] = &endRecord{resumeBinding: e.resumeBinding, received: e.rc.Received(),
+		reason: reason, expires: now.Add(detachTimeout)}
+}
+
+// recordLocked returns handle's end record, deleting it when it expired.
+func (s *Server) recordLocked(handle string) *endRecord {
+	r := s.ended[handle]
+	if r != nil && !s.cfg.clock.Now().Before(r.expires) {
+		delete(s.ended, handle)
+		return nil
+	}
+	return r
+}
+
+// dropRecordLocked deletes r unless another record took its handle.
+func (s *Server) dropRecordLocked(handle string, r *endRecord) {
+	if s.ended[handle] == r {
+		delete(s.ended, handle)
+	}
 }
 
 // endWith ends the connection with reason unless an end is already queued.
@@ -304,6 +386,14 @@ var (
 // afterAttemptClaimCleared is a test hook run in endAttempt's critical section,
 // after the claim is cleared and before the hold is released.
 var afterAttemptClaimCleared atomic.Pointer[func()]
+
+// afterResumeProof, when set by a test, runs in serveResume once the proof
+// verified, before the close, lost and install branches.
+var afterResumeProof atomic.Pointer[func(*resumable)]
+
+// afterResumeReadmit, when set by a test, runs in serveResume after readmit
+// and before the stream is installed.
+var afterResumeReadmit atomic.Pointer[func(*resumable)]
 
 // afterResumeInstall, when set by a test, runs in serveResume once the
 // stream is installed and before the resume's claim is released.
@@ -334,7 +424,8 @@ func NewServer(cfg ServerConfig) *Server {
 	if cfg.clock == nil {
 		cfg.clock = wallClock{}
 	}
-	return &Server{cfg: cfg, launcher: launcherFor(cfg.Launcher), handlers: map[*handler]struct{}{}, conns: map[string]*resumable{}}
+	return &Server{cfg: cfg, launcher: launcherFor(cfg.Launcher), handlers: map[*handler]struct{}{},
+		conns: map[string]*resumable{}, ended: map[string]*endRecord{}}
 }
 
 // LiveSessions returns the number of streams holding a session slot.
@@ -502,8 +593,9 @@ func (s *Server) serveNew(h *handler, stream net.Conn, hello *helloMsg, id [16]b
 	}
 	_ = stream.SetDeadline(time.Time{})
 
-	e := &resumable{rc: NewResumableConn(), handle: string(handle), token: token, subject: adm.Subject, kind: adm.Kind,
-		login: adm.Login, certKey: cert.Key.Marshal(), serial: serial, ended: make(chan string, 1)}
+	e := &resumable{rc: NewResumableConn(), handle: string(handle), ended: make(chan string, 1),
+		resumeBinding: resumeBinding{token: token, subject: adm.Subject, kind: adm.Kind,
+			login: adm.Login, certKey: cert.Key.Marshal(), serial: serial}}
 	ch := &handler{stop: make(chan struct{}), handshaking: true, abort: func() { e.rc.End(errConnEnded) }}
 	// Installed before addConn publishes e, so a resume of the new handle
 	// always finds this stream attached and takes over from it. A fresh conn
@@ -545,25 +637,32 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 		refuse(statusRefused, "the resume signature does not verify with the certificate's key")
 		return
 	}
-	e, status := s.beginResume(h, string(m.Handle))
+	handle := string(m.Handle)
+	e, rec, status := s.beginResume(h, handle)
 	if status != statusOK {
 		refuse(status, "the connection is gone, resuming or shutting down")
 		return
 	}
-	// The hold ends with this call. The claim ends at the install (unclaim)
-	// or, for a failed resume, together with the hold in one critical section
-	// (endAttempt), so no other resume can hold in between and the detach
-	// deadline is checked after every attempt.
+	// The hold, and a record's claim, end with this call. A connection's claim
+	// ends at the install (unclaim) or, for a failed resume, with the hold in one
+	// critical section (endAttempt), so no other resume holds in between and the
+	// detach deadline is checked after every attempt.
 	claimed := true
-	defer func() { s.endAttempt(e, claimed) }()
+	bound := rec
+	if rec == nil {
+		bound = &endRecord{resumeBinding: e.resumeBinding}
+		defer func() { s.endAttempt(e, claimed) }()
+	} else {
+		defer s.endRecordAttempt(rec)
+	}
 	adm, err := s.withCARefresh(cert, func() (*admission, error) {
-		return verifyResumeCert(cert, s.caKeys(), device, serial, e.serial, s.cfg.clock.Now())
+		return verifyResumeCert(cert, s.caKeys(), device, serial, bound.serial, s.cfg.clock.Now())
 	})
 	switch {
 	case err != nil:
 		refuse(statusRefused, "%v", err)
 		return
-	case adm.Subject != e.subject || adm.Kind != e.kind || adm.Login != e.login || !bytes.Equal(cert.Key.Marshal(), e.certKey):
+	case adm.Subject != bound.subject || adm.Kind != bound.kind || adm.Login != bound.login || !bytes.Equal(cert.Key.Marshal(), bound.certKey):
 		refuse(statusRefused, "the resume certificate is for another subject, kind, login or key")
 		return
 	}
@@ -575,15 +674,19 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 	}
 	// A resume for a live stream detaches it first, which settles positions.
 	// A position outside the buffer ends the connection only once the proof
-	// shows the client sent it, not on a replayed message.
-	e.rc.Detach()
-	lost := !e.rc.CanResumeFrom(m.Position)
+	// shows the client sent it, not on a replayed message. A record signs the
+	// position the connection ended with.
+	lost, received := false, bound.received
+	if e != nil {
+		e.rc.Detach()
+		lost, received = !e.rc.CanResumeFrom(m.Position), e.rc.Received()
+	}
 	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		refuse(statusRefused, "%v", err)
 		return
 	}
-	reply := resumeReplyMsg{Status: statusOK, AgentKey: priv.PublicKey().Bytes(), Position: e.rc.Received()}
+	reply := resumeReplyMsg{Status: statusOK, AgentKey: priv.PublicKey().Bytes(), Position: received}
 	th := transcript(m.noSig(), reply.noSig())
 	if reply.Sig, err = signPrelude(host, agentSigContext, th); err != nil {
 		refuse(statusRefused, "host key signature: %v", err)
@@ -596,12 +699,28 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 	if err := readPrelude(stream, &proof); err != nil {
 		return
 	}
-	if !hmac.Equal(proof.Proof, resumeProof(e.token, th)) {
+	if !hmac.Equal(proof.Proof, resumeProof(bound.token, th)) {
 		s.log("session: resume refused: the token proof does not verify")
 		_ = writePrelude(stream, proofReplyMsg{Status: statusRefused})
-		if s.proofFailed(e) >= maxProofFailures {
+		if rec != nil {
+			s.recordProofFailed(handle, rec)
+		} else if s.proofFailed(e) >= maxProofFailures {
 			e.endWith(CloseResumeRefused)
 		}
+		return
+	}
+	if hook := afterResumeProof.Load(); hook != nil {
+		(*hook)(e)
+	}
+	if rec == nil {
+		// The connection may have ended detached during this attempt (its
+		// idle timer runs until readmit): its record answers the resume.
+		s.mu.Lock()
+		rec = s.recordLocked(handle)
+		s.mu.Unlock()
+	}
+	if rec != nil {
+		s.answerRecord(stream, handle, rec, m.Close)
 		return
 	}
 	if m.Close {
@@ -626,11 +745,32 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 	// The connection continues under the resume certificate and this stream's
 	// session id, which the edge attests for recordings, before any byte of
 	// the stream is read.
-	if s.readmit(e, &connAdmission{admission: adm, sessionID: uuidText(id), clientAddr: clientAddr}) {
+	// From readmit to settleResume run decides no idle end, so a resume past the
+	// idle timeout ends `idle` over its installed stream, not as a lost install.
+	violated := s.readmit(e, &connAdmission{admission: adm, sessionID: uuidText(id), clientAddr: clientAddr})
+	settled := false
+	defer func() {
+		if !settled {
+			s.settleResume(e)
+		}
+	}()
+	if violated {
 		s.log("session: resume refused: %s: the resume names a recording that a running channel or forwards helper does not have", CloseRecordingRequired)
 		_ = writePrelude(stream, proofReplyMsg{Status: statusLost})
 		e.endWith(CloseRecordingRequired)
 		e.rc.End(ErrResumeLost)
+		return
+	}
+	if hook := afterResumeReadmit.Load(); hook != nil {
+		(*hook)(e)
+	}
+	// A connection that ended detached during this attempt left a record,
+	// answered as any verified resume of it; Install would close the stream.
+	s.mu.Lock()
+	r := s.recordLocked(handle)
+	s.mu.Unlock()
+	if r != nil {
+		s.answerRecord(stream, handle, r, false)
 		return
 	}
 	_ = stream.SetDeadline(time.Time{})
@@ -653,6 +793,8 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 	// A failed write ends the stream at once; run still runs it, so its end
 	// detaches the connection as any lost stream.
 	_ = writePrelude(stream, proofReplyMsg{Status: statusOK})
+	s.settleResume(e)
+	settled = true
 	s.unclaim(e)
 	claimed = false
 	s.mark(e, markerAttach)
@@ -668,6 +810,51 @@ func (s *Server) readmit(e *resumable, a *connAdmission) bool {
 	c := e.conn
 	s.mu.Unlock()
 	return c != nil && c.readmit(a)
+}
+
+// settleResume ends the idle hold readmit put on e's connection: run decides
+// the idle timeout again, now against an installed stream or, for a resume
+// that failed after readmit, as for any detached connection.
+func (s *Server) settleResume(e *resumable) {
+	s.mu.Lock()
+	c := e.conn
+	s.mu.Unlock()
+	if c != nil {
+		c.settleResume()
+	}
+}
+
+// answerRecord answers a verified resume of an end record and deletes it: a
+// close resume is answered statusOK, any other statusEnded with the reason.
+func (s *Server) answerRecord(stream net.Conn, handle string, r *endRecord, closeConn bool) {
+	s.mu.Lock()
+	s.dropRecordLocked(handle, r)
+	s.mu.Unlock()
+	if closeConn {
+		s.log("session: resume closed an ended connection")
+		_ = writePrelude(stream, proofReplyMsg{Status: statusOK})
+		return
+	}
+	s.log("session: resume answered: the connection ended %s", r.reason)
+	_ = writePrelude(stream, proofReplyMsg{Status: statusEnded, Reason: r.reason})
+}
+
+// endRecordAttempt ends a resume attempt's claim on an end record.
+func (s *Server) endRecordAttempt(r *endRecord) {
+	s.mu.Lock()
+	r.resuming = false
+	s.mu.Unlock()
+}
+
+// recordProofFailed counts a failed proof against an end record; at
+// maxProofFailures the record is deleted.
+func (s *Server) recordProofFailed(handle string, r *endRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r.failures++
+	if r.failures >= maxProofFailures {
+		s.dropRecordLocked(handle, r)
+	}
 }
 
 // mark queues label on every recording of e's connection, if run started.
@@ -734,7 +921,7 @@ func (s *Server) releaseLocked(e *resumable) bool {
 	}
 	left := e.deadline.Sub(now)
 	if left <= 0 {
-		e.expired = true
+		s.expireLocked(e)
 		return true
 	}
 	fire, stop := s.cfg.clock.NewDetachTimer(left)
@@ -751,7 +938,7 @@ func (s *Server) releaseLocked(e *resumable) bool {
 			s.mu.Lock()
 			expire := e.timer == timer && e.running == 0 && !e.removed && !e.expired
 			if expire {
-				e.expired = true
+				s.expireLocked(e)
 				e.stopTimer, e.timer = nil, nil
 			}
 			s.mu.Unlock()
@@ -791,36 +978,56 @@ func (s *Server) addConn(e *resumable, h *handler) bool {
 	return true
 }
 
-// beginResume claims handle's connection for one resume and holds it
-// (release): statusLost when gone, statusBusy while another resume holds the
-// claim, statusRefused during Shutdown. A claim ends h's handshake count.
-func (s *Server) beginResume(h *handler, handle string) (*resumable, uint32) {
+// beginResume claims handle's connection, or its end record, for one resume:
+// statusLost when neither exists, statusBusy while another resume holds the
+// claim, statusRefused during Shutdown, in that order for both. A connection's
+// claim also holds it (release). A claim ends h's handshake count.
+func (s *Server) beginResume(h *handler, handle string) (*resumable, *endRecord, uint32) {
 	s.mu.Lock()
 	e := s.conns[handle]
-	switch {
-	case e == nil || e.removed || e.expired:
-		s.mu.Unlock()
-		return nil, statusLost
-	case s.closing > 0:
-		s.mu.Unlock()
-		return nil, statusRefused
-	case e.resuming:
-		s.mu.Unlock()
-		return nil, statusBusy
-	case e.running == 0 && !e.deadline.IsZero() && !s.cfg.clock.Now().Before(e.deadline):
+	expired := e != nil && !e.removed && !e.expired && e.running == 0 && !e.deadline.IsZero() &&
+		!s.cfg.clock.Now().Before(e.deadline)
+	if expired {
 		// Past its deadline and the timer has not fired yet: expired here,
 		// so no resume can claim a connection that is over.
-		e.expired = true
+		s.expireLocked(e)
 		e.stopTimerLocked()
-		s.mu.Unlock()
+	}
+	claimed, rec, status := s.claimLocked(h, handle, e)
+	s.mu.Unlock()
+	if expired {
 		e.expire()
-		return nil, statusLost
+	}
+	return claimed, rec, status
+}
+
+// claimLocked is beginResume's claim under s.mu; e is handle's connection.
+func (s *Server) claimLocked(h *handler, handle string, e *resumable) (*resumable, *endRecord, uint32) {
+	// A record exists only for an ended connection, so it is checked first:
+	// its connection may still be in s.conns while run ends.
+	if r := s.recordLocked(handle); r != nil {
+		switch {
+		case s.closing > 0:
+			return nil, nil, statusRefused
+		case r.resuming:
+			return nil, nil, statusBusy
+		}
+		r.resuming = true
+		s.endCountLocked(h)
+		return nil, r, statusOK
+	}
+	switch {
+	case e == nil || e.removed || e.expired:
+		return nil, nil, statusLost
+	case s.closing > 0:
+		return nil, nil, statusRefused
+	case e.resuming:
+		return nil, nil, statusBusy
 	}
 	e.resuming = true
 	e.holdLocked()
 	s.endCountLocked(h)
-	s.mu.Unlock()
-	return e, statusOK
+	return e, nil, statusOK
 }
 
 // unclaim releases a resume's claim once its stream is installed; a failed
@@ -829,6 +1036,14 @@ func (s *Server) unclaim(e *resumable) {
 	s.mu.Lock()
 	e.resuming = false
 	s.mu.Unlock()
+}
+
+// expireLocked marks a detached connection expired and leaves its
+// detach_timeout end record in the same critical section, so no resume finds
+// it expired without one; the caller runs e.expire after releasing s.mu.
+func (s *Server) expireLocked(e *resumable) {
+	e.expired = true
+	s.recordEndLocked(e, CloseDetachTimeout)
 }
 
 // expire ends a detached connection detach_timeout and drops its conn, so
@@ -849,7 +1064,10 @@ func (s *Server) proofFailed(e *resumable) int {
 // bounded by handshakeTimeout, then run. It owns the session slot serveNew
 // took and removes the connection, slot included, when it ends.
 func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64, admitted *ssh.Certificate, clientAddr string) {
-	defer s.removeConn(e, h)
+	// stoppedBy is Shutdown's reason when it ended the handshake, decided where
+	// the handshake ends so removeConn never reads a later Shutdown's.
+	var stoppedBy string
+	defer func() { s.removeConn(e, h, stoppedBy) }()
 	defer func() {
 		if r := recover(); r != nil {
 			s.log("session: connection panic: %v", r)
@@ -866,7 +1084,12 @@ func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64,
 	}
 	conn, chans, reqs, err := ssh.NewServerConn(e.rc, cfg)
 	handshake.Stop()
-	if !s.endHandshake(h) || err != nil {
+	ended := !s.endHandshake(h)
+	if ended {
+		// h.stop is closed, so stopReason is final and read without s.mu.
+		stoppedBy = h.stopReason
+	}
+	if ended || err != nil {
 		if err != nil {
 			s.log("session: SSH handshake or userauth failed: %v", err)
 		}
@@ -883,9 +1106,15 @@ func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64,
 // timer stops, its last bytes get closeFlushTimeout to leave on an attached
 // stream, and then the conn is dropped and its session slot freed. The slot
 // is freed before the handler is unregistered, the step that lets Shutdown
-// return, so a returned Shutdown leaves no slot taken.
-func (s *Server) removeConn(e *resumable, h *handler) {
+// return, so a returned Shutdown leaves no slot taken. stoppedBy is the
+// reason of a Shutdown that ended the connection's SSH handshake, else "": a
+// detached connection it ended leaves that record. Any other end before run
+// (a handshake timeout or failure, a panic) leaves none.
+func (s *Server) removeConn(e *resumable, h *handler, stoppedBy string) {
 	s.mu.Lock()
+	if stoppedBy != "" && !e.rc.Attached() {
+		s.recordEndLocked(e, stoppedBy)
+	}
 	delete(s.conns, e.handle)
 	e.removed = true
 	e.stopTimerLocked()
@@ -1300,7 +1529,8 @@ type conn struct {
 	// installed resume's (readmit). Load it once per decision.
 	adm atomic.Pointer[connAdmission]
 	// readmitted receives, without blocking, after readmit stored a new
-	// admission, so run re-arms the idle timer for that admission's timeout.
+	// admission and after settleResume, so run re-reads resumePending and
+	// re-arms the idle timer for the current admission's timeout.
 	readmitted chan struct{}
 	login      string
 	// password is a password login's password (connSecret), nil otherwise;
@@ -1319,10 +1549,13 @@ type conn struct {
 	// open counts the channels accepted and not yet closed; served counts
 	// every channel accepted. ended is set once the connection's end is
 	// decided; no channel is accepted after it.
-	open     int
-	served   int
-	ended    bool
-	channels map[*channel]struct{}
+	open   int
+	served int
+	ended  bool
+	// resumePending is true from a resume's readmit until its settleResume:
+	// run decides no idle end meanwhile.
+	resumePending bool
+	channels      map[*channel]struct{}
 	// desktop is a desktop connection's one channel once its open began.
 	desktop *desktopChannel
 	// allClosed receives once when a terminal or files connection's last
@@ -1354,10 +1587,8 @@ func (c *conn) active() { c.lastActivity.Store(c.s.cfg.clock.Now().UnixNano()) }
 func (c *conn) readmit(a *connAdmission) bool {
 	c.mu.Lock()
 	c.adm.Store(a)
-	select {
-	case c.readmitted <- struct{}{}:
-	default:
-	}
+	c.resumePending = true
+	c.signalReadmitted()
 	violated := c.fwd.recordingViolatedLocked(a)
 	conns, listeners, client := c.fwd.disallowedLocked()
 	channels := slices.Collect(maps.Keys(c.channels))
@@ -1387,6 +1618,29 @@ func (c *conn) readmit(a *connAdmission) bool {
 		}
 	}
 	return false
+}
+
+// settleResume ends the idle hold of the resume readmit started.
+func (c *conn) settleResume() {
+	c.mu.Lock()
+	c.resumePending = false
+	c.signalReadmitted()
+	c.mu.Unlock()
+}
+
+// idleHeld reports whether a resume between readmit and settleResume holds
+// the idle decision.
+func (c *conn) idleHeld() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resumePending
+}
+
+func (c *conn) signalReadmitted() {
+	select {
+	case c.readmitted <- struct{}{}:
+	default:
+	}
 }
 
 // fail ends the connection with reason unless its end is already decided.
@@ -1468,20 +1722,32 @@ wait:
 		case reason = <-e.ended:
 			break wait
 		case <-fire:
-			if idleEnded() {
+			// A resume between readmit and settleResume holds the decision;
+			// settleResume signals readmitted, which decides it.
+			if !c.idleHeld() && idleEnded() {
 				reason = CloseIdle
 				break wait
 			}
 		case <-c.readmitted:
 			stopTimer()
-			if idleEnded() {
+			if !c.idleHeld() && idleEnded() {
 				reason = CloseIdle
 				break wait
 			}
 		}
 	}
 	stopTimer()
-	if !e.rc.Attached() {
+	// A detached end is not told to the client; a resume of the handle is, by
+	// the record, once its proof verifies. An attached end was told, so no
+	// later expiry records one.
+	s.mu.Lock()
+	detached := !e.rc.Attached()
+	if detached {
+		s.recordEndLocked(e, reason)
+	}
+	e.endDecided = true
+	s.mu.Unlock()
+	if detached {
 		e.rc.End(errConnEnded)
 	}
 	if hook := onConnEnd.Load(); hook != nil {

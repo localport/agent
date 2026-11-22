@@ -351,6 +351,15 @@ func resumeCode(err error) string {
 	return ""
 }
 
+// endedReason is the end reason of a resume answered statusEnded, else "".
+func endedReason(err error) string {
+	var re *ResumeError
+	if errors.As(err, &re) && re.Code == CloseResumeEnded {
+		return re.Reason
+	}
+	return ""
+}
+
 func TestResumeContinuesTheConnection(t *testing.T) {
 	clock := &manualClock{}
 	f := newSSHFixture(t, func(c *ServerConfig) { c.clock = clock })
@@ -497,8 +506,8 @@ func TestDetachTimeoutEndsTheConnection(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if err := rc.resume(t, nil); resumeCode(err) != CloseResumeLost {
-		t.Fatalf("resume after the detach timeout = %v, want %s", err, CloseResumeLost)
+	if err := rc.resume(t, nil); endedReason(err) != CloseDetachTimeout {
+		t.Fatalf("resume after the detach timeout = %v, want ended %s", err, CloseDetachTimeout)
 	}
 }
 
@@ -601,7 +610,7 @@ func TestARunningResumeHoldsTheDetachTimer(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got, status := f.srv.beginResume(&handler{}, e.handle); got != e || status != statusOK {
+	if got, _, status := f.srv.beginResume(&handler{}, e.handle); got != e || status != statusOK {
 		t.Fatalf("beginResume = %v, %d", got, status)
 	}
 	clock.fireDetach()
@@ -617,8 +626,8 @@ func TestARunningResumeHoldsTheDetachTimer(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if err := rc.resume(t, nil); resumeCode(err) != CloseResumeLost {
-		t.Fatalf("resume after the expiry = %v, want %s", err, CloseResumeLost)
+	if err := rc.resume(t, nil); endedReason(err) != CloseDetachTimeout {
+		t.Fatalf("resume after the expiry = %v, want ended %s", err, CloseDetachTimeout)
 	}
 }
 
@@ -693,7 +702,7 @@ func TestAResumeKeepsItsClaimUntilItsStreamIsInstalled(t *testing.T) {
 	var second atomic.Uint32
 	second.Store(99)
 	hook := func(e *resumable) {
-		_, status := f.srv.beginResume(&handler{}, e.handle)
+		_, _, status := f.srv.beginResume(&handler{}, e.handle)
 		second.Store(status)
 	}
 	afterResumeInstall.Store(&hook)
@@ -891,7 +900,7 @@ func TestADeadlinePassedDuringAnAttemptEndsTheConnectionAfterIt(t *testing.T) {
 	rc.cut(t)
 	e := onlyConn(t, f.srv)
 	onlyDeadline(t, f.srv, e)
-	if _, status := f.srv.beginResume(&handler{}, e.handle); status != statusOK {
+	if _, _, status := f.srv.beginResume(&handler{}, e.handle); status != statusOK {
 		t.Fatalf("beginResume = %d", status)
 	}
 	clock.advance(detachTimeout + time.Second)
@@ -901,7 +910,7 @@ func TestADeadlinePassedDuringAnAttemptEndsTheConnectionAfterIt(t *testing.T) {
 		t.Fatal("the deadline expired the connection while an attempt ran")
 	}
 	// A second resume during the attempt is busy.
-	if _, status := f.srv.beginResume(&handler{}, e.handle); status != statusBusy {
+	if _, _, status := f.srv.beginResume(&handler{}, e.handle); status != statusBusy {
 		t.Fatalf("a second resume during the attempt = %d, want busy", status)
 	}
 	f.srv.endAttempt(e, true)
@@ -955,9 +964,10 @@ func noClaim(t *testing.T, s *Server) {
 	}
 }
 
-// A resume after the deadline passed, before the detach timer fired, is
-// lost: the claim checks the deadline itself.
-func TestAResumeAfterThePassedDeadlineIsLost(t *testing.T) {
+// A resume after the deadline passed, before the detach timer fired, does not
+// claim the connection: the claim checks the deadline itself, expires it and
+// answers from its detach_timeout record.
+func TestAResumeAfterThePassedDeadlineIsEnded(t *testing.T) {
 	clock := &manualClock{}
 	f := newSSHFixture(t, func(c *ServerConfig) { c.clock = clock })
 	rc := f.connectResumable(t)
@@ -969,8 +979,8 @@ func TestAResumeAfterThePassedDeadlineIsLost(t *testing.T) {
 	// deadline check this resume would be installed.
 	now := clock.Now()
 	valid := func(o *certOpts) { o.after, o.before = now.Add(-30*time.Second), now.Add(time.Minute) }
-	if err := rc.resume(t, valid); resumeCode(err) != CloseResumeLost {
-		t.Fatalf("resume past the deadline = %v, want %s", err, CloseResumeLost)
+	if err := rc.resume(t, valid); endedReason(err) != CloseDetachTimeout {
+		t.Fatalf("resume past the deadline = %v, want ended %s", err, CloseDetachTimeout)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for f.srv.LiveSessions() != 0 {

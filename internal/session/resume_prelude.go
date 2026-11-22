@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/ecdh"
 	"crypto/hkdf"
 	"crypto/hmac"
@@ -24,7 +25,7 @@ import (
 // verified the agent's host-key signature, so a relay learns nothing it could
 // replay (the TLS 1.3 PSK binder model).
 const (
-	preludeVersion    = 2
+	preludeVersion    = 3
 	preludeMaxMessage = 16 << 10
 	resumeHandleLen   = 16
 	resumeTokenLabel  = "localport-resume-v1"
@@ -42,6 +43,9 @@ const (
 	statusRefused uint32 = 1
 	statusBusy    uint32 = 2
 	statusLost    uint32 = 3
+	// statusEnded answers a verified resume of a connection that ended while
+	// detached; the proof reply carries the end reason.
+	statusEnded uint32 = 4
 )
 
 // Reasons a resumable connection ends with or a resume is refused with.
@@ -50,11 +54,16 @@ const (
 	CloseResumeRefused = "resume_refused"
 	CloseResumeLost    = "resume_lost"
 	CloseResumeBusy    = "resume_busy"
+	// CloseResumeEnded is the ResumeError code of a resume answered
+	// statusEnded; its Reason is the connection's end reason.
+	CloseResumeEnded = "resume_ended"
 )
 
-// Prelude messages, x/crypto ssh wire encoding, each sent as a 4-byte
-// big-endian length and the encoding. Sig and Proof fields are left empty in
-// the transcript.
+// maxEndReasonLen bounds an end reason a client accepts from a proof reply.
+const maxEndReasonLen = 64
+
+// Prelude messages in x/crypto ssh wire encoding, each sent after a 4-byte
+// big-endian length. The transcript leaves Sig and Proof empty.
 type helloMsg struct {
 	Version   uint32 `sshtype:"160"`
 	ClientKey []byte
@@ -116,18 +125,42 @@ type proofMsg struct {
 
 type proofReplyMsg struct {
 	Status uint32 `sshtype:"165"`
+	// Reason is the end reason of a statusEnded reply, empty otherwise.
+	Reason string
 }
 
 // ResumeError is a prelude refused by the agent. Code is one of
-// CloseResumeRefused, CloseResumeBusy, CloseResumeLost.
+// CloseResumeRefused, CloseResumeBusy, CloseResumeLost, CloseResumeEnded.
+// Reason is a CloseResumeEnded connection's end reason, empty when the agent
+// sent one that is not at most maxEndReasonLen bytes of [a-z_].
 type ResumeError struct {
-	Code string
+	Code   string
+	Reason string
 }
 
-func (e *ResumeError) Error() string { return "session resume refused: " + e.Code }
+func (e *ResumeError) Error() string {
+	if e.Code == CloseResumeEnded {
+		return "session ended: " + cmp.Or(e.Reason, "unknown reason")
+	}
+	return "session resume refused: " + e.Code
+}
 
 // Retryable reports whether a later resume may succeed.
 func (e *ResumeError) Retryable() bool { return e.Code == CloseResumeBusy }
+
+// endReason returns reason when it is at most maxEndReasonLen bytes of
+// [a-z_], else "".
+func endReason(reason string) string {
+	if len(reason) == 0 || len(reason) > maxEndReasonLen {
+		return ""
+	}
+	for _, r := range []byte(reason) {
+		if (r < 'a' || r > 'z') && r != '_' {
+			return ""
+		}
+	}
+	return reason
+}
 
 func statusError(status uint32) error {
 	switch status {
@@ -228,17 +261,16 @@ func resumeProof(token, th []byte) []byte {
 	return m.Sum(nil)
 }
 
-// noSig returns a copy of each message with its Sig empty, for the
-// transcript.
+// noSig returns a copy of each message with its Sig empty, for the transcript.
 func (m helloMsg) noSig() helloMsg             { m.Sig = nil; return m }
 func (m helloReplyMsg) noSig() helloReplyMsg   { m.Sig = nil; return m }
 func (m resumeMsg) noSig() resumeMsg           { m.Sig = nil; return m }
 func (m resumeReplyMsg) noSig() resumeReplyMsg { m.Sig = nil; return m }
 
 // ClientResumable is the client end of a resumable connection: the conn SSH
-// runs on and what a resume needs. Hello creates it; the caller runs
-// Conn.Attach on the stream and, after a stream ends Detached, Resume on a
-// new one.
+// runs on and what a resume needs. Hello creates it; the caller attaches the
+// stream (Conn.Attach) and, once a stream ends Detached, calls Resume on a new
+// one with it.
 type ClientResumable struct {
 	Conn    *ResumableConn
 	key     []byte
@@ -353,14 +385,17 @@ func (c *ClientResumable) resume(stream io.ReadWriter, signer ssh.Signer, closeC
 	if err := readPrelude(stream, &done); err != nil {
 		return 0, err
 	}
+	if done.Status == statusEnded {
+		c.Conn.End(ErrResumeLost)
+		return 0, &ResumeError{Code: CloseResumeEnded, Reason: endReason(done.Reason)}
+	}
 	if err := statusError(done.Status); err != nil {
 		return 0, err
 	}
 	return reply.Position, nil
 }
 
-// readClientPrelude reads a stream's first prelude message: a hello or a
-// resume.
+// readClientPrelude reads a stream's first prelude message, a hello or a resume.
 func readClientPrelude(stream net.Conn) (*helloMsg, *resumeMsg, error) {
 	payload, err := readPreludeRaw(stream)
 	if err != nil {

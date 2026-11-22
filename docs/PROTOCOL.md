@@ -1106,7 +1106,8 @@ stream:
    `localport: session ended: <reason>` to each open channel's stderr, for
    `idle` (the admitting certificate's `idle@localport.io` timeout without
    client channel data or a global request, on every kind; after a resume,
-   the resume certificate's timeout applies at once),
+   the resume certificate's timeout applies at once, decided once the resumed
+   stream is installed, so a resume past it ends `idle` over that stream),
    `shutdown` (the control session is ending), `config_changed`
    (`localport set` changed the device's entry and the agent reloaded it; the
    device's other sessions end too), `exited` (the channel of a `terminal`
@@ -1162,7 +1163,7 @@ pin one wire vector (`TestResumeWireVector`). A connection does not
 survive an agent restart.
 
 Prelude messages are a 4-byte big-endian length (at most 16 KiB) and the
-x/crypto SSH wire encoding of one message (`sshtype` 160 to 165, version 2; the
+x/crypto SSH wire encoding of one message (`sshtype` 160 to 165, version 3; the
 agent refuses any other version). The edge relays them like any bytes.
 
 | Step | Sender | Message |
@@ -1172,7 +1173,7 @@ agent refuses any other version). The edge relays them like any bytes.
 | resume | client | resume: version, handle, fresh X25519 key, bytes received, close (boolean), the resume certificate, the client's signature |
 | | agent | resume reply: status, fresh X25519 key, bytes received, its host-key signature |
 | | client | proof: `HMAC-SHA256(token, transcript)`, sent only after it verified the reply under the pinned host key |
-| | agent | proof reply: status |
+| | agent | proof reply: status, end reason (empty unless status 4) |
 
 - Signatures cover SHA-256 of the messages so far with their signature fields
   empty, prefixed by `localport-resume-client-v1` or `localport-resume-agent-v1`
@@ -1184,7 +1185,7 @@ agent refuses any other version). The edge relays them like any bytes.
   the handle happens for one that does not verify.
 - The agent admits a hello as userauth admits a certificate (table above,
   serial the notice's), and binds the connection to the certificate's key. It
-  admits a resume only for a live handle, with a resume certificate (critical
+  admits a resume only for a live handle or an end record (below), with a resume certificate (critical
   options exactly those of the table above plus `resume@localport.io`, naming
   the original serial in lowercase hex) for the same subject, kind,
   login and key that passes the local checks a hello does (kind and login
@@ -1203,10 +1204,26 @@ agent refuses any other version). The edge relays them like any bytes.
   `recording_required`; a start in progress across such a resume is refused
   with `recording_required`.
 - Statuses: 0 ok, 1 `resume_refused`, 2 `resume_busy` (another resume of the
-  handle runs; retry), 3 `resume_lost` (no such connection, or a position
-  outside the send buffer). Three failed proofs end the connection
+  handle runs; retry), 3 `resume_lost` (no such connection or end record, or
+  a position outside the send buffer), 4 ended (proof reply only: the
+  connection ended while detached; the reply's end reason says why, and the
+  resume is final). Three failed proofs end the connection
   `resume_refused`. A resume of a handle whose stream is still attached
   detaches that stream first.
+- End record: a connection that ends while detached, for a reason the agent
+  decides and did not tell the client (any end but a client's close or close
+  resume, `resume_refused`, `resume_lost` and `recording_required`), leaves a
+  record of its certificate binding, received position, token and reason.
+  Before SSH userauth completes, only a Shutdown or config change ending the
+  handshake leaves one; a handshake timeout or failure leaves none. A
+  connection leaves at most one record. A
+  resume of the handle passes the same checks, with the same replies, as on a
+  live handle; once its proof verifies it is answered 4 with the reason (a
+  close resume: 0), and the record is deleted. Failed proofs count as on a
+  live handle and the third deletes the record. A record lives 5 minutes from
+  the end, at most 8 are kept (the oldest goes first), and none survives an
+  agent restart; a resume that finds none is `resume_lost`. Clients accept a
+  reason of at most 64 bytes of `[a-z_]` and treat any other as unknown.
 - A close resume (close true) is how a client that lost its stream ends the
   connection at once instead of leaving it to the detach deadline. It passes
   every check a resume does, proof included; the agent then answers 0 and
@@ -1233,8 +1250,9 @@ installed resume clears it: a refused or failed resume attempt never moves it
 that passed meanwhile ends the connection `detach_timeout` when the attempt
 ends. Attempts on one connection run one at a time: a resume arriving while
 another attempt runs is `resume_busy`, and one arriving after the deadline with
-no attempt running is `resume_lost`. Shutdown, a config change, the idle timeout
-and a handler panic end detached connections as attached ones.
+no attempt running ends the connection `detach_timeout` and is answered from
+its end record. Shutdown, a config change, the idle timeout and a handler panic
+end detached connections as attached ones.
 
 ## Session recording
 
@@ -1596,7 +1614,9 @@ close frame or a reason in `sshResumableEnds` (`closed`, `edge_shutdown`,
 (never written to the certificate file), a new WebSocket with the resume
 certificate first, then the resume prelude. Any other close reason, or a final
 refusal, is printed as `error: the session ended: <reason> [AG109]`, the
-edge's reason unchanged.
+edge's reason unchanged. A resume answered 4 prints the agent's end reason
+the same way (without it when the agent sent none a client accepts) and is
+not retried.
 
 `localport ssh-config <device-host>...` prints, per device:
 
