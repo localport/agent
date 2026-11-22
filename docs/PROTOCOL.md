@@ -1215,8 +1215,11 @@ agent refuses any other version). The edge relays them like any bytes.
   resume, `resume_refused`, `resume_lost` and `recording_required`), leaves a
   record of its certificate binding, received position, token and reason.
   Before SSH userauth completes, only a Shutdown or config change ending the
-  handshake leaves one; a handshake timeout or failure leaves none. A
-  connection leaves at most one record. A
+  handshake leaves one, attached or detached, since the abort closes the
+  stream without telling the client; a handshake timeout or failure leaves
+  none. A connection leaves at most one record, and an end that leaves none
+  (`resume_refused`, `resume_lost`, `recording_required`, a client's close)
+  is not followed by a detach timeout record. A
   resume of the handle passes the same checks, with the same replies, as on a
   live handle; once its proof verifies it is answered 4 with the reason (a
   close resume: 0), and the record is deleted. Failed proofs count as on a

@@ -704,7 +704,7 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 		_ = writePrelude(stream, proofReplyMsg{Status: statusRefused})
 		if rec != nil {
 			s.recordProofFailed(handle, rec)
-		} else if s.proofFailed(e) >= maxProofFailures {
+		} else if s.proofFailed(e) {
 			e.endWith(CloseResumeRefused)
 		}
 		return
@@ -729,13 +729,17 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 		// stream, so the token is spent.
 		s.log("session: resume closed the connection")
 		_ = writePrelude(stream, proofReplyMsg{Status: statusOK})
+		s.decideAnsweredEnd(e)
+		// Queued before the release can expire e, so run ends with the
+		// client's close ("") and not detach_timeout.
+		e.endWith("")
 		e.rc.CloseRemote()
 		return
 	}
 	if lost {
 		s.log("session: resume refused: position %d is outside the send buffer", m.Position)
 		_ = writePrelude(stream, proofReplyMsg{Status: statusLost})
-		e.endWith(CloseResumeLost)
+		s.endAnswered(e, CloseResumeLost)
 		e.rc.End(ErrResumeLost)
 		return
 	}
@@ -757,7 +761,7 @@ func (s *Server) serveResume(h *handler, stream net.Conn, m *resumeMsg, id [16]b
 	if violated {
 		s.log("session: resume refused: %s: the resume names a recording that a running channel or forwards helper does not have", CloseRecordingRequired)
 		_ = writePrelude(stream, proofReplyMsg{Status: statusLost})
-		e.endWith(CloseRecordingRequired)
+		s.endAnswered(e, CloseRecordingRequired)
 		e.rc.End(ErrResumeLost)
 		return
 	}
@@ -1038,6 +1042,20 @@ func (s *Server) unclaim(e *resumable) {
 	s.mu.Unlock()
 }
 
+// decideEnd decides run's end of e for reason and reports whether e was
+// detached. A detached end leaves the record a later resume is answered
+// with; once decided, no later expiry records one.
+func (s *Server) decideEnd(e *resumable, reason string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	detached := !e.rc.Attached()
+	if detached {
+		s.recordEndLocked(e, reason)
+	}
+	e.endDecided = true
+	return detached
+}
+
 // expireLocked marks a detached connection expired and leaves its
 // detach_timeout end record in the same critical section, so no resume finds
 // it expired without one; the caller runs e.expire after releasing s.mu.
@@ -1053,11 +1071,33 @@ func (e *resumable) expire() {
 	e.rc.End(errConnEnded)
 }
 
-func (s *Server) proofFailed(e *resumable) int {
+// proofFailed counts a failed proof against e and reports whether it reached
+// maxProofFailures. At the limit e's end is decided in the same critical
+// section: resume_refused leaves no record, and neither does a later expiry.
+func (s *Server) proofFailed(e *resumable) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e.failures++
-	return e.failures
+	if e.failures < maxProofFailures {
+		return false
+	}
+	e.endDecided = true
+	return true
+}
+
+// endAnswered ends e for a reason its resume stream already answered
+// (resume_lost, recording_required).
+func (s *Server) endAnswered(e *resumable, reason string) {
+	s.decideAnsweredEnd(e)
+	e.endWith(reason)
+}
+
+// decideAnsweredEnd decides an end the resume stream answered before the
+// attempt releases e, so an expiry the release reaches leaves no record.
+func (s *Server) decideAnsweredEnd(e *resumable) {
+	s.mu.Lock()
+	e.endDecided = true
+	s.mu.Unlock()
 }
 
 // serveConn runs one connection: the SSH handshake on its ResumableConn,
@@ -1102,17 +1142,15 @@ func (s *Server) serveConn(h *handler, e *resumable, id [16]byte, serial uint64,
 	s.run(h, conn, chans, reqs, &connAdmission{admission: admissionOf(conn.Permissions), sessionID: uuidText(id), clientAddr: clientAddr}, secret.password, e)
 }
 
-// removeConn forgets an ended connection: no resume finds it, its detach
-// timer stops, its last bytes get closeFlushTimeout to leave on an attached
-// stream, and then the conn is dropped and its session slot freed. The slot
-// is freed before the handler is unregistered, the step that lets Shutdown
-// return, so a returned Shutdown leaves no slot taken. stoppedBy is the
-// reason of a Shutdown that ended the connection's SSH handshake, else "": a
-// detached connection it ended leaves that record. Any other end before run
-// (a handshake timeout or failure, a panic) leaves none.
+// removeConn forgets an ended connection, gives an attached stream
+// closeFlushTimeout to flush, then frees its session slot. The slot is freed
+// before the handler is unregistered so a returned Shutdown leaves no slot
+// taken. stoppedBy, the reason of a Shutdown that ended the SSH handshake,
+// leaves an end record whether attached or not: Shutdown's abort does not
+// tell the client. Other ends before run leave none.
 func (s *Server) removeConn(e *resumable, h *handler, stoppedBy string) {
 	s.mu.Lock()
-	if stoppedBy != "" && !e.rc.Attached() {
+	if stoppedBy != "" {
 		s.recordEndLocked(e, stoppedBy)
 	}
 	delete(s.conns, e.handle)
@@ -1737,17 +1775,7 @@ wait:
 		}
 	}
 	stopTimer()
-	// A detached end is not told to the client; a resume of the handle is, by
-	// the record, once its proof verifies. An attached end was told, so no
-	// later expiry records one.
-	s.mu.Lock()
-	detached := !e.rc.Attached()
-	if detached {
-		s.recordEndLocked(e, reason)
-	}
-	e.endDecided = true
-	s.mu.Unlock()
-	if detached {
+	if s.decideEnd(e, reason) {
 		e.rc.End(errConnEnded)
 	}
 	if hook := onConnEnd.Load(); hook != nil {
