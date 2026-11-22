@@ -129,9 +129,9 @@ be reached is decided server-side.
 The agent sends no client id. The edge mints one per session and returns it in
 `RegisterAck.client_id`.
 
-`agent_version` and `agent_os` describe the binary, not the client. They are
-stored with the connection's server-side record for support. Both are
-self-asserted and optional, and nothing on the server gates on either.
+`agent_version` and `agent_os` describe the binary, not the client. Both are
+self-asserted and optional, shown for support; no access decision depends on
+them.
 `agent_version` is the build's version string; `agent_os` is `GOOS/GOARCH`.
 
 `resume_session_id` echoes the `session_id` from this tunnel's previous
@@ -346,7 +346,7 @@ A Shutdown with `code` `SE040` (an admin disconnected the device, `retryable`
 true) is a drain: the edge keeps the connection, its session streams and the
 session mux open, and admits no new session, stream or consumer, so the device
 can end its sessions and deliver their recordings. The edge closes the
-connection when the agent does, or after 92 seconds. The device keeps reading
+connection when the agent does, or after 5 minutes. The device keeps reading
 the control connection while it drains and answers its heartbeats: a close
 with another code during the drain (a removal, teardown or revocation) sends
 its own Shutdown, and a non-retryable one ends the drain at once and is
@@ -410,8 +410,8 @@ instead of asking the agent to dial back.
 The bind is authenticated on its own, because it is dialed separately from the
 control connection:
 
-- `timestamp` and `nonce` are checked against the same replay window and the
-  same store a Register uses, so neither frame can be replayed as the other.
+- `timestamp` and `nonce` share Register's replay window, so neither frame can
+  be replayed as the other.
 - `token` proves which tunnel. A device sends none: the mux connection presents
   the client certificate its control session registered with, and the edge
   requires the same leaf.
@@ -725,7 +725,7 @@ stream:
    | a user certificate whose serial is the notice's serial |
    | signed by a session CA key the agent holds (`ticket_keys.json`); an unknown CA key triggers one key fetch (at most 3 s, at most once per 5 minutes) and one retry |
    | valid now within 30 s of skew, for the user name as its principal |
-   | exactly the critical options `device@localport.io`, naming this device's prefix and registered key (`spki_sha256`), `idle@localport.io`: the connection's idle timeout in whole seconds, decimal without leading zeros, 300 to 14400 (the fleet's setting; any other value, or a certificate without it, is refused), and for a `files` or `ssh` certificate `files@localport.io`: the file directions its SFTP channels may use, one of `""`, `download`, `upload`, `download,upload` (any other value, or a `files` or `ssh` certificate without it, is refused), and for a `vnc` or `rdp` certificate `clipboard@localport.io`: the clipboard directions of its desktop channel, one of `""`, `copy`, `paste`, `copy,paste` (any other value, a desktop certificate without it, or the option on another kind, is refused) |
+   | exactly the critical options `device@localport.io`, naming this device's prefix and registered key (`spki_sha256`), `idle@localport.io`: the connection's idle timeout in whole seconds, decimal without leading zeros, set by Localport from the fleet's setting (zero, any other form, or a certificate without it, is refused), and for a `files` or `ssh` certificate `files@localport.io`: the file directions its SFTP channels may use, one of `""`, `download`, `upload`, `download,upload` (any other value, or a `files` or `ssh` certificate without it, is refused), and for a `vnc` or `rdp` certificate `clipboard@localport.io`: the clipboard directions of its desktop channel, one of `""`, `copy`, `paste`, `copy,paste` (any other value, a desktop certificate without it, or the option on another kind, is refused) |
    | the kind (`kind@localport.io`) enabled in the local config (`terminal` and `ssh` need `terminal`, `files` needs `files`, `rdp` and `vnc` need `desktop` and that target) and served by this agent (`terminal`, `ssh`, `files`, `rdp`, `vnc`) |
    | for `terminal`, `ssh` and `files`: the user name listed in the local `logins`; for `rdp` and `vnc`: the user name `localport-desktop` and no `rec@localport.io` (a desktop session is never recorded) |
    | a `rec@localport.io`, when present, naming the held team recording key; a mismatch triggers one key fetch, under the same floor, and one retry |
@@ -817,7 +817,9 @@ stream:
      (`localport-session shell-exec`), so Apple tools get a silent "Operation
      not permitted" on protected folders; a program the user runs is its own
      responsible process and may still ask on the Mac. A macOS that cannot
-     start it that way refuses the request `full_disk_access_required`.
+     start it that way refuses the request `full_disk_access_required`. When
+     that start fails, the session's stderr gets `localport: session_start_failed`
+     and it exits 127; no shell runs.
    - A session started with it `granted` ends with `localport: session
      ended: full_disk_access_revoked` when the grant is removed while it runs:
      the launcher and the session's own helper each re-read it every 30
@@ -1123,7 +1125,9 @@ stream:
    channel, `helper_failed` (the session helper's channel ended without an
    exit or an end frame) or `full_disk_access_revoked` (macOS, the helper's
    end frame: Full Disk Access was removed during a session started with
-   it). Once the session's process exited, the helper closes the login's
+   it). A macOS shell that could not start as its own responsible process
+   writes `localport: session_start_failed` (not `session ended:`) and exits
+   127. Once the session's process exited, the helper closes the login's
    utmp entry and PAM session first, then delivers the remaining output and
    the exit or end frame within 30 seconds; a channel the agent stops reading
    for longer ends without them (`helper_failed`). A client that closes the
@@ -1150,8 +1154,8 @@ never closed before that step.
 
 ## Resumable connections
 
-A session connection survives a lost stream (network drop, edge restart,
-fleet re-pin) for 5 minutes: the layer runs below SSH, so every channel and
+A session connection survives a lost stream (network drop, edge restart) for
+5 minutes: the layer runs below SSH, so every channel and
 forward carries on. Code: `internal/session/resume.go` and
 `resume_prelude.go`; the browser client implements the same layer, and both
 pin one wire vector (`TestResumeWireVector`). A connection does not
@@ -1503,9 +1507,8 @@ are queued or 2 s after the last attempt. The body is JSON:
 
 - `id`: a version 7 UUID the agent mints when it queues the notice, in queue
   order (a 12-bit per-millisecond sequence keeps ids increasing, also when
-  the clock steps back). The edge keys the audit entry by a name-based UUID
-  it derives from the session and this id, so a notice sent again lands on
-  the same entry and no device can name another device's entry.
+  the clock steps back). A notice sent again with the same id is recorded
+  once, and no device can name another device's entry.
 - `session_id`: the canonical UUID of the stream the connection runs on now
   (a resume stream's after a resume), as a recording's `session_id`.
 - `kind`: `vnc` or `rdp`; `direction`: `copy` or `paste`; `outcome`:
@@ -1530,14 +1533,10 @@ the device within the last 10 minutes on that edge, and is a desktop session
 of the notice's `kind`; its time is clamped to between 1 minute before the
 session's admission and 1 minute after the edge clock. A notice not newer
 than the last one the edge counted for its session (a batch sent again) is
-ignored. Any other notice is dropped and counted in the edge log. The first
-100 notices of a session become `clipboard` audit entries; later ones, count
-notices, and notices past the edge's audit budgets are summed per minute of
-receipt into one `clipboard_fold` entry per session, or past the fold budgets
-one per fleet and kind.
-Notices are lost when the agent exits before sending them, when the flush at
-mux stop passes its bound, and when they reach the edge more than 10 minutes
-after the session ended, at another edge, or after an edge restart.
+ignored. Any other notice is dropped and counted in the edge log. Notices are
+lost when the agent exits before sending them, when the flush at mux stop
+passes its bound, and when they reach the edge more than 10 minutes after the
+session ended, at another edge, or after an edge restart.
 
 ## Native SSH clients (`localport ssh`)
 
@@ -1671,10 +1670,11 @@ the socket. Not available on Windows.
 CI token request or the WebSocket upgrade is a terminal error reported with its
 status. Following it would send the token or CSR to the `Location` host.
 
-**Every connection the agent makes requires TLS 1.3**, including both carriers,
-the consumer connection and the control-plane calls. TLS 1.3 encrypts the client
-Certificate message, which carries the consumer's SPIFFE identity. Under TLS 1.2
-it is sent in the clear. No flag or environment variable lowers the minimum.
+**Every connection to Localport requires TLS 1.3**: both carriers, the consumer
+connection and the control-plane calls. TLS 1.3 encrypts the client Certificate
+message, which carries the consumer's SPIFFE identity. Under TLS 1.2 it is sent
+in the clear. No flag or environment variable lowers the minimum. The RDP
+gateway's connection to the device's own RDP target accepts TLS 1.2 or later.
 
 **Server verification uses the system trust store.** The edge presents its
 region zone wildcard certificate, publicly trusted and issued by Let's Encrypt,
@@ -1712,8 +1712,8 @@ localport login
 `hostname` and `agent_os` describe the machine, not the person. The approval
 screen shows them beside the requesting address, so somebody signing in from a
 laptop and a jump box can tell which one is asking. Both are self-asserted and
-optional, like `agent_version` and `agent_os` on Register. Nothing on the server
-gates on either.
+optional, like `agent_version` and `agent_os` on Register; no access decision
+depends on them.
 
 - **Both URIs are printed, and the prefilled one leads.**
   `verification_uri_complete` (RFC 8628 §3.3.1) carries the code so the common
