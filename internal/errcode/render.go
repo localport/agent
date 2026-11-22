@@ -78,7 +78,8 @@ func (e *Usage) Unwrap() error { return e.err }
 // server internals, plain wrappers) are left out; hidden reports that one was,
 // so the caller can point at --verbose, which prints Error(). A *Usage prints
 // its text. A chain that shows nothing prints "a network operation failed"
-// when it holds a network error, else the Unexpected line; both hidden.
+// when it holds a network error, else the Unexpected line; both hidden and
+// followed by the chain's remedies. Every Redactor in the chain masks the text.
 func Render(err error) (text string, hidden bool) {
 	if err == nil {
 		return "", false
@@ -87,14 +88,13 @@ func Render(err error) (text string, hidden bool) {
 	r.walk(err)
 	switch {
 	case r.typed, len(r.parts) > 0 || len(r.branches) > 0:
-		text, hidden = r.text(), r.hidden
+		hidden = r.hidden
 	case isNetwork(err):
-		return "a network operation failed", true
+		r.parts, hidden = []string{"a network operation failed"}, true
 	default:
-		r.parts = []string{errUnexpected.Error()}
-		return r.text(), true
+		r.parts, hidden = []string{errUnexpected.Error()}, true
 	}
-	return redact(err, text), hidden
+	return redact(err, r.text()), hidden
 }
 
 var errUnexpected = New(Unexpected)

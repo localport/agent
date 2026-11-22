@@ -148,6 +148,39 @@ func TestRenderRemedy(t *testing.T) {
 	}
 }
 
+// testRedactor masks one secret, as security.RedactError does.
+type testRedactor struct {
+	error
+	secret string
+}
+
+func (r testRedactor) Unwrap() error { return r.error }
+
+func (r testRedactor) Redact(text string) string {
+	return strings.ReplaceAll(text, r.secret, "<redacted>")
+}
+
+// A network chain that shows nothing keeps its remedy after the network line.
+func TestRenderRemedyOnANetworkChain(t *testing.T) {
+	cause := &url.Error{Op: "Get", URL: "https://example.test", Err: errors.New("connection refused")}
+	text, hidden := errcode.Render(errcode.WithRemedy(cause, "check the proxy"))
+	if text != "a network operation failed\n  check the proxy" || !hidden {
+		t.Fatalf("Render = %q, %v; want the network line, the remedy, hidden", text, hidden)
+	}
+}
+
+// Every Redactor in the chain also masks the remedy on the network and Unexpected lines.
+func TestRenderRedactsTheFallbackLines(t *testing.T) {
+	network := &url.Error{Op: "Get", URL: "https://example.test", Err: errors.New("connection refused")}
+	for name, cause := range map[string]error{"network": network, "unexpected": errors.New("plain")} {
+		err := testRedactor{error: errcode.WithRemedy(cause, "retry with token s3cret"), secret: "s3cret"}
+		text, _ := errcode.Render(err)
+		if strings.Contains(text, "s3cret") || !strings.Contains(text, "retry with token <redacted>") {
+			t.Fatalf("%s: Render = %q, want the remedy redacted", name, text)
+		}
+	}
+}
+
 // A local OS error is shown; the same error inside a network failure is not.
 func TestRenderOSErrors(t *testing.T) {
 	local := errcode.New(errcode.InstallNotCommitted).With(fmt.Errorf("move: %w", os.NewSyscallError("rename", syscall.EACCES)), "")

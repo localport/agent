@@ -569,6 +569,27 @@ func endedByEdge(reason string) error {
 	return errcode.New(errcode.SessionEnded).With(edgeEnd{security.SanitizeDisplay(reason)}, "")
 }
 
+// finalResumeRefusal is the AG error for an agent's resume refusal after which
+// no later resume can succeed, nil for any other error. A resume of a
+// connection that ended while detached reports its end reason.
+func finalResumeRefusal(err error) error {
+	var refused *session.ResumeError
+	switch {
+	case !errors.As(err, &refused) || refused.Retryable():
+		return nil
+	case refused.Code == session.CloseResumeEnded:
+		return endedByAgent(refused.Reason)
+	}
+	return errcode.New(errcode.SessionEnded).With(nil, refused.Code)
+}
+
+// endedByAgent is the AG error for a resume the agent answered with the end
+// reason of a connection that ended while detached; an unknown reason ("")
+// shows the generic text.
+func endedByAgent(reason string) error {
+	return errcode.New(errcode.SessionEnded).With(nil, security.SanitizeDisplay(reason))
+}
+
 // sshRetryEnds are the edge close reasons of a refused first stream after which
 // ssh-proxy mints one new certificate and tries once more (docs/PROTOCOL.md
 // "Native SSH clients").
@@ -685,9 +706,8 @@ func (t sshTarget) resumeAttempt(ctx context.Context, deadline time.Time, cr *se
 		return stream, pos, false, nil
 	}
 	_ = stream.Close()
-	var refused *session.ResumeError
-	if errors.As(err, &refused) && !refused.Retryable() {
-		return nil, 0, false, errcode.New(errcode.SessionEnded).With(nil, refused.Code)
+	if final := finalResumeRefusal(err); final != nil {
+		return nil, 0, false, final
 	}
 	if reason, closed := stream.closeReason(); closed && !slices.Contains(sshResumableEnds, reason) {
 		return nil, 0, false, endedByEdge(reason)

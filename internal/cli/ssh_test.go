@@ -23,7 +23,36 @@ import (
 
 	"github.com/localport/agent/internal/errcode"
 	"github.com/localport/agent/internal/identity"
+	"github.com/localport/agent/internal/session"
 )
+
+// A resume the agent answered with a detached end reports the reason as an
+// attached end does, final; an unknown reason shows the generic text; a busy
+// resume is retried.
+func TestFinalResumeRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"ended idle", &session.ResumeError{Code: session.CloseResumeEnded, Reason: "idle"}, "the session ended: idle [AG109]"},
+		{"ended unknown", &session.ResumeError{Code: session.CloseResumeEnded}, "the session ended [AG109]"},
+		{"lost", &session.ResumeError{Code: session.CloseResumeLost}, "the session ended: resume_lost [AG109]"},
+		{"busy", &session.ResumeError{Code: session.CloseResumeBusy}, ""},
+		{"transport", io.EOF, ""},
+	} {
+		final := finalResumeRefusal(tc.err)
+		if tc.want == "" {
+			if final != nil {
+				t.Errorf("%s: final %v, want a retry", tc.name, final)
+			}
+			continue
+		}
+		if text, _ := errcode.Render(final); text != tc.want {
+			t.Errorf("%s: Render = %q, want %q", tc.name, text, tc.want)
+		}
+	}
+}
 
 const testDeviceHost = "gw-01-factory.eu.localport.dev"
 
