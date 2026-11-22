@@ -14,9 +14,13 @@
 #                        are signed ad-hoc (local and CI builds).
 #   MACOS_SIGN_CERT      the identity's certificate, PEM (tests use a throwaway
 #                        one); default release/keys/macos-signing.pem
+#   SOURCE_DATE_EPOCH    the time every packed file carries; default the
+#                        commit time of HEAD.
 #
-# With a keychain, every signature must name the release certificate as leaf;
-# the script fails otherwise.
+# With a keychain, every signature must name the release certificate as leaf
+# and every CLI must embed its fingerprint (a MACOS_RELEASE build); the script
+# fails otherwise. The archive is the same for the same input: sorted entries,
+# fixed times, no gzip timestamp.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -32,6 +36,10 @@ version=0.0.0
 if [[ "${VERSION:-}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-.*)?$ ]]; then
 	version="${BASH_REMATCH[1]}"
 fi
+
+epoch="${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct)}"
+[[ "$epoch" =~ ^[0-9]+$ ]] || die "SOURCE_DATE_EPOCH is not a number of seconds: $epoch"
+stamp="$(date -u -r "$epoch" +%Y%m%d%H%M.%S)"
 
 identity=-
 sha1=""
@@ -81,6 +89,10 @@ for arch in $archs; do
 	[ -f "$cli" ] || die "$cli is missing"
 	[ -f "$session" ] || die "$session is missing"
 
+	if [ -n "$sha1" ]; then
+		grep -aqF "$sha1" "$cli" ||
+			die "$cli does not embed the release certificate $sha1: build it with MACOS_RELEASE=1"
+	fi
 	sign io.localport.localport "$cli"
 	check io.localport.localport "$cli"
 
@@ -93,6 +105,8 @@ for arch in $archs; do
 	sign io.localport.session "$app"
 	check io.localport.session "$app"
 
-	tar -C "$work/$arch" --no-mac-metadata --uid 0 --gid 0 --uname root --gname wheel \
-		-czf "$bin/localport-session-darwin-$arch.tar.gz" Localport.app
+	find "$app" -exec env TZ=UTC touch -h -t "$stamp" {} +
+	(cd "$work/$arch" && find Localport.app | LC_ALL=C sort) |
+		tar -C "$work/$arch" --no-mac-metadata --uid 0 --gid 0 --uname root --gname wheel \
+			--options gzip:!timestamp -n -T - -czf "$bin/localport-session-darwin-$arch.tar.gz"
 done

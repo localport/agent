@@ -60,7 +60,11 @@ ifneq ($(MACOS_RELEASE),)
 ifeq ($(wildcard $(MACOS_SIGNING_CERT)),)
 $(error MACOS_RELEASE needs $(MACOS_SIGNING_CERT); see RELEASING.md)
 endif
-LDFLAGS += -X github.com/localport/agent/internal/service.releaseCertSHA1=$(shell openssl x509 -in $(MACOS_SIGNING_CERT) -noout -fingerprint -sha1 | sed 's/^.*=//; s/://g' | tr 'A-F' 'a-f')
+MACOS_RELEASE_CERT_SHA1 := $(shell openssl x509 -in $(MACOS_SIGNING_CERT) -noout -fingerprint -sha1 | sed 's/^.*=//; s/://g' | tr 'A-F' 'a-f')
+ifeq ($(shell printf '%s' '$(MACOS_RELEASE_CERT_SHA1)' | grep -Ex '[0-9a-f]{40}'),)
+$(error cannot read the SHA-1 fingerprint of $(MACOS_SIGNING_CERT))
+endif
+LDFLAGS += -X github.com/localport/agent/internal/service.releaseCertSHA1=$(MACOS_RELEASE_CERT_SHA1)
 endif
 
 DIST = dist
@@ -150,7 +154,7 @@ build-darwin: build-session-darwin
 # (scripts/release/macos-sign.sh): ad-hoc, or with the release identity when
 # MACOS_SIGN_KEYCHAIN names the keychain that holds it.
 sign-darwin:
-	@VERSION="$(VERSION)" ./scripts/release/macos-sign.sh bin
+	@VERSION="$(VERSION)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" ./scripts/release/macos-sign.sh bin
 
 # Release set: binaries, license notices and checksums.txt. The release
 # workflow builds the localport-session binaries and the signed darwin

@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/localport/agent/internal/errcode"
 )
 
 // testApp is a sessionApp installing under a temporary directory as the
@@ -25,8 +27,7 @@ func testApp(t *testing.T, verify func(context.Context, string) error) sessionAp
 	}
 }
 
-// testAppExe is a CLI path with a bundle beside it whose launcher holds
-// "v1".
+// testAppExe is a CLI path beside a bundle whose launcher holds "v1".
 func testAppExe(t *testing.T) string {
 	t.Helper()
 	return writeTestApp(t, t.TempDir(), "v1")
@@ -65,15 +66,155 @@ func assertNoLeftovers(t *testing.T, a sessionApp) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.Name() != AppName {
+		if e.Name() != AppName && e.Name() != installLockName {
 			t.Errorf("%s left in the app directory", e.Name())
 		}
 	}
 }
 
+// An install or uninstall while another install holds the lock is refused
+// at once (AG161) and leaves the running install's stage alone; the running
+// install then completes.
+func TestSessionAppInstallsAreSerialized(t *testing.T) {
+	unixInitOnly(t)
+	verifying, release := make(chan struct{}), make(chan struct{})
+	first := testApp(t, func(context.Context, string) error {
+		close(verifying)
+		<-release
+		return nil
+	})
+	done := make(chan error, 1)
+	go func() { done <- first.install(context.Background(), testAppExe(t)) }()
+	<-verifying
+	stages, _ := filepath.Glob(filepath.Join(filepath.Dir(first.path), ".staged-*"))
+	if len(stages) != 1 {
+		t.Fatalf("stages while the first install verifies: %v", stages)
+	}
+
+	second := first
+	second.verify = func(context.Context, string) error { return nil }
+	if err := second.install(context.Background(), testAppExe(t)); !errors.Is(err, errInstallBusy) {
+		t.Fatalf("concurrent install = %v, want errInstallBusy", err)
+	}
+	if err := second.uninstall(); !errors.Is(err, errInstallBusy) {
+		t.Fatalf("concurrent uninstall = %v, want errInstallBusy", err)
+	}
+	if _, err := os.Stat(stages[0]); err != nil {
+		t.Fatalf("the running install's stage is gone: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("first install = %v", err)
+	}
+	if got := installedVersion(t, first); got != "v1" {
+		t.Fatalf("installed launcher = %q, want v1", got)
+	}
+	assertNoLeftovers(t, first)
+}
+
+// A lock held on a lock file an uninstall unlinked excludes nobody: it is not
+// taken as the install lock. With the directory gone, an install is busy.
+func TestInstallLockFollowsTheFileAtItsPath(t *testing.T) {
+	unixInitOnly(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, installLockName)
+	orphan, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer orphan.Close()
+	if !lockedAtPath(orphan, path) {
+		t.Fatal("the file at its path is not recognized")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if lockedAtPath(orphan, path) {
+		t.Fatal("an unlinked lock file counts as the lock")
+	}
+	unlock, err := lockInstall(dir)
+	if err != nil {
+		t.Fatalf("lock after the unlink = %v", err)
+	}
+	unlock()
+	if _, err := lockInstall(filepath.Join(dir, "gone")); !errors.Is(err, errInstallBusy) {
+		t.Fatalf("lock in a removed directory = %v, want errInstallBusy", err)
+	}
+}
+
+// The interleaving uninstall causes: an install opens the lock file, uninstall
+// unlinks it and another install creates a new one before the lock is taken.
+// lockInstall drops the lock on the unlinked file and takes the one at the
+// path, so a further install is busy.
+func TestInstallLockRetriesAfterAnUnlink(t *testing.T) {
+	unixInitOnly(t)
+	dir := t.TempDir()
+	opens := 0
+	saved := openInstallLock
+	openInstallLock = func(p string) (*os.File, error) {
+		opens++
+		f, err := saved(p)
+		if err == nil && opens == 1 {
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			replacement, err := saved(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = replacement.Close()
+		}
+		return f, err
+	}
+	t.Cleanup(func() { openInstallLock = saved })
+
+	unlock, err := lockInstall(dir)
+	if err != nil {
+		t.Fatalf("lockInstall = %v", err)
+	}
+	defer unlock()
+	if opens != 2 {
+		t.Fatalf("%d opens, want a retry after the unlinked lock", opens)
+	}
+	if _, err := lockInstall(dir); !errors.Is(err, errInstallBusy) {
+		t.Fatalf("a second install = %v, want errInstallBusy: the lock must be on the file at the path", err)
+	}
+}
+
+// An uninstall whose directory a concurrent one removed is done, not busy.
+func TestConcurrentUninstallIsDone(t *testing.T) {
+	unixInitOnly(t)
+	a := testApp(t, nil)
+	if err := a.install(context.Background(), testAppExe(t)); err != nil {
+		t.Fatal(err)
+	}
+	saved := openInstallLock
+	openInstallLock = func(p string) (*os.File, error) {
+		if err := os.RemoveAll(filepath.Dir(p)); err != nil {
+			t.Fatal(err)
+		}
+		return saved(p)
+	}
+	t.Cleanup(func() { openInstallLock = saved })
+	if err := a.uninstall(); err != nil {
+		t.Fatalf("uninstall after a concurrent one = %v, want nil", err)
+	}
+}
+
+// A Localport.app beside the CLI that is not a directory is named as such.
+func TestSessionAppNotAFolder(t *testing.T) {
+	unixInitOnly(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, AppName), "not a bundle")
+	_, err := appBeside(filepath.Join(dir, "localport"))
+	var coded *errcode.Error
+	if !errors.As(err, &coded) || coded.Code != errcode.SessionAppInvalid || !strings.Contains(coded.Detail, "is not a folder") {
+		t.Fatalf("appBeside = %v, want AG014 naming a file that is not a folder", err)
+	}
+}
+
 // The installed bundle is a copy of the one beside the CLI, verified while
-// staged, with modes that only the owner may write, and an update replaces
-// it whole.
+// staged, writable by the owner only; an update replaces it whole.
 func TestSessionAppInstallsAndReplaces(t *testing.T) {
 	unixInitOnly(t)
 	var verified []string
@@ -116,8 +257,7 @@ func TestSessionAppInstallsAndReplaces(t *testing.T) {
 	assertNoLeftovers(t, a)
 }
 
-// Every refusal and failure before the new bundle is in place keeps the
-// installed one.
+// Every refusal and failure before the new bundle is in place keeps the old one.
 func TestSessionAppFailureKeepsTheInstalledApp(t *testing.T) {
 	unixInitOnly(t)
 	for name, c := range map[string]struct {
@@ -208,8 +348,7 @@ func TestSessionAppMissingIsRefused(t *testing.T) {
 	}
 }
 
-// CheckApp refuses a missing bundle and one verify refuses, and writes
-// nothing.
+// CheckApp refuses a missing bundle and one verify refuses, writing nothing.
 func TestLaunchdCheckApp(t *testing.T) {
 	unixInitOnly(t)
 	l := newLaunchd(t, &recorder{})

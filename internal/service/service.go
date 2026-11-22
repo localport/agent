@@ -88,8 +88,7 @@ var (
 	ErrForeignUnit = errcode.New(errcode.ForeignUnit)
 	// ErrNotInstalled means no device service is installed.
 	ErrNotInstalled = errcode.New(errcode.NotInstalled)
-	// ErrUnsupported means this platform has no service manager the agent
-	// installs into.
+	// ErrUnsupported means the agent supports no service manager on this platform.
 	ErrUnsupported = errcode.New(errcode.Unsupported)
 	// ErrMarkedForDelete means the Windows device service is deleted but
 	// stays registered until every handle to it closes.
@@ -101,9 +100,10 @@ var (
 
 	// errManager is a service manager command, query or call that failed.
 	errManager = errcode.New(errcode.ServiceManagerFailed)
-	// errDefinition is a definition file that could not be read, written or
-	// removed.
+	// errDefinition is a definition file that could not be read, written or deleted.
 	errDefinition = errcode.New(errcode.ServiceDefinitionFailed)
+	// errInstallBusy is a session app install lock held by another run.
+	errInstallBusy = errcode.New(errcode.ServiceInstallBusy)
 )
 
 // ExitError ends the process with Code: the process exit status, or the
@@ -198,25 +198,22 @@ func Executable() (string, error) {
 	return filepath.Abs(real)
 }
 
-// AgentAccount is the system account the device service runs as on this
-// platform. Each service definition names its own platform's account
-// (agentaccount.Linux or agentaccount.MacOS), so it renders the same on
-// every build.
+// AgentAccount is the system account the device service runs as here. Each
+// service definition names its own platform's account (agentaccount.Linux or
+// agentaccount.MacOS), so it renders the same on every build.
 const AgentAccount = launcher.AgentAccount
 
 // AgentLogDir is the agent's own log directory under launchd and OpenRC,
 // owned by AgentAccount.
 const AgentLogDir = "/var/log/localport"
 
-// SessionExecutable is the session launcher binary, localport-session (with
-// exe's extension, .exe on Windows), installed beside the agent executable
-// exe.
+// SessionExecutable is the session launcher, localport-session with exe's
+// extension (.exe on Windows), installed beside the agent executable exe.
 func SessionExecutable(exe string) string {
 	return filepath.Join(filepath.Dir(exe), "localport-session"+filepath.Ext(exe))
 }
 
-// owned reports whether path exists, and refuses one without the line
-// marker.
+// owned reports whether path exists, refusing one without the line marker.
 func owned(path, marker string) (bool, error) {
 	content, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -231,8 +228,7 @@ func owned(path, marker string) (bool, error) {
 	return true, nil
 }
 
-// hasLine reports whether content holds line as a whole line, LF or CRLF
-// terminated.
+// hasLine reports whether content holds line as a whole LF or CRLF terminated line.
 func hasLine(content []byte, line string) bool {
 	for l := range bytes.Lines(content) {
 		if string(bytes.TrimRight(l, "\r\n")) == line {
@@ -243,8 +239,7 @@ func hasLine(content []byte, line string) bool {
 }
 
 // checkOwned refuses, before anything is written, when any of paths exists
-// without the line marker, so an install never leaves a partial set of
-// definitions.
+// without the line marker, so an install never leaves a partial set.
 func checkOwned(marker string, paths ...string) error {
 	for _, p := range paths {
 		if _, err := owned(p, marker); err != nil {

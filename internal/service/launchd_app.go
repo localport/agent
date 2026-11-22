@@ -11,6 +11,7 @@ import (
 	"regexp"
 
 	"github.com/localport/agent/internal/errcode"
+	"github.com/localport/agent/internal/security"
 )
 
 // On macOS the session launcher runs from Localport.app, so a Full Disk Access
@@ -75,7 +76,8 @@ func appRequirement(certSHA1 string) (string, error) {
 // verifies the staged copy's signature, then exchanges it with the installed
 // bundle in one rename (exchange) and removes the old one. Files are never
 // overwritten in place: launchd kills a launcher whose signed file changed
-// under it. Any failure leaves the installed bundle as it was.
+// under it. Any failure leaves the installed bundle as it was. Runs under the
+// install lock, so removeLeftovers never deletes a live stage.
 func (a sessionApp) install(ctx context.Context, exe string) error {
 	src, err := appBeside(exe)
 	if err != nil {
@@ -85,6 +87,11 @@ func (a sessionApp) install(ctx context.Context, exe string) error {
 	if err := a.ensureDir(parent); err != nil {
 		return err
 	}
+	unlock, err := lockInstall(parent)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	removeLeftovers(parent)
 	staged, err := os.MkdirTemp(parent, ".staged-")
 	if err != nil {
@@ -130,8 +137,12 @@ func (a sessionApp) check(ctx context.Context, exe string) error {
 // appBeside is the bundle in exe's directory, refused unless it is a directory.
 func appBeside(exe string) (string, error) {
 	src := filepath.Join(filepath.Dir(exe), AppName)
-	if fi, err := os.Lstat(src); err != nil || !fi.IsDir() {
+	fi, err := os.Lstat(src)
+	switch {
+	case err != nil:
 		return "", errAppInvalid.With(err, fmt.Sprintf("%s is missing: install localport with the install script, or extract the release's Localport app archive next to %s", src, exe))
+	case !fi.IsDir():
+		return "", errAppInvalid.With(nil, fmt.Sprintf("%s is not a folder: install localport with the install script, or extract the release's Localport app archive next to %s", src, exe))
 	}
 	return src, nil
 }
@@ -141,17 +152,82 @@ func (a sessionApp) installed() bool {
 	return err == nil && fi.IsDir()
 }
 
-// uninstall removes the installed bundle and, when empty, its directory.
+// uninstall removes the installed bundle and, when empty, its directory,
+// under the install lock.
 func (a sessionApp) uninstall() error {
 	parent := filepath.Dir(a.path)
+	if _, err := os.Lstat(parent); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	unlock, err := lockInstall(parent)
+	if err != nil {
+		if _, statErr := os.Lstat(parent); errors.Is(statErr, fs.ErrNotExist) {
+			return nil // a concurrent uninstall finished first
+		}
+		return err
+	}
+	defer unlock()
 	removeLeftovers(parent)
 	if err := os.RemoveAll(a.path); err != nil {
 		return errDefinition.With(err, "remove "+a.path)
+	}
+	if err := os.Remove(filepath.Join(parent, installLockName)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return errDefinition.With(err, "remove "+filepath.Join(parent, installLockName))
 	}
 	if err := os.Remove(parent); err != nil && !errors.Is(err, fs.ErrNotExist) && !isNotEmpty(parent) {
 		return errDefinition.With(err, "remove "+parent)
 	}
 	return nil
+}
+
+const installLockName = ".install.lock"
+
+// openInstallLock opens the install lock file; tests replace it.
+var openInstallLock = security.OpenLockFile
+
+// lockInstall takes the install lock in dir without waiting; a held lock is
+// errInstallBusy. uninstall unlinks the lock file while holding it, so a lock
+// taken on a file no longer at path is dropped and taken again, and a missing
+// dir means an uninstall removed it: busy.
+func lockInstall(dir string) (unlock func(), err error) {
+	path := filepath.Join(dir, installLockName)
+	busy := errInstallBusy.With(nil, "run it again once the other one finishes")
+	for range 3 {
+		f, err := openInstallLock(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, busy
+		}
+		if err != nil {
+			return nil, errDefinition.With(err, "open "+path)
+		}
+		held, err := security.TryLockFile(f)
+		if err != nil || !held {
+			_ = f.Close()
+			if err != nil {
+				return nil, errDefinition.With(err, "lock "+path)
+			}
+			return nil, busy
+		}
+		release := func() {
+			_ = security.UnlockFile(f)
+			_ = f.Close()
+		}
+		if lockedAtPath(f, path) {
+			return release, nil
+		}
+		release()
+	}
+	return nil, busy
+}
+
+// lockedAtPath reports whether f is still the file at path.
+func lockedAtPath(f *os.File, path string) bool {
+	held, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	current, err := os.Lstat(path)
+	return err == nil && os.SameFile(held, current)
 }
 
 // isNotEmpty reports whether dir still holds an entry.

@@ -92,6 +92,7 @@ jobs:
           security set-keychain-settings -lut 900 "$kc"
           security unlock-keychain -p "$pw" "$kc"
           security import "$p12" -k "$kc" -P "$MACOS_SIGNING_P12_PASSWORD" -T /usr/bin/codesign >/dev/null
+          unset MACOS_SIGNING_P12 MACOS_SIGNING_P12_PASSWORD
           rm -f "$p12"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pw" "$kc" >/dev/null
           MACOS_SIGN_KEYCHAIN="$kc" VERSION="$TAG" ./scripts/release/macos-sign.sh bin
