@@ -20,15 +20,21 @@ import (
 )
 
 // fakeWatch is an exit watch whose registration or wait fails on demand. It
-// records the pid it was given.
+// records the pid it was given; closed, when set, closes at its Close.
 type fakeWatch struct {
 	watchErr, waitErr error
 	pid               int
+	closed            chan struct{}
 }
 
 func (w *fakeWatch) Watch(pid int) error { w.pid = pid; return w.watchErr }
 func (w *fakeWatch) Wait() error         { return w.waitErr }
-func (w *fakeWatch) Close() error        { return nil }
+func (w *fakeWatch) Close() error {
+	if w.closed != nil {
+		close(w.closed)
+	}
+	return nil
+}
 
 func setExitWatch(t *testing.T, newWatch func() (childproc.Watcher, error)) {
 	t.Helper()
@@ -84,8 +90,12 @@ func TestRunRelayedSignalsOnlyTheChildWhenTheExitIsUnobservable(t *testing.T) {
 		unobserved bool
 	}{{"observable", false}, {"unobservable", true}} {
 		t.Run(tc.name, func(t *testing.T) {
+			// decided closes once runRelayed recorded the exit as
+			// unobservable: the watch is closed after that decision.
+			var decided chan struct{}
 			if tc.unobserved {
-				setExitWatch(t, func() (childproc.Watcher, error) { return &fakeWatch{waitErr: unix.EBADF}, nil })
+				decided = make(chan struct{})
+				setExitWatch(t, func() (childproc.Watcher, error) { return &fakeWatch{waitErr: unix.EBADF, closed: decided}, nil })
 			}
 			groups := countGroupSignals(t)
 			ready := filepath.Join(t.TempDir(), "ready")
@@ -97,6 +107,9 @@ func TestRunRelayedSignalsOnlyTheChildWhenTheExitIsUnobservable(t *testing.T) {
 					t.Fatal("the child never started")
 				}
 				time.Sleep(10 * time.Millisecond)
+			}
+			if decided != nil {
+				<-decided
 			}
 			// runWithSignals relays root's SIGTERM to the child.
 			if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
