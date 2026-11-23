@@ -42,8 +42,10 @@ func (g *grantedSession) end(log func(string, ...any)) {
 // covers sessions a closed or restarted launcher does not watch.
 type revocation struct {
 	read func() string
-	// ticker returns the interval's ticks and their stop; tests replace it.
+	// ticker returns the interval's ticks and their stop; end ends every
+	// registered session. Tests replace both.
 	ticker func(time.Duration) (<-chan time.Time, func())
+	end    func()
 	log    func(string, ...any)
 
 	mu       sync.Mutex
@@ -57,7 +59,9 @@ type revocation struct {
 }
 
 func newRevocation(read func() string, log func(string, ...any)) *revocation {
-	return &revocation{read: read, log: log, ticker: realTicker, sessions: map[*grantedSession]struct{}{}}
+	r := &revocation{read: read, log: log, ticker: realTicker, sessions: map[*grantedSession]struct{}{}}
+	r.end = r.endAll
+	return r
 }
 
 func realTicker(d time.Duration) (<-chan time.Time, func()) {
@@ -120,11 +124,13 @@ func (r *revocation) stopWatcherLocked() {
 }
 
 // watch re-reads Full Disk Access each interval until stop closes or ctx
-// ends, and ends every registered session at a reading that is not granted.
+// ends, and ends every registered session at a denied reading. An unknown
+// reading is logged once and read again at the next tick.
 func (r *revocation) watch(ctx context.Context, stop <-chan struct{}) {
 	defer r.watchers.Done()
 	ticks, stopTicks := r.ticker(RevocationInterval)
 	defer stopTicks()
+	loggedUnknown := false
 	for {
 		select {
 		case <-stop:
@@ -132,8 +138,14 @@ func (r *revocation) watch(ctx context.Context, stop <-chan struct{}) {
 		case <-ctx.Done():
 			return
 		case <-ticks:
-			if r.read() != FullDiskAccessGranted {
-				r.endAll()
+			switch r.read() {
+			case FullDiskAccessDenied:
+				r.end()
+			case FullDiskAccessUnknown:
+				if !loggedUnknown {
+					loggedUnknown = true
+					r.log("launcher: Full Disk Access unreadable; granted sessions keep running")
+				}
 			}
 		}
 	}

@@ -25,8 +25,9 @@ type revocationWatch struct {
 
 // watchRevocation starts the watch on control, the helper's end of the
 // launcher control channel, which it then owns. read is the Full Disk Access
-// reading; ticker returns the interval's ticks and their stop.
-func watchRevocation(control *os.File, read func() string, ticker func(time.Duration) (<-chan time.Time, func())) *revocationWatch {
+// reading; ticker returns the interval's ticks and their stop. A denied
+// reading ends the session; an unknown one is logged once.
+func watchRevocation(control *os.File, read func() string, ticker func(time.Duration) (<-chan time.Time, func()), log func(string, ...any)) *revocationWatch {
 	w := &revocationWatch{c: make(chan string, 1), done: make(chan struct{}), control: control}
 	w.wg.Go(func() {
 		// An error is the launcher's exit or a message it never sends; the
@@ -38,14 +39,21 @@ func watchRevocation(control *os.File, read func() string, ticker func(time.Dura
 	w.wg.Go(func() {
 		ticks, stop := ticker(launcher.RevocationInterval)
 		defer stop()
+		loggedUnknown := false
 		for {
 			select {
 			case <-w.done:
 				return
 			case <-ticks:
-				if read() != launcher.FullDiskAccessGranted {
+				switch read() {
+				case launcher.FullDiskAccessDenied:
 					w.fire(launcher.EndFullDiskAccessRevoked)
 					return
+				case launcher.FullDiskAccessUnknown:
+					if !loggedUnknown {
+						loggedUnknown = true
+						log("sessionhelper: Full Disk Access unreadable; the session keeps running")
+					}
 				}
 			}
 		}

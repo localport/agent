@@ -254,19 +254,30 @@ func fakeTicks(s *Server, ticks chan time.Time) *revocation {
 	return r
 }
 
-// The launcher re-reads Full Disk Access while granted sessions run: a
-// granted reading changes nothing, the first other reading ends every
-// granted session with full_disk_access_revoked, and the watcher stops once
-// they are gone. Each response carries the reading taken for its request.
+// The launcher re-reads Full Disk Access while granted sessions run: granted
+// and unknown readings end nothing, a denied reading ends every granted
+// session with full_disk_access_revoked, and the watcher stops once they are
+// gone. Each response carries the reading taken for its request.
 func TestRevocationEndsGrantedSessions(t *testing.T) {
 	var reading atomic.Value
 	reading.Store(FullDiskAccessGranted)
+	var watching atomic.Bool
+	reads := make(chan string, 1)
 	ticks := make(chan time.Time)
 	var r *revocation
+	var ends atomic.Int32
 	c, _ := serve(t, uint32(os.Getuid()), testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityTerminal, config.CapabilityFiles}, Logins: []string{"granted"}}),
 		func(s *Server) {
-			s.FullDiskAccess = func() string { return reading.Load().(string) }
+			s.FullDiskAccess = func() string {
+				v := reading.Load().(string)
+				if watching.Load() {
+					reads <- v
+				}
+				return v
+			}
 			r = fakeTicks(s, ticks)
+			end := r.end
+			r.end = func() { ends.Add(1); end() }
 		})
 	exec := Request{Kind: KindExec, Device: testDevice, Login: "granted", Command: "id"}
 	var channels []*os.File
@@ -278,9 +289,28 @@ func TestRevocationEndsGrantedSessions(t *testing.T) {
 		}
 		channels = append(channels, ch)
 	}
-	ticks <- time.Now()
+	watching.Store(true)
+	// A tick is handled once the next one is taken: the ticks are unbuffered.
+	tick := func(want string) {
+		t.Helper()
+		select {
+		case ticks <- time.Now():
+		case <-time.After(10 * time.Second):
+			t.Fatal("the watcher took no tick")
+		}
+		if got := <-reads; got != want {
+			t.Fatalf("watcher read %q, want %q", got, want)
+		}
+	}
+	tick(FullDiskAccessGranted)
+	reading.Store(FullDiskAccessUnknown)
+	tick(FullDiskAccessUnknown)
+	tick(FullDiskAccessUnknown)
+	if n := ends.Load(); n != 0 {
+		t.Fatalf("granted and unknown readings ended sessions %d times", n)
+	}
 	reading.Store(FullDiskAccessDenied)
-	ticks <- time.Now()
+	tick(FullDiskAccessDenied)
 	for i, ch := range channels {
 		_ = ch.SetDeadline(time.Now().Add(10 * time.Second))
 		fr := NewFrameReader(ch)

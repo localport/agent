@@ -41,7 +41,7 @@ func reasonWithin(t *testing.T, w *revocationWatch) string {
 // The launcher's End ends the session with its reason.
 func TestRevocationWatchEndsOnTheLaunchersEnd(t *testing.T) {
 	l, h := controlPair(t)
-	w := watchRevocation(h, func() string { return launcher.FullDiskAccessGranted }, manualTicks(make(chan time.Time)))
+	w := watchRevocation(h, func() string { return launcher.FullDiskAccessGranted }, manualTicks(make(chan time.Time)), t.Logf)
 	defer w.stop()
 	if err := launcher.WriteHelperEnd(l, launcher.EndFullDiskAccessRevoked); err != nil {
 		t.Fatal(err)
@@ -52,23 +52,39 @@ func TestRevocationWatchEndsOnTheLaunchersEnd(t *testing.T) {
 }
 
 // With no launcher (it exited and closed its end), the helper's own reading
-// ends the session at the first tick that is not granted.
+// ends the session at the first denied tick; granted and unknown end nothing.
 func TestRevocationWatchSelfCheckWithoutALauncher(t *testing.T) {
 	l, h := controlPair(t)
 	l.Close()
 	var reading atomic.Value
 	reading.Store(launcher.FullDiskAccessGranted)
+	reads := make(chan string, 1)
 	ticks := make(chan time.Time)
-	w := watchRevocation(h, func() string { return reading.Load().(string) }, manualTicks(ticks))
+	w := watchRevocation(h, func() string { v := reading.Load().(string); reads <- v; return v }, manualTicks(ticks), t.Logf)
 	defer w.stop()
-	ticks <- time.Now()
+	// A tick is handled once the next one is taken: the ticks are unbuffered.
+	tick := func(want string) {
+		t.Helper()
+		select {
+		case ticks <- time.Now():
+		case <-time.After(5 * time.Second):
+			t.Fatal("the watch took no tick")
+		}
+		if got := <-reads; got != want {
+			t.Fatalf("watch read %q, want %q", got, want)
+		}
+	}
+	tick(launcher.FullDiskAccessGranted)
+	reading.Store(launcher.FullDiskAccessUnknown)
+	tick(launcher.FullDiskAccessUnknown)
+	tick(launcher.FullDiskAccessUnknown)
 	select {
 	case r := <-w.C():
-		t.Fatalf("ended %q while granted", r)
+		t.Fatalf("ended %q on a granted or unknown reading", r)
 	default:
 	}
 	reading.Store(launcher.FullDiskAccessDenied)
-	ticks <- time.Now()
+	tick(launcher.FullDiskAccessDenied)
 	if r := reasonWithin(t, w); r != launcher.EndFullDiskAccessRevoked {
 		t.Fatalf("reason %q", r)
 	}
@@ -78,7 +94,7 @@ func TestRevocationWatchSelfCheckWithoutALauncher(t *testing.T) {
 // and stop joins the watch's goroutines.
 func TestRevocationWatchIgnoresAnEndAfterTheSession(t *testing.T) {
 	l, h := controlPair(t)
-	w := watchRevocation(h, func() string { return launcher.FullDiskAccessDenied }, manualTicks(make(chan time.Time)))
+	w := watchRevocation(h, func() string { return launcher.FullDiskAccessDenied }, manualTicks(make(chan time.Time)), t.Logf)
 	w.stop()
 	_ = launcher.WriteHelperEnd(l, launcher.EndFullDiskAccessRevoked)
 	select {
