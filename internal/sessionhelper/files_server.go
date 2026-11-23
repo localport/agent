@@ -76,9 +76,15 @@ func ServeFiles(rwc io.ReadWriteCloser, root, home string, privacy bool, access 
 	}
 	if root != "" {
 		var guard privacyGuard
+		var base []fs.FileInfo
 		if privacy {
-			guard = newPrivacyGuard(home)
-			if err := guard.checkRoot(root); err != nil {
+			// ErrPermission means home is inside a protected directory, which
+			// the guard already covers.
+			var err error
+			if guard, err = systemPrivacyGuard(home); err != nil && !errors.Is(err, fs.ErrPermission) {
+				return err
+			}
+			if base, err = guard.checkRoot(root); err != nil {
 				return err
 			}
 		}
@@ -89,7 +95,7 @@ func ServeFiles(rwc io.ReadWriteCloser, root, home string, privacy bool, access 
 		defer r.Close()
 		s.fs = rootFS{root: r}
 		if privacy {
-			s.fs = privacyFS{rootFS: rootFS{root: r}, guard: guard}
+			s.fs = privacyFS{rootFS: rootFS{root: r}, guard: guard, base: base}
 		}
 	} else {
 		start, err := startDir(home)

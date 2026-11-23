@@ -374,10 +374,15 @@ func TestFilesAnswersEveryPermissionRefusalDenied(t *testing.T) {
 	_ = c.Close()
 	_ = clientSide.Close()
 	<-done
+	var ops []string
 	for _, ev := range events.list(t) {
+		ops = append(ops, ev.Op)
 		if ev.Result != "permission_denied" {
 			t.Errorf("event %+v, want result permission_denied", ev)
 		}
+	}
+	if want := []string{launcher.OpRead, launcher.OpMkdir}; !slices.Equal(ops, want) {
+		t.Errorf("events %q, want %q", ops, want)
 	}
 }
 

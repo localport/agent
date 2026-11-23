@@ -3,6 +3,8 @@
 package sessionhelper
 
 import (
+	"errors"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -41,5 +43,40 @@ func TestFilesServerArgsFollowFullDiskAccess(t *testing.T) {
 	}
 	if _, ok := ParsePrivacyArg("yes"); ok {
 		t.Error("ParsePrivacyArg accepted an unknown value")
+	}
+}
+
+// A home inside a protected directory is left out of the view; without a
+// root the session is refused.
+func TestFilesSessionHomeInsideProtected(t *testing.T) {
+	top, _ := usersTop(t)
+	privacyTop = top
+	t.Cleanup(func() { privacyTop = "/" })
+	home := filepath.Join(top, "Volumes/ext/u")
+	_, v, err := filesSession(FilesAccess{}, top, home, launcher.FullDiskAccessDenied)
+	if err != nil || v.Home != "" {
+		t.Errorf("root %s: view %+v, err %v; want no home", top, v, err)
+	}
+	if _, _, err := filesSession(FilesAccess{}, "", home, launcher.FullDiskAccessDenied); !errors.Is(err, errProtectedRoot) {
+		t.Errorf("no root: %v, want errProtectedRoot", err)
+	}
+	if _, _, err := filesSession(FilesAccess{}, top, "home", launcher.FullDiskAccessDenied); !errors.Is(err, errHomeNotAbsolute) {
+		t.Errorf("relative home: %v, want errHomeNotAbsolute", err)
+	}
+}
+
+// Without Full Disk Access a root inside a protected folder is refused before
+// filesView reads it; with the grant the same root is served.
+func TestFilesSessionRefusesAProtectedRoot(t *testing.T) {
+	home := privacyHome(t)
+	protected := filepath.Join(home, "Desktop", "proj")
+	if _, _, err := filesSession(FilesAccess{}, protected, home, launcher.FullDiskAccessDenied); !errors.Is(err, errProtectedRoot) {
+		t.Fatalf("denied, root in Desktop: err %v, want errProtectedRoot", err)
+	}
+	if _, v, err := filesSession(FilesAccess{}, filepath.Join(home, "Code"), home, launcher.FullDiskAccessDenied); err != nil || !v.Confined {
+		t.Fatalf("denied, root Code: view %+v, err %v; want confined", v, err)
+	}
+	if _, _, err := filesSession(FilesAccess{}, protected, home, launcher.FullDiskAccessGranted); err != nil {
+		t.Fatalf("granted, root in Desktop: %v", err)
 	}
 }

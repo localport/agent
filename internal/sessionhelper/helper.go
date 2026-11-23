@@ -169,19 +169,22 @@ func Run(log func(string, ...any)) int {
 	if req.Kind == launcher.KindSFTP {
 		// The file server is this binary run as the login, as sshd runs sftp-server:
 		// confined to files_root, else the whole file system with relative paths
-		// starting at the login's home, which must be a directory. Without Full
-		// Disk Access it is confined below.
+		// starting at the login's home, which must be a directory. Without Full Disk
+		// Access filesSession confines it.
 		if plan.path, err = os.Executable(); err != nil {
 			pam.close()
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
 		access := FilesAccess{Download: req.FilesDownload, Upload: req.FilesUpload}
-		if plan.args, err = filesServerArgs(access, req.Root, a.Home, req.FullDiskAccess); err != nil {
+		var v launcher.Started
+		if plan.args, v, err = filesSession(access, req.Root, a.Home, req.FullDiskAccess); err != nil {
 			pam.close()
+			if errors.Is(err, errProtectedRoot) {
+				return refuse(launcher.CodeFullDiskAccessRequired, err)
+			}
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
 		plan.events = true
-		v := filesView(req.Root, a.Home, filesPrivacy(req.FullDiskAccess))
 		reply.Confined, reply.Home, reply.WholeDisk = v.Confined, v.Home, v.WholeDisk
 	}
 	// startLogDone closes at the start log's EOF: the exec or the mode's exit.
@@ -265,11 +268,11 @@ func Run(log func(string, ...any)) int {
 		log("sessionhelper: reply started: %v", err)
 		k.finish()
 	}
-	// A session started with Full Disk Access granted runs on our identity's
-	// grant: it ends when the grant goes. Every other session needs no control.
+	// A session started with Full Disk Access granted runs on Localport.app's
+	// grant and ends when it is denied. Other sessions need no control.
 	var revoked <-chan string
 	if req.FullDiskAccess == launcher.FullDiskAccessGranted {
-		w := watchRevocation(control, launcher.ReadFullDiskAccess, realTicker)
+		w := watchRevocation(control, launcher.ReadFullDiskAccess, realTicker, log)
 		defer w.stop()
 		revoked = w.C()
 	} else {

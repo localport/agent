@@ -43,7 +43,7 @@ func TestPrivacyWalkNeverLooksInside(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	g := newPrivacyGuard(home)
+	g, base := homeGuard(t, home)
 	gated := []string{"Desktop/", "Library/", "Pictures/Photos Library.photoslibrary/"}
 	var looked []string
 	lstat := func(n string) (fs.FileInfo, error) { looked = append(looked, n); return root.Lstat(n) }
@@ -63,7 +63,7 @@ func TestPrivacyWalkNeverLooksInside(t *testing.T) {
 		{"missing/file", false},
 	} {
 		looked = looked[:0]
-		err := g.walk(lstat, readlink, ".", rel(tc.name), true, true)
+		_, err := g.walk(lstat, readlink, ".", base, rel(tc.name), true, true)
 		if got := errors.Is(err, fs.ErrPermission); got != tc.refused {
 			t.Errorf("%s: %v, refused %v", tc.name, err, tc.refused)
 		}
@@ -86,11 +86,11 @@ func TestPrivacyWalkUseOfTheFolderItself(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	g := newPrivacyGuard(home)
-	if err := g.walk(root.Lstat, root.Readlink, ".", "Desktop", true, false); err != nil {
+	g, base := homeGuard(t, home)
+	if _, err := g.walk(root.Lstat, root.Readlink, ".", base, "Desktop", true, false); err != nil {
 		t.Errorf("stat Desktop: %v", err)
 	}
-	if err := g.walk(root.Lstat, root.Readlink, ".", "Desktop", true, true); !errors.Is(err, fs.ErrPermission) {
+	if _, err := g.walk(root.Lstat, root.Readlink, ".", base, "Desktop", true, true); !errors.Is(err, fs.ErrPermission) {
 		t.Errorf("open Desktop: %v, want permission denied", err)
 	}
 }
@@ -161,4 +161,132 @@ func slicesContainName(entries []fs.FileInfo, name string) bool {
 		}
 	}
 	return false
+}
+
+// homeGuard returns a guard for home on a system with no Users directory, and
+// home's directories from checkRoot.
+func homeGuard(t *testing.T, home string) (privacyGuard, []fs.FileInfo) {
+	t.Helper()
+	g, err := newPrivacyGuard(t.TempDir(), home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := g.checkRoot(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g, base
+}
+
+// usersTop builds a system top with Users/other/{Desktop/secret,Code}, an
+// alias symlink to Users and Volumes/ext; the login's home is elsewhere.
+func usersTop(t *testing.T) (top, home string) {
+	t.Helper()
+	top = t.TempDir()
+	for _, d := range []string{"Users/other/Desktop", "Users/other/Code", "Volumes/ext/u/Desktop"} {
+		if err := os.MkdirAll(filepath.Join(top, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(top, "Users/other/Desktop/secret"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("Users", filepath.Join(top, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	return top, privacyHome(t)
+}
+
+// Another account's folders under Users are refused through any path,
+// without a lookup inside them.
+func TestPrivacyGuardRecognizesUsersHomes(t *testing.T) {
+	top, home := usersTop(t)
+	g, err := newPrivacyGuard(top, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desktop := filepath.ToSlash(filepath.Join(top, "Users/other/Desktop")) + "/"
+	var looked []string
+	lstat := func(n string) (fs.FileInfo, error) { looked = append(looked, n); return os.Lstat(n) }
+	readlink := func(n string) (string, error) { looked = append(looked, n); return os.Readlink(n) }
+	for _, tc := range []struct {
+		name    string
+		refused bool
+	}{
+		{"Users/other/Desktop/secret", true},
+		{"alias/other/Desktop/secret", true},
+		{"Users/other/Code/../Desktop/secret", true},
+		{"Users/other/Code", false},
+	} {
+		looked = looked[:0]
+		_, err := g.walk(lstat, readlink, "/", rootBase, filepath.ToSlash(filepath.Join(top, tc.name)), true, true)
+		if got := errors.Is(err, fs.ErrPermission); got != tc.refused {
+			t.Errorf("%s: %v, refused %v", tc.name, err, tc.refused)
+		}
+		for _, n := range looked {
+			if strings.HasPrefix(n, desktop) {
+				t.Errorf("%s: looked up %s inside a gated folder", tc.name, n)
+			}
+		}
+	}
+
+	// A files root of Users serves other homes through privacyFS.
+	users := filepath.Join(top, "Users")
+	base, err := g.checkRoot(users)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(users)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	p := privacyFS{rootFS: rootFS{root: root}, guard: g, base: base}
+	if _, err := p.Stat("/other/Desktop/secret"); !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("stat other/Desktop/secret: %v, want permission denied", err)
+	}
+	if _, err := p.Stat("/other/Code"); err != nil {
+		t.Errorf("stat other/Code: %v", err)
+	}
+}
+
+// A root that reaches Volumes through "link/.." is refused.
+func TestCheckRootResolvesDotDotAfterALink(t *testing.T) {
+	top, home := usersTop(t)
+	g, err := newPrivacyGuard(top, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(top, "Volumes/ext/u"), filepath.Join(top, "Users/other/Code/link")); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(top, "Users/other/Code/link") + "/.."
+	if _, err := g.checkRoot(root); !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("checkRoot(%s) = %v, want permission denied", root, err)
+	}
+}
+
+// A relative home is refused.
+func TestPrivacyGuardRefusesARelativeHome(t *testing.T) {
+	for _, home := range []string{"", "home"} {
+		if _, err := newPrivacyGuard(t.TempDir(), home); !errors.Is(err, errHomeNotAbsolute) {
+			t.Errorf("home %q: %v, want errHomeNotAbsolute", home, err)
+		}
+		if err := ServeFiles(nil, t.TempDir(), home, true, FilesAccess{}, nil); !errors.Is(err, errHomeNotAbsolute) {
+			t.Errorf("ServeFiles home %q: %v, want errHomeNotAbsolute", home, err)
+		}
+	}
+}
+
+// A login home inside a protected directory is refused and none of its
+// folders is read.
+func TestPrivacyGuardHomeInsideProtected(t *testing.T) {
+	top, _ := usersTop(t)
+	g, err := newPrivacyGuard(top, filepath.Join(top, "Volumes/ext/u"))
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("newPrivacyGuard = %v, want permission denied", err)
+	}
+	if len(g.dirs) != 1 {
+		t.Errorf("guard holds %d directories, want Volumes only", len(g.dirs))
+	}
 }

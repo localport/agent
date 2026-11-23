@@ -75,7 +75,8 @@ const (
 	// and the launcher service come from different releases.
 	CodeVersionMismatch = "version_mismatch"
 	// CodeFullDiskAccessRequired refuses, on macOS without Full Disk Access, a
-	// terminal or exec shell that cannot start as its own responsible process.
+	// shell that cannot start as its own responsible process or a files_root
+	// inside a protected folder.
 	CodeFullDiskAccessRequired = "full_disk_access_required"
 )
 
