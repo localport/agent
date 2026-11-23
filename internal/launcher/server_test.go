@@ -300,24 +300,6 @@ func TestRevocationEndsGrantedSessions(t *testing.T) {
 	}
 }
 
-// A refusal carries the reading too: a file session without Full Disk
-// Access is refused before any helper starts.
-func TestFilesRefusedWithoutFullDiskAccess(t *testing.T) {
-	c, _ := serve(t, uint32(os.Getuid()), testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityFiles}, Logins: []string{"pi"}}),
-		func(s *Server) { s.FullDiskAccess = func() string { return FullDiskAccessDenied } })
-	ours, theirs, err := SocketPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ours.Close()
-	_, err = c.Start(ctx(t), Request{Kind: KindSFTP, Device: testDevice, Login: "pi"}, theirs)
-	theirs.Close()
-	r, ok := errors.AsType[*RefusalError](err)
-	if !ok || r.Code != CodeFullDiskAccessRequired || r.FullDiskAccess != FullDiskAccessDenied {
-		t.Fatalf("Start = %v, want full_disk_access_required with the denied reading", err)
-	}
-}
-
 // Every config refusal comes before a helper starts, with its typed code.
 func TestStartRefusesWhatTheConfigDoesNotEnable(t *testing.T) {
 	terminal := []config.Capability{config.CapabilityTerminal}
@@ -381,20 +363,16 @@ func TestAuthorizeFileSessions(t *testing.T) {
 	}
 }
 
-// On macOS a file session needs the launcher's Full Disk Access granted:
-// denied and unknown are refused full_disk_access_required. Terminal and exec
-// are never refused for it and carry the reading to the helper; where the
-// platform has no reading (empty, Linux) a file session proceeds.
+// No session kind is refused for the Full Disk Access reading: files,
+// terminal and exec carry it to the helper, which confines a files session
+// without it. Without a platform reading (Linux) it stays empty.
 func TestAuthorizeFullDiskAccess(t *testing.T) {
 	files := Request{V: Version, Kind: KindSFTP, Device: terminalRequest("pi").Device, Login: "pi"}
 	exec := Request{V: Version, Kind: KindExec, Device: files.Device, Login: "pi", Command: "id"}
 	s := &Server{LoadConfig: testConfig(t, config.LocalDevice{Enable: []config.Capability{config.CapabilityFiles, config.CapabilityTerminal},
 		Logins: []string{"pi"}})}
 	for _, fda := range []string{FullDiskAccessDenied, FullDiskAccessUnknown} {
-		if _, err := s.authorize(files, fda); CodeOf(err) != CodeFullDiskAccessRequired {
-			t.Errorf("files with %s: %v, want full_disk_access_required", fda, err)
-		}
-		for _, r := range []Request{terminalRequest("pi"), exec} {
+		for _, r := range []Request{files, terminalRequest("pi"), exec} {
 			if h, err := s.authorize(r, fda); err != nil || h.FullDiskAccess != fda {
 				t.Errorf("%s with %s: %+v, %v", r.Kind, fda, h, err)
 			}

@@ -793,7 +793,7 @@ stream:
    channel's stderr (`login_not_allowed`, `kind_disabled`, `agent_busy`,
    `kind_unavailable`, `launcher_unavailable`, `recording_unavailable` for a
    Strict channel whose recording did not open, `full_disk_access_required`
-   on macOS, below) and then closes the channel, so a client reads the reason
+   for a macOS shell, below) and then closes the channel, so a client reads the reason
    to the end of stderr. The messages PAM gives the
    login's session setup (an expiry warning, the `/etc/nologin` text) are
    written to the channel's stderr, one line each ending in CRLF, before the
@@ -810,8 +810,15 @@ stream:
    On macOS no session makes the agent's code or Apple's tools raise a privacy
    (TCC) dialog on the device's screen. The launcher reads its Full Disk Access
    for every `shell`, `exec` and `sftp` request:
-   - `sftp` needs it `granted`; otherwise the request is refused
-     `full_disk_access_required`.
+   - `sftp` with it `granted` serves as on any Unix device. Otherwise the
+     session is confined to `files_root`, else the login's home, and never
+     looks inside the folders macOS gates: Desktop, Documents, Downloads and
+     Library in the login's home, any `*.photoslibrary` folder, and
+     `/Volumes`. Each name is resolved one component at a time with lstat and
+     readlink, so a symlink cannot reach them either; opening, listing or
+     changing one answers `SSH_FX_PERMISSION_DENIED`, while its own entry
+     still lists and stats in its parent. A `files_root` inside one of them
+     cannot be opened and ends the session.
    - With it `granted`, a shell runs as the launcher's child and the grant
      applies. Without it the shell starts as its own responsible process
      (`localport-session shell-exec`), so Apple tools get a silent "Operation

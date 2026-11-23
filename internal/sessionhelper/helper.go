@@ -167,18 +167,18 @@ func Run(log func(string, ...any)) int {
 	if req.Kind == launcher.KindSFTP {
 		// The file server is this binary run as the login, as sshd runs sftp-server:
 		// confined to files_root, else the whole file system with relative paths
-		// starting at the login's home, which must be a directory.
+		// starting at the login's home, which must be a directory. Without Full
+		// Disk Access it is confined below.
 		if plan.path, err = os.Executable(); err != nil {
 			pam.close()
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
-		var home string
-		if home, err = filesHome(req.Root, a.Home); err != nil {
+		access := FilesAccess{Download: req.FilesDownload, Upload: req.FilesUpload}
+		if plan.args, err = filesServerArgs(access, req.Root, a.Home, req.FullDiskAccess); err != nil {
 			pam.close()
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
-		access := FilesAccess{Download: req.FilesDownload, Upload: req.FilesUpload}
-		plan.args, plan.events = []string{"localport-session", FilesServerMode, access.Arg(), req.Root, home}, true
+		plan.events = true
 	}
 	// startLogDone closes at the start log's EOF: the exec or the mode's exit.
 	// Nil unless shell-exec.

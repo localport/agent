@@ -96,9 +96,15 @@ func newHomeFilesHarness(t *testing.T) *filesHarness {
 // serveFilesHarness runs ServeFiles with root and home over a pipe to a client.
 func serveFilesHarness(t *testing.T, dir, root, home string, access FilesAccess) *filesHarness {
 	t.Helper()
+	return servePrivacyHarness(t, dir, root, home, false, access)
+}
+
+// servePrivacyHarness is serveFilesHarness with ServeFiles' privacy flag.
+func servePrivacyHarness(t *testing.T, dir, root, home string, privacy bool, access FilesAccess) *filesHarness {
+	t.Helper()
 	serverSide, clientSide := net.Pipe()
 	h := &filesHarness{dir: dir, events: &eventSink{}, done: make(chan error, 1)}
-	go func() { h.done <- ServeFiles(serverSide, root, home, access, h.events) }()
+	go func() { h.done <- ServeFiles(serverSide, root, home, privacy, access, h.events) }()
 	c, err := sftp.NewClientPipe(clientSide, clientSide)
 	if err != nil {
 		t.Fatal(err)

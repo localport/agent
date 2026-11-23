@@ -4,7 +4,7 @@
 //
 //	localport-session launcher                  the daemon the service manager starts
 //	localport-session helper                    one session; started only by the launcher
-//	localport-session files-server <access> <root> <home>  one file session as the login; started only by a helper
+//	localport-session files-server <access> <root> <home> <privacy>  one file session as the login; started only by a helper
 //	localport-session forward-server            one connection's port forwards as the login; started only by a helper
 //	localport-session shell-exec <path> <argv0> [args...]  replaces itself with a session's shell, its own responsible process (macOS); started only by a helper
 //
@@ -44,14 +44,18 @@ func main() {
 	// The file server runs as the login, not as root: the helper starts it
 	// with the event pipe on descriptor 3.
 	if os.Args[1] == sessionhelper.FilesServerMode {
-		if len(os.Args) != 5 {
+		if len(os.Args) != 6 {
 			os.Exit(2)
 		}
 		access, ok := sessionhelper.ParseFilesAccess(os.Args[2])
 		if !ok {
 			os.Exit(2)
 		}
-		if err := sessionhelper.ServeFiles(stdio{}, os.Args[3], os.Args[4], access, os.NewFile(3, "file-events")); err != nil {
+		privacy, ok := sessionhelper.ParsePrivacyArg(os.Args[5])
+		if !ok {
+			os.Exit(2)
+		}
+		if err := sessionhelper.ServeFiles(stdio{}, os.Args[3], os.Args[4], privacy, access, os.NewFile(3, "file-events")); err != nil {
 			logger.Printf("localport-session: files: %v", err)
 			os.Exit(1)
 		}

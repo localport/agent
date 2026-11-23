@@ -43,7 +43,7 @@ func main() {
 		if err != nil {
 			os.Exit(2)
 		}
-		if err := sessionhelper.ServeFiles(stdio{}, os.Args[3], os.Args[4], access, os.NewFile(uintptr(h), "file-events")); err != nil {
+		if err := sessionhelper.ServeFiles(stdio{}, os.Args[3], os.Args[4], false, access, os.NewFile(uintptr(h), "file-events")); err != nil {
 			logger.Printf("localport-session: files: %v", err)
 			os.Exit(1)
 		}

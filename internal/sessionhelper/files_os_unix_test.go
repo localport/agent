@@ -167,7 +167,7 @@ func TestFilesRefusesABadHome(t *testing.T) {
 			t.Errorf("startDir(%q) accepted it", home)
 		}
 		server, client := net.Pipe()
-		err := ServeFiles(server, "", home, FilesAccess{}, io.Discard)
+		err := ServeFiles(server, "", home, false, FilesAccess{}, io.Discard)
 		_ = client.Close()
 		if err == nil {
 			t.Errorf("ServeFiles with home %q served", home)

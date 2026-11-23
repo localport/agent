@@ -71,9 +71,9 @@ type HelperRequest struct {
 	ClientAddr string `json:"client_addr,omitempty"`
 	// FullDiskAccess is the launcher's reading for this terminal, exec or sftp
 	// request (macOS), one of the FullDiskAccess states, empty where the
-	// platform has none. A shell starts as its own responsible process unless
-	// the reading is granted; a granted session ends when the grant goes
-	// (HelperEnd from the launcher).
+	// platform has none. Unless granted, a shell starts as its own responsible
+	// process and a files session runs under the privacy guard; a granted
+	// session ends when the grant goes (HelperEnd from the launcher).
 	FullDiskAccess string `json:"full_disk_access,omitempty"`
 	// Pipe is the session channel pipe the helper opens (Windows).
 	Pipe string `json:"pipe,omitempty"`
@@ -106,9 +106,7 @@ func startFailureCode(err error) string {
 // what the helper is told. agentAccount is the login a run_as_agent device
 // serves; empty where there is no such account (Windows), which refuses
 // every run_as_agent request. fullDiskAccess is the launcher's reading for
-// this request, empty where the platform has none: an sftp session needs it
-// granted, since the file server is our code and TCC would ask the console
-// user for each protected folder.
+// this request, empty where the platform has none; the helper decides on it.
 func authorize(load func() (*config.LocalConfig, error), agentAccount string, req Request, fullDiskAccess string) (HelperRequest, error) {
 	cfg, err := load()
 	if err != nil {
@@ -130,9 +128,6 @@ func authorize(load func() (*config.LocalConfig, error), agentAccount string, re
 	}
 	if !slices.Contains(d.Enable, need) {
 		return HelperRequest{}, Refusal(CodeKindNotEnabled)
-	}
-	if req.Kind == KindSFTP && fullDiskAccess != "" && fullDiskAccess != FullDiskAccessGranted {
-		return HelperRequest{}, Refusal(CodeFullDiskAccessRequired)
 	}
 	h := HelperRequest{Kind: req.Kind, Login: req.Login, Cols: req.Cols, Rows: req.Rows, Term: req.Term, Command: req.Command,
 		Env: req.Env, ClientAddr: req.ClientAddr, Pipe: req.Pipe, HasPassword: req.HasPassword, Password: req.Password}

@@ -43,8 +43,8 @@ const (
 // Disk Access reading (empty off macOS) and whether this macOS can disclaim
 // responsibility. A terminal or exec shell starts plainly with the grant or
 // off macOS, through shell-exec without it, and is refused when shell-exec is
-// unavailable. The file and forward servers start plainly; the launcher
-// refuses files without the grant.
+// unavailable. The file and forward servers start plainly; without the grant
+// the file server confines itself (privacyFS).
 func shellSpawn(kind, fullDiskAccess string, disclaim bool) spawnMode {
 	if (kind != launcher.KindTerminal && kind != launcher.KindExec) || fullDiskAccess == "" || fullDiskAccess == launcher.FullDiskAccessGranted {
 		return spawnPlain

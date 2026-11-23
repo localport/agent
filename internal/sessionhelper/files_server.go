@@ -20,9 +20,10 @@ import (
 
 // FilesServerMode is the localport-session mode that runs ServeFiles as the
 // login over standard input and output:
-// `files-server <access> <root> <home>` on Unix (event pipe on descriptor 3),
-// `files-server <access> <root> <home> <handle>` on Windows (event pipe
-// handle). access is FilesAccess.Arg; home is empty with a root.
+// `files-server <access> <root> <home> <privacy>` on Unix (event pipe on
+// descriptor 3), `files-server <access> <root> <home> <handle>` on Windows
+// (event pipe handle). access is FilesAccess.Arg, privacy ParsePrivacyArg's
+// value; home is empty with a root unless privacy is on.
 const FilesServerMode = "files-server"
 
 // FilesAccess is what an SFTP session may do beyond listing: read file
@@ -64,15 +65,32 @@ func ParseFilesAccess(v string) (FilesAccess, bool) {
 // paths starting at home, which must be a directory. Each logged operation,
 // permission refusals included, writes a launcher.FileEvent to events; a
 // malformed request writes none.
-func ServeFiles(rwc io.ReadWriteCloser, root, home string, access FilesAccess, events io.Writer) error {
+//
+// privacy (macOS without Full Disk Access) requires root and refuses any
+// lookup inside a protected folder with permission denied (privacyFS); a
+// root inside one is refused.
+func ServeFiles(rwc io.ReadWriteCloser, root, home string, privacy bool, access FilesAccess, events io.Writer) error {
 	s := &filesServer{access: access, events: events, start: "/"}
+	if privacy && root == "" {
+		return errors.New("a files session without Full Disk Access needs a root")
+	}
 	if root != "" {
+		var guard privacyGuard
+		if privacy {
+			guard = newPrivacyGuard(home)
+			if err := guard.checkRoot(root); err != nil {
+				return err
+			}
+		}
 		r, err := os.OpenRoot(root)
 		if err != nil {
 			return err
 		}
 		defer r.Close()
 		s.fs = rootFS{root: r}
+		if privacy {
+			s.fs = privacyFS{rootFS: rootFS{root: r}, guard: guard}
+		}
 	} else {
 		start, err := startDir(home)
 		if err != nil {
