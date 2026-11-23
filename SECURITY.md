@@ -47,4 +47,13 @@ cosign verify ghcr.io/localport/agent:<version> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
+To check the macOS app and CLI against the release certificate
+[`release/keys/macos-signing.pem`](release/keys/macos-signing.pem):
+
+```sh
+sha1=$(openssl x509 -in macos-signing.pem -noout -fingerprint -sha1 | sed 's/^.*=//; s/://g')
+codesign --verify --strict -R="=identifier \"io.localport.session\" and certificate leaf = H\"$sha1\"" Localport.app
+codesign --verify --strict -R="=identifier \"io.localport.localport\" and certificate leaf = H\"$sha1\"" localport
+```
+
 Packages from `pkg.localport.io` are verified by apt, dnf and apk against the repository keys in [`release/keys`](release/keys). [RELEASING.md](RELEASING.md) describes the full process and every key.

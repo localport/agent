@@ -184,10 +184,9 @@ to disk.
 `region_name` is the server-supplied display name for the region; when empty
 the agent falls back to a built-in mapping, then the uppercased slug.
 
-`client_id` is the id the edge minted for this session. It is the id the
-dashboard and the edge's logs show. A reconnect that resumes (see below) keeps
-it; any other registration gets a new one. It is not a secret and grants
-nothing.
+`client_id` is the id the edge minted for this session, shown in the
+dashboard and the edge's logs. A reconnect that resumes (see below) keeps it; any other
+registration gets a new one. It is not a secret and grants nothing.
 
 `session_id` is an edge-minted secret for this session; present it as
 `resume_session_id` on the next `Register` for this tunnel to reclaim the
@@ -352,9 +351,8 @@ with another code during the drain (a removal, teardown or revocation) sends
 its own Shutdown, and a non-retryable one ends the drain at once and is
 applied as below. A device whose control writes have stalled (its session
 loops do not end within 5 seconds) drains without reading, and a Shutdown
-sent meanwhile is read at its next attempt. Every
-registration, renewal and key fetch is refused `SE040` until an admin
-reconnects the device.
+sent meanwhile is read at its next attempt. Every registration, renewal and
+key fetch is refused `SE040` until an admin reconnects the device.
 
 A Shutdown or refusal with `SE018` (the device was removed or its fleet
 deleted) or `SE041` (its certificate was revoked because the device was
@@ -381,9 +379,9 @@ replaced is kept. A renewal or key fetch refused the same way does the same.
 }
 ```
 
-`edge_addr` is a per-edge hostname (served by the platform's own NS); port
-defaults to 443 when omitted. The agent dials the new address verbatim and
-derives the SNI from the target's zone (see [Redirect](#redirect) below).
+`edge_addr` is a per-edge hostname (served by the platform's own NS); port defaults to 443 when omitted. The
+agent dials the new address verbatim and derives the SNI from the target's
+zone (see [Redirect](#redirect) below).
 
 ### MuxBind (11) / MuxBindAck (12)
 
@@ -552,11 +550,10 @@ acceptable client certificate or the connection is refused.
    `retryable` and `limit_type` only.
 4. Backoff is exponential (1.5×), capped at 30 s, plus up to 25 % jitter. It
    starts over only after a registered control session stayed up 30 s, so a
-   session the edge accepts and drops at once is retried at a growing
-   backoff. The per-transport dial budget also escalates with consecutive failures
-   (2 s doubling to 16 s) so high-latency links (2G, satellite) can
-   complete the TLS handshake; an explicit dial-timeout setting is used
-   verbatim.
+   session the edge accepts and drops at once is retried at a growing backoff.
+   The per-transport dial budget also escalates with consecutive failures (2 s
+   doubling to 16 s) so high-latency links (2G, satellite) can complete the TLS
+   handshake; an explicit dial-timeout setting is used verbatim.
 5. Dead-link detection is symmetric. The agent treats a control connection
    with no inbound frame for 75 s (the edge heartbeats every 30 s) as dead
    and reconnects, even when the socket never returns an error.
@@ -742,84 +739,85 @@ stream:
    past that, or one arriving while the agent shuts down, is refused in the
    prelude.
 3. Channels: `session` channels, and on an `ssh` connection the port forwarding
-   channels below (others are refused `prohibited`); a `terminal` connection has
-   one session channel, an `ssh` or `files` connection at most 4 open at once.
-   On a session channel of a `terminal` or `ssh` connection the agent accepts
-   `pty-req` (cols and rows 1 to 1000, term matching `^[a-zA-Z0-9.+-]{1,32}$`),
-   `window-change`, `shell` (with a PTY: the login shell on a terminal; without
-   one, on `ssh` only: the login shell on pipes) and, on `ssh` only, `exec` (a
-   command of at most 2 KiB, run by the login shell with `-c`, on Windows as
-   `"%SystemRoot%\System32\cmd.exe" /c "<command>"`, on a PTY when one was
-   requested, else on pipes with stdout and stderr apart). `subsystem` `sftp` is
-   accepted on `ssh` and is the only request a `files` connection accepts. `env`
-   is accepted before `shell`, `exec` or `subsystem` for `LANG` and
-   `LC_[A-Z]{1,24}` only: at most 16 per channel, each value at most 256 bytes
-   of UTF-8 without control characters, names and values together at most 1 KiB;
-   the helper sets them after the login's environment. It refuses every other
-   `env`, other subsystems, `x11-req`, `auth-agent-req@openssh.com`, `signal`,
-   and every global request other than the port forwarding requests below. Each
-   `shell`, `exec` or `subsystem` is one launcher request of kind `terminal`,
-   `exec` or `sftp`; an `sftp` request serves the SFTP protocol (version 3) as
-   the login, opening only regular files and directories and writing in place at
-   the requested offsets. With the device's `files_root` the client sees that
-   directory as `/` and no `..`, absolute name or symlink leaves it; relative
-   paths start at `/`. Without it the client sees the whole file system as the
-   login, the login's OS permissions the only boundary, symlinks followed as the
-   OS follows them, and relative paths (and `realpath .`) start at the login's
+   channels below (others are refused `prohibited`); a `terminal` connection
+   has one session channel, an `ssh` or `files` connection at most 4 open at
+   once. On a session channel of a `terminal` or `ssh` connection the agent
+   accepts `pty-req` (cols and rows 1 to 1000, term matching
+   `^[a-zA-Z0-9.+-]{1,32}$`), `window-change`, `shell` (with a PTY: the login
+   shell on a terminal; without one, on `ssh` only: the login shell on pipes)
+   and, on `ssh` only, `exec` (a command of at most 2 KiB, run by the login
+   shell with `-c`, on Windows as `"%SystemRoot%\System32\cmd.exe" /c
+   "<command>"`, on a PTY when one was requested, else on pipes with stdout and
+   stderr apart). `subsystem` `sftp` is accepted on `ssh` and is the only
+   request a `files` connection accepts. `env` is accepted before `shell`,
+   `exec` or `subsystem` for `LANG` and `LC_[A-Z]{1,24}` only: at most 16 per
+   channel, each value at most 256 bytes of UTF-8 without control characters,
+   names and values together at most 1 KiB; the helper sets them after the
+   login's environment. It refuses every other `env`, other subsystems,
+   `x11-req`, `auth-agent-req@openssh.com`, `signal`, and every global request
+   other than the port forwarding requests below. Each `shell`, `exec` or
+   `subsystem` is one launcher request of kind `terminal`, `exec` or `sftp`; an
+   `sftp` request serves the SFTP protocol (version 3) as the login, opening
+   only regular files and directories and writing in place at the requested
+   offsets. With the device's `files_root` the client sees that directory as
+   `/` and no `..`, absolute name or symlink leaves it; relative paths start at
+   `/`. Without it the client sees the whole file system as the login, the
+   login's OS permissions the only boundary, symlinks followed as the OS
+   follows them, and relative paths (and `realpath .`) start at the login's
    home with its symlinks resolved; a home that is missing or not a directory
    refuses the request. On Windows `/` is then a read-only list of the drives
    Win32-OpenSSH lists (local, removable, network and optical; not RAM disks or
    drives without a root) as `c:`, `d:`, and `/c:/Users/x` is `C:\Users\x`
    (drive letter in any case, shown lower case); a backslash in a request path
    is a separator, as in Win32-OpenSSH. A colon past the drive (an alternate
-   data stream), a UNC, device or `\??\` path, a DOS device name (`NUL`, `COM1`;
-   with an extension only before Windows 11), and a backslash in a symlink's
-   target text are `SSH_FX_FAILURE`; readlink answers in `/c:/` form, and a
-   target with no such form (UNC, volume) is `SSH_FX_FAILURE`; a rename or link
-   across drives is `SSH_FX_FAILURE` (the OS refuses it; nothing is copied).
-   `statvfs@openssh.com` answers for the file system holding the path, a file or
-   a directory, through symlinks, junctions and mounted folders (`files_root`'s
-   with one; none for the Windows `/`); a missing path is `SSH_FX_NO_SUCH_FILE`.
-   On Windows the available blocks are those the login's quota allows. On a
-   `files` connection, once the file server started and before the `subsystem`
-   reply, the agent sends the channel one request `files-session@localport.io`
-   with want-reply false, so it arrives before the reply and all SFTP data; an
-   `ssh` connection gets none. Its payload is one SSH string holding JSON
-   `{"confined": bool, "home"?: string, "whole_disk"?: true,
-   "full_disk_access"?: string}`: `confined` is true when the server serves one
-   folder as `/` (`files_root`, or the login's home on macOS without Full Disk
-   Access); `home` is the login's home relative to that folder, slash separated,
-   `.` when equal, present only when confined and the home is inside the folder
-   (compared with symlinks resolved, case-insensitively on Windows) and at most
-   1024 bytes JSON-encoded; `whole_disk`, only beside `confined`, marks a served
-   folder that resolves to the file system root `/` (never on Windows);
-   `full_disk_access` is the launcher's reading for the request (`granted`,
-   `denied` or `unknown`), macOS only. It never carries an absolute path. The
-   request carries the certificate's `files@localport.io` access
+   data stream), a UNC, device or `\??\` path, a DOS device name (`NUL`,
+   `COM1`; with an extension only before Windows 11), and a backslash in a
+   symlink's target text are `SSH_FX_FAILURE`; readlink answers in `/c:/` form,
+   and a target with no such form (UNC, volume) is `SSH_FX_FAILURE`; a rename
+   or link across drives is `SSH_FX_FAILURE` (the OS refuses it; nothing is
+   copied). `statvfs@openssh.com` answers for the file system holding the path,
+   a file or a directory, through symlinks, junctions and mounted folders
+   (`files_root`'s with one; none for the Windows `/`); a missing path is
+   `SSH_FX_NO_SUCH_FILE`. On Windows the available blocks are those the login's
+   quota allows. On a `files` connection, once the file server started and
+   before the `subsystem` reply, the agent sends the channel one request
+   `files-session@localport.io` with want-reply false, so it arrives before the
+   reply and all SFTP data; an `ssh` connection gets none. Its payload is one
+   SSH string holding JSON `{"confined": bool, "home"?: string, "whole_disk"?:
+   true, "full_disk_access"?: string}`: `confined` is true when the server
+   serves one folder as `/` (`files_root`, or the login's home on macOS without
+   Full Disk Access); `home` is the login's home relative to that folder, slash
+   separated, `.` when equal, present only when confined and the home is inside
+   the folder (compared with symlinks resolved, case-insensitively on Windows)
+   and at most 1024 bytes JSON-encoded; `whole_disk`, only beside `confined`,
+   marks a served folder that resolves to the file system root `/` (never on
+   Windows); `full_disk_access` is the launcher's reading for the request
+   (`granted`, `denied` or `unknown`), macOS only. It never carries an absolute
+   path. The request carries the certificate's `files@localport.io` access
    (`files_download`, `files_upload`; only an `sftp` request may): without
    download an open for reading is refused `SSH_FX_PERMISSION_DENIED`, a
    read-write open needs both directions, and without upload every change (open
    for writing, setstat, rename, posix-rename, remove, mkdir, rmdir, symlink,
    link) is, as OpenSSH `sftp-server -R`; listing, stat, readlink and realpath
    are always served, and each refusal is a file event with result
-   `permission_denied`. A shell or exec on an `ssh` connection is not restricted
-   by it. A refusal fails the request, writes `localport: <code>` to the
-   channel's stderr (`login_not_allowed`, `kind_disabled`, `agent_busy`,
+   `permission_denied`. A shell or exec on an `ssh` connection is not
+   restricted by it. A refusal fails the request, writes `localport: <code>` to
+   the channel's stderr (`login_not_allowed`, `kind_disabled`, `agent_busy`,
    `kind_unavailable`, `launcher_unavailable`, `recording_unavailable` for a
-   Strict channel whose recording did not open, `full_disk_access_required`
-   for a macOS shell, below) and then closes the channel, so a client reads the reason
-   to the end of stderr. The messages PAM gives the
-   login's session setup (an expiry warning, the `/etc/nologin` text) are
-   written to the channel's stderr, one line each ending in CRLF, before the
-   session's output or the refusal line; a port forward has no stderr, so the
-   agent logs them. Shell and exec run through the login's shell, so an account
-   whose shell is `nologin` or `false` refuses them itself, as under sshd; SFTP
-   and port forwarding run the agent's own file and forward servers as the login
-   and follow the device config, not the login shell. The helper's exit becomes
-   `exit-status`, or for a Unix helper killed by a signal `exit-signal` (the RFC
-   4254 name without `SIG`, `<name>@localport.io` outside its list, core-dumped
-   false), then the channel closes; a Strict channel whose recording fails ends
-   with `localport: session ended: recording_failed`.
+   Strict channel whose recording did not open, `full_disk_access_required` on
+   macOS, below) and then closes the channel, so a client reads the reason to
+   the end of stderr. The messages PAM gives the login's session setup (an
+   expiry warning, the `/etc/nologin` text) are written to the channel's
+   stderr, one line each ending in CRLF, before the session's output or the
+   refusal line; a port forward has no stderr, so the agent logs them. Shell
+   and exec run through the login's shell, so an account whose shell is
+   `nologin` or `false` refuses them itself, as under sshd; SFTP and port
+   forwarding run the agent's own file and forward servers as the login and
+   follow the device config, not the login shell. The helper's exit becomes
+   `exit-status`, or for a Unix helper killed by a signal `exit-signal` (the
+   RFC 4254 name without `SIG`, `<name>@localport.io` outside its list,
+   core-dumped false), then the channel closes; a Strict channel whose
+   recording fails ends with `localport: session ended: recording_failed`.
 
    On macOS no session makes the agent's code or Apple's tools raise a privacy
    (TCC) dialog on the device's screen. The launcher reads its Full Disk Access
@@ -827,24 +825,26 @@ stream:
    - `sftp` with it `granted` serves as on any Unix device. Otherwise the
      session is confined to `files_root`, else the login's home, and never
      looks inside the folders macOS gates: Desktop, Documents, Downloads and
-     Library in the login's home, any `*.photoslibrary` folder, and
-     `/Volumes`. Each name is resolved one component at a time with lstat and
-     readlink, so a symlink cannot reach them either; opening, listing or
-     changing one answers `SSH_FX_PERMISSION_DENIED`, while its own entry
-     still lists and stats in its parent. A `files_root` inside one of them
-     cannot be opened and ends the session.
+     Library in each home under `/Users` and in the login's home, any
+     `*.photoslibrary` folder, `/Volumes` and `/Network`. Each name is
+     resolved one component at a time with lstat and readlink, so a symlink
+     cannot reach them either; opening, listing or changing one answers
+     `SSH_FX_PERMISSION_DENIED`, while its own entry still lists and stats in
+     its parent. A `files_root` inside or equal to one of them refuses the
+     request `full_disk_access_required`; a login's home inside one is not
+     read.
    - With it `granted`, a shell runs as the launcher's child and the grant
      applies. Without it the shell starts as its own responsible process
      (`localport-session shell-exec`), so Apple tools get a silent "Operation
      not permitted" on protected folders; a program the user runs is its own
      responsible process and may still ask on the Mac. A macOS that cannot
      start it that way refuses the request `full_disk_access_required`. When
-     that start fails, the session's stderr gets `localport: session_start_failed`
-     and it exits 127; no shell runs.
+     that start fails, the session's stderr gets `localport:
+     session_start_failed` and it exits 127; no shell runs.
    - A session started with it `granted` ends with `localport: session
      ended: full_disk_access_revoked` when the grant is removed while it runs:
      the launcher and the session's own helper each re-read it every 30
-     seconds.
+     seconds. An unreadable state leaves the session running.
    - Every login, agent-account sessions included, runs in its own BSM audit
      session as under Apple's sshd: the login's audit user id, flags remote and
      authenticated, a TTY flag for a PTY, the client address as terminal id. A
@@ -994,14 +994,13 @@ stream:
    once the client stays silent, as the agent does during the key question.
    The key is the SHA-256 of the leaf certificate's SubjectPublicKeyInfo;
    the key question's payload is, as SSH wire values: string that hash in
-   lowercase hex, boolean
-   pinned, string the certificate's SHA-256 (whole DER) and string its
-   SHA-1 (the Windows thumbprint), both lowercase hex, string subject and
-   string issuer (RFC 4514, each at most 512 bytes), boolean self-signed
-   (subject and issuer equal), uint64 notBefore and uint64 notAfter (Unix
-   seconds). After a true reply the agent sends the RDCleanPath response
-   PDU (version 3390, the confirm as `x224_connection_pdu`, every peer
-   certificate's DER leaf first as
+   lowercase hex, boolean pinned, string the certificate's SHA-256 (whole
+   DER) and string its SHA-1 (the Windows thumbprint), both lowercase hex,
+   string subject and string issuer (RFC 4514, each at most 512 bytes),
+   boolean self-signed (subject and issuer equal), uint64 notBefore and uint64
+   notAfter (Unix seconds). After a true reply the agent sends the
+   RDCleanPath response PDU (version 3390, the confirm as
+   `x224_connection_pdu`, every peer certificate's DER leaf first as
    `server_cert_chain`, the configured target as `server_addr`) and relays
    the channel and the TLS plaintext through its RDP filter; nothing from
    the target reaches the client before then. A malformed request or
@@ -1132,9 +1131,9 @@ stream:
    `shutdown` (the control session is ending), `config_changed`
    (`localport set` changed the device's entry and the agent reloaded it; the
    device's other sessions end too), `exited` (the channel of a `terminal`
-   or desktop connection, or the last channel of a `files` connection, closed or
-   was refused, a Strict
-   recording failure on it included), the desktop handshake's
+   or desktop connection, or the last channel of a `files` connection, closed
+   or was refused, a Strict recording failure on it included), the desktop
+   handshake's
    `desktop_handshake_timeout`, `desktop_target_closed` (also during the
    relay), `desktop_key_changed`, `desktop_key_downgraded` (`vnc`),
    `desktop_key_rejected`, `desktop_key_unavailable`,
@@ -1142,8 +1141,8 @@ stream:
    `rdp_security_refused` and `rdp_tls_failed` (`rdp`) (step 3),
    `desktop_protocol_violation` (step 3, also during the relay),
    `desktop_channel_refused` (`rdp`, during the relay),
-   `recording_failed` (a Strict
-   connection's port forwarding events could not be recorded) and, on one
+   `recording_failed` (a Strict connection's port forwarding events could not
+   be recorded) and, on one
    channel, `helper_failed` (the session helper's channel ended without an
    exit or an end frame) or `full_disk_access_revoked` (macOS, the helper's
    end frame: Full Disk Access was removed during a session started with
@@ -1170,18 +1169,16 @@ Stop: when the control session ends or the agent stops, the agent first asks its
 session handler to shut down (connections end with `shutdown`, handshakes in
 progress are aborted, session processes are ended: SIGHUP, then SIGKILL at
 5 s, and each channel waits at most 3 s for its recording's final segment
-to reach the uploader),
-waits for that at most 15 s, then closes the mux connection. The connection is
-never closed before that step.
+to reach the uploader), waits for that at most 15 s, then closes the mux
+connection. The connection is never closed before that step.
 
 ## Resumable connections
 
 A session connection survives a lost stream (network drop, edge restart) for
-5 minutes: the layer runs below SSH, so every channel and
-forward carries on. Code: `internal/session/resume.go` and
-`resume_prelude.go`; the browser client implements the same layer, and both
-pin one wire vector (`TestResumeWireVector`). A connection does not
-survive an agent restart.
+5 minutes: the layer runs below SSH, so every channel and forward carries on.
+Code: `internal/session/resume.go` and `resume_prelude.go`; the browser client
+implements the same layer, and both pin one wire vector
+(`TestResumeWireVector`). A connection does not survive an agent restart.
 
 Prelude messages are a 4-byte big-endian length (at most 16 KiB) and the
 x/crypto SSH wire encoding of one message (`sshtype` 160 to 165, version 3; the
@@ -1206,24 +1203,23 @@ agent refuses any other version). The edge relays them like any bytes.
   the handle happens for one that does not verify.
 - The agent admits a hello as userauth admits a certificate (table above,
   serial the notice's), and binds the connection to the certificate's key. It
-  admits a resume only for a live handle or an end record (below), with a resume certificate (critical
-  options exactly those of the table above plus `resume@localport.io`, naming
-  the original serial in lowercase hex) for the same subject, kind,
-  login and key that passes the local checks a hello does (kind and login
-  enabled, recording key held, table above), and only then checks the proof,
-  before it resends anything.
-  An installed resume runs the connection under the resume certificate and
-  the resume stream's session id: later recordings name that id and carry
-  that certificate, and its forwarding extensions apply from then on, so a
-  direction it no longer allows ends that direction's listeners and
-  forwarded connections; an SFTP channel started with a file direction its
-  `files@localport.io` no longer allows ends `files_narrowed`, written to
-  its recording as an asciicast marker of that label. A resume whose
-  certificate names a recording that a started channel or the running forwards
-  helper cannot meet (never recorded, under either policy, or recording failed
-  under Strict) is answered 3 and ends the connection with the logged reason
-  `recording_required`; a start in progress across such a resume is refused
-  with `recording_required`.
+  admits a resume only for a live handle or an end record (below), with a
+  resume certificate (critical options exactly those of the table above plus
+  `resume@localport.io`, naming the original serial in lowercase hex) for the
+  same subject, kind, login and key that passes the local checks a hello does
+  (kind and login enabled, recording key held, table above), and only then
+  checks the proof, before it resends anything. An installed resume runs the
+  connection under the resume certificate and the resume stream's session id:
+  later recordings name that id and carry that certificate, and its forwarding
+  extensions apply from then on, so a direction it no longer allows ends that
+  direction's listeners and forwarded connections; an SFTP channel started with
+  a file direction its `files@localport.io` no longer allows ends
+  `files_narrowed`, written to its recording as an asciicast marker of that
+  label. A resume whose certificate names a recording that a started channel or
+  the running forwards helper cannot meet (never recorded, under either policy,
+  or recording failed under Strict) is answered 3 and ends the connection with
+  the logged reason `recording_required`; a start in progress across such a
+  resume is refused with `recording_required`.
 - Statuses: 0 ok, 1 `resume_refused`, 2 `resume_busy` (another resume of the
   handle runs; retry), 3 `resume_lost` (no such connection or end record, or
   a position outside the send buffer), 4 ended (proof reply only: the
@@ -1239,12 +1235,11 @@ agent refuses any other version). The edge relays them like any bytes.
   handshake leaves one, attached or detached, since the abort closes the
   stream without telling the client; a handshake timeout or failure leaves
   none. A connection leaves at most one record, and an end that leaves none
-  (`resume_refused`, `resume_lost`, `recording_required`, a client's close)
-  is not followed by a detach timeout record. A
-  resume of the handle passes the same checks, with the same replies, as on a
-  live handle; once its proof verifies it is answered 4 with the reason (a
-  close resume: 0), and the record is deleted. Failed proofs count as on a
-  live handle and the third deletes the record. A record lives 5 minutes from
+  is not followed by a detach timeout record. A resume of the handle passes
+  the same checks, with the same replies, as on a live handle; once its proof
+  verifies it is answered 4 with the reason (a close resume: 0), and the
+  record is deleted. Failed proofs count as on a live handle and the third
+  deletes the record. A record lives 5 minutes from
   the end, at most 8 are kept (the oldest goes first), and none survives an
   agent restart; a resume that finds none is `resume_lost`. Clients accept a
   reason of at most 64 bytes of `[a-z_]` and treat any other as unknown.
@@ -1294,15 +1289,15 @@ open fails within 5 s is refused (`recording_unavailable`) and other channels
 are unaffected; a Best effort one runs unrecorded. A recorded `shell` or `exec`
 writes `localport: this session is recorded` to its stderr before any helper
 output; an `sftp` channel, whose client shows no stderr, does not. The agent
-records the channel's output, resizes and exit (or the end marker), seals it
-in segments and delivers them over its session mux. The open carries the
-admitting certificate (`certificate`, base64url, at most 8 KiB), from which the
-control plane creates the recording; the edge forwards the open only for a
-connection its session mux carries and adds when it admitted that certificate,
-so a channel that starts after a short-lived certificate expired is still
-recorded. The spool's `meta.json` keeps the certificate and the session id so a
-resumed open after a restart sends them again. Code: `internal/recording/`,
-`internal/session/recorder.go`, `internal/tunnel/recording_client.go`.
+records the channel's output, resizes and exit (or the end marker), seals it in
+segments and delivers them over its session mux. The open carries the admitting
+certificate (`certificate`, base64url, at most 8 KiB), from which the control
+plane creates the recording; the edge forwards the open only for a connection
+its session mux carries and adds when it admitted that certificate, so a
+channel that starts after a short-lived certificate expired is still recorded. The spool's `meta.json` keeps the
+certificate and the session id so a resumed open after a restart sends them
+again. Code: `internal/recording/`, `internal/session/recorder.go`,
+`internal/tunnel/recording_client.go`.
 
 Format: the plaintext is asciicast v3, one JSON line per event (header, then `o`
 output, `r` resize, `f` file activity, `p` port forward, `x` exit and `m`
@@ -1401,8 +1396,8 @@ Every open a live channel or forwards start sends, normal or failed, carries
 `Localport-Session-Channels` (decimal, the recorded starts of that stream so
 far, this one included, counted before the start is attempted and from zero on
 each resume stream). The edge reads both before it takes a stream slot, so a
-`recording_busy` refusal still counts. An open of a spooled entry after an agent
-restart carries neither.
+`recording_busy` refusal still counts. An open of
+a spooled entry after an agent restart carries neither.
 
 Each recorded start reports its outcome: one open, and one failed open when the
 start fails before or after that open. A failed open never delays the channel.
@@ -1456,8 +1451,8 @@ open and before the first output, so a crash leaves an entry to complete. The
 final segment is always spooled and named in `meta.json` before it can be sent,
 so a crash after its delivery still completes the recording as final. At
 restart a segment file at the sealed count, written just before a crash, is
-adopted, with each contiguous one after it. The
-spool holds at most 32 MiB per agent across every device and recording,
+adopted, with each contiguous one after it. The spool holds at most 32 MiB
+per agent across every device and recording,
 `meta.json` files included. Each recording counts the largest `meta.json` it can
 reach (its complete fields included) plus the space of each segment hash it
 accepted, so a recording's `meta.json` writes always fit once the recording
@@ -1504,8 +1499,8 @@ Policies:
 - Strict: the channel's open is sent before its helper starts, within 5 s.
   Any failure, a missing uploader or no spool room for a new recording
   refuses that channel (`recording_unavailable`) and spawns nothing; other
-  channels are unaffected. When the
-  spool has no room for a segment's hash, or memory is full and the spool
+  channels are unaffected. When the spool has no room for a segment's hash,
+  or memory is full and the spool
   refuses the segment, the agent seals what it has, completes `incomplete`
   with reason `recording_failed` and ends that channel with
   `recording_failed`. When the recorder's queue is full, terminal output waits
@@ -1606,23 +1601,23 @@ Files, under the state root (the directory holding `identity/`): per
 credential, device and login, the client key
 `ssh/<team>/<kind>-<identity>/<login>@<device-host>` (ed25519, OpenSSH format,
 0600, generated on first use, never sent), its certificate beside it as
-`<login>@<device-host>-cert.pub` and the edge URL as `<login>@<device-host>.url`,
-so runs for two logins never replace each other's certificate; and, per
-credential, `known_hosts` beside them, one line per device host. A login is
-refused when the device's login rule refuses it (`config.ValidLogin`), when it
-starts with `-` or holds any of ``' ` " ; & < > | ( ) { } $``, on a Windows
-client when it holds `\`, `*` or `?`, and elsewhere when it ends in `\` or
-holds `\\`. A Windows domain account is named in its UPN form,
-`alice@corp.example`; `localport ssh` splits `[login@]<device-host>` at the
-last `@`. `ssh-proxy` only reads the client files: without a certificate, URL
-or client key it fails with AG101 and names the `ssh-cert` command.
-`ssh-cert` mints only when the stored
-certificate is not for this key and login, or has under 60 s left. It checks
-the answer (a user certificate for the client key and exactly the login,
-not expired, an `ecdsa-sha2-nistp256` host key, a `wss` URL) before writing,
-then replaces the device host's `known_hosts` line with the answer's host key,
-writes the URL and the certificate, each atomically, all under the lock
-`ssh/.lock`, so concurrent connections mint once.
+`<login>@<device-host>-cert.pub` and the edge URL as
+`<login>@<device-host>.url`, so runs for two logins never replace each other's
+certificate; and, per credential, `known_hosts` beside them, one line per
+device host. A login is refused when the device's login rule refuses it
+(`config.ValidLogin`), when it starts with `-` or holds any of ``' ` " ; & < >
+| ( ) { } $``, on a Windows client when it holds `\`, `*` or `?`, and elsewhere
+when it ends in `\` or holds `\\`. A Windows domain account is named in its UPN
+form, `alice@corp.example`; `localport ssh` splits `[login@]<device-host>` at
+the last `@`. `ssh-proxy` only reads the client files: without a certificate,
+URL or client key it fails with AG101 and names the `ssh-cert` command.
+`ssh-cert` mints only when the stored certificate is not for this key and
+login, or has under 60 s left. It checks the answer (a user certificate for the
+client key and exactly the login, not expired, an `ecdsa-sha2-nistp256` host
+key, a `wss` URL) before writing, then replaces the device host's `known_hosts`
+line with the answer's host key, writes the URL and the certificate, each
+atomically, all under the lock `ssh/.lock`, so concurrent connections mint
+once.
 
 Stream: `ssh-proxy` dials the URL, sends the certificate in SSH wire form as
 the first binary WebSocket message, runs the first connect's prelude with the
@@ -1765,6 +1760,10 @@ depends on them.
   browser on another device. The approval screen shows the requesting IP and
   what the certificate will reach. Nothing auto-submits, and the code stays
   visible so it can be checked against what is on screen.
+- **Both URIs must be https on the API's registrable domain** (eTLD+1; an IP
+  or single-label API host must match exactly), with no user info, control,
+  bidi or zero-width characters. Otherwise login fails before printing
+  anything.
 - **The CSR goes up at the start**, and the server pins its hash. The human
   approves one key, and only that key can collect.
 - **Pending and slow-down continue the poll.** `SE021` is RFC 8628
@@ -1774,13 +1773,13 @@ depends on them.
   to map the state of somebody else's sign-in. The agent branches on the code,
   never on message text.
 - **A sign-in certificate does not renew.** It lives hours; re-running
-  `localport login` is how a fresh one is obtained. The identity is the person's
-  immutable username, so removing them from the team ends it. The control plane
-  refuses `/v1/mtls/certs/renew` for a sign-in certificate, and the agent does
-  not ask: the credential records `source: sso`, and `Renew` refuses before
-  building a request. The control plane sends no `renew_after` for a sign-in,
-  and the field is omitted from `meta.json`. `localport access` prints the expiry and that
-  `localport login` is how it comes back.
+  `localport login` is how a fresh one is obtained. The identity is the
+  person's immutable username, so removing them from the team ends it. The
+  control plane refuses `/v1/mtls/certs/renew` for a sign-in certificate, and
+  the agent does not ask: the credential records `source: sso`, and `Renew`
+  refuses before building a request. The control plane sends no `renew_after`
+  for a sign-in, and the field is omitted from `meta.json`. `localport access`
+  prints the expiry and that `localport login` is how it comes back.
 
 ### Stored identity (`localport identity`)
 
@@ -1844,15 +1843,15 @@ of backups and configuration management.
 ```
 
 The lock files live outside the credential directory, so a credential is
-deleted whole while its writers' lock is held. Only `service uninstall
---purge` deletes lock files: it holds `.store.lock` exclusively, so no lock
-below it is held or awaited, deletes `.locks`, and on Linux and macOS deletes
-`.store.lock` when nothing else remains. On Windows `.store.lock` stays: a
-deleted file there is delete pending while a handle is open, and opening it
-meanwhile fails instead of waiting. A process that takes a lock checks afterwards that the
-path still names the file it locked, and opens it again when a purge deleted
-it in between. A lock wanted while a purge runs is refused with `AG149`. The
-hashed directory name carries no team or device identifier.
+deleted whole while its writers' lock is held. Only `service uninstall --purge`
+deletes lock files: it holds `.store.lock` exclusively, so no lock below it is
+held or awaited, deletes `.locks`, and on Linux and macOS deletes `.store.lock`
+when nothing else remains. On Windows `.store.lock` stays: a deleted file there
+is delete pending while a handle is open, and opening it meanwhile fails
+instead of waiting. A process that takes a lock checks afterwards that the path
+still names the file it locked, and opens it again when a purge deleted it in
+between. A lock wanted while a purge runs is refused with `AG149`. The hashed
+directory name carries no team or device identifier.
 
 Before every read and write, each directory from the base (`LOCALPORT_HOME`,
 `~/.localport` or the machine-wide config directory) down to the credential is
@@ -1877,7 +1876,8 @@ record without it still loads. A renewal refreshes it but never blanks it.
 `source` is `token`, `oidc` or `sso`. Only `token` is a renewing source, and
 any other value is treated as non-renewing. A workload (`oidc`) certificate is
 held in memory for one run and never renewed: the control plane refuses its
-renewal, and the job requests a new certificate with a new workload token. A renewal carries the source forward unchanged.
+renewal, and the job requests a new certificate with a new workload token. A
+renewal carries the source forward unchanged.
 
 `meta.json` is validated on read and on write. A record naming an unknown kind
 or source, missing an expiry, or pairing a non-renewing source with a renewal
@@ -1952,21 +1952,22 @@ The signature is recomputed on every attempt, because a retry that crosses a
 minute boundary would otherwise send a signature the server no longer accepts.
 
 Renewal is due at `renew_after`, which the server sets about two thirds through
-the lifetime. For a setup-token certificate it is at least an hour before
-expiry. For a device certificate it is capped at expiry and can equal it, for
-example under a team CA that expires soon; an expired device certificate still
-renews at the device route. The server's value is
-authoritative: only setup-token and device certificates renew, and a sign-in,
-dashboard or workload certificate carries no `renew_after` on the wire. A
-setup-token certificate whose renewal would fall past its token's expiry or
-renewal stop, or within an hour of its own expiry, carries none either and is
-not renewed: the agent stores no deadline and never sends a renewal for it.
-The loop logs once that it does not renew and when it expires, and
-`localport identity renew` refuses it with `AG007`. A device
-certificate always carries one; an enrolment or device renewal answer without
-a parseable `renew_after` is refused. The loop runs inside `localport access`; a machine that is not permanently connected
-should run `localport identity renew` from a daily timer instead. The previous
-certificate stays valid until its own expiry, so rollover overlaps.
+the lifetime. For a setup-token
+certificate it is at least an hour before expiry. For a device certificate it
+is capped at expiry and can equal it, for example under a team CA that expires
+soon; an expired device certificate still renews at the device route. The
+server's value is authoritative: only setup-token and device certificates
+renew, and a sign-in, dashboard or workload certificate carries no
+`renew_after` on the wire. A setup-token certificate whose renewal would fall
+past its token's expiry or renewal stop, or within an hour of its own expiry,
+carries none either and is not renewed: the agent stores no deadline and never
+sends a renewal for it. The loop logs once that it does not renew and when it
+expires, and `localport identity renew` refuses it with `AG007`. A device
+certificate always carries one; an enrolment or device renewal answer without a
+parseable `renew_after` is refused. The loop runs inside `localport access`; a
+machine that is not permanently connected should run `localport identity renew`
+from a daily timer instead. The previous certificate stays valid until its own
+expiry, so rollover overlaps.
 
 ### Device enrolment and rollover
 
@@ -2065,31 +2066,31 @@ Rollover:
 and `login` refuse one. `up`, `setup` and `login` check the store
 directory before they spend their one-time secret.
 
-A second `up` for an enrolled device checks its flags before the spend
-without the stored entry, since the identity is unknown until enrolment; a flag
-that needs the stored entry (`--logins` alone, `--enable desktop` relying on a
-stored target) is refused with the remedy: re-enrol without it, then
-`localport set`. Before the spend it takes the local config lock and holds it
-through enrolment; it then re-reads the config and merges the flags onto the stored entry as `set` does: each flag
-given overrides, the rest keep their stored values. A new identity appends an
-entry. It prints the settings in force, and a re-enrolment that changes nothing
-does not rewrite the config. When the flags conflict with the stored entry,
-the stored entry stays in force with the new credential and `up` exits
-non-zero naming the conflict and `localport set`. A stored files root that no
-longer exists is reported as such, with the stored entry in force; any other
-failure to write the config prints the spent-token remedy. A device entry
-enabling `terminal` or `files` needs at least one login, and one enabling
-neither has none. `localport run` logs and skips a device whose credential is
-missing or unreadable and runs the others. In a terminal it refuses to start
-when the config lists no device or none can start, and returns when the last
-one ends; the device service (`run --service`) instead keeps running with no
-connection until a reload or a stop. A device whose tombstone stands and whose
-credential is gone is skipped without a dial, and the service deletes the
-tombstones of devices absent from the config. `localport down` sets
+A second `up` for an enrolled device checks its flags before the spend without
+the stored entry, since the identity is unknown until enrolment; a flag that
+needs the stored entry (`--logins` alone, `--enable desktop` relying on a
+stored target) is refused with the remedy: re-enrol without it, then `localport
+set`. Before the spend it takes the local config lock and holds it through
+enrolment; it then re-reads the config and merges the flags onto the stored
+entry as `set` does: each flag given overrides, the rest keep their stored
+values. A new identity appends an entry. It prints the settings in force, and a
+re-enrolment that changes nothing does not rewrite the config. When the flags
+conflict with the stored entry, the stored entry stays in force with the new
+credential and `up` exits non-zero naming the conflict and `localport set`. A
+stored files root that no longer exists is reported as such, with the stored
+entry in force; any other failure to write the config prints the spent-token
+remedy. A device entry enabling `terminal` or `files` needs at least one login,
+and one enabling neither has none. `localport run` logs and skips a device
+whose credential is missing or unreadable and runs the others. In a terminal it
+refuses to start when the config lists no device or none can start, and returns
+when the last one ends; the device service (`run --service`) instead keeps
+running with no connection until a reload or a stop. A device whose tombstone
+stands and whose credential is gone is skipped without a dial, and the service
+deletes the tombstones of devices absent from the config. `localport down` sets
 `paused: true` on an entry, which the service then runs no tunnel for, until
-`localport up` clears it. A save or local config write that fails
-after a join token, setup token or sign-in was spent names the remedy: a new
-token or sign-in, then the command again.
+`localport up` clears it. A save or local config write that fails after a join
+token, setup token or sign-in was spent names the remedy: a new token or
+sign-in, then the command again.
 
 ### When the control plane cannot be reached
 

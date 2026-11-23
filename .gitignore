@@ -1,6 +1,8 @@
 # Common
 bin/
 dist/
+# `go build ./cmd/localport` output
+/localport
 .DS_Store
 *.env
 
