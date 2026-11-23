@@ -17,6 +17,15 @@ import (
 	"github.com/localport/agent/internal/launcher"
 )
 
+// waitReady reads the command's first output, "ready", which it prints once
+// its traps are installed.
+func waitReady(t *testing.T, fr *launcher.FrameReader) {
+	t.Helper()
+	if f, err := fr.ReadFrame(); err != nil || f.Type != launcher.FrameData || string(f.Data) != "ready\n" {
+		t.Fatalf("first frame %+v, %v; want ready", f, err)
+	}
+}
+
 // startPipe runs `sh -c command` on pipes as the test's user and returns the
 // session and the agent's frame reader.
 func startPipe(t *testing.T, command string) (*pipeSession, *launcher.FrameReader) {
@@ -386,8 +395,8 @@ func TestEndSessionBoundsAStalledAgent(t *testing.T) {
 // The end path ends a command that ignores SIGHUP with SIGKILL to its group,
 // so no frame follows and Wait returns.
 func TestPipeSessionEndKillsTheCommand(t *testing.T) {
-	p, _ := startPipe(t, "trap '' HUP; while :; do sleep 1; done")
-	time.Sleep(100 * time.Millisecond)
+	p, fr := startPipe(t, "trap '' HUP; echo ready; while :; do sleep 1; done")
+	waitReady(t, fr)
 	pid := p.cmd.Process.Pid
 	p.finish()
 	done := make(chan struct{})

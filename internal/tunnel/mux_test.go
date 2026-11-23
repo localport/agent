@@ -65,7 +65,6 @@ func TestMuxServerPipesStreamToLocalService(t *testing.T) {
 	}
 }
 
-// An unreachable local service returns 502.
 func TestMuxServerReportsUnreachableLocalService(t *testing.T) {
 	srv := &muxServer{
 		dialTarget: tunnelTarget(func() (net.Conn, error) {

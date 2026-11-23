@@ -51,8 +51,7 @@ func rfbServer(version string, types []byte, type33 uint32, after func(c net.Con
 	}
 }
 
-// sendKeyThenFrame writes the key.
-func sendKeyThenFrame(key []byte) func(net.Conn) error {
+func sendServerKey(key []byte) func(net.Conn) error {
 	return func(c net.Conn) error {
 		_, err := c.Write(key)
 		return err
@@ -74,9 +73,8 @@ func ra2Sealed(n int) []byte {
 // ra2ClientFirst is the client's key and random, sent together.
 func ra2ClientFirst() []byte { return append(ra2ClientKey(), ra2Message(128)...) }
 
-// ra2Server runs the server side of RA2ne: key and server random in one
-// write, as a server may, then the rest through ServerInit. It answers key
-// events afterwards.
+// ra2Server runs the server side of RA2ne: key and server random in one write,
+// as a server may, then the rest through ServerInit, then answers key events.
 func ra2Server(key []byte) func(net.Conn) error {
 	return func(c net.Conn) error {
 		if _, err := c.Write(append(append([]byte(nil), key...), ra2Message(128)...)); err != nil {
@@ -156,7 +154,7 @@ func TestDesktopKeyHandOverKeepsPipelinedClientBytes(t *testing.T) {
 	key := rsaKey(2048, 7)
 	got := make(chan string, 1)
 	script := rfbServer("RFB 003.008\n", []byte{6}, 0, func(c net.Conn) error {
-		if err := sendKeyThenFrame(key)(c); err != nil {
+		if err := sendServerKey(key)(c); err != nil {
 			return err
 		}
 		ahead := make([]byte, len(ra2ClientKey()))
@@ -246,8 +244,8 @@ func TestDesktopKeyRefusals(t *testing.T) {
 		ask     bool // a key request arrives and is refused
 		want    string
 	}{
-		{"rejected", rfbServer("RFB 003.008\n", []byte{6}, 0, sendKeyThenFrame(key)), func(string) *memKeys { return &memKeys{} }, "RFB 003.008\n", 6, true, CloseDesktopKeyRejected},
-		{"changed", rfbServer("RFB 003.008\n", []byte{6}, 0, sendKeyThenFrame(key)), func(addr string) *memKeys {
+		{"rejected", rfbServer("RFB 003.008\n", []byte{6}, 0, sendServerKey(key)), func(string) *memKeys { return &memKeys{} }, "RFB 003.008\n", 6, true, CloseDesktopKeyRejected},
+		{"changed", rfbServer("RFB 003.008\n", []byte{6}, 0, sendServerKey(key)), func(addr string) *memKeys {
 			m := &memKeys{}
 			_, _ = m.Pin(context.Background(), "vnc", addr, sha256.Sum256(other))
 			return m
@@ -257,10 +255,10 @@ func TestDesktopKeyRefusals(t *testing.T) {
 			_, _ = m.Pin(context.Background(), "vnc", addr, sha256.Sum256(key))
 			return m
 		}, "RFB 003.008\n", 2, false, CloseDesktopKeyDowngraded},
-		{"store unreadable", rfbServer("RFB 003.008\n", []byte{6}, 0, sendKeyThenFrame(key)), func(string) *memKeys {
+		{"store unreadable", rfbServer("RFB 003.008\n", []byte{6}, 0, sendServerKey(key)), func(string) *memKeys {
 			return &memKeys{err: errors.New("corrupt")}
 		}, "RFB 003.008\n", 6, false, CloseDesktopKeyUnavailable},
-		{"key too short", rfbServer("RFB 003.008\n", []byte{6}, 0, sendKeyThenFrame(rsaKey(512, 1))), func(string) *memKeys { return &memKeys{} }, "RFB 003.008\n", 6, false, CloseDesktopHandshake},
+		{"key too short", rfbServer("RFB 003.008\n", []byte{6}, 0, sendServerKey(rsaKey(512, 1))), func(string) *memKeys { return &memKeys{} }, "RFB 003.008\n", 6, false, CloseDesktopHandshake},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var keys *memKeys
@@ -299,7 +297,7 @@ func TestDesktopKeyRefusals(t *testing.T) {
 func TestDesktopKeyFraming(t *testing.T) {
 	key := rsaKey(1024, 3)
 	t.Run("3.3", func(t *testing.T) {
-		f, _ := keyFixture(t, rfbServer("RFB 003.003\n", nil, 6, sendKeyThenFrame(key)), &memKeys{})
+		f, _ := keyFixture(t, rfbServer("RFB 003.003\n", nil, 6, sendServerKey(key)), &memKeys{})
 		client := f.connect(t, f.vncOpts())
 		ch, reqs, err := openDesktopChannel(client, chanVNC)
 		if err != nil {
@@ -328,7 +326,7 @@ func TestDesktopKeyFraming(t *testing.T) {
 			if _, err := io.ReadFull(c, make([]byte, 4)); err != nil {
 				return err
 			}
-			return sendKeyThenFrame(key)(c)
+			return sendServerKey(key)(c)
 		})
 		f, _ := keyFixture(t, script, &memKeys{})
 		client := f.connect(t, f.vncOpts())
@@ -367,7 +365,7 @@ func TestDesktopKeyFraming(t *testing.T) {
 func TestDesktopKeyCheckDeadlinePerRead(t *testing.T) {
 	const timeout = time.Second
 	key := rsaKey(2048, 7)
-	target := newScriptedTarget(t, rfbServer("RFB 003.008\n", []byte{6}, 0, sendKeyThenFrame(key)))
+	target := newScriptedTarget(t, rfbServer("RFB 003.008\n", []byte{6}, 0, sendServerKey(key)))
 	f := desktopFixture(t, target.ln.Addr().String(), func(c *ServerConfig) {
 		c.DesktopKeys = &memKeys{}
 		c.desktopCheckTimeout = timeout
@@ -416,7 +414,7 @@ func TestDesktopKeyCheckSilentTarget(t *testing.T) {
 func TestDesktopKeyEndDuringTheQuestion(t *testing.T) {
 	key := rsaKey(2048, 5)
 	keys := &memKeys{}
-	f, target := keyFixture(t, rfbServer("RFB 003.008\n", []byte{6}, 0, sendKeyThenFrame(key)), keys)
+	f, target := keyFixture(t, rfbServer("RFB 003.008\n", []byte{6}, 0, sendServerKey(key)), keys)
 	client := f.connect(t, f.vncOpts())
 	ch, reqs, err := openDesktopChannel(client, chanVNC)
 	if err != nil {

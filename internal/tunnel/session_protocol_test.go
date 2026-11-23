@@ -262,8 +262,7 @@ func TestNonRetryableShutdownStopsTheTunnel(t *testing.T) {
 	}
 }
 
-// A retryable shutdown ends only the session, for example during an edge
-// deploy.
+// A retryable shutdown, as in an edge deploy, ends only the session.
 func TestRetryableShutdownEndsOnlyTheSession(t *testing.T) {
 	tn, edge := connectedTunnel(t, Options{Local: "127.0.0.1:1"})
 
@@ -282,7 +281,6 @@ func TestRetryableShutdownEndsOnlyTheSession(t *testing.T) {
 	}
 }
 
-// A shutdown without the retryable field is retryable.
 func TestShutdownWithoutARetryableFieldIsRetryable(t *testing.T) {
 	tn, edge := connectedTunnel(t, Options{Local: "127.0.0.1:1"})
 
@@ -300,7 +298,6 @@ func TestShutdownWithoutARetryableFieldIsRetryable(t *testing.T) {
 	}
 }
 
-// An Error frame is reported and the session continues.
 func TestErrorFrameIsReportedWithoutEndingTheSession(t *testing.T) {
 	rec := &recorder{}
 	tn, edge := connectedTunnel(t, Options{Local: "127.0.0.1:1", Handler: rec})
@@ -346,7 +343,6 @@ func TestAdvisoryFramesAreAcceptedSilently(t *testing.T) {
 	}
 }
 
-// Unknown frame types are ignored.
 func TestUnknownFrameTypeIsIgnored(t *testing.T) {
 	rec := &recorder{}
 	tn, edge := connectedTunnel(t, Options{Local: "127.0.0.1:1", Handler: rec})
@@ -386,8 +382,7 @@ func TestMalformedPayloadIsDropped(t *testing.T) {
 	}
 }
 
-// A NewConnection starts a dial-back that reports its result under the frame's
-// connection ID.
+// A NewConnection starts a dial-back reporting its result under the frame's connection ID.
 func TestNewConnectionIsProxiedUnderItsConnectionID(t *testing.T) {
 	rec := &recorder{}
 	tn, edge := connectedTunnel(t, Options{Local: "127.0.0.1:1", Protocol: "tcp", Handler: rec})

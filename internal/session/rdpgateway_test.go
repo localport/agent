@@ -51,8 +51,7 @@ func golden(t *testing.T, name string) []byte {
 	return nil
 }
 
-// x224Confirm is a Connection Confirm TPKT selecting protocol, as the golden
-// generator's.
+// x224Confirm is a Connection Confirm TPKT selecting protocol, as the golden generator builds it.
 func x224Confirm(protocol uint32) []byte {
 	b := []byte{0x03, 0x00, 0x00, 0x13, 0x0e, 0xd0, 0x00, 0x00, 0x12, 0x34, 0x00, rdpNegResponse, 0x1f, 0x08, 0x00}
 	return binary.LittleEndian.AppendUint32(b, protocol)
@@ -61,8 +60,7 @@ func x224Confirm(protocol uint32) []byte {
 var (
 	// x224Request asks for TLS and CredSSP.
 	x224Request = []byte{0x03, 0x00, 0x00, 0x13, 0x0e, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00, 0x03, 0x00, 0x00, 0x00}
-	// x224Failure is a Connection Confirm carrying RDP_NEG_FAILURE
-	// HYBRID_REQUIRED_BY_SERVER.
+	// x224Failure is a Connection Confirm with RDP_NEG_FAILURE HYBRID_REQUIRED_BY_SERVER.
 	x224Failure = []byte{0x03, 0x00, 0x00, 0x13, 0x0e, 0xd0, 0x00, 0x00, 0x12, 0x34, 0x00, rdpNegFailure, 0x00, 0x08, 0x00, 0x05, 0x00, 0x00, 0x00}
 	// x224NoNegotiation is a Connection Confirm with no negotiation
 	// structure: Standard RDP Security.
@@ -92,8 +90,7 @@ func validRequest() testRequest {
 	return testRequest{Version: rdcleanpathVersion, Destination: "localport-desktop", ProxyAuth: "localport", X224: x224Request}
 }
 
-// The agent's PDUs are byte for byte IronRDP's, and IronRDP's request
-// parses.
+// The agent's PDUs match IronRDP's byte for byte, and IronRDP's request parses.
 func TestRDCleanPathMatchesIronRDP(t *testing.T) {
 	resp, err := asn1.Marshal(rdcleanpathResponse{Version: rdcleanpathVersion, X224: x224Confirm(2),
 		CertChain: [][]byte{[]byte("leaf-certificate-der"), []byte("issuer-der")}, ServerAddr: "192.168.1.20:3389"})
@@ -392,11 +389,10 @@ func noRequestsThenClose(t *testing.T, reqs <-chan *ssh.Request) {
 }
 
 // On first use the agent relays the X.224 request unchanged, asks with the
-// certificate's details, pins the SPKI on trust, and answers with the
-// confirm, the chain and the target; the filter then carries the plaintext,
-// the bytes sent after the request first: a TSRequest the target echoes, or
-// under TLS alone a Connect Initial the target answers. The next connection
-// asks pinned.
+// certificate's details, pins the SPKI on trust and answers with the confirm,
+// the chain and the target. The filter then carries the plaintext, bytes sent
+// after the request first: a TSRequest the target echoes, or under TLS alone
+// a Connect Initial it answers. The next connection asks as pinned.
 func TestRDPGatewayFirstUseAndMatch(t *testing.T) {
 	cert := testCert(t, "desktop.test")
 	leaf := cert.Leaf
@@ -838,9 +834,8 @@ func (c *waitClock) fire(t *testing.T) {
 	}
 }
 
-// The client wait ends a connection whose client stays silent, for both
-// kinds; a stop that loses the race to the timer ends it too, before any
-// key question.
+// The client wait ends a connection whose client stays silent, for both kinds;
+// a stop that loses the race to the timer also ends it before any key question.
 func TestDesktopClientWait(t *testing.T) {
 	cases := map[string]func(t *testing.T, clock *waitClock) (ssh.Channel, <-chan *ssh.Request){
 		"rdp": func(t *testing.T, clock *waitClock) (ssh.Channel, <-chan *ssh.Request) {
@@ -854,7 +849,7 @@ func TestDesktopClientWait(t *testing.T) {
 			return ch, reqs
 		},
 		"vnc": func(t *testing.T, clock *waitClock) (ssh.Channel, <-chan *ssh.Request) {
-			target := newScriptedTarget(t, rfbServer("RFB 003.008\n", []byte{6}, 0, sendKeyThenFrame(rsaKey(2048, 7))))
+			target := newScriptedTarget(t, rfbServer("RFB 003.008\n", []byte{6}, 0, sendServerKey(rsaKey(2048, 7))))
 			f := desktopFixture(t, target.ln.Addr().String(), func(c *ServerConfig) { c.clock = clock })
 			client := f.connect(t, f.vncOpts())
 			ch, reqs, err := openDesktopChannel(client, chanVNC)

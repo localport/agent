@@ -32,13 +32,19 @@ func TestExitWatchObservesTheExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer w.Close()
-	cmd := exec.Command("/bin/sh", "-c", "sleep 0.3; exit 5")
+	// The child exits when its stdin closes, after the registration.
+	cmd := exec.Command("/bin/sh", "-c", "read x; exit 5")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Watch(cmd.Process.Pid); err != nil {
 		t.Fatal(err)
 	}
+	_ = stdin.Close()
 	waitWithin(t, w, 10*time.Second)
 	// Unreaped: the pid still names the zombie.
 	if err := syscall.Kill(cmd.Process.Pid, 0); err != nil {
@@ -61,7 +67,16 @@ func TestExitWatchOfAnExitedChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = cmd.Wait() }()
-	time.Sleep(300 * time.Millisecond)
+	// A first watch observes the exit; the child stays unreaped.
+	exited, err := NewExitWatch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exited.Close()
+	if err := exited.Watch(cmd.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	waitWithin(t, exited, 10*time.Second)
 	if err := w.Watch(cmd.Process.Pid); err != nil {
 		t.Fatal(err)
 	}

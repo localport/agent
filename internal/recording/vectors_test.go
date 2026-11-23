@@ -41,10 +41,9 @@ type vectorSegment struct {
 
 var b64 = base64.RawURLEncoding
 
-// recordVectorSession seals a scripted session: output, a resize, a large
-// compressible output, a short line in its own segment and the end marker of
-// a session closed without an exit in the final segment, so both codecs
-// appear.
+// recordVectorSession seals a scripted session covering both codecs: output,
+// a resize, a large compressible output, a short line in its own segment, and
+// in the final segment the end marker of a session closed without an exit.
 func recordVectorSession(t *testing.T) recordingVectors {
 	t.Helper()
 	sealer, priv := newTestSealer(t)
@@ -71,7 +70,7 @@ func recordVectorSession(t *testing.T) recordingVectors {
 	plains = append(plains, seg.Flush())
 
 	v := recordingVectors{
-		Description: "Recording " + testID + " sealed by agent/internal/recording; regenerate with go test ./internal/recording -run TestRecordingVectors -update",
+		Description: "Recording " + testID + " sealed by internal/recording; regenerate with go test ./internal/recording -run TestRecordingVectors -update",
 		ID:          testID,
 		FinalSealed: true,
 	}

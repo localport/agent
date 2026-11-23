@@ -148,7 +148,6 @@ func TestFrameRoundTripPreservesTypeAndPayload(t *testing.T) {
 	}
 }
 
-// A heartbeat ack echoes the heartbeat timestamp.
 func TestHeartbeatAckEchoesTheSenderTimestamp(t *testing.T) {
 	w, r := pipeConns(t)
 
@@ -207,7 +206,6 @@ func TestFrameWithNoPayload(t *testing.T) {
 	}
 }
 
-// Shutdown with an empty body parses to an empty payload.
 func TestParseShutdownAcceptsAnEmptyBody(t *testing.T) {
 	p, err := ParseShutdown(nil)
 	if err != nil {
@@ -329,8 +327,7 @@ func TestMessageTypeNumbersAreFixed(t *testing.T) {
 	}
 }
 
-// Concurrent senders never interleave frames, and a reader runs alongside
-// them.
+// Concurrent senders never interleave frames while a reader runs alongside.
 func TestConcurrentSendersEmitWholeFrames(t *testing.T) {
 	w, r := pipeConns(t)
 

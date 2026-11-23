@@ -190,7 +190,6 @@ func TestFailedOpenDiscardsTheSealer(t *testing.T) {
 	}
 }
 
-// A resume stream counts its recorded starts from zero.
 func TestResumeStreamCountsRecordedStartsFromZero(t *testing.T) {
 	client := &captureClient{opens: make(chan capturedOpen, 2)}
 	f, keySum, _ := recordingFixture(t, client)

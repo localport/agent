@@ -43,9 +43,8 @@ func desktopChannelType(kind string) string {
 	return ""
 }
 
-// isDesktopKind reports whether kind is a desktop kind the agent serves: its
-// connection carries one channel to the configured target, dialed by the
-// agent process.
+// isDesktopKind reports whether kind is a desktop kind: one channel to the
+// configured target, dialed by the agent process.
 func isDesktopKind(kind string) bool { return desktopChannelType(kind) != "" }
 
 // desktopChannel is the one channel of a desktop connection, guarded by the
@@ -342,8 +341,7 @@ func malformed(side handshakeSide, format string, args ...any) error {
 	return &handshakeError{side: side, fault: faultMalformed, err: fmt.Errorf(format, args...)}
 }
 
-// targetEnded reports whether err is the target's EOF, I/O error or
-// deadline.
+// targetEnded reports whether err is the target's EOF, I/O error or deadline.
 func targetEnded(err error) bool {
 	var he *handshakeError
 	return errors.As(err, &he) && he.side == sideTarget && he.fault != faultMalformed
@@ -399,7 +397,6 @@ func (h *desktopHandshake) readClient(n int) ([]byte, error) {
 	return b, nil
 }
 
-// writeClient writes b to the channel.
 func (h *desktopHandshake) writeClient(b []byte) error {
 	if _, err := h.ch.Write(b); err != nil {
 		return clientIOError(err)

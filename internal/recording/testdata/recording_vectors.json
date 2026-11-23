@@ -1,5 +1,5 @@
 {
-  "description": "Recording 0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b sealed by agent/internal/recording; regenerate with go test ./internal/recording -run TestRecordingVectors -update",
+  "description": "Recording 0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b sealed by internal/recording; regenerate with go test ./internal/recording -run TestRecordingVectors -update",
   "id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
   "dek": "wTV9jINv-ar-YvO1pEUscbRbKO0a2Eeh_5GMPgiy8nE",
   "final_sealed": true,

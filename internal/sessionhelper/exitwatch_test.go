@@ -174,8 +174,8 @@ func TestPipeSessionUnobservedExitReleasesTheLogin(t *testing.T) {
 // its group by number, and still ends it.
 func TestPipeSessionUnobservedExitSignalsOnlyTheCommand(t *testing.T) {
 	groups := recordGroupSignals(t)
-	p, _, _ := startPipeUnwatched(t, "trap '' HUP; while :; do sleep 0.1; done", 0)
-	time.Sleep(100 * time.Millisecond)
+	p, agent, _ := startPipeUnwatched(t, "trap '' HUP; echo ready; while :; do sleep 0.1; done", 0)
+	waitReady(t, launcher.NewFrameReader(agent))
 	p.finish()
 	done := make(chan struct{})
 	go func() { p.Wait(); close(done) }()

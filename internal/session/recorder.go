@@ -104,10 +104,9 @@ func (s *Server) startRecording(id, sessionID string, adm *admission, start time
 		reportFailed(recording.ReasonRecordingFailed)
 		return nil, errRecordingUnavailable.With(nil, "the held recording key changed")
 	}
-	// Both policies open before the channel's helper starts; the edge attests
-	// the live connection, so the control plane checks the certificate at its
-	// admission however late the channel starts. strictOpenTimeout bounds the
-	// wait.
+	// Both policies open before the channel's helper starts. The edge attests the
+	// live connection, so the control plane checks the certificate at its
+	// admission however late the channel starts; strictOpenTimeout bounds the wait.
 	strict := adm.Rec.Policy == RecPolicyStrict
 	ctx, cancel := context.WithTimeout(context.Background(), strictOpenTimeout)
 	defer cancel()
@@ -153,9 +152,8 @@ func startFailureReason(err error) string {
 	return recording.ReasonRecordingFailed
 }
 
-// reportFailedOpen queues the failed open of recording id. The key hash is
-// the one the certificate names, which the control plane checks the
-// signature against.
+// reportFailedOpen queues recording id's failed open with the certificate's
+// key hash, which the control plane checks the signature against.
 func (s *Server) reportFailedOpen(id, sessionID string, adm *admission, reason string, channels int32) {
 	sum, err := base64.RawURLEncoding.DecodeString(adm.Rec.PubSHA256)
 	if err != nil {
@@ -385,9 +383,8 @@ func (r *sessionRecorder) marker(label string) {
 	r.enqueue(recEvent{kind: evMarker, at: time.Now(), data: []byte(label)})
 }
 
-// enqueue appends an event that always fits. A resize queued right after
-// another replaces it, so resizes cannot grow a stalled queue past one per
-// queued output.
+// enqueue appends an event that always fits. A resize right after another
+// replaces it, so a stalled queue holds at most one resize per queued output.
 func (r *sessionRecorder) enqueue(ev recEvent) {
 	if r == nil {
 		return
@@ -414,10 +411,8 @@ func (r *sessionRecorder) poke() {
 	}
 }
 
-// end seals the final segment (what is queued and buffered, with the
-// partial-sequence flush and the end marker when the shell did not exit, or
-// an empty plaintext)
-// and hands over the complete fields. It runs after the kind's last tap.
+// end seals the final segment and hands over the complete fields. It runs
+// after the kind's last tap.
 func (r *sessionRecorder) end() { r.closeAndWait(recEnd) }
 
 // abort removes the recording of a session refused after it started.
@@ -456,8 +451,7 @@ func (r *sessionRecorder) closeWith(how recClose, reason string) {
 	r.mu.Unlock()
 }
 
-// closeLocked records the first close; a Strict failure also ends the
-// session.
+// closeLocked records the first close; a Strict failure also ends the session.
 func (r *sessionRecorder) closeLocked(how recClose, reason string) {
 	if r.how != recOpen {
 		return
