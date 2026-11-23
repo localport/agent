@@ -50,7 +50,7 @@ func runSetup(args []string) error {
 	}
 	if secret == "" {
 		usageSetup()
-		return errcode.Invalidf("setup token required (argument, --token, or %s)", setupTokenEnv)
+		return errcode.InvalidArgf("setup token required (argument, --token, or %s)", setupTokenEnv)
 	}
 
 	client, err := identity.NewClient(resolveAPIURL(*apiURL))

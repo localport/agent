@@ -24,7 +24,7 @@ const edgePort = "443"
 func ParseDevice(raw string) (host, addr string, err error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "", "", errcode.Invalidf("device address required")
+		return "", "", errcode.InvalidArgf("device address required")
 	}
 	if _, after, ok := strings.Cut(raw, "://"); ok {
 		raw = after
@@ -36,7 +36,7 @@ func ParseDevice(raw string) (host, addr string, err error) {
 		return "", "", err
 	}
 	if host == "" {
-		return "", "", errcode.Invalidf("device %q is missing a host", raw)
+		return "", "", errcode.InvalidArgf("device %q is missing a host", raw)
 	}
 	if port == "" {
 		port = edgePort
@@ -55,17 +55,17 @@ const socketPrefix = "unix:"
 func ParseForward(raw, bindAddr string) (Forward, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return Forward{}, errcode.Invalidf("-L requires a port")
+		return Forward{}, errcode.InvalidArgf("-L requires a port")
 	}
 	if rest, ok := strings.CutPrefix(raw, socketPrefix); ok {
 		// the path may contain colons, so split on the last one.
 		split := strings.LastIndex(rest, ":")
 		if split <= 0 {
-			return Forward{}, errcode.Invalidf("-L %s: want unix:<path>:<device port>", raw)
+			return Forward{}, errcode.InvalidArgf("-L %s: want unix:<path>:<device port>", raw)
 		}
 		remote, err := parsePort(rest[split+1:])
 		if err != nil || remote == 0 {
-			return Forward{}, errcode.Invalidf("-L %s: device port must be 1-65535", raw)
+			return Forward{}, errcode.InvalidArgf("-L %s: device port must be 1-65535", raw)
 		}
 		return Forward{Socket: true, LocalAddr: rest[:split], RemotePort: remote}, nil
 	}
@@ -76,11 +76,11 @@ func ParseForward(raw, bindAddr string) (Forward, error) {
 
 	remote, err := parsePort(remoteText)
 	if err != nil || remote == 0 {
-		return Forward{}, errcode.Invalidf("-L %s: device port must be 1-65535", raw)
+		return Forward{}, errcode.InvalidArgf("-L %s: device port must be 1-65535", raw)
 	}
 	local, err := parsePort(localText)
 	if err != nil {
-		return Forward{}, errcode.Invalidf("-L %s: local port must be 0-65535", raw)
+		return Forward{}, errcode.InvalidArgf("-L %s: local port must be 0-65535", raw)
 	}
 	return Forward{
 		LocalAddr:  net.JoinHostPort(bindAddr, strconv.Itoa(int(local))),
@@ -111,12 +111,12 @@ func stripPathAndQuery(s string) string {
 func splitHostPortLoose(s string) (host, port string, err error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return "", "", errcode.Invalidf("empty address")
+		return "", "", errcode.InvalidArgf("empty address")
 	}
 	if strings.HasPrefix(s, "[") {
 		end := strings.Index(s, "]")
 		if end < 0 {
-			return "", "", errcode.Invalidf("address %q is missing a closing bracket", s)
+			return "", "", errcode.InvalidArgf("address %q is missing a closing bracket", s)
 		}
 		host = s[1:end]
 		rest := s[end+1:]

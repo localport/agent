@@ -38,16 +38,36 @@ func (r *Remedy) Error() string { return r.Err.Error() + "\n  " + r.Text }
 
 func (r *Remedy) Unwrap() error { return r.Err }
 
-// Invalid is local input the user must fix: a flag or config value, or the
-// content of a local file its parser refused. Render prints its text. Build
-// it with Invalidf from local input only, never around network, control
-// plane or edge text; an Invalid whose chain holds a coded, remote or
-// network error renders that chain by type instead.
-type Invalid struct{ err error }
+// Invalid is local input the user must fix: an argument, flag, config value
+// or local file content. Render prints its text with its class code; a coded
+// error around it replaces the code. Build it from local input only; one
+// whose chain holds a coded, remote or network error renders its prefix and
+// that chain by type, a network chain with NetworkFailed.
+type Invalid struct {
+	code   Code
+	err    error
+	prefix string
+}
 
-// Invalidf formats like fmt.Errorf, %w included.
-func Invalidf(format string, args ...any) error {
-	return &Invalid{err: fmt.Errorf(format, args...)}
+// InvalidArgf is a refused argument or flag value (InvalidArgument). It
+// formats like fmt.Errorf.
+func InvalidArgf(format string, args ...any) error { return invalidf(InvalidArgument, format, args) }
+
+// InvalidConfigf is a refused config value (InvalidConfigValue).
+func InvalidConfigf(format string, args ...any) error {
+	return invalidf(InvalidConfigValue, format, args)
+}
+
+// Unsupportedf is a flag or setting this operating system does not support.
+func Unsupportedf(format string, args ...any) error { return invalidf(UnsupportedHere, format, args) }
+
+func invalidf(code Code, format string, args []any) error {
+	e := &Invalid{code: code, err: fmt.Errorf(format, args...)}
+	// "<prefix>: %w" keeps its prefix when the wrapped chain renders by type.
+	if head, ok := strings.CutSuffix(format, ": %w"); ok && !strings.Contains(head, "%w") {
+		e.prefix = fmt.Sprintf(head, args[:len(args)-1]...)
+	}
+	return e
 }
 
 func (e *Invalid) Error() string { return e.err.Error() }
@@ -75,11 +95,11 @@ func (e *Usage) Unwrap() error { return e.err }
 // user acts on (*fs.PathError, *os.LinkError, a listen address in use, an
 // *Invalid) and a Remote's message, followed by every code, innermost first.
 // Each error of a join prints on its own line. Other causes (network, TLS,
-// server internals, plain wrappers) are left out; hidden reports that one was,
-// so the caller can point at --verbose, which prints Error(). A *Usage prints
-// its text. A chain that shows nothing prints "a network operation failed"
-// when it holds a network error, else the Unexpected line; both hidden and
-// followed by the chain's remedies. Every Redactor in the chain masks the text.
+// server internals, plain wrappers) are left out; hidden reports whether any
+// was, so the caller can point at --verbose, which prints Error(). A *Usage
+// prints its text. A chain that shows nothing prints the NetworkFailed line when it
+// holds a network error, else the Unexpected line; both hidden and followed
+// by the chain's remedies. Every Redactor in the chain masks the text.
 func Render(err error) (text string, hidden bool) {
 	if err == nil {
 		return "", false
@@ -90,14 +110,17 @@ func Render(err error) (text string, hidden bool) {
 	case r.typed, len(r.parts) > 0 || len(r.branches) > 0:
 		hidden = r.hidden
 	case isNetwork(err):
-		r.parts, hidden = []string{"a network operation failed"}, true
+		r.parts, r.codes, hidden = []string{errNetwork.Msg}, []string{string(NetworkFailed)}, true
 	default:
 		r.parts, hidden = []string{errUnexpected.Error()}, true
 	}
 	return redact(err, r.text()), hidden
 }
 
-var errUnexpected = New(Unexpected)
+var (
+	errUnexpected = New(Unexpected)
+	errNetwork    = New(NetworkFailed)
+)
 
 // Redactor is an error that masks secrets in the text of its chain
 // (security.RedactError). Render applies every Redactor in the chain to the
@@ -130,6 +153,8 @@ func redact(err error, text string) string {
 type renderer struct {
 	parts, codes, remedies, branches []string
 	typed, hidden                    bool
+	// coded is set below a coded error, whose code replaces an Invalid's.
+	coded bool
 }
 
 func (r *renderer) text() string {
@@ -168,7 +193,10 @@ func (r *renderer) walk(err error) {
 		}
 		r.parts = append(r.parts, part)
 		if e.Err != nil {
+			outer := r.coded
+			r.coded = true
 			r.walk(e.Err)
+			r.coded = outer
 		}
 		r.codes = append(r.codes, string(e.Code))
 		return
@@ -178,10 +206,24 @@ func (r *renderer) walk(err error) {
 		return
 	case *Invalid:
 		r.typed = true
+		outer := r.coded
 		if holdsTyped(e.err) {
+			if e.prefix != "" {
+				r.parts = append(r.parts, e.prefix)
+			}
+			r.coded = true
 			r.walk(e.err)
+			r.coded = outer
 		} else {
 			r.parts = append(r.parts, e.Error())
+		}
+		// One code per failure: a coded error around or inside it has one.
+		if !outer && !holdsCode(e.err) {
+			code := e.code
+			if isNetwork(e.err) {
+				code = NetworkFailed
+			}
+			r.codes = append(r.codes, string(code))
 		}
 		return
 	case Remote:
@@ -223,7 +265,7 @@ func (r *renderer) walk(err error) {
 	switch u := err.(type) {
 	case interface{ Unwrap() []error }:
 		for _, inner := range u.Unwrap() {
-			var b renderer
+			b := renderer{coded: r.coded}
 			b.walk(inner)
 			r.typed = r.typed || b.typed
 			r.hidden = r.hidden || b.hidden
@@ -262,10 +304,13 @@ func errnoText(err error) string {
 
 // holdsTyped reports whether err's chain holds a coded, remote or network
 // error, which Render shows or hides by type rather than as text.
-func holdsTyped(err error) bool {
+func holdsTyped(err error) bool { return holdsCode(err) || isNetwork(err) }
+
+// holdsCode reports whether err's chain holds a coded or remote error.
+func holdsCode(err error) bool {
 	var coded *Error
 	var remote Remote
-	return errors.As(err, &coded) || errors.As(err, &remote) || isNetwork(err)
+	return errors.As(err, &coded) || errors.As(err, &remote)
 }
 
 // isNetwork reports whether err's chain holds a network or URL error.

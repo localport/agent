@@ -31,8 +31,7 @@ func savedCredential(t *testing.T) (*Store, Ref, string, Meta) {
 	return store, ref, dir, meta
 }
 
-// replaceWithLink renames path and puts a symlink to the renamed file in its
-// place.
+// replaceWithLink renames path and puts a symlink to the renamed file in its place.
 func replaceWithLink(t *testing.T, path string) {
 	t.Helper()
 	moved := filepath.Join(t.TempDir(), filepath.Base(path))
@@ -44,7 +43,6 @@ func replaceWithLink(t *testing.T, path string) {
 	}
 }
 
-// Load accepts everything Save writes.
 func TestLoadAcceptsWhatSaveWrites(t *testing.T) {
 	store, ref, _, _ := savedCredential(t)
 	if _, err := store.Load(ref); err != nil {
@@ -80,8 +78,7 @@ func TestLoadRefusesAGroupWritableMeta(t *testing.T) {
 	}
 }
 
-// A symlinked renewal lock is refused before O_CREATE or O_RDWR reach its
-// target.
+// A symlinked renewal lock is refused before O_CREATE or O_RDWR reach its target.
 func TestRenewLockRefusesSymlink(t *testing.T) {
 	store, ref, _, _ := savedCredential(t)
 	victim := filepath.Join(t.TempDir(), "victim")

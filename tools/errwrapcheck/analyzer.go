@@ -14,14 +14,15 @@ import (
 
 const errcodePath = "github.com/localport/agent/internal/errcode"
 
-// Analyzer reports fmt.Errorf and errcode.Invalidf calls that wrap a coded
-// error, an operand of static type *errcode.Error, with other format text.
-// errcode.Render prints typed parts only, so that text never reaches the
-// user: such a site passes the text to (*errcode.Error).With or
-// errcode.WithRemedy. Test files are not checked.
+// Analyzer reports fmt.Errorf and errcode Invalid constructor calls that
+// wrap a coded error, an operand of static type *errcode.Error, with other
+// format text. errcode.Render prints typed parts only, so that text never
+// reaches the user: such a site passes the text to (*errcode.Error).With or
+// errcode.WithRemedy. An Invalid built "<prefix>: %w" is exempt: Render
+// prints its prefix. Test files are not checked.
 var Analyzer = &analysis.Analyzer{
 	Name:     "errwrapcheck",
-	Doc:      "report fmt.Errorf and errcode.Invalidf text around a coded error, which errcode.Render does not print",
+	Doc:      "report fmt.Errorf and errcode Invalid constructor text around a coded error, which errcode.Render does not print",
 	URL:      "https://github.com/localport/agent/blob/main/docs/ERRORS.md",
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
 	Run:      run,
@@ -31,7 +32,8 @@ func run(pass *analysis.Pass) (any, error) {
 	ins := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
 	ins.Preorder([]ast.Node{(*ast.CallExpr)(nil)}, func(n ast.Node) {
 		call := n.(*ast.CallExpr)
-		if len(call.Args) < 2 || !isErrorf(pass.TypesInfo, call) {
+		kind := errorfKind(pass.TypesInfo, call)
+		if len(call.Args) < 2 || kind == notErrorf {
 			return
 		}
 		if strings.HasSuffix(pass.Fset.Position(call.Pos()).Filename, "_test.go") {
@@ -43,6 +45,9 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 		format := constant.StringVal(tv.Value)
 		if format == "%w" {
+			return
+		}
+		if head, ok := strings.CutSuffix(format, ": %w"); kind == invalidf && ok && !strings.Contains(head, "%w") {
 			return
 		}
 		operands, ok := wrapOperands(format)
@@ -62,10 +67,17 @@ func run(pass *analysis.Pass) (any, error) {
 	return nil, nil
 }
 
-// isErrorf reports whether call is fmt.Errorf or errcode.Invalidf, which
-// formats the same way and whose text Render also does not print around a
-// coded error.
-func isErrorf(info *types.Info, call *ast.CallExpr) bool {
+type errorf int
+
+const (
+	notErrorf errorf = iota
+	fmtErrorf
+	// invalidf is an errcode Invalid constructor, which formats as fmt.Errorf.
+	invalidf
+)
+
+// errorfKind reports whether call is fmt.Errorf or an errcode Invalid constructor.
+func errorfKind(info *types.Info, call *ast.CallExpr) errorf {
 	var id *ast.Ident
 	switch fun := call.Fun.(type) {
 	case *ast.SelectorExpr:
@@ -73,17 +85,21 @@ func isErrorf(info *types.Info, call *ast.CallExpr) bool {
 	case *ast.Ident:
 		id = fun
 	default:
-		return false
+		return notErrorf
 	}
 	fn, ok := info.Uses[id].(*types.Func)
 	if !ok || fn.Pkg() == nil {
-		return false
+		return notErrorf
 	}
-	path, name := fn.Pkg().Path(), fn.Name()
-	return path == "fmt" && name == "Errorf" || path == errcodePath && name == "Invalidf"
+	switch path, name := fn.Pkg().Path(), fn.Name(); {
+	case path == "fmt" && name == "Errorf":
+		return fmtErrorf
+	case path == errcodePath && (name == "InvalidArgf" || name == "InvalidConfigf" || name == "Unsupportedf"):
+		return invalidf
+	}
+	return notErrorf
 }
 
-// isCodedError reports whether t is *errcode.Error.
 func isCodedError(t types.Type) bool {
 	ptr, ok := types.Unalias(t).(*types.Pointer)
 	if !ok {

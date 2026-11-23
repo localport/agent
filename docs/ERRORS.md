@@ -4,16 +4,18 @@ A failure the agent reports to you is a message, the local detail you act on
 (a path, a value, the command to run), and its code, such as `[AG021]`. A
 failure caused by another shows both codes, innermost first. A refusal from
 the control plane or the edge shows the service's message and code (such as
-`[SE031]`) exactly as received; those codes are not listed here. Flag usage
+`[SE031]`) exactly as received; those codes are not listed here. A refused
+argument, flag or config value names the value and carries the class code
+AG164, AG165 or AG166, or the code of the failure around it. Flag syntax
 errors carry no code. Include every code when you contact support.
 
 Commands leave out causes from the network, the service or agent internals
 (endpoint paths, HTTP status, TLS and connection errors) and say so; run the
 command again with the global flag `--verbose` (`localport --verbose
-<command>`) to print the full cause. A local cause you act on, such as a
-file path with its permission error, a port already in use or a config or flag
-value the agent refused, is always shown. Several failures at once print one per
-line. The agent that runs tunnels and devices (`run`, `up`, the tunnel
+<command>`) to print the full cause. A local cause you act on, such as a file
+path with its permission error, a port already in use or a config or flag
+value the agent refused, is always shown. Several failures at once print one
+per line. The agent that runs tunnels and devices (`run`, `up`, the tunnel
 form) prints full causes in its log.
 
 Codes up to AG134 are grouped by area: AG001 to AG010 credentials and keys,
@@ -23,12 +25,12 @@ sessions, AG061 to AG063 recordings, AG071 to AG079 network, AG081 to AG093 the
 Windows installer, AG101 to AG109 SSH clients, AG110 to AG120 commands
 (enrolment, settings, credentials), AG121 to AG125 `localport access`, AG126 to
 AG134 control plane calls and credentials. Codes from AG135 on have no area
-grouping. The Windows installer and uninstaller exit with the number of their code
-(`AG084` exits 84). Three refusals of the installer itself use the Windows
-Installer codes instead: exit 1603, a step could not run or take its lock; exit
-1618, another Localport installer or uninstaller is running (wait for it to
-finish, then run it again); exit 1633, the machine is not running 64-bit
-Windows.
+grouping. The Windows installer and uninstaller exit with the number of their
+code (`AG084` exits 84). Three refusals of the installer itself use the
+Windows Installer codes instead: exit 1603, a step could not run or take its
+lock; exit 1618, another Localport installer or uninstaller is running (wait
+for it to finish, then run it again); exit 1633, the machine is not running
+64-bit Windows.
 
 | Code | Title | What to do |
 |---|---|---|
@@ -61,7 +63,7 @@ Windows.
 | AG032 | No device can start | Every enrolled device is paused, removed, or has a missing or unreadable credential; the lines above name each one. Resume a paused device with `sudo localport up` (on Windows, `localport up` from an elevated prompt). A removed device, or one whose credential is gone, needs a new join command from the dashboard: run it. |
 | AG033 | Device service installed | Deleting the devices is refused while the device service is installed, as when another command installed it during the purge. Run `sudo localport service uninstall --purge` again once that command has finished. |
 | AG034 | Flags conflict with stored settings | The flags of a repeated `up <join-token>` differ from the device's settings. Change the settings with `localport set`, or run `up` without the conflicting flags. |
-| AG035 | Unexpected argument | `up` takes one join token, and `up` and `down` without one take one device name. Put every flag before that argument or right after it. |
+| AG035 | Unexpected argument | A command got a positional argument it does not take. `up` takes one join token or one device name; `down` and `set` take one device name; `run`, `service` and `status` take none. Put every flag before that argument or right after it. |
 | AG036 | No default login | Terminal and files need a login, and the account running the command gives none: root, or on Windows SYSTEM, a service account, an Entra ID account, or a domain account whose sign-in name cannot be read. Name the accounts with `--logins`; an Entra ID account also with `--password-logins` (`--logins you@domain --password-logins you@domain`). |
 | AG037 | Agent account step failed | Root runs the device-store part of this command as the agent account (`localport`, `_localport` on macOS), and that part failed. Its own error, printed above this line, says why. |
 | AG038 | Agent account step not started | Root could not start localport as the agent account (`localport`, `_localport` on macOS). Check that the account exists (`id localport`, on macOS `id _localport`) and that the localport executable is intact; reinstall localport if either is missing. |
@@ -76,7 +78,7 @@ Windows.
 | AG055 | Session launcher from another release | The agent and the session launcher service (`localport-session`) come from different localport releases, usually right after an upgrade. Restart the launcher service: `sudo systemctl restart localport-session` (Linux), `sudo launchctl kickstart -k system/io.localport.session` (macOS), or restart the `localport-session` service (Windows). |
 | AG061 | Recording spool full | The recording spool reached its size limit, so recordings stop until uploads catch up. Check the device's connection to the edge on TCP 443. |
 | AG062 | Disk space low for recordings | The disk holding the recording spool is nearly full. Free disk space. |
-| AG063 | Recording unavailable | A recording could not start; the message names the cause. Causes: no recording uploader, a recording key that is not held or does not match the session certificate, a key that cannot seal the recording's key (malformed, or the wrap fails), too little time before the session's deadline, a spool that cannot store the entry, no session mux, or the control plane refusing, not answering or answering the open with segments already stored. A strict session is refused and a best-effort session runs unrecorded. Retry the session; when it persists, act on the named cause. |
+| AG063 | Recording unavailable | A recording could not start; the message names the cause. A strict session is refused and a best-effort session runs unrecorded. Retry the session; when it persists, contact support with the code and the message. |
 | AG071 | No transport | No connection to the edge worked. Check that this machine reaches the edge on TCP 443 and that no firewall or proxy blocks it. |
 | AG072 | Registration failed | The connection to the edge broke or carried an unexpected answer while the tunnel or device registered. localport retries on its own; when it persists, contact support with the agent log. |
 | AG073 | Redirect to an untrusted host | The edge sent this agent to a host outside the Localport service, so the agent refused to follow. localport retries on its own; contact support. |
@@ -161,3 +163,7 @@ Windows.
 | AG160 | Control endpoint unavailable | A foreground run (`localport run`, `up --foreground`) could not serve the control endpoint that `up`, `down` and `set` use to apply settings, so it did not start. When the message says the endpoint is not a foreground run's, the directory (`/run/localport`, `/var/run/localport` on macOS) or the socket at `control.sock` is not root's or is open to others: find what created it, remove it, and start the run again. Otherwise start the run again, and if it fails again contact support with the output of `localport --verbose run`. |
 | AG161 | Service install busy | Another `localport service install` or `uninstall` is installing or removing Localport.app on macOS. Wait for it to finish, then run the command again. |
 | AG162 | Unexpected error | The command failed for a reason it has no message for. Run it again with `--verbose` to see the cause, and contact support with that output if it fails again. |
+| AG163 | Network failure | A connection to Localport failed; the message leaves out the cause. Check the machine's network, proxy and firewall, then retry. Run the command with `--verbose` to see the cause. |
+| AG164 | Invalid argument | A command argument or flag value was refused; the message names it and the accepted form. Correct it and run the command again. |
+| AG165 | Invalid config value | A config value was refused; the message names it and the accepted form. A value in a config file shows that file's code (AG028, AG122 or AG144) instead. Correct it and run the command again. |
+| AG166 | Not supported on this OS | The flag or setting the message names is not available on this operating system. Leave it out. |

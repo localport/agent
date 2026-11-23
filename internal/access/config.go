@@ -20,9 +20,8 @@ type AccessConfig struct {
 }
 
 // Entry is one device and the ports forwarded from it. At most one of PEM or
-// P12 is set. With neither, the stored identity is used (see `localport
-// identity`). The P12 password comes inline, from a file or from an env
-// variable.
+// P12 is set; with neither, the stored identity is used (`localport identity`).
+// The P12 password comes inline, from a file or from an env variable.
 type Entry struct {
 	Device string `yaml:"device"`
 	// Forward lists `[local:]remote` pairs in -L syntax.
@@ -54,7 +53,7 @@ func LoadAccessConfig(path string) (*AccessConfig, error) {
 
 	var cc AccessConfig
 	if err := dec.Decode(&cc); err != nil {
-		return nil, errcode.New(errcode.AccessConfigInvalid).With(errcode.Invalidf("%w", err), "parse "+path)
+		return nil, errcode.New(errcode.AccessConfigInvalid).With(errcode.InvalidConfigf("%w", err), "parse "+path)
 	}
 	if cc.Version != 1 {
 		return nil, errcode.New(errcode.AccessConfigInvalid).With(nil, fmt.Sprintf("%s: unsupported config version %d: this agent reads version 1", path, cc.Version))
@@ -62,8 +61,7 @@ func LoadAccessConfig(path string) (*AccessConfig, error) {
 	if len(cc.Access) == 0 {
 		return nil, errcode.New(errcode.AccessConfigInvalid).With(nil, "no devices listed")
 	}
-	// Local ports must be unique across entries since every forward binds on
-	// this machine.
+	// Local ports are unique across entries: every forward binds on this machine.
 	boundBy := make(map[string]string)
 	for i := range cc.Access {
 		entry := &cc.Access[i]
@@ -94,16 +92,16 @@ func LoadAccessConfig(path string) (*AccessConfig, error) {
 
 func (e *Entry) validate() error {
 	if e.Device == "" {
-		return errcode.Invalidf("'device' is required")
+		return errcode.InvalidConfigf("'device' is required")
 	}
 	if len(e.Forward) == 0 {
-		return errcode.Invalidf("'forward' needs at least one port")
+		return errcode.InvalidConfigf("'forward' needs at least one port")
 	}
 	if e.PEM != "" && e.P12 != "" {
-		return errcode.Invalidf("set at most one of 'pem' or 'p12' (omit both to use the stored identity)")
+		return errcode.InvalidConfigf("set at most one of 'pem' or 'p12' (omit both to use the stored identity)")
 	}
 	if e.Identity != "" && !e.UsesIdentity() {
-		return errcode.Invalidf("'identity' selects a stored credential, so it cannot be combined with 'pem' or 'p12'")
+		return errcode.InvalidConfigf("'identity' cannot be combined with 'pem' or 'p12'")
 	}
 
 	var missing []string
@@ -116,7 +114,7 @@ func (e *Entry) validate() error {
 		}
 	}
 	if len(missing) > 0 {
-		return errcode.Invalidf("file(s) not found: %s", strings.Join(missing, ", "))
+		return errcode.InvalidConfigf("file(s) not found: %s", strings.Join(missing, ", "))
 	}
 	return nil
 }

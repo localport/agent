@@ -58,8 +58,8 @@ func TestRenderKeepsALocalPathError(t *testing.T) {
 // Local input the user must fix prints in full under the agent error,
 // nested context included; the cause stays in the chain.
 func TestRenderShowsInvalidLocalInput(t *testing.T) {
-	leaf := errcode.Invalidf("-L %s: device port must be 1-65535", "99999")
-	err := errcode.New(errcode.AccessConfigInvalid).With(errcode.Invalidf("device %s: %w", "plc", leaf), "")
+	leaf := errcode.InvalidArgf("-L %s: device port must be 1-65535", "99999")
+	err := errcode.New(errcode.AccessConfigInvalid).With(errcode.InvalidConfigf("device %s: %w", "plc", leaf), "")
 	want := errcode.New(errcode.AccessConfigInvalid).Msg + ": device plc: -L 99999: device port must be 1-65535 [AG122]"
 	if text, hidden := errcode.Render(err); text != want || hidden {
 		t.Fatalf("Render = %q, %v; want %q", text, hidden, want)
@@ -69,16 +69,36 @@ func TestRenderShowsInvalidLocalInput(t *testing.T) {
 	}
 }
 
-// An Invalid built around a coded or network error renders that chain by
-// type, so its codes stay separate and network text stays hidden.
+// An Invalid built around a coded or network error renders its prefix and
+// that chain by type: the inner code replaces its class code; network text
+// stays hidden behind NetworkFailed.
 func TestRenderInvalidAroundTypedErrors(t *testing.T) {
-	coded := errcode.Invalidf("device %s: %w", "plc", errcode.New(errcode.RunLocked))
-	if text, _ := errcode.Render(coded); text != errcode.New(errcode.RunLocked).Msg+" [AG021]" {
+	coded := errcode.InvalidArgf("device %s: %w", "plc", errcode.New(errcode.RunLocked))
+	if text, _ := errcode.Render(coded); text != "device plc: "+errcode.New(errcode.RunLocked).Msg+" [AG021]" {
 		t.Fatalf("coded: Render = %q", text)
 	}
-	network := errcode.Invalidf("fetch: %w", &url.Error{Op: "Get", URL: "https://x/v1/y", Err: errors.New("eof")})
-	if text, hidden := errcode.Render(network); strings.Contains(text, "/v1/y") || !hidden {
+	network := errcode.InvalidArgf("fetch: %w", &url.Error{Op: "Get", URL: "https://x/v1/y", Err: errors.New("eof")})
+	if text, hidden := errcode.Render(network); text != "fetch [AG163]" || !hidden {
 		t.Fatalf("network: Render = %q, %v", text, hidden)
+	}
+}
+
+// Each class of refused input renders its text with its own code, alone; a
+// coded error around it shows only its own code.
+func TestRenderInvalidClassCodes(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{errcode.InvalidArgf("--stdio port must be 1-65535"), "--stdio port must be 1-65535 [AG164]"},
+		{errcode.InvalidConfigf("device %s is listed twice", "x"), "device x is listed twice [AG165]"},
+		{errcode.Unsupportedf("--log-file is supported on Linux and macOS only"), "--log-file is supported on Linux and macOS only [AG166]"},
+		{errcode.InvalidArgf("--allow-ports: %w", errcode.InvalidConfigf("port %q: bad", "x")), `--allow-ports: port "x": bad [AG164]`},
+		{fmt.Errorf("up: %w", errcode.InvalidArgf("name the device")), "name the device [AG164]"},
+	} {
+		if text, hidden := errcode.Render(tc.err); text != tc.want || hidden {
+			t.Errorf("Render = %q, %v; want %q", text, hidden, tc.want)
+		}
 	}
 }
 
@@ -164,7 +184,7 @@ func (r testRedactor) Redact(text string) string {
 func TestRenderRemedyOnANetworkChain(t *testing.T) {
 	cause := &url.Error{Op: "Get", URL: "https://example.test", Err: errors.New("connection refused")}
 	text, hidden := errcode.Render(errcode.WithRemedy(cause, "check the proxy"))
-	if text != "a network operation failed\n  check the proxy" || !hidden {
+	if text != "a network connection failed [AG163]\n  check the proxy" || !hidden {
 		t.Fatalf("Render = %q, %v; want the network line, the remedy, hidden", text, hidden)
 	}
 }
@@ -214,7 +234,7 @@ func TestRenderKeepsAListenAddressInUse(t *testing.T) {
 // agent error the branches are indented below it.
 func TestRenderJoinedErrors(t *testing.T) {
 	first := errcode.New(errcode.RunLocked).With(nil, "run.lock is held")
-	second := errcode.New(errcode.InvalidLocalConfig).With(errcode.Invalidf("device x is listed twice"), "")
+	second := errcode.New(errcode.InvalidLocalConfig).With(errcode.InvalidConfigf("device x is listed twice"), "")
 	want := first.Msg + ": run.lock is held [AG021]\n" + second.Msg + ": device x is listed twice [AG028]"
 	if text, hidden := errcode.Render(errors.Join(first, second)); text != want || hidden {
 		t.Fatalf("top level: Render = %q, %v; want %q", text, hidden, want)
@@ -243,7 +263,7 @@ func TestRenderPlainChains(t *testing.T) {
 		t.Fatalf("usage: Render = %q, %v", text, hidden)
 	}
 	netErr := fmt.Errorf("fetch: %w", &url.Error{Op: "Get", URL: "https://x/v1/y", Err: errors.New("eof")})
-	if text, hidden := errcode.Render(netErr); text != "a network operation failed" || !hidden {
+	if text, hidden := errcode.Render(netErr); text != "a network connection failed [AG163]" || !hidden {
 		t.Fatalf("network: Render = %q, %v", text, hidden)
 	}
 }

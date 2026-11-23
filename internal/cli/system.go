@@ -46,6 +46,7 @@ var (
 	errServiceConfigBusy    = errcode.New(errcode.ServiceConfigBusy)
 	errUninstallEntryNotSet = errcode.New(errcode.UninstallEntryNotSet)
 	errPurgeFailed          = errcode.New(errcode.PurgeFailed)
+	errStoreNotPurged       = errcode.New(errcode.StoreNotPurged)
 )
 
 // productFiles are the files the installer puts in the install directory,
@@ -393,8 +394,7 @@ type journal struct {
 type txnAction struct {
 	Kind  string   `json:"kind"`
 	Names []string `json:"names,omitempty"`
-	// From and To are a move's paths; To is also the exe a services action
-	// registers.
+	// From and To are a move's paths; To is also the exe a services action registers.
 	From string `json:"from,omitempty"`
 	To   string `json:"to,omitempty"`
 	// Edit (add, remove), Prior and Next are a Path change.
@@ -817,12 +817,11 @@ func (t *transaction) closeMarker() {
 	}
 }
 
-// openInstallTransaction names a transaction in dir that an interrupted
-// installer or uninstaller left in phase applying, or returns "". Its
-// rollback writes the service definitions back from its snapshot, so a
-// service change made before that rollback would be undone by it. The
-// caller holds the service configuration lock and has checked dir
-// admin-only.
+// openInstallTransaction names a transaction an interrupted installer or
+// uninstaller left applying in dir, or returns "". Its rollback restores the
+// service definitions from its snapshot, undoing any service change made
+// before it. The caller holds the service configuration lock and has checked
+// dir is admin-only.
 func openInstallTransaction(dir string) string {
 	entries, err := os.ReadDir(filepath.Join(dir, txnRoot))
 	if err != nil {

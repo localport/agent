@@ -15,8 +15,7 @@ import (
 	"time"
 )
 
-// A 4xx other than 429 and the in-flight 409 SE037 is a refusal and is not
-// retried.
+// A 4xx other than 429 and the in-flight 409 SE037 is a refusal, not retried.
 func TestRetryClassification(t *testing.T) {
 	cases := []struct {
 		name string
@@ -44,9 +43,8 @@ func TestRetryClassification(t *testing.T) {
 		{"403 is terminal", &APIError{Status: http.StatusForbidden}, false},
 		{"404 is terminal", &APIError{Status: http.StatusNotFound}, false},
 		{"409 is terminal", &APIError{Status: http.StatusConflict}, false},
-		// Context errors are omitted. http.Client.Timeout also reports
-		// DeadlineExceeded, and retry decides to stop from ctx. See
-		// TestRetryStopsWhenTheCallerCancels.
+		// Context errors are left out: http.Client.Timeout also reports
+		// DeadlineExceeded, and retry stops on ctx (TestRetryStopsWhenTheCallerCancels).
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,7 +241,6 @@ func TestRetryKeepsTryingWhenTheControlPlaneHangs(t *testing.T) {
 	}
 }
 
-// retry stops when the caller cancels.
 func TestRetryStopsWhenTheCallerCancels(t *testing.T) {
 	// Released before srv.Close(), which waits on outstanding handlers.
 	release := make(chan struct{})

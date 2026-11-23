@@ -147,7 +147,7 @@ var deviceHostPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(
 func parseDeviceHost(raw string) (string, error) {
 	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
 	if len(host) > 253 || !deviceHostPattern.MatchString(host) {
-		return "", errcode.Invalidf("%q is not a device host, such as gw-01-factory.eu.localport.dev", security.SanitizeDisplay(raw))
+		return "", errcode.InvalidArgf("%q is not a device host, such as gw-01-factory.eu.localport.dev", security.SanitizeDisplay(raw))
 	}
 	return host, nil
 }
@@ -849,7 +849,7 @@ func splitLoginHost(arg string) (string, string, error) {
 	// At the last @, as ssh does, so a UPN login keeps its own @.
 	if i := strings.LastIndexByte(arg, '@'); i >= 0 {
 		if i == 0 {
-			return "", "", errcode.Invalidf("empty login before @")
+			return "", "", errcode.InvalidArgf("empty login before @")
 		}
 		return arg[:i], arg[i+1:], nil
 	}
@@ -879,7 +879,7 @@ func parseSSHHelperArgs(name string, args []string) (identityArg, login, host st
 	}
 	if fs.NArg() != 2 || fs.Arg(0) == "" {
 		fs.Usage()
-		return "", "", "", errcode.Invalidf("want a login and a device host")
+		return "", "", "", errcode.InvalidArgf("want a login and a device host")
 	}
 	return *ident, fs.Arg(0), fs.Arg(1), nil
 }
@@ -934,7 +934,7 @@ device through Localport. Add them to ~/.ssh/config:
 	}
 	if fs.NArg() == 0 {
 		fs.Usage()
-		return errcode.Invalidf("name at least one device host")
+		return errcode.InvalidArgf("name at least one device host")
 	}
 	exe, err := configCommand()
 	if err != nil {
@@ -988,7 +988,7 @@ func runSSH(args []string) error {
 	}
 	if fs.NArg() == 0 {
 		fs.Usage()
-		return errcode.Invalidf("name a device host")
+		return errcode.InvalidArgf("name a device host")
 	}
 	login, host, err := splitLoginHost(fs.Arg(0))
 	if err != nil {

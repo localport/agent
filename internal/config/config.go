@@ -149,7 +149,7 @@ func load(path string) (*Config, error) {
 		if len(resolved) > 0 {
 			msg = redactQuoted(msg)
 		}
-		return nil, errcode.Invalidf("parse yaml: %s", msg)
+		return nil, errcode.InvalidConfigf("parse yaml: %s", msg)
 	}
 	return build(&fc)
 }
@@ -191,10 +191,10 @@ func TunnelFromFlags(token, region, local, proto, name string) (*Config, error) 
 	switch resolvedProto {
 	case "http", "tcp", "tls":
 	default:
-		return nil, errcode.Invalidf("protocol %q is not one of http, tcp, tls", resolvedProto)
+		return nil, errcode.InvalidConfigf("protocol %q is not one of http, tcp, tls", resolvedProto)
 	}
 	if resolvedLocal == "" {
-		return nil, errcode.Invalidf("no upstream address to forward to")
+		return nil, errcode.InvalidConfigf("no upstream address to forward to")
 	}
 
 	return &Config{Tunnels: []TunnelSpec{{
@@ -213,10 +213,10 @@ const maxTunnelNameLength = 64
 // are allowed because the control plane slugifies the name.
 func validTunnelName(name string) error {
 	if len(name) > maxTunnelNameLength {
-		return errcode.Invalidf("--name is %d characters, over the %d character limit", len(name), maxTunnelNameLength)
+		return errcode.InvalidArgf("--name is %d characters, over the %d character limit", len(name), maxTunnelNameLength)
 	}
 	if name != security.SanitizeDisplay(name) {
-		return errcode.Invalidf("--name contains control characters")
+		return errcode.InvalidArgf("--name contains control characters")
 	}
 	return nil
 }
@@ -227,7 +227,7 @@ func validRegion(region string) error {
 	if region == "" || identity.ValidRegion(region) {
 		return nil
 	}
-	return errcode.Invalidf("--region %q is not a valid region, expected lowercase letters, "+
+	return errcode.InvalidArgf("--region %q is not a valid region, expected lowercase letters, "+
 		"digits and internal dashes", region)
 
 }
@@ -290,10 +290,10 @@ func NormProto(p string) string {
 
 func build(fc *fileConfig) (*Config, error) {
 	if fc.Version != 1 {
-		return nil, errcode.Invalidf("unsupported config version %d: this agent reads version 1, see https://localport.io/docs/configuration", fc.Version)
+		return nil, errcode.InvalidConfigf("unsupported config version %d: this agent reads version 1, see https://localport.io/docs/configuration", fc.Version)
 	}
 	if len(fc.Tunnels) == 0 {
-		return nil, errcode.Invalidf("the file lists no tunnels")
+		return nil, errcode.InvalidConfigf("the file lists no tunnels")
 	}
 
 	out := &Config{}
@@ -309,19 +309,19 @@ func build(fc *fileConfig) (*Config, error) {
 
 func buildTunnel(idx int, t tunnelFile) (*TunnelSpec, error) {
 	if t.Name == "" {
-		return nil, errcode.Invalidf("tunnel %d: name is required", idx)
+		return nil, errcode.InvalidConfigf("tunnel %d: name is required", idx)
 	}
 	if t.Token == "" {
-		return nil, errcode.Invalidf("tunnel %q: token is required", t.Name)
+		return nil, errcode.InvalidConfigf("tunnel %q: token is required", t.Name)
 	}
 	if t.Upstream == "" {
-		return nil, errcode.Invalidf("tunnel %q: upstream is required", t.Name)
+		return nil, errcode.InvalidConfigf("tunnel %q: upstream is required", t.Name)
 	}
 	proto, local := ParseLocal(t.Upstream, "")
 	switch proto {
 	case "http", "tcp", "tls":
 	default:
-		return nil, errcode.Invalidf("tunnel %q: upstream scheme %q is not one of http, tcp, tls", t.Name, proto)
+		return nil, errcode.InvalidConfigf("tunnel %q: upstream scheme %q is not one of http, tcp, tls", t.Name, proto)
 	}
 	return &TunnelSpec{
 		Name:     t.Name,
@@ -340,10 +340,10 @@ func parseDeviceHost(name, host string) (string, error) {
 		return DefaultDeviceHost, nil
 	}
 	if strings.Contains(host, "://") {
-		return "", errcode.Invalidf("device %q: host takes an address without a scheme", name)
+		return "", errcode.InvalidConfigf("device %q: host takes an address without a scheme", name)
 	}
 	if hasExplicitPort(host) {
-		return "", errcode.Invalidf("device %q: host takes an address without a port, ports are set in the dashboard", name)
+		return "", errcode.InvalidConfigf("device %q: host takes an address without a port, ports are set in the dashboard", name)
 	}
 	return host, nil
 }

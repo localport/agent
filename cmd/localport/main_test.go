@@ -23,3 +23,12 @@ func TestReportPrintsTheCodeOfAWrappedCodedError(t *testing.T) {
 		t.Fatalf("printed %q, want %q", out.String(), want)
 	}
 }
+
+// -h prints the command's usage and exits 0 without an error line.
+func TestReportHelpExitsZero(t *testing.T) {
+	var out bytes.Buffer
+	err := cli.New("test", "", "").Run([]string{"up", "-h"})
+	if code := report(&out, cli.New("test", "", ""), err); code != 0 || out.Len() != 0 {
+		t.Fatalf("report(%v) = %d, printed %q; want 0 and nothing", err, code, out.String())
+	}
+}

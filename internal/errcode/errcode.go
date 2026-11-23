@@ -4,7 +4,8 @@
 // without the message text; With adds the local detail and the cause, and a
 // coded error wrapping another prints both codes. Render builds the user
 // text from typed parts only; Error() is the full chain for logs and
-// --verbose. Flag usage errors carry no code. docs/ERRORS.md lists each code
+// --verbose. A refused argument, flag or config value is an Invalid with a
+// class code; flag syntax errors carry none. docs/ERRORS.md lists each code
 // with what to do. Codes from the control plane or the edge (such as SE031)
 // are not defined here and pass through unchanged (Remote).
 package errcode
@@ -210,6 +211,10 @@ const (
 	ControlEndpointFailed   Code = "AG160"
 	ServiceInstallBusy      Code = "AG161"
 	Unexpected              Code = "AG162"
+	NetworkFailed           Code = "AG163"
+	InvalidArgument         Code = "AG164"
+	InvalidConfigValue      Code = "AG165"
+	UnsupportedHere         Code = "AG166"
 )
 
 // NewJoinCommand is the remedy for every lost or unusable device credential.
@@ -334,6 +339,10 @@ var registry = []Entry{
 	{ServiceDefinitionFailed, "Service definition not written", "the device service definition could not be read, written or removed"},
 	{ServiceInstallBusy, "Service install busy", "another localport service install or uninstall is running"},
 	{Unexpected, "Unexpected error", "localport could not finish the command"},
+	{NetworkFailed, "Network failure", "a network connection failed"},
+	{InvalidArgument, "Invalid argument", "an argument or flag value was refused"},
+	{InvalidConfigValue, "Invalid config value", "a config value was refused"},
+	{UnsupportedHere, "Not supported on this OS", "not supported on this operating system"},
 	{AccountMissing, "Agent account missing", "the agent account " + agentaccount.Name + " does not exist; create it with: sudo localport service install"},
 	{AccountNotChanged, "Agent account not changed", "the agent account " + agentaccount.Name + " could not be created, looked up or inspected"},
 	{SystemNeedsRoot, "Needs root", "only root or an elevated Administrator changes the device config directory"},

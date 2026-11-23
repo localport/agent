@@ -58,13 +58,13 @@ func runAccess(args []string) error {
 	if remote == "" {
 		if fs.NArg() < 1 {
 			fs.Usage()
-			return errcode.Invalidf("remote address required")
+			return errcode.InvalidArgf("remote address required")
 		}
 		remote = fs.Arg(0)
 	}
 	if (remoteFromHead == "" && fs.NArg() > 1) || (remoteFromHead != "" && fs.NArg() > 0) {
 		fs.Usage()
-		return errcode.Invalidf("unexpected extra positional arguments")
+		return errcode.InvalidArgf("unexpected extra positional arguments")
 	}
 
 	deviceHost, deviceAddr, err := access.ParseDevice(remote)
@@ -73,10 +73,10 @@ func runAccess(args []string) error {
 	}
 	if len(forwards) == 0 && *stdio == 0 {
 		fs.Usage()
-		return errcode.Invalidf("pass -L <local>:<remote>, or --stdio <port>")
+		return errcode.InvalidArgf("pass -L <local>:<remote>, or --stdio <port>")
 	}
 	if len(forwards) > 0 && *stdio != 0 {
-		return errcode.Invalidf("--stdio carries one connection, so it cannot be combined with -L")
+		return errcode.InvalidArgf("--stdio cannot be combined with -L")
 	}
 	parsedForwards := make([]access.Forward, 0, len(forwards))
 	for _, raw := range forwards {
@@ -153,7 +153,7 @@ func runAccess(args []string) error {
 
 	if *stdio != 0 {
 		if *stdio < 1 || *stdio > 65535 {
-			return errcode.Invalidf("--stdio port must be 1-65535")
+			return errcode.InvalidArgf("--stdio port must be 1-65535")
 		}
 		return proxy.ServeStdio(ctx, os.Stdin, os.Stdout, uint16(*stdio))
 	}
@@ -184,7 +184,7 @@ func pickCredentialSource(pemFile, p12File, audience string) (credentialSource, 
 	// Both flags name a credential. Picking one would present a principal the
 	// caller did not choose, so the combination is an error.
 	if audience != "" && fileNamed {
-		return 0, errcode.Invalidf("--audience uses the CI platform's own identity, so it cannot be combined with --pem or --p12")
+		return 0, errcode.InvalidArgf("--audience cannot be combined with --pem or --p12")
 	}
 	switch {
 	case fileNamed:
@@ -301,7 +301,7 @@ func runAccessFromConfig(path string) error {
 		deviceHost, deviceAddr, parseErr := access.ParseDevice(entry.Device)
 		if parseErr != nil {
 			cancel()
-			return errcode.Invalidf("device %q: %w", entry.Device, parseErr)
+			return errcode.New(errcode.AccessConfigInvalid).With(parseErr, "device "+entry.Device)
 		}
 
 		forwards := make([]access.Forward, 0, len(entry.Forward))
@@ -309,7 +309,7 @@ func runAccessFromConfig(path string) error {
 			f, forwardErr := access.ParseForward(raw, "127.0.0.1")
 			if forwardErr != nil {
 				cancel()
-				return errcode.Invalidf("device %q: %w", entry.Device, forwardErr)
+				return errcode.New(errcode.AccessConfigInvalid).With(forwardErr, "device "+entry.Device)
 			}
 			forwards = append(forwards, f)
 		}
@@ -332,7 +332,7 @@ func runAccessFromConfig(path string) error {
 		}
 		if err != nil {
 			cancel()
-			return errcode.Invalidf("device %q: %w", entry.Device, err)
+			return fmt.Errorf("device %q: %w", entry.Device, err)
 		}
 
 		session := &access.Session{Device: deviceHost, Addr: deviceAddr, TLSConfig: tlsCfg}
@@ -388,8 +388,8 @@ func usageAccess(fs *flag.FlagSet) {
 
   Credentials. With no flag, the identity this machine holds is used and
   renewed in the background, so there is no file to copy and nothing that
-  expires while somebody is on holiday. Supply a file only for a credential we
-  did not issue.
+  expires while somebody is on holiday. Supply a file only for a credential
+  Localport did not issue.
     (none)              the stored identity (localport setup <TOKEN>)
     --audience          CI, the pipeline's own OIDC identity, no secret at all
     --pem               PEM file with client cert + key + fleet CA

@@ -86,11 +86,11 @@ func (r Ref) valid() bool {
 func ParseDeviceRef(raw string) (Ref, error) {
 	parts := strings.Split(raw, "/")
 	if len(parts) != 3 || Kind(parts[1]) != KindDevice {
-		return Ref{}, errcode.Invalidf("identity %q is not of the form <team>/device/<tunnel>.<prefix>", raw)
+		return Ref{}, errcode.InvalidArgf("identity %q is not of the form <team>/device/<tunnel>.<prefix>", raw)
 	}
 	ref := Ref{Team: parts[0], Kind: KindDevice, Identity: parts[2]}
 	if !ref.valid() {
-		return Ref{}, errcode.Invalidf("identity %q is not of the form <team>/device/<tunnel>.<prefix>", raw)
+		return Ref{}, errcode.InvalidArgf("identity %q is not of the form <team>/device/<tunnel>.<prefix>", raw)
 	}
 	return ref, nil
 }
@@ -167,7 +167,7 @@ func ParseSelector(raw string) (Selector, error) {
 	parts := strings.Split(raw, "/")
 	for _, p := range parts {
 		if p == "" {
-			return Selector{}, errcode.Invalidf("identity %q has an empty part; use <identity>, <team>/<identity> or <team>/<kind>/<identity>", raw)
+			return Selector{}, errcode.InvalidArgf("identity %q has an empty part; use <identity>, <team>/<identity> or <team>/<kind>/<identity>", raw)
 		}
 	}
 	switch len(parts) {
@@ -178,11 +178,11 @@ func ParseSelector(raw string) (Selector, error) {
 	case 3:
 		kind := Kind(parts[1])
 		if !kind.Valid() {
-			return Selector{}, errcode.Invalidf("unknown identity kind %q (want user, client or device)", parts[1])
+			return Selector{}, errcode.InvalidArgf("unknown identity kind %q (want user, client or device)", parts[1])
 		}
 		return Selector{Team: parts[0], Kind: kind, Identity: parts[2]}, nil
 	default:
-		return Selector{}, errcode.Invalidf("identity %q has too many parts; use <identity>, <team>/<identity> or <team>/<kind>/<identity>", raw)
+		return Selector{}, errcode.InvalidArgf("identity %q has too many parts; use <identity>, <team>/<identity> or <team>/<kind>/<identity>", raw)
 	}
 }
 
@@ -210,8 +210,7 @@ func RefFromCert(leaf *x509.Certificate) (Ref, error) {
 	return Ref{}, errors.New("certificate carries no Localport SPIFFE identity")
 }
 
-// SpiffeURI returns the certificate's SPIFFE URI SAN, for display and for the
-// principal pin.
+// SpiffeURI returns the certificate's SPIFFE URI SAN, for display and the principal pin.
 func SpiffeURI(leaf *x509.Certificate) string {
 	for _, u := range leaf.URIs {
 		if u.Scheme == "spiffe" {

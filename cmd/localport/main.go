@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -31,7 +32,11 @@ func main() {
 
 // report prints err as the user sees it (cli.App.ErrorText), its codes
 // included, and returns the exit status: a positive ExitError Code, else 1.
+// -h has printed the usage already and exits 0.
 func report(w io.Writer, app *cli.App, err error) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
 	fmt.Fprintln(w, "error:", app.ErrorText(err))
 	var exitErr *service.ExitError
 	if errors.As(err, &exitErr) && exitErr.Code > 0 {

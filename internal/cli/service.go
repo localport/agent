@@ -25,7 +25,7 @@ func runService(args []string) (err error) {
 	ignoreHangup()
 	if len(args) == 0 || (args[0] != "install" && args[0] != "uninstall") {
 		usageService()
-		return errcode.Invalidf("unknown service command; use install or uninstall")
+		return errcode.InvalidArgf("unknown service command; use install or uninstall")
 	}
 	sub := args[0]
 	var who invoker
@@ -174,7 +174,7 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 		fmt.Fprintf(os.Stderr, "  nothing to delete: %s does not exist\n%s\n", dir, stillValid)
 		return nil
 	} else if err != nil {
-		return errPurgeFailed.With(err, "inspect "+dir)
+		return errStoreNotPurged.With(err, "inspect "+dir)
 	}
 	if m != nil {
 		installed, err := m.Installed()
@@ -199,7 +199,7 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 	}
 	defer unlock()
 	if err := os.Remove(file.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return errPurgeFailed.With(err, "remove "+file.Path)
+		return errStoreNotPurged.With(err, "remove "+file.Path)
 	}
 	fmt.Fprintf(os.Stderr, "  deleted %s\n", file.Path)
 	if err := purgeDeviceStore(dir, viaChild, store); err != nil {
@@ -212,7 +212,7 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 	}
 	if root := service.CrashRoot(); root != "" && file.System {
 		if err := os.RemoveAll(root); err != nil {
-			return errPurgeFailed.With(err, "remove "+root)
+			return errStoreNotPurged.With(err, "remove "+root)
 		}
 		fmt.Fprintf(os.Stderr, "  deleted %s\n", root)
 	}
@@ -226,7 +226,7 @@ func purgeSystemDevices(who invoker, m service.Manager, runLockWait time.Duratio
 func purgeDeviceStore(dir string, viaChild bool, store *identity.Store) error {
 	if !viaChild {
 		if err := purgeStore(store); err != nil {
-			return errPurgeFailed.With(err, "")
+			return errStoreNotPurged.With(err, "")
 		}
 		return nil
 	}
@@ -234,7 +234,7 @@ func purgeDeviceStore(dir string, viaChild bool, store *identity.Store) error {
 	if _, err := os.Lstat(idDir); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	} else if err != nil {
-		return errPurgeFailed.With(err, "inspect "+idDir)
+		return errStoreNotPurged.With(err, "inspect "+idDir)
 	}
 	return runAsAgentAccount([]string{"purge"}, nil, os.Stdout)
 }

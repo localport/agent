@@ -50,10 +50,9 @@ func (f *fakeManager) Uninstall(context.Context) error {
 	return f.uninstallErr
 }
 
-// asRoot runs the test's commands as a privileged process whose machine-wide
-// config directory is a fresh path under a temp directory, not yet created,
-// with m as the service manager and an accepted binary. It returns the
-// config file.
+// asRoot runs the test's commands as a privileged process with m as the
+// service manager, an accepted binary and a machine-wide config directory at
+// a fresh, not yet created temp path. It returns the config file.
 func asRoot(t *testing.T, m *fakeManager) config.LocalConfigFile {
 	t.Helper()
 	tmp, err := filepath.EvalSymlinks(t.TempDir())
@@ -88,8 +87,7 @@ func asRoot(t *testing.T, m *fakeManager) config.LocalConfigFile {
 	return file
 }
 
-// fakeEnrol replaces the enrolment and the credential save, and counts the
-// enrolment requests.
+// fakeEnrol replaces enrolment and the credential save, counting enrolment requests.
 func fakeEnrol(t *testing.T, ref identity.Ref) *int {
 	t.Helper()
 	calls := 0
@@ -105,8 +103,7 @@ func fakeEnrol(t *testing.T, ref identity.Ref) *int {
 
 var upArgs = []string{"lpj_x", "--api", "https://127.0.0.1:1", "--wait", "0"}
 
-// holdRun holds run.lock of file, as another localport run would, until the
-// test ends.
+// holdRun holds file's run.lock until the test ends, as another localport run would.
 func holdRun(t *testing.T, file config.LocalConfigFile) {
 	t.Helper()
 	release, err := config.LockRun(file, 0)
@@ -193,8 +190,7 @@ func TestPrivilegedUpRefusesNoMuxForTheService(t *testing.T) {
 // With the device service installed, the run.lock holder is that service:
 // up enrols and reinstalls (restarts) it.
 func TestUpBesideTheRunningServiceInstalls(t *testing.T) {
-	// The test process holds run.lock and stands in for the service's main
-	// process.
+	// The test process holds run.lock, standing in for the service's main process.
 	m := &fakeManager{installed: true, mainPID: os.Getpid()}
 	file := asRoot(t, m)
 	holdRun(t, file)
@@ -391,9 +387,8 @@ func TestPurgeStopsAtAForeignDefinition(t *testing.T) {
 	}
 }
 
-// writeSpool puts a recording entry in the recording spool of the system
-// store (in the identity directory off Windows) and returns the spool
-// directory.
+// writeSpool puts a recording entry in the system store's spool (in the
+// identity directory off Windows) and returns the spool directory path.
 func writeSpool(t *testing.T, file config.LocalConfigFile) string {
 	t.Helper()
 	store, err := identity.SystemStore(file.Base)
@@ -510,8 +505,7 @@ func TestPurgeRefusals(t *testing.T) {
 // the restart wait too (standby), and starts once the holder releases it;
 // every privileged run re-checks the binary.
 func TestPrivilegedRunHoldsRunLock(t *testing.T) {
-	// The holder recorded in run.lock is this process, the service's main
-	// process here.
+	// run.lock records this process, here the service's main process, as holder.
 	m := &fakeManager{installed: true, mainPID: os.Getpid()}
 	file := asRoot(t, m)
 	release, err := config.LockRun(file, 0)
@@ -603,5 +597,23 @@ func TestForegroundRunListensOnlyWithTheRunLock(t *testing.T) {
 	}
 	if err := runEnrolledDevices(context.Background(), "test", currentInvoker(false), false, true, func() {}); !errors.Is(err, refused) || listened != 1 || !heldWhileListening {
 		t.Fatalf("run past run.lock = %v, binds %d, lock held while binding %v; want the bind with the lock held", err, listened, heldWhileListening)
+	}
+}
+
+// A purge that cannot delete reports AG045, not the Windows uninstaller's AG093.
+func TestPurgeFailureIsStoreNotPurged(t *testing.T) {
+	m := fakeManager{uninstallErr: service.ErrNotInstalled}
+	file := asRoot(t, &m)
+	writeDevices(t, file)
+	// A non-empty directory in place of the config cannot be removed.
+	if err := os.Remove(file.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(file.Path, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := runService([]string{"uninstall", "--purge"})
+	if !errors.Is(err, errcode.New(errcode.StoreNotPurged)) || errors.Is(err, errcode.New(errcode.PurgeFailed)) {
+		t.Fatalf("uninstall --purge = %v, want AG045", err)
 	}
 }

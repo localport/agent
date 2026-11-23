@@ -54,10 +54,10 @@ func runTunnel(version string, args []string) error {
 	}
 	if posProto != "" {
 		if *configPath != "" {
-			return errcode.Invalidf("a positional protocol and port cannot be combined with --config: set it in the config file")
+			return errcode.InvalidArgf("a positional protocol and port cannot be combined with --config: set it in the config file")
 		}
 		if *local != "" {
-			return errcode.Invalidf("--local cannot be combined with positional protocol/address")
+			return errcode.InvalidArgf("--local cannot be combined with positional protocol/address")
 		}
 		*proto = posProto
 		*local = posLocal
@@ -170,7 +170,7 @@ func refuseGiven(fs *flag.FlagSet, reason string, names ...string) error {
 	if len(given) == 0 {
 		return nil
 	}
-	return errcode.Invalidf("%s %s", strings.Join(given, ", "), reason)
+	return errcode.InvalidArgf("%s %s", strings.Join(given, ", "), reason)
 }
 
 func pickRenderer(mode ui.Mode, a *agent.Agent) tunnelUI {
@@ -191,7 +191,7 @@ func buildTunnelConfig(path, flagToken, region, local, proto, name string) (*con
 		return nil, err
 	}
 	if local == "" {
-		return nil, errcode.Invalidf("--local is required for token-based tunnel mode")
+		return nil, errcode.InvalidArgf("--local is required for token-based tunnel mode")
 	}
 	return config.TunnelFromFlags(token, region, local, proto, name)
 }

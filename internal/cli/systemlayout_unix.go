@@ -106,15 +106,10 @@ func dirEmpty(fd int, path string) (bool, error) {
 	return false, nil
 }
 
-// removeAgentDirs runs after `service uninstall --purge` emptied the store:
-// when the identity directory holds nothing more it removes it and the
-// agent's log directory logDir (service.AgentLogDir). While the directory
-// still holds credentials (machine credentials from setup) both stay.
-// identity.Store.PurgeDevices always deletes the credential lock directory
-// and deletes the store lock too when no credential remains, so a kept
-// directory keeps only the store lock. The
-// account and its group always stay (service.AccountRemoval says why); the
-// message names the commands that remove them.
+// removeAgentDirs removes the identity directory and logDir after
+// `service uninstall --purge`. Both stay while the identity directory holds
+// non-device credentials. The agent account always stays; the notice names
+// the commands that remove it.
 func removeAgentDirs(file config.LocalConfigFile, logDir string) error {
 	idDir := filepath.Join(filepath.Dir(file.Path), "identity")
 	switch err := os.Remove(idDir); {

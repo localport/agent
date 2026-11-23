@@ -46,7 +46,7 @@ func runSet(args []string) (err error) {
 	}
 	if name == "" {
 		fs.Usage()
-		return errcode.Invalidf("name the device to change")
+		return errcode.InvalidArgf("name the device to change")
 	}
 	if fs.NArg() > 0 {
 		return errExtraArgument.With(nil, fmt.Sprintf("%q", security.SanitizeDisplay(fs.Arg(0))))

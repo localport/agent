@@ -4,8 +4,7 @@ package ui
 
 import "os"
 
-// Windows builds use a static 80x24 size. The console host can ship its
-// own SIGWINCH-equivalent later if needed.
+// TermSize is 80x24 on Windows, and notifyResize reports no resize.
 func TermSize(_ *os.File) (cols, rows int) { return 80, 24 }
 
 func notifyResize() (<-chan os.Signal, func()) {

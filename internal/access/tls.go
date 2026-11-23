@@ -74,9 +74,8 @@ func loadPEM(path string) (tls.Certificate, error) {
 	}
 	cert, err := tls.X509KeyPair(data, data)
 	if err != nil {
-		// The identity store's certificate file has no key. crypto/tls reports
-		// that as a PEM block type error, so replace it with a specific
-		// message.
+		// The identity store's certificate file has no key; crypto/tls would report
+		// a PEM block type error, so say so directly.
 		if bytes.Contains(data, []byte("BEGIN CERTIFICATE")) && !bytes.Contains(data, []byte("PRIVATE KEY")) {
 			return tls.Certificate{}, errcode.New(errcode.ClientCertUnusable).With(nil,
 				path+" holds certificates but no private key\n"+
@@ -104,8 +103,7 @@ func loadPEM(path string) (tls.Certificate, error) {
 		if block.Type != "CERTIFICATE" {
 			continue
 		}
-		// Compare DER. A serial is unique only within its CA (RFC 5280
-		// 4.1.2.2).
+		// Compare DER: a serial is unique only within its CA (RFC 5280 4.1.2.2).
 		if bytes.Equal(block.Bytes, cert.Certificate[0]) {
 			continue
 		}
@@ -177,17 +175,15 @@ func assertLeafFresh(cert tls.Certificate) error {
 }
 
 // unparsable codes a credential file its parser refused. The parser's text
-// describes the local file (a wrong pkcs12 password included), so the user
-// sees it.
+// describes the local file (a wrong pkcs12 password included) and is shown.
 func unparsable(path string, err error) error {
-	return errcode.New(errcode.ClientCertUnusable).With(errcode.Invalidf("%w", err), "parse "+path)
+	return errcode.New(errcode.ClientCertUnusable).With(errcode.InvalidConfigf("%w", err), "parse "+path)
 }
 
 // resolveServerName returns the name used to verify the server certificate.
 //
-// An IP literal is kept as ServerName. crypto/tls refuses an empty
-// ServerName, omits SNI for an IP (RFC 6066) and verifies it against the IP
-// SANs.
+// An IP literal is kept as ServerName: crypto/tls refuses an empty one, omits
+// SNI for an IP (RFC 6066) and verifies it against the IP SANs.
 func resolveServerName(remote, override string) string {
 	if override != "" {
 		return override

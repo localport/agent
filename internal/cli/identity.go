@@ -23,7 +23,7 @@ const identityEnv = "LOCALPORT_IDENTITY"
 func runIdentity(args []string) error {
 	if len(args) == 0 {
 		usageIdentity()
-		return errcode.Invalidf("identity: subcommand required")
+		return errcode.InvalidArgf("identity: subcommand required")
 	}
 	switch args[0] {
 	case "list":
@@ -37,7 +37,7 @@ func runIdentity(args []string) error {
 		return nil
 	default:
 		usageIdentity()
-		return errcode.Invalidf("identity: unknown subcommand %q", args[0])
+		return errcode.InvalidArgf("identity: unknown subcommand %q", args[0])
 	}
 }
 
@@ -159,7 +159,7 @@ func runIdentityRemove(args []string) error {
 	}
 	if fs.NArg() != 1 {
 		usageIdentity()
-		return errcode.Invalidf("identity remove: name exactly one credential")
+		return errcode.InvalidArgf("identity remove: name exactly one credential")
 	}
 
 	store, err := currentInvoker(false).store()

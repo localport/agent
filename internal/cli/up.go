@@ -727,7 +727,7 @@ func prepareDevice(fs *flag.FlagSet, flags *deviceFlags, who invoker) (config.Lo
 	}
 	if d.FilesRoot != "" {
 		if err := config.CheckFilesRoot(d.FilesRoot); err != nil {
-			return d, errcode.Invalidf("--files-root: %w", err)
+			return d, errcode.InvalidArgf("--files-root: %w", err)
 		}
 	}
 	return d, nil

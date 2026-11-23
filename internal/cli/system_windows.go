@@ -23,7 +23,6 @@ func runSystem(version string, args []string) error {
 	return systemExitError(runSystemSteps(context.Background(), windowsInstallHost{}, version, args))
 }
 
-// windowsInstallHost is the installHost of a Windows machine.
 type windowsInstallHost struct{}
 
 const (
@@ -126,8 +125,7 @@ func (windowsInstallHost) foreignServicesIn(dir string) ([]string, error) {
 	return service.ForeignServicesIn(dir)
 }
 
-// registryValue is one value of a key, kept with its type for an exact
-// restore.
+// registryValue is one value of a key, kept with its type for an exact restore.
 type registryValue struct {
 	Name    string   `json:"name"`
 	Type    uint32   `json:"type"`
