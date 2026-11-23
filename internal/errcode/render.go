@@ -51,20 +51,25 @@ type Invalid struct {
 
 // InvalidArgf is a refused argument or flag value (InvalidArgument). It
 // formats like fmt.Errorf.
-func InvalidArgf(format string, args ...any) error { return invalidf(InvalidArgument, format, args) }
+func InvalidArgf(format string, args ...any) error {
+	return invalidf(InvalidArgument, format, args...)
+}
 
 // InvalidConfigf is a refused config value (InvalidConfigValue).
 func InvalidConfigf(format string, args ...any) error {
-	return invalidf(InvalidConfigValue, format, args)
+	return invalidf(InvalidConfigValue, format, args...)
 }
 
 // Unsupportedf is a flag or setting this operating system does not support.
-func Unsupportedf(format string, args ...any) error { return invalidf(UnsupportedHere, format, args) }
+func Unsupportedf(format string, args ...any) error {
+	return invalidf(UnsupportedHere, format, args...)
+}
 
-func invalidf(code Code, format string, args []any) error {
+// invalidf is variadic so vet checks the formats of its exported wrappers.
+func invalidf(code Code, format string, args ...any) error {
 	e := &Invalid{code: code, err: fmt.Errorf(format, args...)}
 	// "<prefix>: %w" keeps its prefix when the wrapped chain renders by type.
-	if head, ok := strings.CutSuffix(format, ": %w"); ok && !strings.Contains(head, "%w") {
+	if head, ok := strings.CutSuffix(format, ": %w"); ok && len(args) > 0 && !strings.Contains(head, "%w") {
 		e.prefix = fmt.Sprintf(head, args[:len(args)-1]...)
 	}
 	return e

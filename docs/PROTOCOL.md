@@ -830,9 +830,10 @@ stream:
      resolved one component at a time with lstat and readlink, so a symlink
      cannot reach them either; opening, listing or changing one answers
      `SSH_FX_PERMISSION_DENIED`, while its own entry still lists and stats in
-     its parent. A `files_root` inside or equal to one of them refuses the
-     request `full_disk_access_required`; a login's home inside one is not
-     read.
+     its parent. A `files_root`, else the login's home when no `files_root`
+     is set, inside or equal to one of them refuses the request
+     `full_disk_access_required`; with a `files_root`, a login's home inside
+     one is not read.
    - With it `granted`, a shell runs as the launcher's child and the grant
      applies. Without it the shell starts as its own responsible process
      (`localport-session shell-exec`), so Apple tools get a silent "Operation

@@ -102,6 +102,15 @@ func TestRenderInvalidClassCodes(t *testing.T) {
 	}
 }
 
+// A ": %w" format spread with no arguments, which vet cannot check, still
+// returns an error instead of panicking.
+func TestInvalidWithoutArgumentsDoesNotPanic(t *testing.T) {
+	var none []any
+	if err := errcode.InvalidArgf("x: %w", none...); err == nil {
+		t.Fatal("InvalidArgf returned nil")
+	}
+}
+
 // Detail is shown; a plain wrapper's words are not, nor counted as a hidden cause.
 func TestRenderShowsDetailNotWrappers(t *testing.T) {
 	err := fmt.Errorf("ssh-proxy: %w", errcode.New(errcode.NoSessionCert).With(nil, "run: localport ssh-cert pi gw"))
