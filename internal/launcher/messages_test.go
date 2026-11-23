@@ -85,14 +85,17 @@ func asRefusal(err error, r **RefusalError) bool {
 // One profile progress may precede the reply when the reader takes it; a
 // second one, an unknown stage, or any progress without a reader is refused.
 func TestReadHelperReplyProgress(t *testing.T) {
-	read := func(onProgress func(string), msgs ...any) (HelperReply, error) {
+	readKind := func(kind string, onProgress func(string), msgs ...any) (HelperReply, error) {
 		var buf bytes.Buffer
 		for _, m := range msgs {
 			if err := writeMessage(&buf, m); err != nil {
 				t.Fatal(err)
 			}
 		}
-		return ReadHelperReply(&buf, onProgress)
+		return ReadHelperReply(&buf, kind, onProgress)
+	}
+	read := func(onProgress func(string), msgs ...any) (HelperReply, error) {
+		return readKind(KindSFTP, onProgress, msgs...)
 	}
 	var stages []string
 	note := func(s string) { stages = append(stages, s) }
@@ -109,10 +112,26 @@ func TestReadHelperReplyProgress(t *testing.T) {
 		"confined on a refusal":   {HelperReply{Refused: CodeSpawnFailed, Confined: true}},
 		"home on a refusal":       {HelperReply{Refused: CodeSpawnFailed, Home: "."}},
 		"whole disk on a refusal": {HelperReply{Refused: CodeSpawnFailed, WholeDisk: true}},
+		"home without confined":   {HelperReply{Started: true, Home: "x"}},
+		"absolute home":           {HelperReply{Started: true, Confined: true, Home: "/x"}},
+		"home outside the root":   {HelperReply{Started: true, Confined: true, Home: "../x"}},
+		"whole disk unconfined":   {HelperReply{Started: true, WholeDisk: true}},
 	} {
 		if _, err := read(note, msgs...); err == nil {
 			t.Errorf("%s: read", name)
 		}
+	}
+	for name, reply := range map[string]HelperReply{
+		"confined":   {Started: true, Confined: true},
+		"home":       {Started: true, Confined: true, Home: "x"},
+		"whole disk": {Started: true, Confined: true, WholeDisk: true},
+	} {
+		if _, err := readKind(KindTerminal, nil, reply); err == nil {
+			t.Errorf("%s view on a terminal session: read", name)
+		}
+	}
+	if reply, err := readKind(KindTerminal, nil, HelperReply{Started: true}); err != nil || !reply.Started {
+		t.Errorf("terminal start without a view: %+v, %v", reply, err)
 	}
 	if _, err := read(nil, HelperProgress{Stage: ProgressProfile}, HelperReply{Started: true}); err == nil {
 		t.Error("progress read without a reader")

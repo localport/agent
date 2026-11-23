@@ -179,10 +179,12 @@ func WriteHelperProgress(control io.Writer, stage string) error {
 	return writeMessage(control, HelperProgress{Stage: stage})
 }
 
-// ReadHelperReply reads a helper's reply: started, or a refusal. With
-// onProgress set, at most one ProgressProfile message may come first and is
-// passed to it; without, any progress message is refused.
-func ReadHelperReply(control io.Reader, onProgress func(stage string)) (HelperReply, error) {
+// ReadHelperReply reads a helper's started or refused reply to a request of
+// kind. A files view is accepted only on an sftp start and only well formed
+// (Started.validView), as the client checks the launcher's reply. With
+// onProgress set, one ProgressProfile message may come first and is passed
+// to it; otherwise a progress message is refused.
+func ReadHelperReply(control io.Reader, kind string, onProgress func(stage string)) (HelperReply, error) {
 	progressed := false
 	for {
 		body, err := readBody(control)
@@ -206,6 +208,10 @@ func ReadHelperReply(control io.Reader, onProgress func(stage string)) (HelperRe
 		}
 		if m.Started == (m.Refused != "") || (!m.Started && (m.Confined || m.Home != "" || m.WholeDisk)) {
 			return HelperReply{}, errors.New("bad helper reply")
+		}
+		view := Started{Confined: m.Confined, Home: m.Home, WholeDisk: m.WholeDisk}
+		if !view.validView() || (kind != KindSFTP && (view.Confined || view.Home != "" || view.WholeDisk)) {
+			return HelperReply{}, errors.New("bad helper files view")
 		}
 		return m.HelperReply, nil
 	}

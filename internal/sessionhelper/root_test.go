@@ -99,7 +99,7 @@ func TestRootHelperForwardsAsTheLogin(t *testing.T) {
 	if err := launcher.WriteHelperRequest(ours, launcher.HelperRequest{Kind: launcher.KindForward, Login: login}); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := launcher.ReadHelperReply(ours, nil)
+	reply, err := launcher.ReadHelperReply(ours, launcher.KindForward, nil)
 	if err != nil || !reply.Started {
 		t.Fatalf("helper reply %+v, %v", reply, err)
 	}
@@ -189,7 +189,7 @@ func runRootTerminal(t *testing.T, req launcher.HelperRequest, script string) (s
 	if err := launcher.WriteHelperRequest(ours, req); err != nil {
 		t.Fatal(err)
 	}
-	if reply, err := launcher.ReadHelperReply(ours, nil); err != nil || !reply.Started {
+	if reply, err := launcher.ReadHelperReply(ours, req.Kind, nil); err != nil || !reply.Started {
 		t.Fatalf("helper reply %+v, %v", reply, err)
 	}
 	_ = agentEnd.SetDeadline(time.Now().Add(20 * time.Second))
@@ -268,7 +268,7 @@ func TestRootHelperRunsAPAMSession(t *testing.T) {
 	if err := launcher.WriteHelperRequest(ours, launcher.HelperRequest{Kind: launcher.KindTerminal, Login: login, Cols: 80, Rows: 24, Term: "xterm"}); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := launcher.ReadHelperReply(ours, nil)
+	reply, err := launcher.ReadHelperReply(ours, launcher.KindTerminal, nil)
 	if err != nil || !reply.Started {
 		t.Fatalf("helper reply %+v, %v", reply, err)
 	}

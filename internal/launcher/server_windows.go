@@ -219,7 +219,7 @@ func (s *Server) run(conn *os.File, req HelperRequest) {
 	_ = in.Close()
 	var reply HelperReply
 	if err == nil {
-		reply, err = ReadHelperReply(out, func(string) { watch.progress() })
+		reply, err = ReadHelperReply(out, req.Kind, func(string) { watch.progress() })
 	}
 	if watch.stop() {
 		err = errHelperTimeout

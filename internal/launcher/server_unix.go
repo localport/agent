@@ -346,7 +346,7 @@ func (s *Server) start(control *os.File, req HelperRequest) (HelperReply, error)
 	if err := WriteHelperRequest(control, req); err != nil {
 		return HelperReply{}, err
 	}
-	reply, err := ReadHelperReply(control, nil)
+	reply, err := ReadHelperReply(control, req.Kind, nil)
 	if errors.Is(err, os.ErrDeadlineExceeded) {
 		return HelperReply{}, errHelperTimeout
 	}
