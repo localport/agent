@@ -780,7 +780,21 @@ stream:
    `statvfs@openssh.com` answers for the file system holding the path, a file or
    a directory, through symlinks, junctions and mounted folders (`files_root`'s
    with one; none for the Windows `/`); a missing path is `SSH_FX_NO_SUCH_FILE`.
-   On Windows the available blocks are those the login's quota allows. The
+   On Windows the available blocks are those the login's quota allows. On a
+   `files` connection, once the file server started and before the `subsystem`
+   reply, the agent sends the channel one request `files-session@localport.io`
+   with want-reply false, so it arrives before the reply and all SFTP data; an
+   `ssh` connection gets none. Its payload is one SSH string holding JSON
+   `{"confined": bool, "home"?: string, "whole_disk"?: true,
+   "full_disk_access"?: string}`: `confined` is true when the server serves one
+   folder as `/` (`files_root`, or the login's home on macOS without Full Disk
+   Access); `home` is the login's home relative to that folder, slash separated,
+   `.` when equal, present only when confined and the home is inside the folder
+   (compared with symlinks resolved, case-insensitively on Windows) and at most
+   1024 bytes JSON-encoded; `whole_disk`, only beside `confined`, marks a served
+   folder that resolves to the file system root `/` (never on Windows);
+   `full_disk_access` is the launcher's reading for the request (`granted`,
+   `denied` or `unknown`), macOS only. It never carries an absolute path. The
    request carries the certificate's `files@localport.io` access
    (`files_download`, `files_upload`; only an `sftp` request may): without
    download an open for reading is refused `SSH_FX_PERMISSION_DENIED`, a

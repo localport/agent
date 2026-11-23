@@ -37,9 +37,9 @@ type Server struct {
 	// Probe reports what this host offers sessions.
 	Probe func() Probe
 	// FullDiskAccess reads the launcher's Full Disk Access for each terminal,
-	// exec and sftp request (macOS): the reading gates sftp, picks how a shell
-	// starts, returns on the response and, when granted, enrols the session
-	// for revocation. Nil where the platform has none (Linux).
+	// exec and sftp request (macOS): the reading picks the sftp view and how
+	// a shell starts, returns on the response and, when granted, enrols the
+	// session for revocation. Nil where the platform has none (Linux).
 	FullDiskAccess func() string
 	// GroupMember, when set, reports whether the directory service lists a
 	// uid in a group. It decides a status reader whose peer credential may be
@@ -328,7 +328,7 @@ func (s *Server) run(ctx context.Context, conn *net.UnixConn, req HelperRequest,
 	}
 	id := newSessionID()
 	s.Log("launcher: session %s: %s for %q, helper %d", id, req.Kind, req.Login, cmd.Process.Pid)
-	respond(conn, Response{Started: &Started{SessionID: id}, Messages: reply.Messages, FullDiskAccess: fda})
+	respond(conn, Response{Started: &Started{SessionID: id, Confined: reply.Confined, Home: reply.Home, WholeDisk: reply.WholeDisk}, Messages: reply.Messages, FullDiskAccess: fda})
 	e := <-exited
 	s.logExit(cmd.Process.Pid, e)
 	respond(conn, Response{Exit: &e})

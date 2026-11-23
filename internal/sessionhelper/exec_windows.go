@@ -42,21 +42,27 @@ func commandLine(shell, command string) string {
 // filesServerCommand is the file server command run as the login:
 // `"<exe>" files-server <access> "<root>" "<home>"`. root is files_root or
 // empty; home is empty with a root, else the profile directory, which must be
-// a directory. startPiped appends the event pipe's handle.
-func filesServerCommand(token windows.Token, root string, access FilesAccess) (app, cmdLine string, err error) {
+// a directory. startPiped appends the event pipe's handle. view is the
+// session's view (filesView); with a root the profile directory sets only
+// view.Home, omitted when unreadable.
+func filesServerCommand(token windows.Token, root string, access FilesAccess) (app, cmdLine string, view launcher.Started, err error) {
 	if app, err = os.Executable(); err != nil {
-		return "", "", err
+		return "", "", view, err
 	}
-	home := ""
-	if root == "" {
-		if home, err = token.GetUserProfileDirectory(); err != nil {
-			return "", "", fmt.Errorf("profile directory: %w", err)
-		}
+	profile, perr := token.GetUserProfileDirectory()
+	if perr != nil && root == "" {
+		return "", "", view, fmt.Errorf("profile directory: %w", perr)
 	}
-	if home, err = filesHome(root, home); err != nil {
-		return "", "", fmt.Errorf("profile directory: %w", err)
+	home, err := filesHome(root, profile)
+	if err != nil {
+		return "", "", view, fmt.Errorf("profile directory: %w", err)
 	}
-	return app, syscall.EscapeArg(app) + " " + FilesServerMode + " " + access.Arg() + " " + syscall.EscapeArg(root) + " " + syscall.EscapeArg(home), nil
+	if perr == nil {
+		view = filesView(root, profile, false)
+	} else {
+		view.Confined = true
+	}
+	return app, syscall.EscapeArg(app) + " " + FilesServerMode + " " + access.Arg() + " " + syscall.EscapeArg(root) + " " + syscall.EscapeArg(home), view, nil
 }
 
 // environment is the login's environment block (CreateEnvironmentBlock) with

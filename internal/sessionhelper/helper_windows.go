@@ -106,15 +106,17 @@ func Run(log func(string, ...any)) int {
 	if err != nil {
 		return refuse(launcher.CodeSpawnFailed, err)
 	}
-	// A terminal, and an exec with a terminal, run under the console host;
-	// an exec without one, the file server and the forward server run on
-	// pipes.
+	// A terminal, and an exec with a terminal, run under the console host; an
+	// exec without one and the file and forward servers run on pipes.
 	app, cmdLine := shell, commandLine(shell, req.Command)
+	reply := launcher.HelperReply{Started: true}
 	switch req.Kind {
 	case launcher.KindSFTP:
-		if app, cmdLine, err = filesServerCommand(token, req.Root, FilesAccess{Download: req.FilesDownload, Upload: req.FilesUpload}); err != nil {
+		var view launcher.Started
+		if app, cmdLine, view, err = filesServerCommand(token, req.Root, FilesAccess{Download: req.FilesDownload, Upload: req.FilesUpload}); err != nil {
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
+		reply.Confined, reply.Home, reply.WholeDisk = view.Confined, view.Home, view.WholeDisk
 	case launcher.KindForward:
 		if app, cmdLine, err = forwardServerCommand(); err != nil {
 			return refuse(launcher.CodeSpawnFailed, err)
@@ -125,7 +127,7 @@ func Run(log func(string, ...any)) int {
 		if err != nil {
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
-		if err := launcher.WriteHelperReply(os.Stdout, launcher.HelperReply{Started: true}); err != nil {
+		if err := launcher.WriteHelperReply(os.Stdout, reply); err != nil {
 			log("sessionhelper: reply started: %v", err)
 			p.close()
 		}

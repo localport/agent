@@ -407,6 +407,21 @@ var afterConnPublished atomic.Pointer[func(*resumable)]
 // with ("" for a client's close), before its channels end.
 var onConnEnd atomic.Pointer[func(reason string)]
 
+// beforeRunDecidesEnd, when set by a test, runs in run once its end reason is
+// known and before decideEnd.
+var beforeRunDecidesEnd atomic.Pointer[func(*Server, *resumable)]
+
+// afterIdleCheck, when set by a test, gets each idle decision run makes:
+// timer is true for the idle timer and false for a readmit signal, decided
+// true when it ends the connection idle.
+var afterIdleCheck atomic.Pointer[func(s *Server, timer, decided bool)]
+
+func idleChecked(s *Server, timer, decided bool) {
+	if hook := afterIdleCheck.Load(); hook != nil {
+		(*hook)(s, timer, decided)
+	}
+}
+
 // beforeConnUnregister, when set by a test, runs in removeConn just before
 // the connection's handler is unregistered, the step that lets Shutdown
 // return. It gets the server, since every test's servers share it.
@@ -1762,19 +1777,26 @@ wait:
 		case <-fire:
 			// A resume between readmit and settleResume holds the decision;
 			// settleResume signals readmitted, which decides it.
-			if !c.idleHeld() && idleEnded() {
+			decided := !c.idleHeld() && idleEnded()
+			idleChecked(s, true, decided)
+			if decided {
 				reason = CloseIdle
 				break wait
 			}
 		case <-c.readmitted:
 			stopTimer()
-			if !c.idleHeld() && idleEnded() {
+			decided := !c.idleHeld() && idleEnded()
+			idleChecked(s, false, decided)
+			if decided {
 				reason = CloseIdle
 				break wait
 			}
 		}
 	}
 	stopTimer()
+	if hook := beforeRunDecidesEnd.Load(); hook != nil {
+		(*hook)(s, e)
+	}
 	if s.decideEnd(e, reason) {
 		e.rc.End(errConnEnded)
 	}

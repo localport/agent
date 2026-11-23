@@ -51,6 +51,10 @@ type fakeLauncher struct {
 	// its Full Disk Access reading.
 	messages []string
 	fda      string
+	// confined, home and wholeDisk are every started sftp session's view.
+	confined  bool
+	home      string
+	wholeDisk bool
 	// hold, when set, makes Start wait for it to close after announcing the
 	// request on starting; helperDone receives, when it has room, when a
 	// helper's channel ends.
@@ -102,7 +106,11 @@ func (l *fakeLauncher) Start(_ context.Context, req launcher.Request, channel *o
 			}
 		}
 	})
-	return &launcher.Session{Messages: l.messages, FullDiskAccess: l.fda}, nil
+	sess := &launcher.Session{Messages: l.messages, FullDiskAccess: l.fda}
+	if req.Kind == launcher.KindSFTP {
+		sess.Confined, sess.Home, sess.WholeDisk = l.confined, l.home, l.wholeDisk
+	}
+	return sess, nil
 }
 
 func (l *fakeLauncher) lastRequest(t *testing.T) launcher.Request {

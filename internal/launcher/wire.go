@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -347,9 +348,11 @@ func validPrefix(s string, n int) string {
 // messagesFit reports whether msgs fit the largest reply on both hops.
 func messagesFit(msgs []string) bool {
 	code := strings.Repeat("x", maxCodeLen)
+	home := strings.Repeat("x", MaxFilesHome-2) // encodes to MaxFilesHome bytes
 	for _, v := range []any{
 		HelperReply{Refused: code, Messages: msgs},
-		Response{Started: &Started{SessionID: strings.Repeat("0", 32)}, Messages: msgs, FullDiskAccess: FullDiskAccessGranted},
+		HelperReply{Started: true, Messages: msgs, Confined: true, Home: home, WholeDisk: true},
+		Response{Started: &Started{SessionID: strings.Repeat("0", 32), Confined: true, Home: home, WholeDisk: true}, Messages: msgs, FullDiskAccess: FullDiskAccessGranted},
 		Response{Refused: &Refused{Code: code}, Messages: msgs, FullDiskAccess: FullDiskAccessGranted},
 	} {
 		b, err := json.Marshal(v)
@@ -361,9 +364,35 @@ func messagesFit(msgs []string) bool {
 }
 
 // Started reports a helper that passed account and session setup and
-// started the login's process.
+// started the login's process. Confined and Home are an sftp session's view:
+// Confined when the file server serves one folder as "/", Home the login's
+// home relative to that folder (slash separated, "." when equal), present
+// only when confined and the home is inside it. WholeDisk, only beside
+// Confined, is a served folder that is the file system root "/" (Unix).
 type Started struct {
 	SessionID string `json:"session_id"`
+	Confined  bool   `json:"confined,omitempty"`
+	Home      string `json:"home,omitempty"`
+	WholeDisk bool   `json:"whole_disk,omitempty"`
+}
+
+// MaxFilesHome bounds Started.Home in its JSON-encoded form, quotes included.
+const MaxFilesHome = 1024
+
+// ValidFilesHome reports whether home is a well-formed Started.Home:
+// relative, clean, slash separated, inside the served folder and at most
+// MaxFilesHome bytes JSON-encoded.
+func ValidFilesHome(home string) bool {
+	if home == "" || path.IsAbs(home) || path.Clean(home) != home || home == ".." || strings.HasPrefix(home, "../") || strings.ContainsRune(home, 0) {
+		return false
+	}
+	b, err := json.Marshal(home)
+	return err == nil && len(b) <= MaxFilesHome
+}
+
+// validView checks a started reply's sftp view fields.
+func (s Started) validView() bool {
+	return (s.Home == "" || (s.Confined && ValidFilesHome(s.Home))) && (!s.WholeDisk || s.Confined)
 }
 
 // Refused is a typed refusal.
@@ -547,5 +576,18 @@ func readResponse(r io.Reader) (Response, error) {
 	if resp.FullDiskAccess != "" && ((resp.Started == nil && resp.Refused == nil) || !validFullDiskAccess(resp.FullDiskAccess)) {
 		return Response{}, errors.New("launcher: bad response: full disk access")
 	}
+	if resp.Started != nil && !resp.Started.validView() {
+		return Response{}, errors.New("launcher: bad response: files view")
+	}
 	return resp, nil
+}
+
+// startedSession is the Session for a started reply to req on conn. Only an
+// sftp session may carry a view; any other kind with one is a bad response.
+func startedSession(conn io.ReadWriteCloser, req Request, resp Response) (*Session, error) {
+	st := resp.Started
+	if req.Kind != KindSFTP && (st.Confined || st.Home != "" || st.WholeDisk) {
+		return nil, errors.New("launcher: bad response: files view for a " + req.Kind + " session")
+	}
+	return &Session{conn: conn, ID: st.SessionID, Messages: resp.Messages, FullDiskAccess: resp.FullDiskAccess, Confined: st.Confined, Home: st.Home, WholeDisk: st.WholeDisk}, nil
 }

@@ -160,6 +160,60 @@ func TestResponseFullDiskAccess(t *testing.T) {
 	}
 }
 
+// A started reply's view is checked where it enters the agent: home only
+// beside confined, relative, clean, inside the served folder and within
+// MaxFilesHome encoded; and only an sftp session may carry a view.
+func TestResponseFilesView(t *testing.T) {
+	if !ValidFilesHome(fullHome) || ValidFilesHome(fullHome+"<") {
+		t.Fatal("MaxFilesHome bound misplaced")
+	}
+	for _, tc := range []struct {
+		name string
+		st   Started
+		ok   bool
+	}{
+		{"none", Started{SessionID: "s"}, true},
+		{"confined only", Started{SessionID: "s", Confined: true}, true},
+		{"home equal", Started{SessionID: "s", Confined: true, Home: "."}, true},
+		{"home below", Started{SessionID: "s", Confined: true, Home: "Users/x"}, true},
+		{"home full", Started{SessionID: "s", Confined: true, Home: fullHome}, true},
+		{"whole disk", Started{SessionID: "s", Confined: true, Home: "Users/x", WholeDisk: true}, true},
+		{"whole disk without confined", Started{SessionID: "s", WholeDisk: true}, false},
+		{"home without confined", Started{SessionID: "s", Home: "x"}, false},
+		{"absolute", Started{SessionID: "s", Confined: true, Home: "/Users/x"}, false},
+		{"parent", Started{SessionID: "s", Confined: true, Home: ".."}, false},
+		{"above", Started{SessionID: "s", Confined: true, Home: "../x"}, false},
+		{"unclean", Started{SessionID: "s", Confined: true, Home: "a/../b"}, false},
+		{"trailing slash", Started{SessionID: "s", Confined: true, Home: "a/"}, false},
+		{"nul", Started{SessionID: "s", Confined: true, Home: "a\x00b"}, false},
+		{"too long", Started{SessionID: "s", Confined: true, Home: fullHome + "<"}, false},
+	} {
+		st := tc.st
+		b, err := encode(Response{Started: &st})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readResponse(bytes.NewReader(b)); (err == nil) != tc.ok {
+			t.Errorf("%s: %v, want ok %v", tc.name, err, tc.ok)
+		}
+	}
+	view := Response{Started: &Started{SessionID: "s", Confined: true, Home: ".", WholeDisk: true}}
+	if s, err := startedSession(nil, Request{Kind: KindSFTP}, view); err != nil || !s.Confined || s.Home != "." || !s.WholeDisk {
+		t.Fatalf("sftp view: %+v, %v", s, err)
+	}
+	for _, kind := range []string{KindTerminal, KindExec, KindForward} {
+		if _, err := startedSession(nil, Request{Kind: kind}, view); err == nil {
+			t.Errorf("%s session accepted a files view", kind)
+		}
+		if _, err := startedSession(nil, Request{Kind: kind}, Response{Started: &Started{SessionID: "s", Confined: true}}); err == nil {
+			t.Errorf("%s session accepted confined", kind)
+		}
+		if _, err := startedSession(nil, Request{Kind: kind}, Response{Started: &Started{SessionID: "s", WholeDisk: true}}); err == nil {
+			t.Errorf("%s session accepted whole disk", kind)
+		}
+	}
+}
+
 // An end frame carries one known reason; any other payload is refused on
 // both the write and the read.
 func TestEndFrame(t *testing.T) {

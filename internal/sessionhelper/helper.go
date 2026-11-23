@@ -156,6 +156,8 @@ func Run(log func(string, ...any)) int {
 	if pam != nil {
 		pamEnv = pam.env()
 	}
+	// reply is the started reply; an sftp session adds its view below.
+	reply := launcher.HelperReply{Started: true}
 	plan := spawnPlan{
 		path: shell,
 		args: shellArgs(shell, req),
@@ -179,6 +181,8 @@ func Run(log func(string, ...any)) int {
 			return refuse(launcher.CodeSpawnFailed, err)
 		}
 		plan.events = true
+		v := filesView(req.Root, a.Home, filesPrivacy(req.FullDiskAccess))
+		reply.Confined, reply.Home, reply.WholeDisk = v.Confined, v.Home, v.WholeDisk
 	}
 	// startLogDone closes at the start log's EOF: the exec or the mode's exit.
 	// Nil unless shell-exec.
@@ -256,7 +260,8 @@ func Run(log func(string, ...any)) int {
 		}
 		k = p
 	}
-	if err := launcher.WriteHelperReply(control, launcher.HelperReply{Started: true, Messages: msgs.messages()}); err != nil {
+	reply.Messages = msgs.messages()
+	if err := launcher.WriteHelperReply(control, reply); err != nil {
 		log("sessionhelper: reply started: %v", err)
 		k.finish()
 	}

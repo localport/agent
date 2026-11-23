@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// fullHome is the longest valid Started.Home in its worst escaped form:
+// every byte escapes to six.
+var fullHome = strings.Repeat("<", (MaxFilesHome-2)/6)
+
 // Messages made of the characters JSON escapes most (`<` becomes \u003c) are
 // cut until the largest reply on both hops still encodes.
 func TestFitMessagesBoundsTheEncodedReply(t *testing.T) {
@@ -17,7 +21,8 @@ func TestFitMessagesBoundsTheEncodedReply(t *testing.T) {
 	}
 	for _, v := range []any{
 		HelperReply{Refused: CodeAccountUnavailable, Messages: msgs},
-		Response{Started: &Started{SessionID: newSessionID()}, Messages: msgs},
+		HelperReply{Started: true, Messages: msgs, Confined: true, Home: fullHome, WholeDisk: true},
+		Response{Started: &Started{SessionID: newSessionID(), Confined: true, Home: fullHome, WholeDisk: true}, Messages: msgs, FullDiskAccess: FullDiskAccessGranted},
 		Response{Refused: &Refused{Code: CodeAccountUnavailable}, Messages: msgs},
 	} {
 		if _, err := encode(v); err != nil {
@@ -95,9 +100,15 @@ func TestReadHelperReplyProgress(t *testing.T) {
 	if err != nil || !reply.Started || len(stages) != 1 || len(reply.Messages) != 1 {
 		t.Fatalf("reply %+v, %v, stages %q", reply, err, stages)
 	}
+	if reply, err := read(nil, HelperReply{Started: true, Confined: true, Home: "x"}); err != nil || !reply.Confined || reply.Home != "x" {
+		t.Fatalf("view reply %+v, %v", reply, err)
+	}
 	for name, msgs := range map[string][]any{
-		"two progress":  {HelperProgress{Stage: ProgressProfile}, HelperProgress{Stage: ProgressProfile}, HelperReply{Started: true}},
-		"unknown stage": {HelperProgress{Stage: "logon"}, HelperReply{Started: true}},
+		"two progress":            {HelperProgress{Stage: ProgressProfile}, HelperProgress{Stage: ProgressProfile}, HelperReply{Started: true}},
+		"unknown stage":           {HelperProgress{Stage: "logon"}, HelperReply{Started: true}},
+		"confined on a refusal":   {HelperReply{Refused: CodeSpawnFailed, Confined: true}},
+		"home on a refusal":       {HelperReply{Refused: CodeSpawnFailed, Home: "."}},
+		"whole disk on a refusal": {HelperReply{Refused: CodeSpawnFailed, WholeDisk: true}},
 	} {
 		if _, err := read(note, msgs...); err == nil {
 			t.Errorf("%s: read", name)

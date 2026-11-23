@@ -35,9 +35,8 @@ const (
 	CodeKindDisabled    = "kind_disabled"
 	CodeAgentBusy       = "agent_busy"
 	CodeKindUnavailable = "kind_unavailable"
-	// CodeFullDiskAccessRequired (launcher.CodeFullDiskAccessRequired): on macOS
-	// a shell that cannot start as its own responsible process needs Full Disk
-	// Access for Localport.
+	// CodeFullDiskAccessRequired: on macOS the session needs Full Disk Access
+	// for Localport (launcher.CodeFullDiskAccessRequired).
 	CodeFullDiskAccessRequired = "full_disk_access_required"
 	// CodeRecordingUnavailable: a Strict channel whose recording could not
 	// open is refused before its helper starts.
@@ -332,6 +331,14 @@ func (ch *channel) start(kind, command string) bool {
 		// Written before the helper's output is relayed, so it is the first
 		// line the user sees; an sftp client shows no stderr.
 		_, _ = ch.ch.Stderr().Write([]byte(recordedNotice))
+	}
+	if kind == launcher.KindSFTP && adm.Kind == "files" {
+		// Sent before serve replies to the subsystem request, so the client
+		// has it before the reply and any SFTP data. An sftp channel on an
+		// ssh connection gets none.
+		if _, err := ch.ch.SendRequest(FilesSessionRequest, false, filesSessionPayload(sess)); err != nil {
+			s.log("session: files session message for %q: %v", ch.c.login, err)
+		}
 	}
 	ch.relayPending = true
 	return true

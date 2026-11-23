@@ -21,6 +21,11 @@ type Session struct {
 	// FullDiskAccess is the launcher's reading taken for this session
 	// (macOS); empty elsewhere.
 	FullDiskAccess string
+	// Confined, Home and WholeDisk are an sftp session's view
+	// (launcher.Started); zero for every other kind.
+	Confined  bool
+	Home      string
+	WholeDisk bool
 }
 
 // Close ends the request connection; the session goes on.

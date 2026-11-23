@@ -85,11 +85,15 @@ type HelperRequest struct {
 }
 
 // HelperReply is the helper's one control message: started, or a refusal
-// code, either with the PAM messages for the client (FitMessages).
+// code, either with the PAM messages for the client (FitMessages). A started
+// sftp session also carries its view (Started.Confined, Started.Home).
 type HelperReply struct {
-	Started  bool     `json:"started,omitempty"`
-	Refused  string   `json:"refused,omitempty"`
-	Messages []string `json:"messages,omitempty"`
+	Started   bool     `json:"started,omitempty"`
+	Refused   string   `json:"refused,omitempty"`
+	Messages  []string `json:"messages,omitempty"`
+	Confined  bool     `json:"confined,omitempty"`
+	Home      string   `json:"home,omitempty"`
+	WholeDisk bool     `json:"whole_disk,omitempty"`
 }
 
 // errHelperTimeout is a helper that did not answer within helperStartTimeout.
@@ -193,14 +197,14 @@ func ReadHelperReply(control io.Reader, onProgress func(stage string)) (HelperRe
 			return HelperReply{}, errors.New("bad helper reply")
 		}
 		if m.Progress != "" {
-			if onProgress == nil || progressed || m.Progress != ProgressProfile || m.Started || m.Refused != "" || len(m.Messages) > 0 {
+			if onProgress == nil || progressed || m.Progress != ProgressProfile || m.Started || m.Refused != "" || len(m.Messages) > 0 || m.Confined || m.Home != "" || m.WholeDisk {
 				return HelperReply{}, errors.New("bad helper progress")
 			}
 			progressed = true
 			onProgress(m.Progress)
 			continue
 		}
-		if m.Started == (m.Refused != "") {
+		if m.Started == (m.Refused != "") || (!m.Started && (m.Confined || m.Home != "" || m.WholeDisk)) {
 			return HelperReply{}, errors.New("bad helper reply")
 		}
 		return m.HelperReply, nil

@@ -238,7 +238,7 @@ func (s *Server) run(conn *os.File, req HelperRequest) {
 	}
 	id := newSessionID()
 	s.Log("launcher: session %s: %s for %q, helper %d", id, req.Kind, req.Login, cmd.Process.Pid)
-	respond(conn, Response{Started: &Started{SessionID: id}, Messages: reply.Messages})
+	respond(conn, Response{Started: &Started{SessionID: id, Confined: reply.Confined, Home: reply.Home, WholeDisk: reply.WholeDisk}, Messages: reply.Messages})
 	e := waitExit(cmd)
 	if e.Status != 0 {
 		s.Log("launcher: session %s: helper %d exited with status %d; a profile it loaded stays loaded until Windows unloads it", id, cmd.Process.Pid, e.Status)

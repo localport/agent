@@ -81,8 +81,13 @@ func (c Client) Start(ctx context.Context, req Request, channel *os.File) (*Sess
 	}
 	switch {
 	case resp.Started != nil:
+		s, err := startedSession(conn, req, resp)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
+		}
 		_ = conn.SetDeadline(time.Time{})
-		return &Session{conn: conn, ID: resp.Started.SessionID, Messages: resp.Messages, FullDiskAccess: resp.FullDiskAccess}, nil
+		return s, nil
 	case resp.Refused != nil:
 		conn.Close()
 		return nil, clientRefusal(resp.Refused.Code, resp.Messages, resp.FullDiskAccess)
