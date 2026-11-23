@@ -149,7 +149,7 @@ jobs:
   # runtime, and the launcher packed in Localport.app
   # (localport-session-darwin-<arch>.tar.gz). codesign needs macOS.
   darwin:
-    name: darwin (signed)
+    name: darwin (ad-hoc signed)
     runs-on: macos-26
     timeout-minutes: 20
     permissions:

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/localport/agent/internal/errcode"
@@ -78,13 +79,20 @@ func assertNoLeftovers(t *testing.T, a sessionApp) {
 func TestSessionAppInstallsAreSerialized(t *testing.T) {
 	unixInitOnly(t)
 	verifying, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
 	first := testApp(t, func(context.Context, string) error {
 		close(verifying)
 		<-release
 		return nil
 	})
-	done := make(chan error, 1)
-	go func() { done <- first.install(context.Background(), testAppExe(t)) }()
+	done, finished := make(chan error, 1), make(chan struct{})
+	go func() {
+		defer close(finished)
+		done <- first.install(context.Background(), testAppExe(t))
+	}()
+	// A failure below still ends the first install before its stage is removed.
+	t.Cleanup(func() { releaseFirst(); <-finished })
 	<-verifying
 	stages, _ := filepath.Glob(filepath.Join(filepath.Dir(first.path), ".staged-*"))
 	if len(stages) != 1 {
@@ -102,7 +110,7 @@ func TestSessionAppInstallsAreSerialized(t *testing.T) {
 	if _, err := os.Stat(stages[0]); err != nil {
 		t.Fatalf("the running install's stage is gone: %v", err)
 	}
-	close(release)
+	releaseFirst()
 	if err := <-done; err != nil {
 		t.Fatalf("first install = %v", err)
 	}

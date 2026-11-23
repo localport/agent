@@ -134,9 +134,15 @@ func (a sessionApp) check(ctx context.Context, exe string) error {
 	return a.verify(ctx, src)
 }
 
-// appBeside is the bundle in exe's directory, refused unless it is a directory.
+// appBeside is the bundle in exe's directory, that directory's path
+// resolved, refused unless it is a directory.
 func appBeside(exe string) (string, error) {
-	src := filepath.Join(filepath.Dir(exe), AppName)
+	// Resolved once here: copyFile refuses a symlink anywhere in its path.
+	dir, err := filepath.EvalSymlinks(filepath.Dir(exe))
+	if err != nil {
+		return "", errDefinition.With(err, "read "+filepath.Dir(exe))
+	}
+	src := filepath.Join(dir, AppName)
 	fi, err := os.Lstat(src)
 	switch {
 	case err != nil:
@@ -299,7 +305,7 @@ func (a sessionApp) copyTree(src, dst string) error {
 			if info.Mode()&0o111 != 0 {
 				perm = 0o755
 			}
-			if err := copyFile(p, target); err != nil {
+			if err := copyFile(p, target, info); err != nil {
 				return err
 			}
 			return a.own(target, perm)
@@ -309,13 +315,21 @@ func (a sessionApp) copyTree(src, dst string) error {
 	})
 }
 
-// copyFile copies src to a new file dst, created owner-only until own runs.
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+// copyFile copies src to dst, created owner-only until own runs. A src that
+// is not the walked file is refused: a non-root user may own the bundle.
+func copyFile(src, dst string, walked fs.FileInfo) error {
+	in, err := openBundleFile(src)
 	if err != nil {
 		return errDefinition.With(err, "read "+src)
 	}
 	defer in.Close()
+	got, err := in.Stat()
+	if err != nil {
+		return errDefinition.With(err, "read "+src)
+	}
+	if !os.SameFile(got, walked) {
+		return errAppInvalid.With(nil, src+" changed while it was copied")
+	}
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return errDefinition.With(err, "stage "+dst)

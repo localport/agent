@@ -45,7 +45,7 @@ identity=-
 sha1=""
 keychain=()
 if [ -n "${MACOS_SIGN_KEYCHAIN:-}" ]; then
-	[ -s "$cert" ] || die "$cert is missing; see RELEASING.md, macOS signing identity"
+	[ -s "$cert" ] || die "$cert is missing; see RELEASING.md, macOS signing certificate"
 	sha1="$(openssl x509 -in "$cert" -noout -fingerprint -sha1 | sed 's/^.*=//; s/://g' | tr 'A-F' 'a-f')"
 	[[ "$sha1" =~ ^[0-9a-f]{40}$ ]] || die "cannot read the SHA-1 fingerprint of $cert"
 	identity="$sha1"

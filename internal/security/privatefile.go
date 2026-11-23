@@ -41,6 +41,9 @@ func ReadPrivateFile(path string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
+// OpenNoFollow opens path for reading and refuses a final symlink.
+func OpenNoFollow(path string) (*os.File, error) { return openNoFollow(path) }
+
 // OpenPrivateFile opens a file for reading and refuses it if anything other
 // than its owner can reach it. The caller closes the returned handle.
 func OpenPrivateFile(path string) (*os.File, error) {
@@ -174,8 +177,7 @@ func walkPrivateDir(root, dir string, followRoot, secure bool) error {
 	return nil
 }
 
-// OpenLockFile opens or creates path read-write without following a symlink or
-// reparse point.
+// OpenLockFile opens or creates path read-write, following no symlink or reparse point.
 func OpenLockFile(path string) (*os.File, error) {
 	return openLockNoFollow(path)
 }
