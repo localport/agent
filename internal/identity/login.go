@@ -2,12 +2,17 @@ package identity
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
 	"time"
 
+	"golang.org/x/net/publicsuffix"
+
 	"github.com/localport/agent/internal/errcode"
+	"github.com/localport/agent/internal/security"
 )
 
 // errSignInExpired is a sign-in poll that reached its deadline.
@@ -78,6 +83,38 @@ func trimHostname(name string) string {
 	return name
 }
 
+// loginPrompt returns the sign-in text safe to print. Both addresses must be
+// https on the API's registrable domain, so a hostile --api cannot send the
+// user to another site.
+func (c *Client) loginPrompt(start deviceStartResponse) (LoginPrompt, error) {
+	api, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return LoginPrompt{}, err
+	}
+	site := strings.ToLower(api.Hostname())
+	// An IP or single-label host has no registrable domain: it must match exactly.
+	if s, err := publicsuffix.EffectiveTLDPlusOne(site); err == nil {
+		site = s
+	}
+	for _, raw := range []string{start.VerificationURI, start.VerificationURIComplete} {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "https" || u.User != nil || security.SanitizeDisplay(raw) != raw || !onSite(u.Hostname(), site) {
+			return LoginPrompt{}, errAnswer.With(fmt.Errorf("verification address %q", security.SanitizeDisplay(raw)), "invalid sign-in address")
+		}
+	}
+	return LoginPrompt{
+		UserCode:                security.SanitizeDisplay(start.UserCode),
+		VerificationURI:         start.VerificationURI,
+		VerificationURIComplete: start.VerificationURIComplete,
+	}, nil
+}
+
+// onSite reports whether host is site or one of its subdomains.
+func onSite(host, site string) bool {
+	host = strings.ToLower(host)
+	return host == site || strings.HasSuffix(host, "."+site)
+}
+
 // Login runs the device flow and returns the credential. onPrompt is called
 // once with the user code, before polling starts.
 func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Material, error) {
@@ -104,12 +141,12 @@ func (c *Client) Login(ctx context.Context, onPrompt func(LoginPrompt)) (*Materi
 		return nil, errAnswer.With(nil, "the sign-in request has no device code, user code or verification address")
 	}
 
+	prompt, err := c.loginPrompt(start)
+	if err != nil {
+		return nil, err
+	}
 	if onPrompt != nil {
-		onPrompt(LoginPrompt{
-			UserCode:                start.UserCode,
-			VerificationURI:         start.VerificationURI,
-			VerificationURIComplete: start.VerificationURIComplete,
-		})
+		onPrompt(prompt)
 	}
 
 	interval := time.Duration(start.Interval) * time.Second

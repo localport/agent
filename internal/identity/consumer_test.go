@@ -43,8 +43,8 @@ func TestLoginRefusesADeviceCredential(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/device/start"):
 			writeJSON(t, w, map[string]any{
 				"device_code": "dc", "user_code": "ABCD-EFGH",
-				"verification_uri":          "https://dash.example/device",
-				"verification_uri_complete": "https://dash.example/device?code=ABCD-EFGH",
+				"verification_uri":          "https://127.0.0.1/device",
+				"verification_uri_complete": "https://127.0.0.1/device?code=ABCD-EFGH",
 				"interval":                  1, "expires_in": 30,
 			})
 		case strings.HasSuffix(r.URL.Path, "/device/token"):

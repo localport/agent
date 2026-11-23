@@ -34,7 +34,7 @@ const DefaultAPIURL = "https://api.localport.io"
 // APIURLEnv is the environment override for DefaultAPIURL.
 const APIURLEnv = "LOCALPORT_API_URL"
 
-// maxResponseBytes bounds what we read from the control plane. A certificate
+// maxResponseBytes bounds a control plane response body. A certificate
 // and its chain are a few kilobytes, and the body is parsed in memory.
 const maxResponseBytes = 1 << 20
 
@@ -146,7 +146,7 @@ func errorCode(err error) string {
 	return ""
 }
 
-// RetryAfter is how long the server asked us to wait, and whether it asked.
+// RetryAfter is the wait the server asked for, and whether it asked.
 func (e *APIError) RetryAfter() (time.Duration, bool) {
 	return e.retryAfter, e.retryAfter > 0
 }
@@ -236,9 +236,8 @@ func redactCause(err error, secrets []string) error {
 	return err
 }
 
-// newIdempotencyKey is the Idempotency-Key value of one logical request: 128
-// random bits as a Structured Field String
-// (draft-ietf-httpapi-idempotency-key-header).
+// newIdempotencyKey is one logical request's Idempotency-Key: 128 random bits
+// as a Structured Field String (draft-ietf-httpapi-idempotency-key-header).
 func newIdempotencyKey() string { return `"` + rand.Text() + `"` }
 
 const (
@@ -275,8 +274,7 @@ func retry(ctx context.Context, budget time.Duration, onWait RetryNotice, fn fun
 		}
 
 		wait := jitter(delay)
-		// Retry-After takes precedence. A wait past the remaining budget ends
-		// the retries.
+		// Retry-After takes precedence; a wait past the remaining budget ends the retries.
 		if asked, ok := retryAfterWait(err); ok {
 			wait = asked
 		}
@@ -418,8 +416,7 @@ func (c *Client) postWithHeader(ctx context.Context, path, credHeader, credValue
 		}
 		var env errorEnvelope
 		if json.Unmarshal(raw, &env) == nil {
-			// Server text reaches terminals and logs: no control or bidi
-			// characters.
+			// Server text reaches terminals and logs: strip control and bidi characters.
 			apiErr.Code = security.RedactString(security.SanitizeDisplay(env.Code), secrets...)
 			// Fall back to the type label when the response has no message.
 			apiErr.Message = security.RedactString(security.SanitizeDisplay(firstNonEmpty(env.Message, env.Error)), secrets...)

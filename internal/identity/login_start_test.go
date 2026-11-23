@@ -18,8 +18,8 @@ import (
 func TestLoginRefusesAStartWithoutVerificationAddresses(t *testing.T) {
 	full := map[string]any{
 		"device_code": "dc", "user_code": "ABCD-EFGH",
-		"verification_uri":          "https://dash.example/device",
-		"verification_uri_complete": "https://dash.example/device?code=ABCD-EFGH",
+		"verification_uri":          "https://127.0.0.1/device",
+		"verification_uri_complete": "https://127.0.0.1/device?code=ABCD-EFGH",
 		"interval":                  1, "expires_in": 30,
 	}
 	for _, missing := range []string{"verification_uri", "verification_uri_complete"} {

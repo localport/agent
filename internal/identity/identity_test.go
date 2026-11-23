@@ -438,7 +438,7 @@ func TestLoginPollingIsDrivenByControlPlaneErrorCodes(t *testing.T) {
 		if r.URL.Path == "/v1/mtls/device/start" {
 			w.WriteHeader(http.StatusCreated)
 			// Short interval to keep the test fast.
-			fmt.Fprint(w, `{"device_code":"dc","user_code":"ABCD-EFGH","verification_uri":"https://dash.example/device","verification_uri_complete":"https://dash.example/device?code=ABCD-EFGH","interval":1,"expires_in":600}`)
+			fmt.Fprint(w, `{"device_code":"dc","user_code":"ABCD-EFGH","verification_uri":"https://127.0.0.1/device","verification_uri_complete":"https://127.0.0.1/device?code=ABCD-EFGH","interval":1,"expires_in":600}`)
 			return
 		}
 		polls++
@@ -482,7 +482,7 @@ func TestLoginStopsOnAnUnrecognisedError(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/mtls/device/start" {
 			w.WriteHeader(http.StatusCreated)
-			fmt.Fprint(w, `{"device_code":"dc","user_code":"ABCD-EFGH","verification_uri":"https://dash.example/device","verification_uri_complete":"https://dash.example/device?code=ABCD-EFGH","interval":1,"expires_in":600}`)
+			fmt.Fprint(w, `{"device_code":"dc","user_code":"ABCD-EFGH","verification_uri":"https://127.0.0.1/device","verification_uri_complete":"https://127.0.0.1/device?code=ABCD-EFGH","interval":1,"expires_in":600}`)
 			return
 		}
 		w.WriteHeader(http.StatusBadRequest)
