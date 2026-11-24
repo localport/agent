@@ -56,10 +56,10 @@ change requires new install scripts.
 
 ## Cutting a release
 
-1. Confirm `main` is green, then tag the commit and push the tag:
+1. Confirm `main` is green, then sign the tag with the release key and push:
 
    ```sh
-   git tag -s vX.Y.Z -m vX.Y.Z
+   git tag -s -u release/signing-key.pub vX.Y.Z -m vX.Y.Z
    git push origin vX.Y.Z
    ```
 
